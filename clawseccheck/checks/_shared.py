@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 from .. import pathprobe
 from ..catalog import (
     BY_ID,
@@ -589,8 +589,10 @@ def _env_default_operator(ctx) -> str:
 
     Three answers for the reason ``_terminal_default`` has three: "we could not see the
     build" is not "the build reads it as a reference", and not "the build uses the text as
-    the credential" either. Only B1 (``check_secrets``) consumes this, at its two credential
-    paths; the shape predicates above stay build-independent.
+    the credential" either. B1 (``check_secrets``) consumes this at its two credential
+    paths; since C-691 so do B323, both B326 sites and the exec-policy monitor dimension, to
+    decide whether ``${NAME:-x}`` is an env reference (the ``default_operator`` argument of
+    ``_b323_contains_env_var_reference``). The shape predicates above stay build-independent.
 
     ONLY ``installed_dist_version`` answers, and it decides outright -- the installed build
     is the one whose parser runs. A calendar release (``YYYY.M.P``, three or more numeric
@@ -1018,6 +1020,14 @@ _C015_EXTRA_SECRET_PATTERNS = [
         r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"([^"\s]{8,})"',
         re.I,
     ),
+    # C-688: the two config leaves whose NAME alone says "credential" but which the key-name
+    # pattern above does not know: OpenClaw's `passphrase` (TLS key / storage-encryption
+    # passphrase) and `identityData` (an inline SSH private key). Exact quoted key only, so
+    # `passphraseFile` (a path) does not match; the value is captured so a `${NAME}` reference
+    # is skipped the same way as for the pattern above. The ambiguous leaves (`key`, `value`,
+    # the env/header maps) cannot be matched by text and are handled by path in
+    # `_vendor_secret_slot_paths`.
+    re.compile(r'"(?:passphrase|identityData)"\s*:\s*"([^"\s]{8,})"', re.I),
 ]
 
 
@@ -3350,11 +3360,191 @@ def _mention_gate_scopes(node: dict) -> list:
 _MAX_WALK_DEPTH = 100
 
 
-def _secret_paths(obj, prefix="", depth=0, min_len=16) -> list[str]:
+# C-688: config slots OpenClaw itself marks sensitive (its `sensitive` schema registry,
+# `zod-schema.sensitive-*.mjs`, walked with the vendor's own `walkConfigSchema`) whose LEAF
+# NAME `SECRET_KEY_RE` does not know. 91 vendor-sensitive paths on 2026.10.2; 68 had such a
+# leaf. SECRET_KEY_RE is shared with the logger, the MCP/exec env scans and the report, so it
+# is NOT widened; instead:
+#   * an unambiguous leaf NAME (`passphrase`, `identityData`) is matched exactly, anywhere;
+#   * an ambiguous leaf (`key`, `value`, `*`) is matched by the vendor's PATH, so an unrelated
+#     `some.other.key` does not start to flag;
+#   * the rest are explicit, reasoned exclusions (`_VENDOR_NOT_SECRET_PATHS`).
+# `tests/test_c688_vendor_sensitive_drift.py` derives the vendor list from the installed dist
+# (local-only) and requires every path to be covered here or excluded below.
+_CONFIG_SECRET_LEAF_RE = re.compile(r"passphrase|identityData", re.I)
+
+# Slots that hold exactly one credential: any non-reference string is a plaintext value.
+_VENDOR_SECRET_VALUE_PATHS = tuple(
+    re.compile(p)
+    for p in (
+        r"(?:^|\.)request(?:\.proxy)?\.tls\.key$",  # TLS client private key (inline PEM)
+        r"(?:^|\.)request\.auth\.value$",  # custom auth-header value
+        r"^gateway\.remote\.edgeAuth\.[^.\[]+$",  # "secret-backed" edge-proxy headers
+    )
+)
+# Free-form env / header maps: the vendor redacts every value, but most values are not
+# credentials (`NODE_ENV`, a model name, a git SHA, `GOOGLE_APPLICATION_CREDENTIALS=creds.json`,
+# `User-Agent`, a tenant id). A map entry is reported ONLY for (a) a concrete value shape the
+# global detectors know (`_concrete_secret_literal`), (b) a URL with an inline password, or
+# (c) in a HEADER map, a vendor credential header name (`_header_name_is_credential`) holding
+# a literal. The ENV key name is NOT a signal here: name-based and entropy-based rules both
+# flagged ordinary paths, model names, digests and policy settings in review. A random
+# literal under a neutral or credential-sounding env key that matches no shape is a declared
+# ceiling (docs/THREAT_COVERAGE.md, Non-static coverage), not an oversight. The older
+# SECRET_KEY_RE key-name rule in `_secret_paths` is unchanged.
+_VENDOR_SECRET_ENV_MAP_PATHS = tuple(
+    re.compile(p)
+    for p in (
+        r"(?:^|\.)mcp\.servers\.[^.\[]+\.env\.[^.\[]+$",
+        r"^models\.providers\.[^.\[]+\.localService\.env\.[^.\[]+$",
+        r"^security\.installPolicy\.exec\.env\.[^.\[]+$",
+    )
+)
+_VENDOR_SECRET_HEADER_MAP_PATHS = tuple(
+    re.compile(p)
+    for p in (
+        r"(?:^|\.)mcp\.servers\.[^.\[]+\.headers\.[^.\[]+$",
+        r"^models\.providers\.[^.\[]+\.headers\.[^.\[]+$",
+        r"(?:^|\.)request\.headers\.[^.\[]+$",
+        r"^tools\.web\.fetch\.headers\.[^.\[]+$",
+    )
+)
+_VENDOR_SECRET_MAP_PATHS = _VENDOR_SECRET_ENV_MAP_PATHS + _VENDOR_SECRET_HEADER_MAP_PATHS
+# Credential header names, mirrored from the vendor's own model-provider header policy
+# (`model-provider-header-policy-*.mjs`: ALWAYS_SENSITIVE_MODEL_PROVIDER_HEADER_NAMES, exact
+# names only - its fragment list also matches `X-Token-Expiry`, which is not a credential).
+# `cookie` is not in the vendor list; it carries session credentials and is added here.
+_CREDENTIAL_HEADER_NAMES = frozenset({
+    "authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "x-auth-token",
+    "auth-token", "x-access-token", "access-token", "x-secret-key", "secret-key", "cookie",
+})
+# A vendor-sensitive path that holds a URL which MAY carry credentials: only a password in
+# the userinfo of the AUTHORITY is a plaintext secret.
+_VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
+# Vendor-sensitive paths that are deliberately NOT secrets (path regex -> reason). The drift
+# test requires each vendor path to be covered above or to match one of these.
+_VENDOR_NOT_SECRET_PATHS = (
+    (re.compile(r"(?:^|\.)request(?:\.proxy)?\.tls\.(?:cert|ca)$"),
+     "a TLS client certificate / CA bundle is public material"),
+    (re.compile(r"(?:^|\.)sandbox\.ssh\.(?:certificateData|knownHostsData)$"),
+     "an SSH certificate and a known_hosts list are public material"),
+    (re.compile(r"(?:^|\.)hooks\.mappings\[\]\.sessionKey$"),
+     "an operator-chosen session-routing identifier, not an authenticator"),
+)
+_ENV_REF_TOKEN_RE = re.compile(r"\$\{[A-Z_][A-Z0-9_]*\}")
+# `${NAME:-fallback}`: the fallback is a literal OpenClaw uses when NAME is unset, so it is
+# config text (`${NAME:-}` carries none). Vendor rule: a fallback with `$` or `{` is no token.
+_ENV_DEFAULT_TOKEN_RE = re.compile(r"\$\{[A-Z_][A-Z0-9_]*:-([^${}]*)\}")
+_AUTH_SCHEME_RE = re.compile(r"^(?:Bearer|Basic|Token)(?:\s+|$)", re.I)
+
+
+def _url_inline_password(value) -> "str | None":
+    """The inline password of ``scheme://user:password@host`` or None. A real parse: the
+    userinfo lives only in the AUTHORITY (the part before the first ``/ ? #``), so an ``@``
+    in a path, query or PAC file name (``http://proxy:3128/?next=a@b``) is not a password.
+    An unparseable value, an empty password and a password that is only an env reference
+    (``${PROXY_PASSWORD}``) are not flagged."""
+    if not isinstance(value, str) or "://" not in value:
+        return None
+    try:
+        parts = urlsplit(value.strip())
+        password = parts.password
+    except ValueError:
+        return None
+    if not parts.scheme or value.strip().lower().find(parts.scheme.lower() + "://") != 0:
+        return None
+    if not password:
+        return None
+    left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
+    return password if left else None
+
+
+def _concrete_secret_literal(value: str) -> bool:
+    """*value* carries a concrete credential literal the global detectors already know
+    (``sk-``, AWS key id, ``ghp_``/``xox``/..., JWT, PEM private key, ``clh_``): the group-less
+    patterns of SECRET_PATTERNS and the C015 extras. The keyword patterns are text-shaped
+    (``password=...``) and are not applied to a bare value."""
+    return any(
+        p.search(value) for p in (*SECRET_PATTERNS, *_C015_EXTRA_SECRET_PATTERNS) if p.groups == 0
+    )
+
+
+def _header_name_is_credential(key: str) -> bool:
+    """Is *key* one of the vendor's credential header names (case-insensitive, ``_`` = ``-``)?"""
+    return key.lower().replace("_", "-") in _CREDENTIAL_HEADER_NAMES
+
+
+# An entry that points AT a secret rather than holding one: a key named like a file / path /
+# directory / name / policy / expiry setting, or a value that is a path, a bare URL, or a bare
+# file name with a common extension (`GOOGLE_APPLICATION_CREDENTIALS=credentials.json`).
+_INDIRECT_KEY_RE = re.compile(r"[_-](?:FILE|PATH|DIR|NAME|POLICY|EXPIRY|EXPIRES|TTL)$", re.I)
+_INDIRECT_VALUE_RE = re.compile(
+    r"^(?:/|~/|\.{1,2}/|[a-zA-Z]:[\\/]|[a-zA-Z][a-zA-Z0-9+.-]*://)"  # absolute / home / URL
+    r"|^[\w.@-]+(?:/[\w.@-]+)+/?$"  # relative path: secrets/db_password
+    r"|^[\w.@-]*\.(?:json|txt|pem|key|crt|yaml|yml|env|npmrc|cfg|conf)$",  # bare file name
+    re.I,
+)
+
+
+def _map_entry_is_indirection(key: str, value: str) -> bool:
+    return bool(_INDIRECT_KEY_RE.search(key) or _INDIRECT_VALUE_RE.match(value))
+
+
+def _vendor_slot_hit(path: str, value, min_len: int) -> bool:
+    """True when *value* is a plaintext (non-reference) string at a vendor-sensitive slot
+    that `SECRET_KEY_RE` cannot see by name. A whole-value reference, and a reference
+    embedded in a header (`Bearer ${TOKEN}`), is the safe form and never counts."""
+    if not isinstance(value, str) or _is_secret_reference(value):
+        return False
+    norm = re.sub(r"\[\d+\]", "[]", path)
+    rest = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", value)).strip()
+    rest = _AUTH_SCHEME_RE.sub("", rest)
+    env_map = any(rx.search(norm) for rx in _VENDOR_SECRET_ENV_MAP_PATHS)
+    header_map = any(rx.search(norm) for rx in _VENDOR_SECRET_HEADER_MAP_PATHS)
+    if env_map or header_map or _VENDOR_SECRET_URL_PATH_RE.search(norm):
+        # a URL password is a credential at any length: `socks5://u:p@h` is 14 characters
+        if _url_inline_password(rest) is not None:
+            return True
+    if len(rest) < min_len:
+        return False
+    if any(rx.search(norm) for rx in _VENDOR_SECRET_VALUE_PATHS):
+        return True
+    if env_map or header_map:
+        if _concrete_secret_literal(rest):
+            return True
+        leaf = norm.rsplit(".", 1)[-1]
+        return (
+            header_map
+            and _header_name_is_credential(leaf)
+            and not _map_entry_is_indirection(leaf, rest)
+        )
+    return False
+
+
+def _vendor_slot_covers(path: str) -> "str | None":
+    """How a concrete vendor-sensitive path (`*` already replaced by a name, `[]` by `[0]`)
+    is handled: ``"name"``, ``"path"``, ``"excluded"`` or ``None`` (a gap)."""
+    norm = re.sub(r"\[\d+\]", "[]", path)
+    if any(rx.search(norm) for rx, _ in _VENDOR_NOT_SECRET_PATHS):
+        return "excluded"
+    leaf = norm.rsplit(".", 1)[-1]
+    if SECRET_KEY_RE.search(leaf) or _CONFIG_SECRET_LEAF_RE.fullmatch(leaf):
+        return "name"
+    for group in (_VENDOR_SECRET_VALUE_PATHS, _VENDOR_SECRET_MAP_PATHS, (_VENDOR_SECRET_URL_PATH_RE,)):
+        if any(rx.search(norm) for rx in group):
+            return "path"
+    return None
+
+
+def _secret_paths(obj, prefix="", depth=0, min_len=16, slots_only=False) -> list[str]:
     """Dotted paths of secret-bearing keys holding a non-trivial string (no values).
 
     ``min_len`` is 16 for B1's count (a shorter value is likely a placeholder);
     ``--incident`` calls it with 1 to inventory short values too.
+
+    C-688: also counts the exact leaves ``passphrase`` / ``identityData`` and a plaintext
+    value at a vendor-sensitive slot (``_vendor_slot_hit``). ``slots_only`` reports ONLY that
+    new reach (C015 reads it for the config file; the older key-name rule stays text-based).
     """
     found = []
     if depth >= _MAX_WALK_DEPTH:
@@ -3362,19 +3552,64 @@ def _secret_paths(obj, prefix="", depth=0, min_len=16) -> list[str]:
     if isinstance(obj, dict):
         for k, v in obj.items():
             path = f"{prefix}.{k}" if prefix else k
-            if (
-                isinstance(v, str)
-                and len(v) >= min_len
-                and SECRET_KEY_RE.search(k)
-                and not _is_secret_reference(v)
+            if isinstance(v, str) and not _is_secret_reference(v) and (
+                (
+                    len(v) >= min_len
+                    and ((not slots_only and SECRET_KEY_RE.search(k)) or _CONFIG_SECRET_LEAF_RE.fullmatch(k))
+                )
+                or _vendor_slot_hit(path, v, min_len)
             ):
                 found.append(path)
             else:
-                found.extend(_secret_paths(v, path, depth + 1, min_len))
+                found.extend(_secret_paths(v, path, depth + 1, min_len, slots_only))
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1, min_len))
+            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1, min_len, slots_only))
     return found
+
+
+def _vendor_secret_slot_paths(cfg) -> list[str]:
+    """Paths holding a plaintext value that only the C-688 rules (not SECRET_KEY_RE) see."""
+    return _secret_paths(cfg, slots_only=True)
+
+
+# C-691: OpenClaw's GitHub connect flow stores a MANAGED PROFILE ID `ghp_` + 32 lowercase hex
+# (`randomBytes(16)`, vendor `github-identity-profile-id-*.mjs`:
+# `MANAGED_GITHUB_PROFILE_ID_PATTERN = /^ghp_[a-f0-9]{32}$/`) under `tools.github.profileId`
+# (system scope) or `agents.entries.<id>.tools.github.profileId`. It names a directory, not a
+# credential, but it has the classic-token prefix. A real classic token is `ghp_` + 36 base62,
+# so the shapes cannot collide.
+_MANAGED_GITHUB_PROFILE_ID_RE = re.compile(r"ghp_[0-9a-f]{32}")
+
+
+def _managed_github_profile_ids(cfg) -> "list[str]":
+    """Every managed GitHub profile id at its vendor path (value shape checked too)."""
+    scopes = []
+    if isinstance(cfg, dict):
+        scopes.append(cfg.get("tools"))
+        agents = cfg.get("agents")
+        entries = agents.get("entries") if isinstance(agents, dict) else None
+        for entry in entries.values() if isinstance(entries, dict) else ():
+            scopes.append(entry.get("tools") if isinstance(entry, dict) else None)
+    found = []
+    for tools in scopes:
+        gh = tools.get("github") if isinstance(tools, dict) else None
+        pid = gh.get("profileId") if isinstance(gh, dict) else None
+        if isinstance(pid, str) and _MANAGED_GITHUB_PROFILE_ID_RE.fullmatch(pid):
+            found.append(pid)
+    return found
+
+
+def _c015_text_without_managed_github_ids(text: str, cfg) -> str:
+    """*text* with the managed GitHub profile ids removed, so C015 does not read the id as a
+    token. An id is removed only when EVERY occurrence of that exact string in the file is
+    accounted for by a profileId at its vendor path: the same string anywhere else (or a
+    real token that merely starts with it) leaves the text untouched and C015 still WARNs."""
+    ids = _managed_github_profile_ids(cfg)
+    for pid in set(ids):
+        if text.count(pid) == ids.count(pid):
+            text = text.replace(pid, "")
+    return text
 
 
 def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
@@ -5935,18 +6170,45 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
 # B-397: relocated from _config.py (B323-only originally) -- B326 needs the identical
 # env-var-reference detection, so per §3.1's "reused by 2+ topics -> _shared.py" rule
 # this leaves its original topic module rather than reaching across it.
-_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+# `\Z`, not `$`: JavaScript's `$` matches only at the very end of the string, Python's also
+# before a trailing newline, so `${FOO\n}` would otherwise read as a reference here and not
+# in OpenClaw (C-691).
+_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*\Z")
+_B323_DEFAULT_VALUE_OPERATOR = ":-"
 
 
-def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None":
-    """Faithful port of OpenClaw's ``parseEnvTokenAt``
-    (``env-substitution-CATXLg7n.js:32-58``).
+def _b323_token_body_is_valid(body: str, default_operator: bool = False) -> bool:
+    """OpenClaw's token-body test (``iterateEnvTemplateTokens``, ``env-substitution-*.mjs``).
+
+    With ``default_operator`` (the audited build understands ``:-``, OpenClaw 2026.9.7 and
+    later - ``_env_default_operator(ctx) == "yes"``): split at the FIRST ``:-``, validate only
+    the NAME against ``ENV_VAR_NAME_PATTERN`` and refuse a default holding ``$`` or ``{``
+    (C-691). Without it (an older or undetermined build) the whole body must be the NAME, so
+    ``${HOME:-x}`` is NOT a reference there and stays a literal value - the reading B323 had
+    before C-691, and the safe one when the build is unknown."""
+    if not default_operator:
+        return bool(_B323_ENV_VAR_NAME_RE.match(body))
+    op = body.find(_B323_DEFAULT_VALUE_OPERATOR)
+    name = body if op == -1 else body[:op]
+    default = None if op == -1 else body[op + len(_B323_DEFAULT_VALUE_OPERATOR):]
+    if not _B323_ENV_VAR_NAME_RE.match(name):
+        return False
+    return default is None or ("$" not in default and "{" not in default)
+
+
+def _b323_parse_env_token_at(
+    value: str, index: int, default_operator: bool = False
+) -> "tuple[str, int] | None":
+    """Port of OpenClaw's env-template token parser (``iterateEnvTemplateTokens``,
+    ``env-substitution-*.mjs``; ``parseEnvTokenAt`` in builds before 2026.9.7).
 
     Returns ``("escaped", end)`` for a ``$${NAME}`` token, ``("substitution", end)``
     for a ``${NAME}`` token, or ``None`` if *index* isn't the start of either --
     including the case where ``NAME`` doesn't match OpenClaw's own
     ``ENV_VAR_NAME_PATTERN`` (``/^[A-Z_][A-Z0-9_]*$/``, all-caps only) or the ``}``
-    is missing. *end* is the index of the closing ``}``.
+    is missing. *end* is the index of the closing ``}`` (the FIRST ``}`` after the opening, as
+    in the vendor). ``default_operator`` selects the build's grammar, see
+    :func:`_b323_token_body_is_valid`.
     """
     if index >= len(value) or value[index] != "$":
         return None
@@ -5955,21 +6217,17 @@ def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None"
     if nxt == "$" and after_next == "{":
         start = index + 3
         end = value.find("}", start)
-        if end != -1:
-            name = value[start:end]
-            if _B323_ENV_VAR_NAME_RE.match(name):
-                return ("escaped", end)
+        if end != -1 and _b323_token_body_is_valid(value[start:end], default_operator):
+            return ("escaped", end)
     if nxt == "{":
         start = index + 2
         end = value.find("}", start)
-        if end != -1:
-            name = value[start:end]
-            if _B323_ENV_VAR_NAME_RE.match(name):
-                return ("substitution", end)
+        if end != -1 and _b323_token_body_is_valid(value[start:end], default_operator):
+            return ("substitution", end)
     return None
 
 
-def _b323_contains_env_var_reference(value: str) -> bool:
+def _b323_contains_env_var_reference(value: str, default_operator: bool = False) -> bool:
     """Faithful port of OpenClaw's ``containsEnvVarReference()``
     (``env-substitution-CATXLg7n.js:102-112``).
 
@@ -5984,6 +6242,10 @@ def _b323_contains_env_var_reference(value: str) -> bool:
     whenever the token merely *looks* like a substitution (e.g.
     ``${systemRoot}:/opt/evil/bin`` -- mixed-case name, not a real reference, but
     the naive check skipped it as if it were one).
+
+    ``default_operator`` is the audited build's grammar (see :func:`_b323_token_body_is_valid`):
+    pass ``_env_default_operator(ctx) == "yes"``. The False default is the pre-2026.9.7
+    reading, which is also the answer for an undetermined build.
     """
     if "$" not in value:
         return False
@@ -5993,7 +6255,7 @@ def _b323_contains_env_var_reference(value: str) -> bool:
         if value[i] != "$":
             i += 1
             continue
-        token = _b323_parse_env_token_at(value, i)
+        token = _b323_parse_env_token_at(value, i, default_operator)
         if token is not None:
             kind, end = token
             if kind == "escaped":

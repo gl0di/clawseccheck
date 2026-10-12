@@ -60,6 +60,8 @@ from ._shared import (
     _B55_FS_WRITE_TOOLS,
     _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
     _c015_has_secret,
+    _c015_text_without_managed_github_ids,
+    _vendor_secret_slot_paths,
     _canonical_ipv4,
     _channel_has_implicit_default_account,
     _channels,
@@ -5227,7 +5229,18 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             continue
         if _c015_is_generated_plugin_model_catalog(path.parts, text):
             continue
-        if _c015_has_secret(text):
+        # C-688/C-691: the config file is also read as a PARSED document - a vendor-sensitive
+        # slot the text patterns cannot place (TLS key, auth value, env/header maps), and the
+        # managed GitHub profile id (`ghp_` + 32 hex at `tools.github.profileId`), which is a
+        # directory name, not a token, and is removed from the text before the scan.
+        _c015_is_cfg = path == (ctx.config_path or (ctx.home / "openclaw.json"))
+        if _c015_is_cfg:
+            text_scanned = _c015_text_without_managed_github_ids(text, ctx.config)
+        else:
+            text_scanned = text
+        if _c015_has_secret(text_scanned) or (
+            _c015_is_cfg and _vendor_secret_slot_paths(ctx.config)
+        ):
             try:
                 rel = path.relative_to(ctx.home)
             except ValueError:
@@ -7492,7 +7505,7 @@ def check_shell_env_fallback(ctx: Context) -> Finding:
     )
 
 
-def _b323_is_literal_path_override(key: object, value: object) -> bool:
+def _b323_is_literal_path_override(key: object, value: object, default_operator: bool = False) -> bool:
     """True if *key* normalizes to PATH and *value* is a literal, non-empty string.
 
     "Literal" excludes a value containing a genuine, unresolved ``${ALL_CAPS}``
@@ -7509,7 +7522,7 @@ def _b323_is_literal_path_override(key: object, value: object) -> bool:
         return False
     if not isinstance(value, str) or not value.strip():
         return False
-    return not _b323_contains_env_var_reference(value)
+    return not _b323_contains_env_var_reference(value, default_operator)
 
 
 def check_env_vars_path_override(ctx: Context) -> Finding:
@@ -7571,16 +7584,19 @@ def check_env_vars_path_override(ctx: Context) -> Finding:
 
     env_cfg = ctx.config.get("env") if isinstance(ctx.config, dict) else None
     hits: "list[str]" = []
+    # C-691: `${NAME:-default}` is a reference only on a build that understands the `:-`
+    # operator (2026.9.7+); on an older or undetermined build it is a literal value.
+    _b323_default_op = _env_default_operator(ctx) == "yes"
     if isinstance(env_cfg, dict):
         vars_block = env_cfg.get("vars")
         if isinstance(vars_block, dict):
             for key, value in vars_block.items():
-                if _b323_is_literal_path_override(key, value):
+                if _b323_is_literal_path_override(key, value, _b323_default_op):
                     hits.append(f"env.vars.{key}={value!r}")
         for key, value in env_cfg.items():
             if key in ("shellEnv", "vars"):
                 continue
-            if _b323_is_literal_path_override(key, value):
+            if _b323_is_literal_path_override(key, value, _b323_default_op):
                 hits.append(f"env.{key}={value!r}")
 
     if hits:

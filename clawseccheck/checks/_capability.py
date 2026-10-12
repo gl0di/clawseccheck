@@ -32,6 +32,7 @@ from . import _shared
 from ._shared import (
     _fs_reads_are_confined,
     _b323_contains_env_var_reference,
+    _env_default_operator,
     _B55_FS_WRITE_TOOLS,
     _canon_tool,
     _code_mode_default,
@@ -2433,7 +2434,7 @@ def _b326_exec_policy_blocking_reason(cfg: dict) -> str | None:
     return None
 
 
-def _b326_exec_policy_unresolved_reason(cfg: dict) -> str | None:
+def _b326_exec_policy_unresolved_reason(cfg: dict, default_operator: bool = False) -> str | None:
     """B-397 (C-135 round on this same fix): the field (if any) among
     tools.exec.mode/security/ask that contains an unresolved ${VAR} substitution --
     the identical hazard Defect 1 fixed for agents.defaults.elevatedDefault itself,
@@ -2450,7 +2451,7 @@ def _b326_exec_policy_unresolved_reason(cfg: dict) -> str | None:
         ("tools.exec.security", dig(cfg, "tools.exec.security")),
         ("tools.exec.ask", dig(cfg, "tools.exec.ask")),
     ):
-        if isinstance(value, str) and _b323_contains_env_var_reference(value):
+        if isinstance(value, str) and _b323_contains_env_var_reference(value, default_operator):
             return f"{field}={value!r}"
     return None
 
@@ -2542,7 +2543,9 @@ def check_elevated_default_full(ctx: Context) -> Finding:
     # Golden Rule #4 forbids. This must run BEFORE the `level != "full"` PASS below,
     # since an interpolated value is never the literal string "full" even when it
     # resolves to it at runtime.
-    if isinstance(level, str) and _b323_contains_env_var_reference(level):
+    if isinstance(level, str) and _b323_contains_env_var_reference(
+        level, _env_default_operator(ctx) == "yes"
+    ):
         return _finding(
             "B326",
             UNKNOWN,
@@ -2596,7 +2599,9 @@ def check_elevated_default_full(ctx: Context) -> Finding:
     # Whether an unresolved field would have resolved to a blocking value is
     # undeterminable from static config, so this must route to UNKNOWN rather than
     # confidently FAIL.
-    exec_policy_unresolved = _b326_exec_policy_unresolved_reason(cfg)
+    exec_policy_unresolved = _b326_exec_policy_unresolved_reason(
+        cfg, _env_default_operator(ctx) == "yes"
+    )
     if exec_policy_unresolved is not None:
         return _finding(
             "B326",

@@ -144,6 +144,17 @@ from ._shared import (
     SECRET_KEY_RE,
     _SECRET_PATH_RE,
     _secret_paths,
+    _vendor_secret_slot_paths,
+    _vendor_slot_covers,
+    _vendor_slot_hit,
+    _url_inline_password,
+    _concrete_secret_literal,
+    _header_name_is_credential,
+    _map_entry_is_indirection,
+    _c015_text_without_managed_github_ids,
+    _managed_github_profile_ids,
+    _CONFIG_SECRET_LEAF_RE,
+    _VENDOR_NOT_SECRET_PATHS,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
     _skill_corpus_complete,
@@ -426,7 +437,7 @@ from ._config import (
 )
 
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
-from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference,)  # B-397: relocated from _config (reused by B326 too)
+from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference, _b323_token_body_is_valid,)  # B-397: relocated from _config (reused by B326 too)
 from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
 from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEASURED_MIN, _cross_context_default,)  # B-833
 from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded

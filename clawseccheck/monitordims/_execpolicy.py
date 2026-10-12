@@ -111,13 +111,13 @@ _SANDBOX_ALWAYS = "all"
 _SANDBOX_NEVER = "off"
 
 
-def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
+def _undetermined_reason(exec_cfg, sandbox_mode, default_operator: bool = False) -> "str | None":
     """Why this scope's policy cannot be decided from static config, or None.
 
     Every branch here exists because the alternative is guessing, and the guess would land
     on `full` - the top of the rank - which is how an unread layer becomes a false alarm.
     """
-    from ..checks import _b323_contains_env_var_reference  # noqa: PLC0415
+    from ..checks import _b323_contains_env_var_reference  # noqa: PLC0415 (default_operator: C-691)
 
     for field in ("mode", "security", "ask", "host"):
         value = exec_cfg.get(field)
@@ -130,7 +130,7 @@ def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
             # to the permissive default and alerted `deny -> full`. The TYPE of the garbage
             # decided whether the arm stood down or fired HIGH.
             return f"tools.exec.{field} is not a string"
-        if _b323_contains_env_var_reference(value):
+        if _b323_contains_env_var_reference(value, default_operator):
             # Could expand to anything. Same hazard B-397 fixed for B326, same helper.
             return "an unresolved ${...} reference"
 
@@ -158,14 +158,14 @@ def _undetermined_reason(exec_cfg, sandbox_mode) -> "str | None":
             "in a sandbox, and that decides the default")
 
 
-def _resolve_scope(exec_cfg, sandbox_mode) -> dict:
+def _resolve_scope(exec_cfg, sandbox_mode, default_operator: bool = False) -> dict:
     """One scope's effective policy - the global one, or one agent's.
 
     `effectiveHost` comes from `resolveExecTarget`: an explicit target wins, and an absent
     or `"auto"` target falls to `sandboxAvailable ? "sandbox" : "gateway"`. Then
     `defaultSecurity = effectiveHost === "sandbox" ? "deny" : "full"`.
     """
-    why = _undetermined_reason(exec_cfg, sandbox_mode)
+    why = _undetermined_reason(exec_cfg, sandbox_mode, default_operator)
     if why:
         return {"undetermined": why}
 
@@ -207,9 +207,13 @@ def _exec_policy_sig(ctx) -> dict:
     """
     from ..collector import agent_roster, dig  # noqa: PLC0415
 
+    from ..checks import _env_default_operator  # noqa: PLC0415
+
     cfg = ctx.config
     if not isinstance(cfg, dict):
         return {}
+    # C-691: `${NAME:-x}` is an env reference only on a build that understands `:-` (2026.9.7+)
+    default_op = _env_default_operator(ctx) == "yes"
 
     global_exec = dig(cfg, "tools.exec")
     global_exec = global_exec if isinstance(global_exec, dict) else {}
@@ -231,7 +235,7 @@ def _exec_policy_sig(ctx) -> dict:
         and isinstance(a.entry["tools"].get("exec"), dict)
         for a in _listed)
     if not _all_overridden:
-        scopes["global"] = _resolve_scope(global_exec, global_sandbox)
+        scopes["global"] = _resolve_scope(global_exec, global_sandbox, default_op)
 
     for _agent in _listed:
         entry, index = _agent.entry, _agent.index
@@ -253,7 +257,7 @@ def _exec_policy_sig(ctx) -> dict:
         if agent_exec.get("mode"):
             merged.pop("security", None)
             merged.pop("ask", None)
-        scopes[f"agent:{name}"] = _resolve_scope(merged, agent_sandbox)
+        scopes[f"agent:{name}"] = _resolve_scope(merged, agent_sandbox, default_op)
 
     return {"scopes": scopes}
 
