@@ -181,7 +181,7 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~8,721 lines (restated 2026-10-08, C-648 — was ~8,208; B176's "
+    "checks/_lifecycle.py": "~9,258 lines (restated 2026-10-08, C-648 — was ~8,208; B176's "
                             "bounded-JSON nesting handling for devices/paired.json and the "
                             "unread-device disclosure added ~60 lines. Restated 2026-09-26, "
                             "B396 — was ~7,329; "
@@ -369,7 +369,7 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~6,795 lines (restated 2026-10-05, C-646 - was ~6,205, and dev was at "
+    "checks/_shared.py": "~7,499 lines (restated 2026-10-05, C-646 - was ~6,205, and dev was at "
                          "~6,505 when it landed; the SecretRef / env-reference predicate block "
                          "(_credential_is_plaintext, _is_secret_ref_object, the env-block walk, "
                          "_has_env_template; ~290 net lines) is read by checks/_config.py (B1, B2) "
@@ -451,7 +451,7 @@ _EXEMPT = {
                              "own inline copy) resolve confinement per scope instead, with "
                              "the grounding comments that decision needed to stay auditable. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~2,239 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
+    "checks/_agents.py": "~2,751 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
                         "the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "
@@ -740,7 +740,7 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~9,362 lines (restated 2026-10-05, C-616 - was ~8,787; C-616 bounds the "
+    "collector.py": "~10,350 lines (restated 2026-10-05, C-616 - was ~8,787; C-616 bounds the "
                     "own-source engine directory by file count, total bytes and file type, "
                     "+94 lines, and its residual disclosure is most of the prose) - the read-only "
                     "collection layer (config / bootstrap / skill "

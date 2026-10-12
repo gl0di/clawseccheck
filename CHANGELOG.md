@@ -3,20 +3,24 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [5.0.0] - 2026-10-11
+## [4.4.0] - 2026-10-12
 
-**This release re-grounds the audit on OpenClaw 2026.10.1, after catching up with 2026.9.7,
-9.8 and 9.9, and makes it much harder for an odd or hostile file to end a run or hide a
-finding.** Gateway token references and templated binds are now judged by what they are (a
-reference nothing visible resolves is UNKNOWN, never PASS), and the monitor, B77 and B172
-read the SQLite stores where current OpenClaw keeps its credentials, config-write journal
-and exec approvals. Nested or padded JSON can no longer end an audit or hide a plugin or
-skill, and a symlink loop, an unreadable plugin manifest or a named pipe no longer crashes,
-hangs or passes. Checks that had fallen behind OpenClaw or answered PASS where they could
-not tell (B353, B33, B372, B350, B4, B382) now say what they know.
+**This release re-grounds the audit on OpenClaw 2026.10.2, after catching up with 2026.9.7,
+9.8, 9.9 and 10.1, reads the SQLite stores where current OpenClaw keeps what older checks looked
+for in files, and makes it much harder for an odd or hostile file to end a run or hide a
+finding.** Gateway token references and templated binds are judged by what they are (a reference
+nothing visible resolves is UNKNOWN, never PASS). B138 (pending device pairings), B78
+(config-health record), B77, B172 and the monitor read the state database instead of answering
+PASS or UNKNOWN about a file that is no longer written, and B164 and B19 say how many
+transcript rows live in the per-agent database and were not examined. A plaintext passphrase,
+TLS key or inline password at a path OpenClaw marks sensitive is now seen, and B382 uses
+OpenClaw's own list of retired settings. Nested or padded JSON can no longer end an audit or
+hide a plugin or skill, and a symlink loop, an unreadable plugin manifest or a named pipe no
+longer crashes, hangs or passes.
 
 **Breaking:** the minimum supported Python is now 3.10, because 3.9 has been end of life
-since October 2025. On Python 3.9 the command-line tool exits with "needs Python 3.10+
+since October 2025 (this is a minor release by the maintainer's decision, although dropping a Python version is a
+breaking change under SemVer). On Python 3.9 the command-line tool exits with "needs Python 3.10+
 (found X.Y)" instead of running. Two other changes can alter an exit code: `--vet`,
 `--vet-skill` and `--advise` on a folder with the scanner's own engine layout now answer
 CAUTION and exit 1, not INSTALL and 0, for a tree they never opened; and `audit.py` exits 2
@@ -40,9 +44,13 @@ nothing visible resolves), which moves from PASS to UNKNOWN.
 
 - **Python 3.10 is the floor and 3.14 is tested.** CI drops the Ubuntu 3.9 leg; 3.12 and
   3.14 on Linux and 3.12 on macOS are tested. 3.13 has not been measured and is not claimed.
-- **Grounded on OpenClaw 2026.10.1.** The grounded ceiling moved through 2026.9.7, 9.8 and
-  9.9 to 10.1, with the snapshots and dist citations re-baselined on each. The Codex harness
-  determination behind B333 and B353 is trusted on all four, so they no longer drop to WARN.
+- **Grounded on OpenClaw 2026.10.2.** The grounded ceiling moved through 2026.9.7, 9.8, 9.9
+  and 10.1 to 10.2, with the snapshots and dist citations re-baselined on each. The Codex
+  harness determination behind B333 and B353 is trusted on all five, so they no longer drop to
+  WARN. On a build above 2026.10.2 the newer-than-grounded notice appears again.
+- **Test hygiene.** The subprocess tests set their resource limits on a best-effort basis (macOS
+  refuses them), and the bytecode tests build their child environment explicitly, so they pass
+  with `PYTHONDONTWRITEBYTECODE` exported.
 - **Documented limits, each pinned by a test; no verdict changes.** `--vet` reads one
   `package.json`, so workspaces and `file:` dependencies are not followed. RISK-03 and B4
   disagree on sandbox mode `non-main` on purpose: RISK-03 counts only off or absent as no
@@ -65,6 +73,54 @@ nothing visible resolves), which moves from PASS to UNKNOWN.
     B397 and five more warned about an exposure they could not know). It is taken from a
     visible non-loopback value or default, else UNKNOWN with the template quoted; a visible
     loopback never clears it, since drop-ins and the process environment are invisible.
+- **Checks that read a file OpenClaw no longer writes now read the state database.**
+  - B138 reads pending device pairings from the `device_pairing_pending` table. It used to
+    answer PASS ("no devices/pending.json found") without looking. A pending request with the
+    `operator.admin` or `operator.write` scope is a WARN. A table it cannot read, or a state
+    database that is a symlink, a directory or a pipe, is UNKNOWN and never PASS. A home with
+    no config and no state is UNKNOWN for B138 (B176 still passes there).
+  - B78 reads the `config_health_entries` table as well as `logs/config-health.json` and
+    judges the more severe of the two. It had answered UNKNOWN on every current install.
+    Its PASS says only that OpenClaw's latest observation showed no suspicious signature; it
+    is not a content-integrity history.
+  - B164 and B19 name the SQLite transcript store: B164 now reports "N transcript row(s)
+    across M session(s) unexamined" and adds them to the run's not-checked list, and B19 says
+    that transcripts at rest live in the per-agent database and that it does not judge that
+    file's permissions. Rows are counted, never read. B164's `detail` changes on a home that
+    has such rows, so a fingerprint-based ignore entry for B164 stops matching.
+  - B18 reads the subagent task, spawn mode and directories that the registry stores, and
+    states the retention rule as measured: the clock starts at completion, only for runs
+    spawned with cleanup "delete"; a default "keep" run is never swept. Its `detail` changed.
+- **A plaintext value at a path OpenClaw marks sensitive is seen.** B1 and C015 now flag a
+  literal at the passphrase, TLS key, request-auth value, edge-auth, inline SSH identity and
+  proxy-URL-password slots (91 paths in OpenClaw's own sensitive registry; 68 of them had a leaf
+  name our pattern did not know), and a URL with an inline password in an env or header map.
+  References (a SecretRef object or `${VAR}`) stay clean, and so do benign env and header
+  values. A secret under a neutral key name that matches no known shape stays invisible; that is
+  a declared ceiling.
+- **B382 uses OpenClaw's own list of retired settings.** The vendor's finder is ported as a
+  pinned, differentially tested module, so a config that Doctor and `openclaw update` refuse
+  no longer reads PASS (42 of 46 such keys did). The 33 channel-level keys WARN like the root
+  keys. On a build outside the port's window the PASS says in its text that the vendor list
+  was not checked.
+- **B2 on a non-loopback bind without a credential.** OpenClaw refuses to start the gateway
+  there ("Refusing to bind gateway to lan without auth", exit 78), so this is a configuration
+  error rather than an exposure. For `bind: lan` with no mode, or mode token and no token, B2
+  and B80 now answer WARN and say so, on builds whose start-up check was read; explicit mode
+  none stays FAIL, and the FAIL text no longer says "exposed" or prints a Python literal.
+- **Advice that sends users to `openclaw doctor --fix` says what the installed OpenClaw
+  does.** From OpenClaw 2026.10.1 Doctor and `openclaw update` refuse retired config keys and
+  retired state files and name a bridge release, so B38, RISK-05, RISK-15, B168, B177, B356 and
+  B382 say so instead of promising a migration. B38 and B168 `detail` text changes on such a
+  build.
+- **Two false alarms are gone.** C015 no longer flags OpenClaw's managed GitHub profile id
+  (`ghp_` plus 32 hex under `tools.github`), and B323 no longer treats `${NAME:-default}` in a
+  PATH value as a literal override on OpenClaw 2026.9.7 and later, where the vendor drops any
+  value that contains an environment reference (WARN to PASS there).
+- **Wording and citations match the installed build.** B321/B322, B391, B172, B381 and B9
+  explanations were corrected against the vendor code (for example B172 notes that grants stored
+  in the pre-2026.10.1 shape are persisted but not in force until repair), and moved vendor
+  symbols are cited with the build they were read on.
 - **Nested or padded JSON no longer ends an audit or hides a record.** A 100,000-level file
   ended the audit with an internal error, and a JSON5 plugin manifest with 201 levels of
   padding lost its skills list, so a malicious bundled skill was CAUTION, not
