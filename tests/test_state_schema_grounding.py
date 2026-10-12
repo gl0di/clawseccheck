@@ -2275,6 +2275,16 @@ _DIFFERENT_DB_TABLES_STILL_READ = {
         "baseline is not drift. Live and current (grounded against the installed "
         "dist, 2026.9.5), not retired."
     ),
+    "transcript_events": (
+        "transcript_events (CLAWSECCHECK-C-699) lives in the PER-AGENT database "
+        "(agents/<agent-id>/agent/openclaw-agent.sqlite), never in the shared state "
+        "database (state/openclaw.sqlite) this baseline enumerates -- a different SQLite "
+        "file, so its absence from the baseline is not drift. Live and current (measured "
+        "on a 2026.10.2 per-agent database: session_id, seq, event_json, created_at, "
+        "event_zstd, event_utf8_bytes, navigation_json); read for a row/session COUNT "
+        "only, the payload columns are never selected "
+        "(trajectorystore._count_transcript_events)."
+    ),
 }
 
 # B-811: a SEPARATE, honestly-named exemption from _RETIRED_TABLES_STILL_READ, not a

@@ -2902,8 +2902,21 @@ def check_data_atrest(ctx: Context) -> Finding:
                 continue
             loose.append(f"{rel} (mode {oct(mode)[-3:]})")
 
+    # C-699: on current OpenClaw the live transcripts are rows of the per-agent SQLite
+    # database, not files this check can stat. Said only when such rows exist (a home with
+    # none keeps its text byte for byte); no permission is judged for that file here.
+    sqlite_note = ""
+    n_sqlite = _trajectorystore.transcript_store_summary(ctx.home).rows
+    if n_sqlite:
+        sqlite_note = (
+            f" Session transcripts ({n_sqlite} row(s)) are also stored inside the per-agent "
+            "SQLite database(s) (agents/*/agent/openclaw-agent.sqlite, transcript_events); "
+            "this check does not judge those files' permissions."
+        )
     if not loose and not candidates_dirs and not transcripts:
-        return _finding("B19", UNKNOWN, "No memory/log/transcript stores found to inspect.", "\u2014")
+        return _finding(
+            "B19", UNKNOWN, "No memory/log/transcript stores found to inspect." + sqlite_note,
+            "\u2014")
     if loose:
         joined = "; ".join(loose[:8])
         extra = f" (+{len(loose) - 8} more)" if len(loose) > 8 else ""
@@ -2913,14 +2926,16 @@ def check_data_atrest(ctx: Context) -> Finding:
             f"Conversation data/PII at rest is group/world-readable (memory/logs, session "
             f"transcripts, or install backups): {joined}{extra}",
             "Run `chmod 700` on the memory/log/session directories and `chmod 600` on the "
-            "files (or `chmod 700 ~/.openclaw`) to restrict access to the owner only.",
+            "files (or `chmod 700 ~/.openclaw`) to restrict access to the owner only."
+            + sqlite_note,
             evidence=loose,
         )
     return _finding(
         "B19",
         PASS,
         "Memory/log directories, session transcripts, and install backups are not reachable "
-        "and readable by other users (owner-only, or sealed inside a tight home).",
+        "and readable by other users (owner-only, or sealed inside a tight home)."
+        + sqlite_note,
         "Keep memory/log/session directories at chmod 700 and their files at 600.",
     )
 
@@ -4251,6 +4266,47 @@ def _log_hunt_budget_remedy(lim) -> str:
     )
 
 
+def _sqlite_transcript_disclosure(home) -> str:
+    """C-699: the sentence B164 owes when session transcripts live in SQLite.
+
+    On current OpenClaw the live transcripts are ``transcript_events`` rows of the
+    per-agent database, not ``*.jsonl`` files, so the file scan above can say "N sinks
+    scanned" while none of them is a live transcript. Owner ruling: disclose only. The rows
+    and sessions are COUNTED (trajectorystore.transcript_store_summary - event_json /
+    event_zstd / navigation_json are never selected) and named as unexamined; the verdict is
+    not changed (the B-817 trajectory precedent: PASS keeps its disclosure, an empty sink
+    list stays UNKNOWN). A database that could not be opened, a table that is not a real
+    table, or a roster beyond the reader's cap makes the count a lower bound and is said so
+    - never a silent zero. pipeline.py parses the two figures below into the run's
+    ``not_checked``; reword them together. Returns "" when there is nothing to say.
+    """
+    if not isinstance(home, Path):
+        return ""
+    summary = _trajectorystore.transcript_store_summary(home)
+    out = ""
+    if summary.rows:
+        out += (
+            " session transcripts live in the same per-agent SQLite databases "
+            "(agents/*/agent/openclaw-agent.sqlite, transcript_events; event_json and "
+            "event_zstd are never opened, by design) \u2014 "
+            f"{summary.rows} transcript row(s) across {summary.sessions} session(s) "
+            "unexamined."
+        )
+    if summary.dbs_unexamined:
+        out += (
+            f" {summary.dbs_unexamined} per-agent database(s) could not be examined for "
+            "transcripts (agents/*/agent/openclaw-agent.sqlite), so transcripts may exist "
+            "there that are not counted above."
+        )
+    if out:
+        out += (
+            " Incognito sessions are held in memory by OpenClaw "
+            "(incognito-openclaw-agent.sqlite is a reserved sentinel path, not a file) "
+            "and are not examined."
+        )
+    return out
+
+
 def check_log_threat_hunt(ctx: Context) -> Finding:
     """B164 - threats surfaced in the agent's own log corpus (content scan, advisory).
 
@@ -4320,6 +4376,10 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
                 f"is never opened, by design) \u2014 {corro.sqlite_rows} row(s) across "
                 f"{corro.sqlite_sessions} session(s) unexamined."
             )
+    # C-699: the transcript table is a second SQLite store, disclosed in the same place and
+    # independent of the branch above - a home with live JSONL trajectory sidecars can
+    # still hold every transcript in SQLite.
+    sqlite_trajectory_disclosure += _sqlite_transcript_disclosure(getattr(ctx, "home", None))
 
     if not sinks:
         # B-913: an unreadable source dir (e.g. a `chmod 000` workspace's memory/) is a

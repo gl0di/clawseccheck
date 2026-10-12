@@ -216,9 +216,10 @@ POINTER_SCHEMA = "openclaw-trajectory-pointer"
 TRAJECTORY_TABLE_NAME = "trajectory_runtime_events"
 
 # A literal, table-scoped SELECT. Never built by string formatting or interpolation --
-# grep for "SELECT" in this module's source: there are exactly six (this one,
+# grep for "SELECT" in this module's source: there are exactly seven (this one,
 # _SELECT_TRAJECTORY_EVENT_JSON below, the two _EXCLUDED_COUNT queries further below,
-# and _table_kind's two sqlite_master lookups), none built from a variable. This one
+# _table_kind's two sqlite_master lookups, and C-699's transcript COUNT in
+# _count_transcript_events), none built from a variable. This one
 # names only session_id/seq; event_json (the sensitive per-record payload) is never
 # selected here, and neither auth table's DATA is ever selected anywhere in this
 # module's source -- see _table_kind's docstring for why a literal table name in OUR
@@ -1027,6 +1028,107 @@ def _read_sqlite_db(db_path: Path) -> "tuple[list, bool, bool]":
         return pairs, True, False
     conn.close()
     return pairs, capped, False
+
+
+# ---------------------------------------------------------------------------
+# C-699 (owner ruling, disclose only): the SESSION TRANSCRIPT table of the same per-agent
+# database. Live transcripts are rows of `transcript_events`, not `*.jsonl` files, so a
+# content scan of the files that still exist says nothing about them. This reader only
+# COUNTS: rows and distinct sessions. It never names event_json / event_zstd /
+# navigation_json (they can hold live OAuth material) and never reads a row's value.
+#
+# The count statement is a literal at the call site on purpose (unlike the trajectory
+# constants above): scripts/state_db_drift_gate.py extracts SELECTs from the argument of
+# execute(), so a literal here is judged against the live per-agent database (reader
+# declared in its PER_AGENT_DB_READERS) and a renamed `session_id` column would be
+# reported instead of silently counting nothing.
+#
+# The incognito database (`incognito-openclaw-agent.sqlite`) is deliberately NOT opened:
+# in the vendor's own code (grounded against 2026.10.2, openclaw-agent-db.paths) that
+# name is a reserved sentinel path keying an IN-MEMORY database, and the vendor refuses to
+# start incognito state when a file already exists there. There is no on-disk store to
+# count; B164 names it as not examined.
+# ---------------------------------------------------------------------------
+TRANSCRIPT_TABLE_NAME = "transcript_events"
+
+
+@dataclass(frozen=True)
+class TranscriptStoreSummary:
+    """Row/session COUNTS of the per-agent ``transcript_events`` tables under a home.
+
+    ``dbs_unreadable`` / ``dbs_beyond_cap`` / ``dbs_unlistable`` each make ``rows`` and
+    ``sessions`` a lower bound; :attr:`dbs_unexamined` is their sum, so a caller can never
+    mistake "could not look" for "zero". A database that predates the table is NOT
+    unexamined: it genuinely holds no transcript rows.
+    """
+
+    dbs_found: int = 0
+    dbs_counted: int = 0
+    dbs_unreadable: int = 0
+    dbs_beyond_cap: int = 0
+    dbs_unlistable: int = 0
+    rows: int = 0
+    sessions: int = 0
+
+    @property
+    def dbs_unexamined(self) -> int:
+        return self.dbs_unreadable + self.dbs_beyond_cap + self.dbs_unlistable
+
+
+def _count_transcript_events(db_path: Path) -> "tuple[int, int, bool]":
+    """``(rows, distinct_sessions, unreadable)`` for one per-agent database.
+
+    Opened through :func:`_open_and_verify_table` (read-only, FIFO-safe, refuses a VIEW /
+    virtual table / rootpage alias / generated column). An absent table is an honest
+    ``(0, 0, False)``; a refused or failing one is ``(0, 0, True)`` -- never a silent zero.
+    """
+    conn, _kind, unreadable = _open_and_verify_table(db_path, TRANSCRIPT_TABLE_NAME)
+    if conn is None:
+        return 0, 0, unreadable
+    try:
+        row = conn.execute(
+            "SELECT count(*), count(DISTINCT session_id) FROM transcript_events"
+        ).fetchone()
+    except sqlite3.Error:
+        conn.close()
+        return 0, 0, True
+    conn.close()
+    if (
+        not row
+        or len(row) < 2
+        or not all(isinstance(v, int) and v >= 0 for v in row[:2])
+    ):
+        return 0, 0, True
+    return row[0], row[1], False
+
+
+def transcript_store_summary(home) -> TranscriptStoreSummary:
+    """Count the SQLite session-transcript rows under *home* (C-699). Counts only; see the
+    comment block above. Bounded like :func:`corroborate` (``_MAX_SQLITE_DBS``) and never
+    raises: a non-``Path`` *home* gives the empty summary."""
+    if not isinstance(home, Path):
+        return TranscriptStoreSummary()
+    stats: dict = {}
+    dbs = _sqlite_dbs(home, stats=stats)
+    counted = unreadable = rows = sessions = 0
+    for db_path in dbs:
+        n_rows, n_sessions, bad = _count_transcript_events(db_path)
+        if bad:
+            unreadable += 1
+            continue
+        counted += 1
+        rows += n_rows
+        sessions += n_sessions
+    total = int(stats.get("dbs_total", len(dbs)))
+    return TranscriptStoreSummary(
+        dbs_found=total,
+        dbs_counted=counted,
+        dbs_unreadable=unreadable,
+        dbs_beyond_cap=max(0, total - len(dbs)),
+        dbs_unlistable=int(stats.get("dbs_unlistable", 0)),
+        rows=rows,
+        sessions=sessions,
+    )
 
 
 def _jsonl_session_seq_pairs(files: "list[Path]") -> "set":

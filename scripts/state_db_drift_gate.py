@@ -97,6 +97,8 @@ _SQLITE_RESERVED_TABLE_PREFIX = "sqlite_"
 # in one file. A name added here must still exist in the package: tests/test_c668_*.py.
 PER_AGENT_DB_READERS = frozenset({
     "collector.py:_collect_agent_auth_profile_store_presence",
+    # C-699: the session-transcript row/session COUNT (transcript_events).
+    "trajectorystore.py:_count_transcript_events",
 })
 # Bare identifiers inside the column list, minus SQL noise words.
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

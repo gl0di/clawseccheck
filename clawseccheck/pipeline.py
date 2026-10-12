@@ -1518,6 +1518,17 @@ _B164_SQLITE_UNSCANNED_RE = re.compile(
     r"(\d+) row\(s\) across (\d+) session\(s\) unexamined"
 )
 
+# C-699: B164's SQLite-TRANSCRIPT disclosure (checks/_egress.py's
+# _sqlite_transcript_disclosure). "transcript row(s)" sits between the digits and
+# "row(s)" on purpose: the trajectory regex above needs digits directly before "row(s)",
+# so neither pattern can match the other's sentence.
+_B164_SQLITE_TRANSCRIPT_RE = re.compile(
+    r"(\d+) transcript row\(s\) across (\d+) session\(s\) unexamined"
+)
+_B164_SQLITE_TRANSCRIPT_DB_RE = re.compile(
+    r"(\d+) per-agent database\(s\) could not be examined for transcripts"
+)
+
 
 def _b164_not_reached(findings) -> tuple:
     b164 = next((f for f in findings if getattr(f, "id", None) == "B164"), None)
@@ -1532,6 +1543,18 @@ def _b164_not_reached(findings) -> tuple:
         out += (
             f"{m2.group(1)} SQLite trajectory row(s) across {m2.group(2)} "
             "session(s) unexamined (agents/*/agent/openclaw-agent.sqlite)",
+        )
+    m3 = _B164_SQLITE_TRANSCRIPT_RE.search(b164.detail)
+    if m3:
+        out += (
+            f"{m3.group(1)} SQLite transcript row(s) across {m3.group(2)} "
+            "session(s) unexamined (agents/*/agent/openclaw-agent.sqlite)",
+        )
+    m4 = _B164_SQLITE_TRANSCRIPT_DB_RE.search(b164.detail)
+    if m4:
+        out += (
+            f"{m4.group(1)} per-agent database(s) could not be examined for "
+            "transcripts (agents/*/agent/openclaw-agent.sqlite)",
         )
     return out
 
