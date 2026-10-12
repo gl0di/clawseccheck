@@ -1332,7 +1332,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     # MODERN since the 2026.9.7 re-baseline (state schema v19): the regenerated snapshot
     # carries exec_approvals_config and this DDL equals the vendor's column for column. It
     # was registered LEGACY_TABLE only while the shipped snapshot still predated the table.
-    "tests/test_c643_exec_approvals_sqlite_store.py:836": _Entry(MODERN),
+    "tests/test_c643_exec_approvals_sqlite_store.py:904": _Entry(MODERN),
 }
 
 # B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site

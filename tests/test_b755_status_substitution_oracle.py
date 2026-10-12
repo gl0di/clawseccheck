@@ -161,6 +161,14 @@ _NOT_DRIVEN = {
     "checks._mcp.sweep_plugins": "produces sweep rows; their rendering is pinned by test_b750",
     "checks._mcp.vet_plugin": "produces the status; does not consume a finding list",
     "checks._mcp._merge_mcp_tool_surface": "merges producer output, upstream of every consumer",
+    # C-685/C-687: B138 and B78 judge TWO containers (the legacy file and a state-database table) and
+    # merge the verdicts of two intermediate Findings the check itself minted a few lines earlier
+    # (most severe wins). They produce the status; no finding list built elsewhere reaches them.
+    "checks._lifecycle._b138_merge": "merges the two container verdicts the check itself minted; produces the status",
+    "checks._egress.check_config_health_integrity": "mints and merges its own two container verdicts; produces the status",
+    # The reader result's `.status` is the READER outcome (ok / unreadable / ...), a collector value,
+    # not a Finding status, so no finding-status substitution can reach it.
+    "collector._collect_config_health": "reads a reader-outcome string, not a Finding status",
     # B-807 follow-up (2026-09-16): needs a sweep object (`.rows`), not a finding list —
     # the pool has no `sweep` entry, so `_bind` always returns None for it, deterministically
     # (confirmed: this is not the flake B-807 was filed about, which never reproduced

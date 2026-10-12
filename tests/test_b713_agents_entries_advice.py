@@ -73,6 +73,10 @@ _LABEL_BUILDER_SITES = {
     # entry sits at on disk.
     ("clawseccheck/collector.py", "agent_roster", "agents.list[]"):
         "agent_roster() legacy AgentEntry.path label",
+    # retiredformats._visit_agent_entries(): the port of the vendor finder's own path label for
+    # an entry of the legacy array (the finder reports `agents.list[<index>]` as it walks it).
+    ("clawseccheck/retiredformats.py", "_visit_agent_entries", "agents.list[]"):
+        "vendor-finder legacy-array path label (a position on disk, not advice)",
     # The per-agent sandbox finding's `where` label: the ternary already tests the
     # roster's own shape and only falls to the else-branch when it genuinely is the
     # legacy array.
