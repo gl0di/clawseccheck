@@ -99,6 +99,8 @@ from ._shared import (
     _mcp_leg_contributions,
     _node_commands,
     _norm_group_policy,
+    _doctor_refuses_retired_formats,  # C-686
+    _doctor_whole_config_hedge,  # C-686
     _numeric_version,
     _open_channels,
     _bind_mentions_docker_sock,
@@ -2336,6 +2338,19 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
             "A config that uses $include may be refused automatic repair, so run the "
             "command explicitly."
         )
+        if _doctor_refuses_retired_formats(ctx) and not in_window:
+            # C-686: from 2026.10.1 Doctor and `openclaw update` STOP on a config that holds a
+            # key from the vendor's retired list. Inside the port's window the finder was
+            # asked and named none of these rows, so the advice above stands (EXECUTED on
+            # 2026.10.2: `applyLegacyDoctorMigrations` migrates or removes each table row).
+            # Outside it the finder was NOT asked, so the advice is hedged, never withdrawn.
+            fix += (
+                " OpenClaw 2026.10.1 and later also stops Doctor and `openclaw update` on a "
+                "config that holds a key from its own retired list, and this build is outside "
+                "the range ClawSecCheck checked that list on: if `openclaw doctor --fix` "
+                "stops with a message that names a release to install first, follow it, or "
+                "delete the keys by hand."
+            )
     return _finding("B382", WARN, detail, fix, evidence=evidence)
 
 
@@ -2384,6 +2399,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     # original FAIL (Golden Rule #4 - do not drop a real finding for a build we did
     # not see).
     device_auth_note = ""
+    # C-686: fix-only whole-config caveat for the "doctor --fix removes the stale line" note.
+    device_auth_fix_hedge = ""
     if dig(cfg, "gateway.controlUi.dangerouslyDisableDeviceAuth"):
         if _device_auth_knob(ctx) == "retired":
             device_auth_note = (
@@ -2392,6 +2409,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
                 "and grants nothing; Control UI browsers pair through the normal "
                 "device flow instead. `openclaw doctor --fix` removes the stale line."
             )
+            if _doctor_refuses_retired_formats(ctx):
+                device_auth_fix_hedge = f" {_doctor_whole_config_hedge(ctx)}"
         else:
             fails.append(
                 "gateway.controlUi.dangerouslyDisableDeviceAuth \u2014 control-plane: "
@@ -2503,7 +2522,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "Replace the wildcard with an explicit, scoped allowlist \u2014 e.g. "
             "commands.ownerAllowFrom to your own channel-native ID(s), or "
             "gateway.nodes.pairing.autoApproveCidrs to a specific host/private range. "
-            "Never leave either as an unscoped wildcard.",
+            "Never leave either as an unscoped wildcard." + device_auth_fix_hedge,
             evidence=wildcard_fails + fails + warns,
             severity=CRITICAL,
         )
@@ -2515,7 +2534,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "auth bypass are active (see evidence)." + device_auth_note,
             "Disable these unless a specific, temporary break-glass need requires one \u2014 each "
             "opens sandbox escape or control-plane authentication bypass. Restore the safe "
-            "default (set to false / remove).",
+            "default (set to false / remove)." + device_auth_fix_hedge,
             evidence=fails + warns,
         )
     if warns:
@@ -2525,7 +2544,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "One or more dangerous break-glass override flag(s) are enabled (see "
             "evidence)." + device_auth_note,
             "Review each \u2014 OpenClaw documents these as 'keep disabled' break-glass toggles. "
-            "Turn off any you do not actively need.",
+            "Turn off any you do not actively need." + device_auth_fix_hedge,
             evidence=warns,
         )
     return _finding(
@@ -2534,7 +2553,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         "None of the break-glass override flags checked here are enabled (browser "
         "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see "
         "B38)." + device_auth_note,
-        "Keep these break-glass toggles off unless an incident temporarily requires one.",
+        "Keep these break-glass toggles off unless an incident temporarily requires one."
+        + device_auth_fix_hedge,
         pass_confidence="verified",
     )
 
@@ -4090,6 +4110,11 @@ def check_gateway(ctx: Context) -> Finding:
             soft_ev.append(_b2_gen_token_note)
     if (ev or soft_ev) and retired_insecure_auth:
         soft_ev.append(retired_insecure_auth)
+        # C-686: the note above says Doctor removes the key -- true per key, but on a build
+        # whose Doctor refuses the whole config while any retired key is present it may not
+        # get that far. FIX only: `soft_ev` is the detail, which a fingerprint hashes.
+        if _doctor_refuses_retired_formats(ctx):
+            fixes.append(_doctor_whole_config_hedge(ctx))
     # C-646: say plainly which templated reads were NOT evaluated, so a FAIL/WARN raised by
     # an independent leg does not read as a complete assessment. Never raises the status.
     if _b2_unresolved:

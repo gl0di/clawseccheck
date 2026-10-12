@@ -4933,9 +4933,17 @@ def _dormant_cron_payload_text(job: dict) -> "str | None":
     extraction. ``~/.openclaw/cron/jobs.json`` is not read by the live execution path
     (``loadCronJobsStoreWithConfigJobs`` -> ``loadMutableCronStore`` ->
     ``loadCronStoreFromDatabase`` reads only the SQLite ``cron_jobs`` table,
-    store-D_NHWaCW.mjs:266-269) -- but it is NOT inert forever. The installed dist ships
-    a doctor/repair import path (``store-migration-DyyVNWF7.mjs``, openclaw@2026.9.4)
-    that migrates a legacy-shaped job into a live SQLite row, preserving its content:
+    store-D_NHWaCW.mjs:266-269) -- but it is NOT inert forever. THROUGH 2026.9.9 the dist
+    shipped a doctor/repair import path (``store-migration-DyyVNWF7.mjs``, openclaw@2026.9.4)
+    that migrates a legacy-shaped job into a live SQLite row, preserving its content.
+    C-686: that import is gone from OpenClaw 2026.10.1 and later (``legacyCronStoreFilesExist``
+    and ``loadLegacyCronStoreForMigration`` occur in no bundle of the installed 2026.10.2).
+    There Doctor refuses the file: ``assertNoRetiredStateFiles("Cron state", ...)`` throws
+    ``RetiredStateFormatError`` for ``cron/jobs.json`` (EXECUTED), imports nothing, and names
+    the bridge release to run Doctor on first. So on the installed build the file is a latent
+    hazard on that prescribed upgrade route, not something ``openclaw doctor`` reactivates.
+    The shapes below are the 2026.9.x migration's leniency, kept because the bridge
+    release's Doctor still applies it:
 
     * ``normalizePayloadKind`` (:594) matches ``payload.kind`` case-INSENSITIVELY
       (``"systemevent"``/``"agentturn"`` -> canonical casing) -- the canonical
@@ -4958,11 +4966,12 @@ def _dormant_cron_payload_text(job: dict) -> "str | None":
     So a hostile job shaped like ``{"kind": "systemevent", "message": "<payload>"}`` (or
     ``{"message": "<payload>"}`` with no ``payload`` object at all) draws zero signal from
     the canonical extraction today, yet would be silently reactivated -- content intact --
-    by a future ``openclaw doctor`` run. Returns the lenient/reactivation-candidate text,
+    by a 2026.9.x ``openclaw doctor`` run (on 2026.10.1 and later only the bridge release's
+    Doctor does; see above). Returns the lenient/reactivation-candidate text,
     or ``None`` when there is nothing beyond what the canonical extraction already covers.
     Deliberately mirrors the vendor's own leniency rather than widening it: e.g. when a
     systemEvent's ``.text`` IS present, its ``.message`` is left unread here exactly as
-    the doctor leaves it unread (the migration only fires when ``.text`` is absent) --
+    the 2026.9.x doctor leaves it unread (the migration only fires when ``.text`` is absent) --
     that stray key is genuinely inert, never migrated in, so scanning it would be a
     fact this scan-only path does not have license to invent.
 
@@ -8495,10 +8504,14 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     # FALLBACK leg (grounded: installed-plugin-index-store-*.js:92
                     # -> installed-plugin-index-*.js:1214-1219) -- assemble the
                     # trust map from each plugin's own installRecord when the top-level
-                    # installRecords key is absent. This is what the runtime itself does;
+                    # installRecords key is absent. This is what the runtime itself did;
                     # inert on the grounding machine (0 of 61 plugins carry
-                    # installRecord), implemented anyway so this reader has no blind spot
-                    # the runtime does not have.
+                    # installRecord). C-686: NOT what OpenClaw 2026.10.2 does -- EXECUTED:
+                    # `parseInstalledPluginIndex` returns null (the whole index is discarded)
+                    # when the top-level `installRecords` key is absent, so on 2026.10.x this
+                    # leg can report a record the runtime ignores. Kept unchanged (no verdict
+                    # moves here; the record is still on disk), flagged for a build-aware
+                    # follow-up.
                     installs = {}
                     for p in plugins_list:
                         if not isinstance(p, dict):

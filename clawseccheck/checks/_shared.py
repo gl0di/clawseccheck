@@ -48,6 +48,7 @@ from .. import toolpolicy as _toolpolicy
 from .. import toolgrant as _toolgrant
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
+from .. import retiredformats as _retiredformats
 
 
 def _is_posix() -> bool:
@@ -2097,6 +2098,113 @@ _LEGACY_SSRF_ALIAS_970_ORDER = (
     "Remove browser.ssrfPolicy.allowPrivateNetwork (or set it to false) BEFORE running "
     "'openclaw doctor --fix'."
 )
+
+# C-686 (OpenClaw 2026.10.1): Doctor no longer migrates formats written before July 2026.
+# EXECUTED on the installed 2026.10.2, not read: `findRetiredConfigUpgradeRequirement` names
+# `browser.ssrfPolicy.allowPrivateNetwork` (and `plugins.installs`, `silentReply.direct`,
+# `silentReplyRewrite`), so `openclaw doctor --fix` and `openclaw update` STOP on a config
+# that holds one and tell the user to install a bridge release first; and
+# `applyLegacyDoctorMigrations` over that key returns no change at all (the migration that
+# folded it into dangerouslyAllowPrivateNetwork is gone from the dist). The 2026.9.7-2026.9.9
+# sentence above ("'openclaw doctor --fix' would migrate a true value ...") is therefore false
+# for an installed 2026.10.1 or later, and `_LEGACY_SSRF_ALIAS_1010_*` replace it on those
+# builds ONLY (the installed build; an unknown or older build keeps the 2026.9.7 text, which
+# is a fact about the builds that text names). The key is the vendor's own, so the bridge
+# release is `retiredformats.BRIDGE_DEFAULT`; a config that also holds a Discord voice or
+# guild-channel key is told 2026.9.7 instead, which the sentence discloses.
+_DOCTOR_REFUSES_RETIRED_MIN = (2026, 10, 1)
+
+#: The release the vendor tells the user to install first for a RETIRED STATE FILE (cron
+#: `jobs.json`, `jobs-state.json`, `runs/*.jsonl`; `credentials/auth-profiles/<32-hex>.json`
+#: OAuth sidecars; `delivery-queue/*.json`; the legacy plugin install index). Config keys
+#: name `retiredformats.BRIDGE_DEFAULT` / `BRIDGE_DISCORD` instead. Pinned against the
+#: vendor's `RetiredStateFormatError` message by tests/test_c686_doctor_advice_grounding.py.
+_RETIRED_STATE_BRIDGE_VERSION = "2026.9.7"
+
+_LEGACY_SSRF_ALIAS_1010_FACT = (
+    "On OpenClaw 2026.10.1 and later 'openclaw doctor --fix' and 'openclaw update' refuse a "
+    "config that holds the retired browser.ssrfPolicy.allowPrivateNetwork key until it is "
+    f"removed by hand; OpenClaw's own message names OpenClaw {_retiredformats.BRIDGE_DEFAULT} "
+    f"as the bridge release to install first ({_retiredformats.BRIDGE_DISCORD} when the "
+    "config also holds a retired Discord voice or guild-channel key)"
+)
+_LEGACY_SSRF_ALIAS_1010_ORDER = (
+    "Delete browser.ssrfPolicy.allowPrivateNetwork by hand (or set it to false); if you "
+    "take OpenClaw's bridge-release route instead, do that BEFORE running 'openclaw "
+    "doctor --fix' there."
+)
+# EXECUTED on 2026.10.2 (`resolveBrowserConfig`, tests/test_c686_doctor_advice_grounding.py):
+# `{ssrfPolicy: {allowPrivateNetwork: true}}` resolves to `{}` -- the installed browser policy
+# no longer reads the alias at all, while `dangerouslyAllowPrivateNetwork: true` still
+# resolves to itself. So on this build the alias alone opens nothing; the FAIL records a stale
+# request for private-network access that would become live if the key were carried into
+# `dangerouslyAllowPrivateNetwork`. Nothing here says who would carry it, nor that the gateway
+# refuses to start (no gateway-start importer of the retired list was found).
+_LEGACY_SSRF_ALIAS_1010_INERT = (
+    "the installed OpenClaw's browser policy ignores this alias, so on its own it does not "
+    "open private-network access on this build, but it is a stale request that would let "
+    "the agent browser reach internal/metadata IPs (169.254.169.254 cloud-credential theft) "
+    "if it were carried into browser.ssrfPolicy.dangerouslyAllowPrivateNetwork"
+)
+
+#: Appended to the `fix` of every piece of Doctor advice that is true per key (the key IS
+#: migrated or removed by `openclaw doctor --fix`) but that Doctor will not reach on a build
+#: that refuses the WHOLE config while any retired key or state file is present.
+_DOCTOR_WHOLE_CONFIG_HEDGE = (
+    "On OpenClaw 2026.10.1 and later Doctor refuses the whole config while any retired "
+    "pre-July-2026 key or state file is present, so if `openclaw doctor --fix` stops with a "
+    "message that names a release to install first, follow that message or delete the key "
+    "by hand."
+)
+
+
+def _doctor_refuses_retired_formats(ctx) -> bool:
+    """True only when the INSTALLED build is known to be OpenClaw 2026.10.1 or later, whose
+    Doctor and ``openclaw update`` refuse a config or state tree that holds a pre-July-2026
+    format (``retiredformats.find_retired`` for the config keys, ``RetiredStateFormatError``
+    for state files) instead of migrating it.
+
+    Reads ONLY ``ctx.installed_dist_version`` (the Doctor that will actually run), and
+    answers False for an unknown or pre-release build, exactly like
+    ``_startup_repair_removed``: a reader whose build we did not see keeps the earlier text.
+    The caller decides whether that earlier text needs a hedge; this predicate does not
+    know the key.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return installed is not None and installed >= _DOCTOR_REFUSES_RETIRED_MIN
+
+
+def _legacy_ssrf_alias_fact(ctx) -> str:
+    """The build-correct sentence about what Doctor does with the retired SSRF alias."""
+    return (_LEGACY_SSRF_ALIAS_1010_FACT if _doctor_refuses_retired_formats(ctx)
+            else _LEGACY_SSRF_ALIAS_970_FACT)
+
+
+def _legacy_ssrf_alias_order(ctx) -> str:
+    """The build-correct "remove it first" step for the retired SSRF alias."""
+    return (_LEGACY_SSRF_ALIAS_1010_ORDER if _doctor_refuses_retired_formats(ctx)
+            else _LEGACY_SSRF_ALIAS_970_ORDER)
+
+
+def _legacy_ssrf_alias_consequence(ctx, canonical_true: bool) -> str:
+    """The clause B38's evidence puts after the Doctor sentence for the retired alias.
+
+    Through 2026.10.0 (and on an unknown build) it is the original "once migrated" clause,
+    byte for byte. From 2026.10.1 the alias is inert on its own (``_LEGACY_SSRF_ALIAS_1010_INERT``);
+    when the canonical flag is ALSO ``true`` the reach is real regardless, and says so.
+    """
+    if not _doctor_refuses_retired_formats(ctx):
+        return ("; once migrated, the agent browser can reach internal/metadata IPs "
+                "(169.254.169.254 cloud-credential theft)")
+    if canonical_true:
+        return ("; dangerouslyAllowPrivateNetwork=true also lets the agent browser reach "
+                "internal/metadata IPs (169.254.169.254 cloud-credential theft)")
+    return f"; {_LEGACY_SSRF_ALIAS_1010_INERT}"
+
+
+def _doctor_whole_config_hedge(ctx) -> str:
+    """``_DOCTOR_WHOLE_CONFIG_HEDGE`` on an installed 2026.10.1 or later, else ``""``."""
+    return _DOCTOR_WHOLE_CONFIG_HEDGE if _doctor_refuses_retired_formats(ctx) else ""
 
 
 def _legacy_ssrf_alias_startup_blocked(ctx, cfg) -> bool:

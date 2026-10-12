@@ -2897,7 +2897,9 @@ CATALOG: list[CheckMeta] = [
     # one reachable route to a FAIL-qualifying record is a retired
     # plugins.installs.<id>.clawhubTrustDisposition config record imported by a doctor or
     # startup config-repair pass (C-645: the STARTUP pass was removed in OpenClaw 2026.9.7;
-    # on 2026.9.7 and later the import runs from Doctor's preflight), not a live moderation
+    # on 2026.9.7 through 2026.9.9 the import runs from Doctor's preflight; C-686: from
+    # 2026.10.1 the importer is gone and plugins.installs is on the vendor's retired list,
+    # so Doctor refuses it and the route is no longer established), not a live moderation
     # verdict on this install. WARN on
     # any other non-clean disposition ("review-required", "review-recommended", or a future
     # value) and on clawhubTrustPending/Stale (an unverified/outdated verdict). UNKNOWN when

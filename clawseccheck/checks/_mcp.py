@@ -81,6 +81,7 @@ from ._shared import (
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
+    _doctor_refuses_retired_formats,  # C-686
     _numeric_version,
     _openclaw_generation,
     _plugins,
@@ -9159,6 +9160,14 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     persisted record, per the ladder above), just reached by a different door than
     originally assumed.
 
+    C-686: that route is closed on OpenClaw 2026.10.1 and later. The two importer symbols
+    named above occur in no bundle of the installed 2026.10.2 dist, and ``plugins.installs``
+    is on the vendor's retired list (``findRetiredConfigUpgradeRequirement``, EXECUTED), so
+    Doctor refuses a config that holds it instead of importing it. The verdict is
+    unaffected (it reads the persisted record); the FAIL ``fix`` says, on those builds, that
+    the route into a "blocked" record is not established. Whether another writer of such a
+    disposition exists on 2026.10.x was not established.
+
     (2b) Once written, does a "blocked" (or any) verdict get rewritten cleanly on
     the next re-scan, or can stale sibling fields (``clawhubTrustModerationState``,
     ``clawhubTrustScanStatus``, ``clawhubTrustReasons``) linger after the
@@ -9318,11 +9327,26 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             f"'blocked': {'; '.join(ev)}{extra}.",
             "Uninstall or replace the blocked plugin(s) immediately \u2014 this is not a "
             "heuristic, it is a 'blocked' verdict persisted in OpenClaw's own "
-            "install-record store. On OpenClaw 2026.9.5, no live ClawHub scan can write "
-            "this value; the only known route into it is a retired "
-            "plugins.installs.<id>.clawhubTrustDisposition config record imported by a "
-            "doctor or startup config-repair pass, so also check openclaw.json (and its "
-            "history) for that record. Do not override or acknowledge the verdict "
+            "install-record store. "
+            + (
+                # C-686: the importer this sentence names is gone from the 2026.10.2 dist
+                # (`importShippedPluginInstallConfigForDoctor` and
+                # `importAutomaticConfigRepairInstallRecords` occur in no bundle) and
+                # `plugins.installs` is on the vendor's retired list, so Doctor refuses a
+                # config that holds it. Whether another writer exists was not established.
+                "On OpenClaw 2026.10.1 and later the config-record import that was the only "
+                "known route into this value on 2026.9.5 no longer exists, and a "
+                "plugins.installs key in openclaw.json now makes Doctor refuse the config, "
+                "so how this record got here is not established: check openclaw.json (and "
+                "its history) and the plugin's install history. "
+                if _doctor_refuses_retired_formats(ctx) else
+                "On OpenClaw 2026.9.5, no live ClawHub scan can write this value; the only "
+                "known route into it is a retired "
+                "plugins.installs.<id>.clawhubTrustDisposition config record imported by a "
+                "doctor or startup config-repair pass, so also check openclaw.json (and its "
+                "history) for that record. "
+            )
+            + "Do not override or acknowledge the verdict "
             "without independently re-verifying provenance.",
             evidence=ev,
         ), ctx.plugin_trust_elided)

@@ -82,7 +82,10 @@ from ._shared import (
     _key_advice,
     _node_allow_skills,  # B396 - shared with B386
     _node_commands,  # B396 - shared with B71
+    _doctor_refuses_retired_formats,  # C-686
+    _doctor_whole_config_hedge,  # C-686
     _numeric_version,  # B396
+    _RETIRED_STATE_BRIDGE_VERSION,  # C-686
     _openclaw_generation,
     _finding,
     _has_approval_gate,
@@ -1874,11 +1877,23 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # The label discloses that explicitly, same disclosure idiom as B-555's
         # advice-text carve-out -- this is a positive observation about a file that
         # really is on disk (B189/shadow-store precedent), not a live-execution claim.
-        _scan_field(
+        # C-686: that sentence is a fact about Doctor through 2026.9.9 only. EXECUTED on the
+        # installed 2026.10.2: `assertNoRetiredStateFiles("Cron state", ...)` throws
+        # `RetiredStateFormatError` for a legacy `cron/jobs.json` (and for `jobs-state.json`
+        # and `runs/*.jsonl`), Doctor imports nothing, and the message names the bridge
+        # release `_RETIRED_STATE_BRIDGE_VERSION`. The label is part of `detail`, so it is
+        # swapped by the INSTALLED build only (an unknown or older build keeps the
+        # original, byte for byte) and the FAIL stays: the file is still a latent hazard on
+        # the upgrade route the vendor itself prescribes.
+        dormant_label = (
+            f"{job_label}.payload (dormant legacy shape \u2014 the installed OpenClaw's "
+            "Doctor refuses this retired file instead of importing it; Doctor on the "
+            f"bridge release {_RETIRED_STATE_BRIDGE_VERSION} would import it)"
+            if _doctor_refuses_retired_formats(ctx) else
             f"{job_label}.payload (dormant legacy shape \u2014 would be reactivated by "
-            "`openclaw doctor`)",
-            job.get("payload_message_dormant"),
+            "`openclaw doctor`)"
         )
+        _scan_field(dormant_label, job.get("payload_message_dormant"))
         _scan_field(f"{job_label}.trigger.script", job.get("trigger_script"))
         # C-476: a `command`-kind payload's argv vector and a `script`-kind payload's
         # body were collected (collector._cron_payload_extras) but never content-scanned
@@ -4637,6 +4652,9 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                         "change.")
         else:
             pass_fix = "\u2014"
+        if retired_note and _doctor_refuses_retired_formats(ctx):
+            # C-686: fix only (the note is in `detail`, which a fingerprint hashes).
+            pass_fix += f" {_doctor_whole_config_hedge(ctx)}"
         return _finding(
             "B175",
             PASS,
@@ -7915,7 +7933,28 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
             "current-generation state \u2014 for the device-auth file specifically, the "
             "gateway refuses to start at all until it is migrated away.",
             "Stop the OpenClaw gateway and run `openclaw doctor --fix` to migrate this "
-            "legacy state, then confirm the file(s) above are gone.",
+            "legacy state, then confirm the file(s) above are gone."
+            + (
+                # C-686: EXECUTED on 2026.10.2 -- Doctor's preflight (`prepareDoctorConfigRecovery`)
+                # throws before it migrates anything when the config holds a key from the
+                # vendor's retired list or the state tree holds a retired file (OAuth
+                # sidecars, cron state, JSON delivery queues). The allowFrom and device-auth
+                # files themselves are on none of those lists. The legacy plugin install
+                # index is NOT a Doctor stop: Doctor only warns and leaves it unchanged
+                # (refusal code `unsupported-plugin-install-index`, message names 2026.9.5),
+                # while `openclaw update` refuses it (`assertNoRetiredStateFiles("Plugin
+                # install index", ...)`, names 2026.9.7).
+                f" On OpenClaw 2026.10.1 and later Doctor stops first, before it migrates "
+                "these files, if it finds a retired pre-July-2026 config key or state file "
+                "(older OAuth credential sidecars, cron state or JSON delivery queues); it "
+                f"then names the release to install first (OpenClaw "
+                f"{_RETIRED_STATE_BRIDGE_VERSION} for a state file), so follow that message "
+                "before retrying. A legacy plugin install index is different: Doctor only "
+                "warns and leaves it unchanged (naming OpenClaw 2026.9.5), while `openclaw "
+                "update` refuses it (naming OpenClaw "
+                f"{_RETIRED_STATE_BRIDGE_VERSION})."
+                if _doctor_refuses_retired_formats(ctx) else ""
+            ),
             evidence=found,
         )
     if unreadable:
@@ -8863,7 +8902,9 @@ def check_marketplace_feed_provenance(ctx: Context) -> Finding:
             "on this build: " + "; ".join(bad),
             "Delete the marketplaces block (`openclaw doctor --fix` removes it). Custom "
             "feed profiles no longer exist; the remaining override is the --feed-url flag, "
-            "which OpenClaw gates against its own clawhub.ai hostname allowlist.",
+            "which OpenClaw gates against its own clawhub.ai hostname allowlist."
+            + (f" {_doctor_whole_config_hedge(ctx)}"
+               if _doctor_refuses_retired_formats(ctx) else ""),
             evidence=list(bad),
             # `verified`, not `no_signal`: this PASS is not "we saw nothing". The profiles
             # were read and named, and the build was identified as one whose schema has no

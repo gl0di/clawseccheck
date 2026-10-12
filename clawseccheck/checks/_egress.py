@@ -55,8 +55,11 @@ from ._shared import (
     _has_approval_gate,
     _hint,
     _KNOWN_EXFIL_HOST_RE,
-    _LEGACY_SSRF_ALIAS_970_FACT,
-    _LEGACY_SSRF_ALIAS_970_ORDER,
+    _doctor_refuses_retired_formats,
+    _doctor_whole_config_hedge,
+    _legacy_ssrf_alias_consequence,
+    _legacy_ssrf_alias_fact,
+    _legacy_ssrf_alias_order,
     _legacy_ssrf_alias_startup_blocked,
     _mcp_has_remote,
     _mcp_servers,
@@ -405,6 +408,14 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     # not read keeps the original wording, conservatively). B38 and RISK-05/RISK-15 share
     # `_LEGACY_SSRF_ALIAS_970_FACT` so they cannot drift.
     #
+    # C-686: from 2026.10.1 the "doctor would make it live" half is gone -- the key is on the
+    # vendor's retired list, Doctor and `openclaw update` refuse the config, and the
+    # migration no longer exists (EXECUTED on 2026.10.2, see `_LEGACY_SSRF_ALIAS_1010_FACT`).
+    # `_legacy_ssrf_alias_fact(ctx)` picks the sentence by the installed build; the verdict
+    # stays FAIL. The detail text for a >= 2026.10.1 reader therefore differs from the
+    # 2026.9.7-2026.9.9 text (a fingerprint moves for that reader only); older and
+    # unknown builds are byte-identical.
+    #
     # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist
     # (STILL TRUE through 2026.9.6, superseded from 2026.9.7 by the note above):
     # the browser's own config resolver, resolveBrowserSsrFPolicy (config-Dc3xLSSD.mjs:
@@ -469,8 +480,8 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             # "the browser can reach internal IPs" is not true TODAY -- say what is.
             fail_ev.append(
                 f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 retired key. "
-                f"{_LEGACY_SSRF_ALIAS_970_FACT}; once migrated, the agent browser can "
-                "reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
+                f"{_legacy_ssrf_alias_fact(ctx)}"
+                f"{_legacy_ssrf_alias_consequence(ctx, dangerously_allow_private is True)}"
             )
         else:
             fail_ev.append(
@@ -494,19 +505,30 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         if legacy_startup_blocked:
             # C-645 (2026.9.7+): do NOT tell the reader to "run doctor --fix to migrate it"
             # -- with the key still true that is exactly the step that makes it live.
-            fix += (
-                " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
-                f"same flag. {_LEGACY_SSRF_ALIAS_970_FACT}, so "
-                "dangerouslyAllowPrivateNetwork=false alone does not close this. "
-                f"{_LEGACY_SSRF_ALIAS_970_ORDER}"
-            )
+            if _doctor_refuses_retired_formats(ctx):
+                # C-686: the "so ...=false alone does not close this" half rests on a Doctor
+                # migration that no longer exists on this build; do not carry it over.
+                fix += (
+                    " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                    f"same flag. {_legacy_ssrf_alias_fact(ctx)}. "
+                    f"{_legacy_ssrf_alias_order(ctx)}"
+                )
+            else:
+                fix += (
+                    " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                    f"same flag. {_legacy_ssrf_alias_fact(ctx)}, so "
+                    "dangerouslyAllowPrivateNetwork=false alone does not close this. "
+                    f"{_legacy_ssrf_alias_order(ctx)}"
+                )
         elif legacy_allow_private is True:
             fix += (
                 " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
                 "same flag \u2014 OpenClaw ORs it into dangerouslyAllowPrivateNetwork before "
                 "the browser ever uses the policy, so dangerouslyAllowPrivateNetwork=false "
                 "alone will not close this while allowPrivateNetwork stays true. Set it to "
-                "false too, or remove it and run 'openclaw doctor --fix' to migrate it."
+                "false too, or remove it by hand. (Through OpenClaw 2026.9.6 'openclaw doctor "
+                "--fix' also migrates it; OpenClaw 2026.10.1 and later refuses a config that "
+                "holds it, so there the key has to be deleted by hand.)"
             )
         # B-722: only add the blockedHostnames lever when the private-network flag
         # is the (or one of the) actual triggers -- B38 can also FAIL on noSandbox alone,
@@ -4075,6 +4097,10 @@ def check_leak(ctx: Context) -> Finding:
     # fact stays, only the framing changes.
     stale = (" On OpenClaw 2026.8.1 and later this key was removed, so the value is not "
              "in effect \u2014 delete it (`openclaw doctor --fix` does)." if modern else "")
+    # C-686: the fix (never the detail, which a fingerprint hashes) also carries the
+    # whole-config caveat on a build whose Doctor refuses any retired key.
+    stale_fix = stale + (f" {_doctor_whole_config_hedge(ctx)}" if modern and
+                         _doctor_refuses_retired_formats(ctx) else "")
     if redact == "off":
         return _finding(
             "B9",
@@ -4082,7 +4108,7 @@ def check_leak(ctx: Context) -> Finding:
             'logging.redactSensitive is "off" \u2014 secrets/system prompt can surface in '
             "tool output/logs." + stale,
             'Set logging.redactSensitive to "tools" to redact secrets from tool output '
-            "and logs." + stale,
+            "and logs." + stale_fix,
         )
     if redact is None:
         # B-128: the OpenClaw default when the field is unset is already "tools"
@@ -4104,7 +4130,7 @@ def check_leak(ctx: Context) -> Finding:
             "B9",
             PASS,
             'Sensitive redaction is enabled (logging.redactSensitive="tools").' + stale,
-            "Keep redaction on." + stale,
+            "Keep redaction on." + stale_fix,
         )
     # Unexpected value - be conservative
     return _finding(
@@ -4112,7 +4138,7 @@ def check_leak(ctx: Context) -> Finding:
         WARN,
         f'logging.redactSensitive has unexpected value {redact!r} \u2014 expected "tools" '
         'or "off".' + stale,
-        'Set logging.redactSensitive to "tools".' + stale,
+        'Set logging.redactSensitive to "tools".' + stale_fix,
     )
 
 

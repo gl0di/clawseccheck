@@ -32,9 +32,12 @@ from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, FAIL_WEIGHT_STATUSES, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _key_advice,
+    _doctor_refuses_retired_formats,
+    _legacy_ssrf_alias_fact,
+    _legacy_ssrf_alias_order,
     _legacy_ssrf_alias_startup_blocked,
+    _LEGACY_SSRF_ALIAS_1010_INERT,
     _LEGACY_SSRF_ALIAS_970_FACT,
-    _LEGACY_SSRF_ALIAS_970_ORDER,
     _b62_actual_families,
     _b62_extract_declaration,
     _credential_is_plaintext,
@@ -805,7 +808,9 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
     run from live rather than live today. Dave ruled to KEEP the trigger (the verdict here
     is unchanged) and make the WORDING version-aware: RISK-05 / RISK-15 keep their original
     text on every build but 2026.9.7+, where `_legacy_ssrf_alias_startup_blocked` selects
-    the corrected sentences (shared with B38 via `_LEGACY_SSRF_ALIAS_970_FACT`). A
+    the corrected sentences (shared with B38 via `_LEGACY_SSRF_ALIAS_970_FACT`; C-686: from
+    2026.10.1 via `_LEGACY_SSRF_ALIAS_1010_FACT`, because Doctor refuses the key there and
+    "one Doctor run from live" no longer holds). A
     nested `network.allowPrivateNetwork`/
     `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
     (isPrivateNetworkOptInEnabled, ssrf-policy-bu9unXwu.mjs) but is CHANNEL-scoped only
@@ -828,6 +833,21 @@ _LEGACY_SSRF_ALIAS_970_LEAD = (
     "The browser SSRF policy sets the retired browser.ssrfPolicy.allowPrivateNetwork key to "
     f"true (B38). {_LEGACY_SSRF_ALIAS_970_FACT}."
 )
+
+
+def _legacy_ssrf_alias_lead(ctx: Context, cfg: dict) -> str:
+    """C-686: the lead sentence by the installed build. ``_LEGACY_SSRF_ALIAS_970_LEAD`` (the
+    2026.9.7-2026.9.9 text) stays byte-identical for those builds; an installed 2026.10.1 or
+    later gets the sentence that says Doctor refuses the key instead of migrating it, and --
+    when the canonical flag is not also ``true`` -- that the installed browser ignores the
+    alias on its own (EXECUTED, ``_LEGACY_SSRF_ALIAS_1010_INERT``)."""
+    lead = ("The browser SSRF policy sets the retired browser.ssrfPolicy.allowPrivateNetwork "
+            f"key to true (B38). {_legacy_ssrf_alias_fact(ctx)}.")
+    if (_doctor_refuses_retired_formats(ctx)
+            and dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is not True):
+        inert = _LEGACY_SSRF_ALIAS_1010_INERT
+        lead += f" {inert[0].upper()}{inert[1:]}."
+    return lead
 
 
 def _reword_legacy_ssrf_alias(path: RiskPath, ctx: Context, cfg: dict, *, lead: str,
@@ -853,7 +873,7 @@ def _reword_legacy_ssrf_alias(path: RiskPath, ctx: Context, cfg: dict, *, lead: 
         return path
     _head, sep, tail = path.why.partition(why_marker)
     why = f"{lead}{sep}{tail}" if sep else f"{lead} {path.why}"
-    order = _LEGACY_SSRF_ALIAS_970_ORDER
+    order = _legacy_ssrf_alias_order(ctx)
     if fix_marker:
         fix_head, fix_sep, fix_tail = path.fix.partition(fix_marker)
     else:
@@ -1166,7 +1186,7 @@ def _rule_browser_ssrf_secrets(ctx: Context, findings: list[Finding],
     # start with the key); every other build gets `path` back untouched.
     return _reword_legacy_ssrf_alias(
         path, ctx, cfg,
-        lead=f"{_LEGACY_SSRF_ALIAS_970_LEAD} The agent also has access to sensitive credentials.",
+        lead=f"{_legacy_ssrf_alias_lead(ctx, cfg)} The agent also has access to sensitive credentials.",
         why_marker=_R05_WHY_MARKER,
     )
 
@@ -1754,7 +1774,7 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         path, ctx, cfg,
         lead=("A channel exposes full untrusted context to the agent "
               "(channels.<p>.contextVisibility='all', B26). "
-              f"{_LEGACY_SSRF_ALIAS_970_LEAD}"),
+              f"{_legacy_ssrf_alias_lead(ctx, cfg)}"),
         why_marker=_R15_WHY_MARKER,
         fix_marker=_R15_FIX_MARKER,
     )
