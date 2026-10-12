@@ -72,7 +72,12 @@ def _install(dest: Path) -> Path:
 
 
 def _run(install: Path, *args: str):
-    return subprocess.run([sys.executable, "audit.py", *args], cwd=install,
+    # An exported PYTHONDONTWRITEBYTECODE / PYTHONPYCACHEPREFIX would make the "a refusal
+    # writes no bytecode" assertion below true whatever the shim does, so the child starts
+    # without them.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")}
+    return subprocess.run([sys.executable, "audit.py", *args], cwd=install, env=env,
                           capture_output=True, text=True, timeout=120)
 
 
