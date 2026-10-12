@@ -842,8 +842,8 @@ def test_wiring_collect_reads_the_unit_and_the_message_hides_the_path(tmp_path):
 # branch and checked cell by cell against dev, over all 19,968 cells of this table: 192 cells differ,
 # all B2, all in detail and evidence only, all cells whose dev detail printed the old sentence
 # (the lan / custom no-mode FAIL cells), none in status or fix, and no B80 cell and no other row
-# differs. This table has no installed version, so it cannot see the measured-build WARN; see
-# tests/test_c693_gateway_generated_startup_token.py.
+# differs. This table has no installed version, so it cannot see the refused-start WARN; see
+# tests/test_c693_gateway_refused_bind_without_credential.py.
 
 _DIFF_VAR_LONG = "OPENCLAW_GATEWAY_TOKEN"
 _DIFF_VAR_SHORT = "GW_T"
