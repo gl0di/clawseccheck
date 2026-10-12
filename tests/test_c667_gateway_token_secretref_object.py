@@ -46,7 +46,11 @@ from clawseccheck.checks import check_gateway, check_gateway_rate_limit
 from clawseccheck.checks._config import _gateway_config_token, _gateway_token_form
 from clawseccheck.collector import Context
 
-_NO_AUTH_DETAIL = "gateway.bind=lan exposed with auth.mode=None"
+# C-693: reworded (no "exposed", no Python literal "None"); the verdict is unchanged
+_NO_AUTH_DETAIL = (
+    "gateway.bind=lan is non-loopback, no gateway.auth.mode is set and no usable gateway token "
+    "is configured"
+)
 _DISCLOSURE = "gateway.auth.token is set"
 _STRING_REF = "${OPENCLAW_GATEWAY_TOKEN}"
 # The caveat B2 adds when the strength of a reference object's secret could not be found.
@@ -829,6 +833,17 @@ def test_wiring_collect_reads_the_unit_and_the_message_hides_the_path(tmp_path):
 # checked cell by cell against dev: the only differences are those twelve PASS-to-UNKNOWN
 # cells and four fix-only cells per row; B80 and every other row are the dev values. See
 # tests/test_c681c_unmeasured_reference_is_unknown.py.
+#
+# C-693 (owner ruling, 2026-10-12) reworded the B2 text of the no-mode, non-loopback FAIL ("exposed
+# with auth.mode=None" became "is non-loopback, no gateway.auth.mode is set and no usable gateway
+# token is configured") and moved NO status; the fix text is untouched. Sixteen B2 digests moved
+# (absent, null, empty, blank, int-zero, int, float, true, false, list-empty, list-literal,
+# list-reference, list-of-dict, legacy-int, legacy-true, legacy-list): they were regenerated on the
+# branch and checked cell by cell against dev, over all 19,968 cells of this table: 192 cells differ,
+# all B2, all in detail and evidence only, all cells whose dev detail printed the old sentence
+# (the lan / custom no-mode FAIL cells), none in status or fix, and no B80 cell and no other row
+# differs. This table has no installed version, so it cannot see the measured-build WARN; see
+# tests/test_c693_gateway_generated_startup_token.py.
 
 _DIFF_VAR_LONG = "OPENCLAW_GATEWAY_TOKEN"
 _DIFF_VAR_SHORT = "GW_T"
@@ -970,10 +985,10 @@ def _diff_cells(only: "str | None" = None, verbose: bool = False) -> dict:
 
 
 _DIFF_EXPECTED: dict = {
-    'absent': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'null': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'empty': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'blank': ('F192', 'c3ee74b5ec44a438', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'absent': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'null': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'empty': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'blank': ('F192', '75b652b773e9280f', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
     'lit-3': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'lit-11': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'lit-23': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
@@ -1003,22 +1018,22 @@ _DIFF_EXPECTED: dict = {
     'marker-secretref-short': ('F192', '31bc9ab2e920411b', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'marker-env-long': ('W24P24W24P24W24P12F12W24P12F12', '7d7714c28547a26b', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'marker-env-short': ('F192', '31bc9ab2e920411b', 'P108W24P24W24P12', '2dc6757070110c2c'),
-    'int-zero': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'int': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'float': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'true': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'false': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'list-empty': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'list-literal': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'list-reference': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'list-of-dict': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'int-zero': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'int': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'float': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'true': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'false': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'list-empty': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'list-literal': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'list-reference': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'list-of-dict': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
     'legacy-lit-3': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'legacy-lit-32': ('P96W12P24F12W12P24F12', '27aa7dc74ac4278d', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'legacy-ref-long': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1P24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1P12F12', '5bc6d6c9be708ca9', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'legacy-ref-short': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', '9dc230ce5fcd0726', 'P96W36P12W36P12', 'b25325a6e4d86091'),
-    'legacy-int': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'legacy-true': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
-    'legacy-list': ('P96F9W3P24F21W3P24F12', '4ba4b6a70fdde3cc', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'legacy-int': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'legacy-true': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
+    'legacy-list': ('P96F9W3P24F21W3P24F12', '9941cfba625a18fe', 'P96U3P6W27P12U3P6W27P12', '8d0777d28b540908'),
     'both-empty-and-legacy-literal': ('F192', '1fa80a8c9804507d', 'P108W24P24W24P12', '2dc6757070110c2c'),
     'both-reference-and-legacy-long': ('U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24U1F1U2F1U1F3P1F1U2F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24W1F1W2F1W1F3W1F1W1U1F1U2F1U1F3P1F1U1F24', '9dc230ce5fcd0726', 'P96W36P12W36P12', 'b25325a6e4d86091'),
     'both-literal-and-legacy-reference': ('P96W12P24F12W12P24F12', '27aa7dc74ac4278d', 'P96W36P12W36P12', 'b25325a6e4d86091'),

@@ -3524,6 +3524,103 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     return _finding("B179", WARN, detail, fix, evidence)
 
 
+# B2/B80: the oldest release whose start-up auth was EXECUTED. `ensureGatewayStartupAuth`
+# (dist/startup-auth-*.mjs) was run in node with an empty environment on 2026.9.6, 9.7, 9.8,
+# 9.9, 10.1 and 10.2: with `gateway.auth.mode` absent or "token" and no credential anywhere
+# (no token, no password, no OPENCLAW_GATEWAY_TOKEN / _PASSWORD) it resolves mode "token" and
+# generates `crypto.randomBytes(24).toString("hex")` (48 hex characters, not persisted), and
+# `resolveGatewayRuntimeConfig` then accepts a `bind: "lan"` gateway because a shared secret
+# exists. The same call refuses a non-loopback bind for an explicit mode "none". No tarball
+# older than 2026.9.6 was available to execute, so earlier builds are UNMEASURED and keep the
+# answers they always had.
+_B2_STARTUP_TOKEN_MEASURED_MIN = (2026, 9, 6)
+
+
+def _gateway_startup_token(ctx) -> str:
+    """Does the INSTALLED OpenClaw start a credential-less gateway behind a token of its own?
+    ``"generated"`` / ``"unknown"``.
+
+    Two answers on purpose: nothing measured says an older build REFUSES to start or serves
+    the gateway open, so "not generated" is never claimed and an unknown build keeps today's
+    answers. Only ``installed_dist_version`` decides - the build whose start-up runs. The
+    config's own ``meta.lastTouchedVersion`` stamp is deliberately NOT a fallback: it names a
+    build that once SAVED the file, not the one that serves it, and this answer lowers a
+    CRITICAL FAIL. No installed version, an unparseable one, a pre-release (``-beta.1``) and
+    a string that is not a calendar release (``YYYY.M.P``, three or more numeric parts) are
+    all ``"unknown"``.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None and len(installed) >= 3 and installed >= _B2_STARTUP_TOKEN_MEASURED_MIN:
+        return "generated"
+    return "unknown"
+
+
+def _gateway_generated_token_shape(cfg: dict, ctx, *, mode_token: bool) -> bool:
+    """Is this EXACTLY a shape on which the executed vendor start-up generates its own token
+    and then starts the gateway? A whitelist, not "no credential found": every config the
+    vendor refuses, or resolves to another mode, answers False and keeps its old verdict.
+
+    Executed on 2026.10.2 (and the shape's core on 9.6 - 10.1): ``bind: "lan"`` (the one
+    non-loopback spelling the start-up seeds the Control-UI origins for and resolves to
+    0.0.0.0; ``"0.0.0.0"`` is refused without ``allowedOrigins``, ``custom`` needs a matching
+    interface, ``tailnet`` depends on Tailscale), an ``auth`` block that is absent or holds
+    ONLY ``mode`` (null for the no-mode cell, ``"token"`` for the other), and nothing else
+    that changes the outcome:
+
+    * any token or password anywhere - ``gateway.auth.*``, the legacy ``gateway.token``,
+      ``gateway.remote.token`` / ``.password`` (a remote token counts as "a token exists", so
+      nothing is generated and the start-up then throws "no token was configured"), or an
+      OPENCLAW_GATEWAY_TOKEN / _PASSWORD in a persistent artifact (never this process's
+      environment) - disqualifies;
+    * ``gateway.tailscale.mode`` serve (refused: needs a loopback bind) or funnel (refused:
+      needs mode password), or any value but absent / "off";
+    * ``gateway.mode`` other than absent / "local"; any ``gateway.remote`` content;
+    * a ``trustedProxy`` block or mode, ``allowTailscale``, ``rateLimit`` (the auth block holds
+      only ``mode``, so these are excluded rather than assumed harmless).
+    """
+    gw = cfg.get("gateway") if isinstance(cfg, dict) else None
+    if not isinstance(gw, dict) or gw.get("bind") != "lan" or "token" in gw:
+        return False
+    if gw.get("mode") not in (None, "local"):
+        return False
+    auth_obj = gw.get("auth")
+    if auth_obj is not None:
+        if not isinstance(auth_obj, dict) or not set(auth_obj) <= {"mode"}:
+            return False
+    want = "token" if mode_token else None
+    if (auth_obj or {}).get("mode") != want:
+        return False
+    tailscale = gw.get("tailscale")
+    if tailscale is not None and (
+        not isinstance(tailscale, dict) or tailscale.get("mode") not in (None, "off")
+    ):
+        return False
+    if gw.get("remote") not in (None, {}):
+        return False
+    return _gateway_env_credential(ctx)[0] is None
+
+
+def _b2_generated_token_note(bind: str, mode_clause: str) -> str:
+    """The one sentence both no-credential cells share (mode absent, mode "token" with no
+    token), so the two equivalent configs cannot be worded apart. It claims what was
+    executed and hedges what cannot be seen: the environment of the running gateway."""
+    return (
+        f"gateway.bind={bind} is non-loopback and {mode_clause}. OpenClaw 2026.9.6 and later "
+        "start a gateway with this configuration with a token it generates at each start "
+        "(not persisted, so no client knows it) unless an environment this audit cannot see "
+        "supplies a credential; no credential is configured, so set an explicit credential"
+    )
+
+
+_B2_GENERATED_TOKEN_FIX = (
+    "Set an explicit credential: gateway.auth.mode=token with a gateway.auth.token of at "
+    "least 24 characters (or a ${...} environment reference), so clients use a secret you "
+    "control instead of one generated at each start; or bind the gateway to loopback. "
+    "Limit: a credential supplied outside the config (the gateway's own environment or "
+    "start-up flags) is not visible to this audit, and replaces the generated token"
+)
+
+
 def check_gateway(ctx: Context) -> Finding:
     cfg = ctx.config
     ev = []
@@ -3616,6 +3713,7 @@ def check_gateway(ctx: Context) -> Finding:
     # trusted-proxy, or an auth mode that is itself undeterminable); the auth mode decides
     # only where the bind may be off-loopback; Tailscale funnel exposes the gateway on its
     # own, whatever the bind.
+    _b2_gen_token_note = ""
     _b2_unresolved = []
     if bind_tpl and (auth in (None, "none", "trusted-proxy") or auth_tpl):
         _b2_unresolved.append("gateway.bind")
@@ -3765,12 +3863,62 @@ def check_gateway(ctx: Context) -> Finding:
                 "Replace the environment-supplied gateway credential with one of at least "
                 "24 characters, or bind the gateway to loopback"
             )
+        elif (
+            auth is None
+            and _gateway_startup_token(ctx) == "generated"
+            and _gateway_generated_token_shape(cfg, ctx, mode_token=False)
+        ):
+            # Owner ruling (Dave, 2026-10-12): on a build whose start-up generation was
+            # MEASURED (`_B2_STARTUP_TOKEN_MEASURED_MIN`), the one executed shape - a "lan"
+            # bind with no mode and no credential anywhere - is started behind a generated
+            # token, so "exposed" is false; the same runtime state as mode "token" with no
+            # token (below), which answers the same. A WARN, never a PASS: nothing is
+            # configured for clients. Any other shape never reaches this branch.
+            soft_ev.append(
+                _b2_generated_token_note(
+                    bind, "the config sets no gateway.auth.mode and no credential"
+                )
+            )
+            fixes.append(_B2_GENERATED_TOKEN_FIX)
+        elif auth is None:
+            # No mode, no usable gateway token. The sentence is reworded (no "exposed", no
+            # Python literal) - the owner's ruling covers the FAIL text of this cell - and
+            # the status is what it always was.
+            ev.append(
+                f"gateway.bind={bind or '?'} is non-loopback, no gateway.auth.mode is set "
+                "and no usable gateway token is configured"
+            )
+            fixes.append(
+                "Bind the gateway to loopback or require auth "
+                "(gateway.auth.mode=token, token >=24 chars)"
+            )
         else:
+            # Explicit mode "none": the vendor REFUSES to bind a non-loopback address with it
+            # (`assertGatewayRuntimeSecurityConfig`), so the config is wrong on every build.
+            # The detail is byte-identical to what it always was (a fingerprint hashes it).
             ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")
             fixes.append(
                 "Bind the gateway to loopback or require auth "
                 "(gateway.auth.mode=token, token >=24 chars)"
             )
+    elif (
+        auth == "token"
+        and bind
+        and bind not in LOOPBACK
+        and _gateway_startup_token(ctx) == "generated"
+        and _gateway_generated_token_shape(cfg, ctx, mode_token=True)
+    ):
+        # The same runtime state as the no-mode cell above (measured: mode "token" and no
+        # token generates one), so the same WARN. On a build whose start-up behaviour was
+        # not measured this stays the PASS it has always been.
+        # Held back, like `retired_insecure_auth` below: where another leg already FAILs this
+        # config (an open channel, funnel, ...) its `detail` must stay what it was - a
+        # fingerprint hashes it - so the note rides in `fix` there and in `detail` only when
+        # it is the whole finding.
+        _b2_gen_token_note = _b2_generated_token_note(
+            bind, "gateway.auth.mode is token but no token is configured"
+        )
+        fixes.append(_B2_GENERATED_TOKEN_FIX)
     # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
     # C-471: `gateway.controlUi.allowInsecureAuth` was REMOVED in OpenClaw 2026.8.1, and
     # the removal is fail-SAFE - unusual enough to state, because the usual shape is the
@@ -3922,6 +4070,11 @@ def check_gateway(ctx: Context) -> Finding:
         ev.append(f"channel '{name}' has an open dm/group policy (anyone can command it)")
     if open_ch:
         fixes.append("Set every open channel's dmPolicy/groupPolicy to 'allowlist'")
+    if _b2_gen_token_note:
+        if ev:
+            fixes.append(_b2_gen_token_note)
+        else:
+            soft_ev.append(_b2_gen_token_note)
     if (ev or soft_ev) and retired_insecure_auth:
         soft_ev.append(retired_insecure_auth)
     # C-646: say plainly which templated reads were NOT evaluated, so a FAIL/WARN raised by
@@ -4154,12 +4307,24 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
         )
     mode = dig(cfg, "gateway.auth.mode")
     cred_src = None
+    generated_token = False
     if mode is None:
         # B-312 parity: config wins over environment (config-first, identical to B2)
         # - a config-supplied token is only ever superseded by looking at the
         # environment when NO config token exists at all.
         _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, mode, ctx)
-        if _cfg_token is not None and _cfg_token_strong:
+        if _gateway_startup_token(ctx) == "generated" and _gateway_generated_token_shape(
+            cfg, ctx, mode_token=False
+        ):
+            # C-693 parity with B2: the one executed shape on a build whose start-up auth was
+            # measured -> the gateway runs in token mode behind a token it generates, the same
+            # state as `gateway.auth.mode: "token"` with no token (which reaches the WARN
+            # below). Whatever an unseen environment adds is a token or password too, so this
+            # no longer waits for env evidence it cannot get.
+            mode = "token"
+            cred_src = "a token the gateway generates at each start"
+            generated_token = True
+        elif _cfg_token is not None and _cfg_token_strong:
             mode = "token"
             cred_src = "a config-supplied gateway.auth.token"
         elif _cfg_token is None:
@@ -4238,14 +4403,20 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             "irrelevant.",
             config_field_paths={"gateway.bind"},
         )
-    evidence = (
-        [f"gateway.auth.mode={mode!r}"]
-        if cred_src is None
-        else [
+    if generated_token:
+        mode_evidence = [
+            "gateway.auth.mode is not set in config; OpenClaw 2026.9.6 and later start this "
+            "gateway with a token it generates at each start (not persisted, so no client "
+            "knows it) unless an environment this audit cannot see supplies a credential"
+        ]
+    elif cred_src is None:
+        mode_evidence = [f"gateway.auth.mode={mode!r}"]
+    else:
+        mode_evidence = [
             f"gateway.auth.mode is not set in config, but {cred_src} authenticates the "
             "gateway"
         ]
-    ) + [
+    evidence = mode_evidence + [
         f"gateway.bind host={bind_host!r} (non-loopback)",
         "gateway.auth.rateLimit is not set",
     ]

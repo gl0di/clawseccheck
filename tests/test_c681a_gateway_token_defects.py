@@ -117,7 +117,7 @@ def test_fixed_name_env_credential_that_is_template_or_marker_shaped_is_not_stro
     cfg = _cfg(bind="lan")
     got = check_gateway(_ctx(cfg, unit={var: _WEAK_SHAPED[shape]}))
     assert got.status == FAIL, got.detail
-    assert "exposed" in got.detail
+    assert "no usable gateway token is configured" in got.detail  # C-693 wording
     assert "authenticated" not in got.detail
     assert _WEAK_SHAPED[shape] not in " ".join([got.detail, got.fix, *got.evidence])
     # the verdict it had with nothing found

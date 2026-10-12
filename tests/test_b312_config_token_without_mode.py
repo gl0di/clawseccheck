@@ -121,7 +121,8 @@ def test_absence_of_any_token_still_fails(tmp_path):
     of auth."""
     f = check_gateway(collect(_home(tmp_path, EXPOSED_NO_AUTH_MODE)))
     assert f.status == FAIL
-    assert "exposed with auth.mode=None" in f.detail
+    assert "is non-loopback, no gateway.auth.mode is set and no usable gateway token is configured" in f.detail  # C-693 wording
+    assert "exposed" not in f.detail
 
 
 def test_explicit_mode_none_is_never_softened_by_a_config_token(tmp_path):
