@@ -1073,6 +1073,21 @@ class Context:
     paired_devices_sqlite: dict = field(default_factory=dict)
     paired_devices_sqlite_found: bool = False        # table present and read (0 rows still counts)
     paired_devices_sqlite_parse_error: bool = False  # present but could not be reliably read
+    # C-685 (B138): pending pairing requests live in ``device_pairing_pending`` of the same
+    # state database (the legacy ``devices/pending.json`` is what an older OpenClaw wrote).
+    # Keyed by request id; same per-entry field names as the legacy JSON, no ``publicKey``
+    # (never selected). Three facts, not one: ``state_db`` (a state database was located),
+    # ``found`` (the table exists there, 0 rows still counts), ``parse_error`` (the store
+    # could not be reliably read: a view, a locked/odd file, or a state-directory listing cut
+    # short before the database). ``dropped`` counts rows the reader did not read (size/row cap).
+    pending_pairings_sqlite: dict = field(default_factory=dict)
+    pending_pairings_sqlite_state_db: bool = False
+    pending_pairings_sqlite_found: bool = False
+    pending_pairings_sqlite_parse_error: bool = False
+    pending_pairings_sqlite_dropped: int = 0
+    # What sits at state/openclaw.sqlite (or at state/ itself) when it EXISTS but is not a
+    # regular file this reader opens - "a symlink", "a directory", ... ; "" otherwise.
+    pending_pairings_sqlite_not_regular: str = ""
     # F-134 (DISK-1, B191): rows from OpenClaw's OWN runtime audit trail (``audit_events`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict: kind,
     # action, status, error_code, actor_type, actor_id, agent_id, session_key, session_id,
@@ -6828,6 +6843,227 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     ctx.paired_devices_sqlite = entries
 
 
+# C-685 (B138): the PENDING half of the pairing store. OpenClaw 2026.8.1 moved the pending
+# requests out of ``devices/pending.json`` (left behind as ``pending.json.migrated``) into the
+# ``device_pairing_pending`` table of the same state database `_collect_paired_devices_sqlite`
+# reads; B138 kept reading only the file and answered a clean PASS on every current install.
+# Bounded exactly like the paired reader (the cap is enforced AT THE SQL LEVEL on a BLOB
+# length, so an oversized value never reaches this process), with the text columns capped too:
+# a row over any cap is excluded, counted, and disclosed as "present but not read", so B138
+# can refuse a clean verdict over it. ``public_key``, ``display_name``, ``device_family``,
+# ``client_id``, ``browser_origin`` and ``remote_ip`` are never selected.
+_MAX_PENDING_PAIRINGS = 500
+_MAX_PENDING_TEXT_BYTES = 1024
+_PENDING_PAIRING_ROW_WITHIN_CAP = (
+    "(scopes_json IS NULL OR length(CAST(scopes_json AS BLOB)) <= ?) "
+    "AND (roles_json IS NULL OR length(CAST(roles_json AS BLOB)) <= ?) "
+    "AND (role IS NULL OR length(CAST(role AS BLOB)) <= ?) "
+    "AND (request_id IS NULL OR length(CAST(request_id AS BLOB)) <= ?) "
+    "AND (device_id IS NULL OR length(CAST(device_id AS BLOB)) <= ?) "
+    "AND (platform IS NULL OR length(CAST(platform AS BLOB)) <= ?) "
+    "AND (client_mode IS NULL OR length(CAST(client_mode AS BLOB)) <= ?)"
+)
+_PENDING_PAIRING_SQLITE_SELECT = (
+    "SELECT request_id, device_id, platform, client_mode, role, roles_json, scopes_json, "
+    "silent, is_repair, ts FROM device_pairing_pending "
+    f"WHERE {_PENDING_PAIRING_ROW_WITHIN_CAP} ORDER BY ts DESC LIMIT ?"
+)
+_PENDING_PAIRING_SQLITE_OVERSIZED_COUNT = (
+    "SELECT count(*) FROM device_pairing_pending "
+    f"WHERE NOT ({_PENDING_PAIRING_ROW_WITHIN_CAP})"
+)
+
+
+def _non_regular_kind(path: Path) -> str:
+    """What *path* is when it exists but is NOT a regular file (``lstat``, never followed):
+    "a symlink", "a directory", "a special file", or "an object that could not be inspected";
+    "" when it is absent or an ordinary file. ``walk_dir_safely`` silently skips every one of
+    these, which would read a relocated or replaced database as "no state database"."""
+    try:
+        mode = os.lstat(path).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return ""
+    except OSError:
+        return "an object that could not be inspected"
+    if stat.S_ISREG(mode):
+        return ""
+    if stat.S_ISLNK(mode):
+        return "a symlink"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    return "a special file"
+
+
+def _collect_pending_pairings_sqlite(home: Path, ctx: Context) -> None:
+    """Read-only collection of ``device_pairing_pending`` (``state/openclaw.sqlite``) into
+    ``ctx.pending_pairings_sqlite``, one entry per pending request, keyed by request id.
+
+    Each row is normalised into the per-entry shape the legacy ``devices/pending.json``
+    envelope uses (``requestId, deviceId, platform, clientMode, role, roles, scopes, silent,
+    isRepair, ts``), so B138 judges either container with the same scope logic. Columns
+    grounded by direct schema inspection of an installed OpenClaw 2026.10.1.
+
+    Four outcomes, never collapsed (a "clean" verdict needs the table actually read):
+    no state database located (all flags stay False); state database located but no such
+    table (``state_db`` only); table read (``found``, 0 rows still counts); table present but
+    not reliably read - a view or other non-table object, a locked or odd file, or a state
+    directory listing cut short before the database was reached (``parse_error``).
+
+    A scopes value that is not valid JSON, is nested deeper than ``_MAX_JSON_NESTING``, or is
+    not a list is kept as ``scopes=None, scopesUnparsed=True`` for THAT request (never read as
+    "no scopes"); a NULL ``scopes_json`` is no scopes. ``ctx.pending_pairings_sqlite_dropped``
+    counts rows excluded for size or row count.
+    """
+    state_dir = home / "state"
+    # An EXISTING database path that is not an ordinary file (a symlink to a relocated state
+    # directory's database, a directory, a FIFO) is present-but-unreadable, never "no state
+    # database": the walk below skips all of them. A symlinked `state` that is not a
+    # directory is the same fact one level up.
+    direct = state_dir / "openclaw.sqlite"
+    odd = _non_regular_kind(direct)
+    where = "state/openclaw.sqlite"
+    if not odd and not _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'"):
+        kind = _non_regular_kind(state_dir) or ("a file" if pathprobe.exists(state_dir) else "")
+        if kind and kind != "a directory":  # a directory _safe_is_dir could not enter reports itself
+            odd, where = kind, "state"
+    if odd:
+        ctx.errors.append(
+            f"{where} exists but is {odd}, not an ordinary "
+            f"{'directory' if where == 'state' else 'file'}; the pending pairing store was not read"
+        )
+        ctx.pending_pairings_sqlite_state_db = True
+        ctx.pending_pairings_sqlite_parse_error = True
+        ctx.pending_pairings_sqlite_not_regular = (
+            f"{where} is {odd}, not a {'directory' if where == 'state' else 'regular file'}"
+        )
+        return
+    capped: list = []
+    sqlite_candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        if capped:
+            # A capped listing that never reached the DB is not "no state store" (GR#4).
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the pending pairing store was not read"
+            )
+            ctx.pending_pairings_sqlite_parse_error = True
+        return
+    ctx.pending_pairings_sqlite_state_db = True
+
+    json_cap, text_cap = _MAX_PAIRED_DEVICE_JSON_BYTES, _MAX_PENDING_TEXT_BYTES
+    cap_params = (json_cap, json_cap, json_cap, text_cap, text_cap, text_cap, text_cap)
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "device_pairing_pending")
+            if kind == "absent":
+                return
+            ctx.pending_pairings_sqlite_found = True
+            if kind != "table":
+                # A view / virtual table / aliased object: refuse to query it, never conflate
+                # it with "absent" (the view-masquerade defense every sibling reader has).
+                ctx.errors.append(
+                    f"'device_pairing_pending' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the pending pairing store was not read"
+                )
+                ctx.pending_pairings_sqlite_parse_error = True
+                return
+            rows = conn.execute(
+                _PENDING_PAIRING_SQLITE_SELECT, (*cap_params, _MAX_PENDING_PAIRINGS + 1),
+            ).fetchall()
+            oversized = conn.execute(
+                _PENDING_PAIRING_SQLITE_OVERSIZED_COUNT, cap_params,
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read device_pairing_pending from {db_path}: {exc}")
+            ctx.pending_pairings_sqlite_found = True
+            ctx.pending_pairings_sqlite_parse_error = True
+        return
+
+    dropped = oversized
+    if oversized:
+        ctx.errors.append(
+            f"device_pairing_pending in {db_path} has {oversized} pending request row(s) "
+            "whose scopes/role/roles/id/platform value exceeds the collector's size cap; "
+            "those rows were not read"
+        )
+    if len(rows) > _MAX_PENDING_PAIRINGS:
+        dropped += 1  # at least one more; the probe row is discarded, never evaluated
+        ctx.errors.append(
+            f"device_pairing_pending in {db_path} has more than {_MAX_PENDING_PAIRINGS} "
+            f"pending request rows within the size cap; only the newest {_MAX_PENDING_PAIRINGS} "
+            "were read"
+        )
+    entries: dict = {}
+    unparsed = 0
+    for (
+        request_id, device_id, platform, client_mode, role, roles_json, scopes_json,
+        silent, is_repair, ts,
+    ) in rows[:_MAX_PENDING_PAIRINGS]:
+        if not isinstance(request_id, str) or not request_id:
+            dropped += 1  # a row we cannot key is "present but not read", never skipped quietly
+            continue
+        scopes_value, scopes_unparsed = None, False
+        if scopes_json is not None:
+            try:
+                parsed = _loads_bounded(scopes_json)
+            except (ValueError, RecursionError):  # incl. the nesting limit's ValueError
+                scopes_unparsed = True
+            else:
+                if isinstance(parsed, list):
+                    # The vendor trims each scope string (case is kept, so a differently-cased
+                    # scope stays unmatched, exactly like the vendor). An element that is not
+                    # a plain string (nested list, object, number) cannot be read: the strings
+                    # beside it still count, but the row is flagged so a clean answer is refused.
+                    scopes_value = [s.strip(_JS_TRIM_CHARS) for s in parsed if isinstance(s, str)]
+                    scopes_unparsed = len(scopes_value) != len(parsed)
+                elif parsed is not None:
+                    scopes_unparsed = True  # a shape we cannot interpret is not "no scopes"
+        unparsed += scopes_unparsed
+        roles_value = None
+        if roles_json is not None:
+            try:
+                raw_roles = _loads_bounded(roles_json)
+            except (ValueError, RecursionError):
+                raw_roles = None
+            if isinstance(raw_roles, list):
+                roles_value = [s for s in raw_roles if isinstance(s, str)]
+            elif isinstance(raw_roles, str):
+                roles_value = raw_roles
+        entries[request_id] = {
+            "requestId": request_id,
+            "deviceId": device_id if isinstance(device_id, str) else None,
+            "platform": platform if isinstance(platform, str) else None,
+            "clientMode": client_mode if isinstance(client_mode, str) else None,
+            "role": role if isinstance(role, str) else None,
+            "roles": roles_value,
+            "scopes": scopes_value,
+            "scopesUnparsed": scopes_unparsed,
+            "silent": bool(silent) if isinstance(silent, (int, float)) else False,
+            "isRepair": bool(is_repair) if isinstance(is_repair, (int, float)) else False,
+            "ts": ts if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None,
+        }
+    ctx.pending_pairings_sqlite_dropped = dropped
+    if unparsed:
+        ctx.errors.append(
+            f"device_pairing_pending in {db_path} holds {unparsed} pending request row(s) "
+            f"whose scopes value is not a JSON list or is nested deeper than "
+            f"{_MAX_JSON_NESTING} levels; their scopes were not read"
+        )
+    ctx.pending_pairings_sqlite = entries
+
+
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     """Read the allowlisted rows of ``config_machine_state`` into ``ctx``.
 
@@ -10019,6 +10255,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
     _collect_agent_auth_profile_store_presence(home, ctx)  # B-845: same, per-agent DBs
     _collect_paired_devices_sqlite(home, ctx)  # B176: migrated devices/paired.json fallback
+    _collect_pending_pairings_sqlite(home, ctx)  # C-685 (B138): device_pairing_pending
     _collect_cron(home, ctx)
     _collect_exec_approvals_sqlite(home, ctx)  # canonical store first: its tiers win
     _collect_exec_approvals(home, ctx)

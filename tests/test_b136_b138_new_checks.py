@@ -82,9 +82,10 @@ def test_b138_pass_no_highscope_pending():
 
 
 def test_b138_pass_when_file_absent(tmp_path):
-    """Absence of devices/pending.json is informative (no pending pairings at all) —
-    PASS, not UNKNOWN, matching the common/expected case."""
-    f = check_pending_device_pairing_scope(_ctx(tmp_path))
+    """Absence of devices/pending.json on an OpenClaw home (config found, no state database
+    either) is informative (no pending pairings at all) — PASS, not UNKNOWN, matching the
+    common/expected case. (C-685: a directory that is not an OpenClaw home at all is UNKNOWN.)"""
+    f = check_pending_device_pairing_scope(Context(home=Path(tmp_path), config_found=True))
     assert f.status == PASS
 
 

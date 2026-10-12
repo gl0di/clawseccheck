@@ -5252,31 +5252,11 @@ def _c680_text(value, default="unknown"):
     return default if _c680_has_elided(value) else value
 
 
-def check_pending_device_pairing_scope(ctx: Context) -> Finding:
-    """B138 - dangling high-scope pending device pairing (devices/pending.json).
+def _b138_judge_legacy_file(pending_path: Path) -> Finding:
+    """B138's judgement of ``devices/pending.json`` alone (the file is known to exist).
 
-    PASS    - devices/pending.json is absent (no pending pairings at all - the common,
-              expected case), OR present with no high-scope pending entries.
-    WARN    - a pending entry requests a high-privilege scope (operator.admin /
-              operator.write), especially combined with isRepair=true - this is a
-              pending pairing awaiting human approval, not proof of compromise.
-    UNKNOWN - devices/pending.json exists but is unreadable or not valid JSON.
-
-    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
-    never reads ``ctx.config`` - the locus is ``devices/pending.json`` under
-    ``ctx.home``, checked by presence/content alone regardless of whether
-    openclaw.json was found or parsed.
+    Wording of every outcome is unchanged since before C-685 (a fingerprint hashes it).
     """
-
-    pending_path = ctx.home / "devices" / "pending.json"
-    if not pathprobe.is_file(pending_path):
-        return _finding(
-            "B138",
-            PASS,
-            "no devices/pending.json found \u2014 no pending device pairing requests.",
-            "No action needed.",
-        )
-
     try:
         data, elided = _loads_shallow(pending_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
@@ -5360,6 +5340,242 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
         f"{len(data)} pending device pairing request(s) found; none request a "
         "high-privilege scope (operator.admin/operator.write).",
         "Continue reviewing pending pairing requests before approving them.",
+    )
+
+
+_B138_FILE = "devices/pending.json"
+_B138_TABLE = "device_pairing_pending (state/openclaw.sqlite)"
+_B138_REVIEW_FIX = (
+    "Review each pending pairing request before approving it. Only approve "
+    "admin/write scope for a device you recognize and expect; reject/ignore "
+    "unrecognized requests."
+)
+
+
+def _b138_judge_pending_table(ctx: Context):
+    """B138's judgement of the ``device_pairing_pending`` table alone (C-685).
+
+    Returns ``(finding, items)``: *items* are the clock-free WARN lines (what a fingerprint
+    may hash); the finding's ``evidence`` additionally carries each request's age.
+    """
+    import time as _time
+
+    from ..logsafe import redact as _redact  # noqa: PLC0415
+
+    if ctx.pending_pairings_sqlite_not_regular:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{ctx.pending_pairings_sqlite_not_regular}, so the pending pairing store was not "
+            "read \u2014 cannot evaluate pending device pairing requests.",
+            "A relocated or replaced state database is not followed. Review the pending "
+            "pairing requests with `openclaw devices list`, or point the audit at the real "
+            "OpenClaw home.",
+        ), []
+    if ctx.pending_pairings_sqlite_parse_error:
+        if not ctx.pending_pairings_sqlite_state_db:
+            why = (
+                "the state directory listing was cut short before openclaw.sqlite was "
+                "reached, so " + _B138_TABLE + " was not read"
+            )
+        else:
+            why = _B138_TABLE + " is present but could not be reliably read"
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{why} \u2014 cannot evaluate pending device pairing requests.",
+            "Review the pending pairing requests manually with `openclaw devices list`, "
+            "or re-run once the state database is not locked.",
+        ), []
+
+    now_ms = _time.time() * 1000.0
+    data = ctx.pending_pairings_sqlite
+    items: list[str] = []
+    evidence: list[str] = []
+    unread: list[str] = []
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        scopes = entry.get("scopes")
+        if isinstance(scopes, (list, tuple)) and any(
+            s in _HIGH_SCOPE_NAMES for s in scopes if isinstance(s, str)
+        ):
+            base = _redact(
+                f"requestId={entry.get('requestId') or key} "
+                f"deviceId={entry.get('deviceId') or 'unknown'} "
+                f"platform={entry.get('platform') or 'unknown'} "
+                f"isRepair={bool(entry.get('isRepair'))}"
+            )
+            ts = entry.get("ts")
+            age = (
+                f" requestAgeDays={max(0.0, (now_ms - ts) / 86_400_000.0):.1f}"
+                if isinstance(ts, (int, float)) and ts > 0 else ""
+            )
+            items.append(base)
+            evidence.append(base + age)
+        elif entry.get("scopesUnparsed"):
+            unread.append(_redact(str(entry.get("requestId") or key)))
+
+    dropped = ctx.pending_pairings_sqlite_dropped
+    gaps = []
+    if unread:
+        gaps.append(
+            f"{len(unread)} request(s) have a scopes value that could not be read "
+            f"(not a JSON list, not valid JSON, or nested deeper than {_MAX_JSON_NESTING} levels)"
+        )
+    if dropped:
+        gaps.append(f"at least {dropped} row(s) were not read (past the collector's size/row cap)")
+    gap_fix = (
+        " Not evaluated: " + "; ".join(gaps) + ". Review them with `openclaw devices list`."
+        if gaps else ""
+    )
+
+    if items:
+        detail = "; ".join(items[:6]) + (f" (+{len(items) - 6} more)" if len(items) > 6 else "")
+        return _finding(
+            "B138",
+            WARN,
+            f"pending device pairing request(s) in {_B138_TABLE} awaiting your approval "
+            f"request a high-privilege scope (operator.admin/operator.write): {detail}.",
+            _B138_REVIEW_FIX + gap_fix,
+            evidence=evidence[:6],
+        ), items
+    if gaps:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{len(data)} pending device pairing request(s) read from {_B138_TABLE}; none of "
+            "them requests a high-privilege scope, but part of the table was not read "
+            "\u2014 a clean bill of health cannot be given.",
+            gap_fix.strip(),
+        ), []
+    if not data:
+        return _finding(
+            "B138",
+            PASS,
+            f"{_B138_TABLE} found with no pending device pairing requests.",
+            "No action needed.",
+        ), []
+    return _finding(
+        "B138",
+        PASS,
+        f"{len(data)} pending device pairing request(s) found in {_B138_TABLE}; none request "
+        "a high-privilege scope (operator.admin/operator.write).",
+        "Continue reviewing pending pairing requests before approving them.",
+    ), []
+
+
+def _b138_merge(legacy: Finding, table: Finding, table_items: list) -> Finding:
+    """One B138 verdict from BOTH containers (the legacy file and the table).
+
+    A WARN in either stands. The legacy file's own wording is kept whenever the file alone
+    decides the verdict (a fingerprint hashes ``detail``, so a legacy finding must not change
+    just because a table also exists); the table's part is appended after it, never before.
+    """
+    gap = lambda label, f: f" Not fully read: {label}: {f.detail}"  # noqa: E731
+    if legacy.status == WARN:
+        if table.status == WARN:
+            head = legacy.detail[:-1] if legacy.detail.endswith(".") else legacy.detail
+            more = f" (+{len(table_items) - 6} more)" if len(table_items) > 6 else ""
+            return _finding(
+                "B138",
+                WARN,
+                f"{head}; state database: {'; '.join(table_items[:6])}{more}.",
+                legacy.fix,
+                evidence=(list(legacy.evidence) + [f"state database: {e}" for e in table.evidence])[:6],
+            )
+        if table.status == UNKNOWN:
+            return _finding(
+                "B138", WARN, legacy.detail, legacy.fix + gap(_B138_TABLE, table),
+                evidence=legacy.evidence,
+            )
+        return legacy
+    if table.status == WARN:
+        fix = table.fix + (gap(_B138_FILE, legacy) if legacy.status == UNKNOWN else "")
+        return _finding("B138", WARN, table.detail, fix, evidence=table.evidence)
+    if legacy.status == UNKNOWN:
+        fix = legacy.fix + (gap(_B138_TABLE, table) if table.status == UNKNOWN else "")
+        return _finding("B138", UNKNOWN, legacy.detail, fix)
+    if table.status == UNKNOWN:
+        return table
+    return _finding(
+        "B138",
+        PASS,
+        f"{_B138_FILE} and {_B138_TABLE} were both read; no pending device pairing request "
+        "requests a high-privilege scope (operator.admin/operator.write).",
+        "Continue reviewing pending pairing requests before approving them.",
+    )
+
+
+def check_pending_device_pairing_scope(ctx: Context) -> Finding:
+    """B138 - dangling high-scope pending device pairing.
+
+    Pending pairing requests live in the ``device_pairing_pending`` table of the state
+    database (OpenClaw 2026.8.1 onward; C-685) or, on an older install, in
+    ``devices/pending.json``. Both are judged by PRESENCE, not by version, and every
+    container that exists is read:
+
+    WARN    - a pending request, in either container, asks for a high-privilege scope
+              (operator.admin / operator.write), especially with isRepair=true - a pairing
+              awaiting human approval, not proof of compromise. A WARN stands even when the
+              other container could not be read.
+    PASS    - at least one container was read and none holds such a request; OR (the one
+              PASS that rests on absence) openclaw.json was found and there is no state
+              database path and no devices/pending.json at all - an install that predates
+              the pairing store kept requests only in that file, so no file means none.
+    UNKNOWN - a container exists but could not be fully read: an unreadable or invalid file;
+              a view, locked or oddly-shaped table; rows past the size/row cap; a scopes
+              value that is not valid JSON, not a list, or holds a non-string element;
+              ``state/openclaw.sqlite`` (or ``state``) present but a symlink, directory or
+              special file, which is not followed (a relocated state directory reads here as
+              UNKNOWN, never as "no store"); a state database with no pending-request table
+              and no legacy file; or a directory that is not recognisable as an OpenClaw home
+              (no openclaw.json, no state database, no file), where nothing was looked at.
+
+    Table scopes are trimmed (the vendor trims) and compared case-sensitively; legacy-file
+    outcomes keep their exact wording. The request age is evidence text only (a fingerprint
+    hashes ``detail``). ``remote_ip`` and ``public_key`` are not read.
+
+    Known limit: the high-scope set is only ``operator.admin`` and ``operator.write``. The
+    vendor defines further operator scopes (``operator.pairing``, ``operator.approvals``,
+    ``operator.talk.secrets``, ``operator.sessions.write``) that are NOT treated as high
+    here; widening the set is a separate decision.
+
+    B-661: the locus is the pairing store under ``ctx.home``, not ``ctx.config``. With the
+    config not found and no store anywhere it is UNKNOWN, not PASS.
+    """
+    pending_path = ctx.home / "devices" / "pending.json"
+    legacy = _b138_judge_legacy_file(pending_path) if pathprobe.is_file(pending_path) else None
+    table, items = None, []
+    if ctx.pending_pairings_sqlite_found or ctx.pending_pairings_sqlite_parse_error:
+        table, items = _b138_judge_pending_table(ctx)
+    if legacy is not None and table is not None:
+        return _b138_merge(legacy, table, items)
+    if legacy is not None or table is not None:
+        return legacy if legacy is not None else table
+
+    if ctx.pending_pairings_sqlite_state_db:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            "state/openclaw.sqlite exists but holds no device_pairing_pending table and there "
+            "is no devices/pending.json \u2014 the pending pairing store was not found, so "
+            "pending device pairing requests were not evaluated.",
+            "Review pending pairing requests with `openclaw devices list`.",
+        )
+    if ctx.config_found:
+        return _finding(
+            "B138",
+            PASS,
+            "no devices/pending.json found \u2014 no pending device pairing requests.",
+            "No action needed.",
+        )
+    return _finding(
+        "B138",
+        UNKNOWN,
+        "no devices/pending.json, no state database and no openclaw.json found \u2014 this does "
+        "not look like an OpenClaw home, so pending device pairing requests were not evaluated.",
+        "Point the audit at the OpenClaw home (default ~/.openclaw).",
     )
 
 

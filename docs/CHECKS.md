@@ -2015,7 +2015,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B138 - Dangling high-scope pending device pairing (devices/pending.json)
+### B138 - Dangling high-scope pending device pairing (device_pairing_pending / devices/pending.json)
 
 - Severity: MEDIUM
 - Block: advisory
@@ -2023,7 +2023,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: MEDIUM
 - OWASP: LLM06 Excessive Agency
-- What it checks: Dangling high-scope pending device pairing (devices/pending.json)
+- What it checks: Dangling high-scope pending device pairing (device_pairing_pending / devices/pending.json)
 - Remediation:
   - none
 

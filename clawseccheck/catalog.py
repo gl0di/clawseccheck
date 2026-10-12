@@ -2325,13 +2325,14 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="tools",
     ),
-    # B138: dangling high-scope pending device pairing (devices/pending.json). A pending
+    # B138: dangling high-scope pending device pairing (the device_pairing_pending state-database
+    # table; devices/pending.json on an older install). A pending
     # isRepair=true request with an operator.admin/operator.write scope is awaiting human
     # approval - informational awareness, not proof of compromise. Hardening advisory,
     # never FAIL; surface="agents" (control-plane device/identity onboarding).
     CheckMeta(
         "B138",
-        "Dangling high-scope pending device pairing (devices/pending.json)",
+        "Dangling high-scope pending device pairing (device_pairing_pending / devices/pending.json)",
         MEDIUM,
         "advisory",
         "Control Plane / Human Approval",

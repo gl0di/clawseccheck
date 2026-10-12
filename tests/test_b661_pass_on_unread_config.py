@@ -38,7 +38,7 @@ from clawseccheck.collector import Context
 
 pytestmark = pytest.mark.mechanical
 
-# The 5 checks whose PASS is legitimately independent of ctx.config — each reads a
+# The checks whose PASS is legitimately independent of ctx.config — each reads a
 # DIFFERENT file under ctx.home by presence/content alone, and each carries its own
 # "B-661: exempt..." docstring comment at its definition explaining why.
 _INDEPENDENT_OF_CONFIG = frozenset({
@@ -46,9 +46,13 @@ _INDEPENDENT_OF_CONFIG = frozenset({
     "check_legacy_state_migration_pending",  # credentials/*-allowFrom.json, identity/device-auth.json
     "check_paired_device_operator_authority",  # devices/paired.json
     "check_paired_node_skill_coverage",  # pairing store; PASS only when no skill-capable node is paired (config-gate PASSes need config)
-    "check_pending_device_pairing_scope",    # devices/pending.json
     "check_restart_handoff_stale",           # gateway-supervisor-restart-handoff.json
 })
+# C-685: check_pending_device_pairing_scope (B138) left this list. With the config unread AND no
+# pairing store anywhere (no devices/pending.json, no state database) it now answers UNKNOWN
+# ("not an OpenClaw home"), because a store that moved into the state database made "no file"
+# a non-answer; it still PASSes once a store was actually read, or on a home whose config WAS
+# found (tests/test_c685_pending_pairing_sqlite.py pins both cells).
 
 
 def _unread_ctx(tmp_path) -> Context:
