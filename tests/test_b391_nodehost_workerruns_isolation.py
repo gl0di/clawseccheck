@@ -169,6 +169,7 @@ def test_enabled_with_unrecognized_isolation_value_warns():
 #   2026.9.3 .. 2026.9.6  node:24.19.0-slim
 #   2026.9.7 .. 2026.9.9  node:24.21.0-slim   (9.8: installed dist; 9.9: npm-cached tarball)
 #   2026.10.1             node:24.21.0-slim   (installed dist, read 2026-10-11)
+#   2026.10.2             node:24.21.0-slim   (installed dist, read 2026-10-12)
 # The check used to print node:24.19.0-slim on every build -- wrong on 2026.8.x/9.1/9.2 and,
 # after 2026.9.7, wrong again. Now it names the image only for a build whose default was
 # actually read (exact match); every other build gets no literal at all.
@@ -199,6 +200,7 @@ def test_default_image_is_named_per_measured_build():
         "2026.9.8": "node:24.21.0-slim",
         "2026.9.9": "node:24.21.0-slim",
         "2026.10.1": "node:24.21.0-slim",
+        "2026.10.2": "node:24.21.0-slim",
     }
     from clawseccheck.checks._config import _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD as table
     # the table is EXACTLY these measured builds -- no row was added on an inference
@@ -222,7 +224,7 @@ def test_default_image_is_not_named_for_a_build_nobody_read():
     # builds (2026.8.3 was never read, so the step function is not extrapolated), or newer
     # than the last row
     for build in (None, "", "2026.9.7-beta.1", "2026.9", "2026.8.0", "2026.7.35", "2026.8.3",
-                  "2026.9.2-1", "2026.9.7.1", "2026.9.10", "2026.10.2", "2027.1.1"):
+                  "2026.9.2-1", "2026.9.7.1", "2026.9.10", "2026.10.3", "2027.1.1"):
         detail = _detail_on(build)
         assert "node:" not in detail, (build, detail)
         assert "default image for the installed build" in detail, (build, detail)

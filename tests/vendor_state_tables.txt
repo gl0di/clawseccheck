@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.10.1
+# openclaw-version: 2026.10.2
 # state-schema-version: 20
-# generated: 2026-10-11
+# generated: 2026-10-12
 # tables: 136
 #
-# source-bundle: openclaw-state-db-legacy-backfills-Dn2j69HZ.mjs
+# source-bundle: openclaw-state-db-legacy-backfills-BxTnDU05.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -25,9 +25,9 @@
 # that a given database has it yet: many are created on first use.
 #
 # Satellite constants read (bundle it came from, tables it adds beyond the main constant):
-#   USER_PROFILES_SCHEMA_SQL  [user-profiles-internal-C2NRCqw2.mjs, 1 copy]
+#   USER_PROFILES_SCHEMA_SQL  [user-profiles-internal-BiysPlpS.mjs, 1 copy]
 #     adds: user_profile_emails, user_profiles
-#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [store-row-codec-CyIv_fTr.mjs, 1 copy]
+#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [store-row-codec-ryDCZJLu.mjs, 1 copy]
 #     adds: worker_environment_session_attachments
 #
 # Why it exists

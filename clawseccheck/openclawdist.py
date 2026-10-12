@@ -393,7 +393,13 @@ def self_reported_version(config: "dict | None") -> str:
 # its two $include clauses are unchanged, and it gained two others (it declines a config with
 # a retired-format upgrade requirement and now also admits a VALID snapshot that carries a
 # legacy Talk voice-call inheritance rule issue); nothing in this repo models either.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 1)
+# Raised to 2026.10.2 on 2026-10-12: 10.2 moved nothing a check stands on - the config schema
+# is identical (5,430 paths, +0/-0), the 167 dist-verified paths, the 13 state tables, the 136
+# vendor tables and the DM-policy manifest differ by version stamp, date and bundle name only,
+# the 773-row harness battery re-ran on the installed build with no moved answer and the
+# oracle window was widened to 10.2, and the B391 default worker image is unchanged. No new
+# advisory was published after 2026-10-05.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 2)
 
 
 def grounding_gap(installed_version: "str | None"):
