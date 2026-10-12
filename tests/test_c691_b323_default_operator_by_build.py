@@ -26,8 +26,14 @@ _NEW = ["2026.9.7", "2026.9.9", "2026.10.2"]
 _OLD_OR_UNKNOWN = ["2026.9.6", "2026.8.1", "2026.7.1", None, "0.0.0", "not-a-version", "2026.9"]
 
 
+_SCRATCH = tempfile.TemporaryDirectory(prefix="c691-")  # removed at interpreter exit
+_COUNTER = [0]
+
+
 def _ctx(cfg: dict, build):
-    home = Path(tempfile.mkdtemp(prefix="c691-"))
+    _COUNTER[0] += 1
+    home = Path(_SCRATCH.name) / f"home{_COUNTER[0]}"
+    home.mkdir()
     (home / "openclaw.json").write_text(json.dumps(cfg), encoding="utf-8")
     ctx = collect(home)
     ctx.installed_dist_version = build
