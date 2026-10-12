@@ -160,8 +160,10 @@ def _transcript_sinks(home: Path, budget: int) -> list[LogSink]:
 def _default_cache_trace_sink(home: Path) -> "LogSink | None":
     """``logs/cache-trace.jsonl`` - where cache tracing writes when ``filePath`` is unset.
 
-    ``resolveCacheTraceConfig`` (``dist/selection-JInn13lc.js:1052``) resolves the
-    destination as ``config?.filePath?.trim() || env.OPENCLAW_CACHE_TRACE_FILE?.trim()``
+    ``resolveCacheTraceConfig`` (``dist/selection-JInn13lc.js:1052`` on 2026.9.x; inlined into
+    ``createCacheTrace``, builtin-openclaw-DkEpBBN1.mjs:15551-15556 on openclaw@2026.10.2, read
+    2026-10-12, where the file comes only from ``OPENCLAW_CACHE_TRACE_FILE`` or the state-dir
+    default) resolves the destination as ``config?.filePath?.trim() || env.OPENCLAW_CACHE_TRACE_FILE?.trim()``
     and otherwise falls back to ``path.join(resolveStateDir(env), "logs",
     "cache-trace.jsonl")`` - and ``resolveStateDir`` defaults to the same state root this
     module is handed as ``home`` (``dist/config-utils-Cn9AD66v.js:65-77``). Since

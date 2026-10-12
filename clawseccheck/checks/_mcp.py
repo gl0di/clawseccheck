@@ -4817,12 +4817,14 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     confident "no" or "yes"; each was a finding of the targeted review):
 
     1. Plugin activation -- `_plugin_activation_blocked`, the same enabled/deny/allow gate
-       B-421 grounded for memory-core (`resolvePluginActivationDecisionShared`,
-       `dist/config-normalization-shared-*.mjs:82-102`): `plugins.enabled: false`,
+       B-421 grounded for memory-core (`resolvePluginActivationStateShared`, renamed from
+       `resolvePluginActivationDecisionShared`; `dist/config-activation-shared-DnNUje5Q.mjs
+       :117-182` on openclaw@2026.10.2, read 2026-10-12, gates at :137/:139/:141):
+       `plugins.enabled: false`,
        `"codex"` in `plugins.deny`, `entries.codex.enabled: false`, or a non-empty
        `plugins.allow` without `"codex"` each deactivate the plugin. `deny`/`allow`/
        `entries` are matched case-insensitively (B-831 round 2): the real gate compares
-       through `normalizePluginPolicyId` (`plugin-policy-id-1GfPFu0U.mjs:10-12` as of 2026.10.1,
+       through `normalizePluginPolicyId` (`plugin-policy-id-1GfPFu0U.mjs:10-12` as of 2026.10.2,
        trim + lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
        used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
        are lowercase-normalized when config is normalized" per that function's own
@@ -4856,8 +4858,9 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     else:
         # B-831 round 2: NO `plugins.entries.codex` block at all does not prove the
         # plugin is not installed. A non-bundled plugin with no entry of its own still
-        # activates on the implicit default (`resolvePluginActivationDecisionShared`
-        # returns `decision("default")` when nothing names it explicitly) whenever its
+        # activates on the implicit default (`resolvePluginActivationStateShared`,
+        # config-activation-shared-DnNUje5Q.mjs:182 on openclaw@2026.10.2, returns
+        # `decision("default")` when nothing names it explicitly) whenever its
         # manifest declares `onAgentHarnesses: ["codex"]` and a configured model would
         # reach that harness -- this audit cannot see whether the package is actually
         # installed, only whether a model would reach the Codex harness IF it were
@@ -6860,8 +6863,9 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     this check was the one left blind, not the vendor schema.
 
     Deliberately NOT scanned: the deprecated WHOLE-AGENT spelling
-    (``agents.defaults.agentRuntime.id`` / ``agents.entries.<id>.agentRuntime.id``, still
-    read defensively by the vendor's ``resolveAgentScopedRuntimeOverride`` at run time).
+    (``agents.defaults.agentRuntime.id`` / ``agents.entries.<id>.agentRuntime.id``; the
+    vendor once read it defensively through ``resolveAgentScopedRuntimeOverride``, which no
+    longer exists on openclaw@2026.10.2 -- zero matches in dist/*.mjs, read 2026-10-12).
     Confirmed via ``OpenClawSchema.safeParse()``: neither ``AgentDefaultsSchema`` nor
     ``AgentEntryBaseSchema`` declares an ``agentRuntime`` field at that level - both are
     ``.strict()``, so a config authoring that key is REJECTED WHOLESALE at load time
@@ -7937,9 +7941,13 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
 _MEMORY_SLOT_DEFAULT_OWNER = "memory-core"
 
 # B-421 (corrected post-review, see below): OpenClaw's own built-in plugin-id alias table
-# (config-state-CtMlHVRM.js:6-9, BUILT_IN_PLUGIN_ALIAS_FALLBACKS) -- normalizePluginId
+# (config-state-CtMlHVRM.js:6-9, BUILT_IN_PLUGIN_ALIAS_FALLBACKS, 2026.9.x) -- normalizePluginId
 # folds an alias to its canonical id before any allow/deny/activation comparison. NOTE
-# what the real normalizer does NOT do: it does not lowercase ids outside this table --
+# what the 2026.9.x normalizer did NOT do (re-measured on openclaw@2026.10.2, 2026-10-12, by
+# executing it: config-state-wnnTmmuG.mjs:19-23 now LOWERCASES on a miss, so
+# normalizePluginId("Memory-Core") === "memory-core" -- this mirror below still keeps the
+# case, a known drift left unchanged here because changing it moves B342's verdicts):
+# it did not lowercase ids outside this table --
 # normalizePluginIdWithLookup (same file :17-23) looks the LOWERCASED id up in the alias
 # map, but on a miss falls back to the CASE-PRESERVED trimmed string, not the lowercased
 # one. So a bare case difference like "Memory-Core" vs "memory-core" is never folded
@@ -7970,8 +7978,9 @@ _PLUGIN_ID_ALIASES = {
 
 
 def _normalize_plugin_id(raw: str) -> str:
-    """B-421: replicate OpenClaw's ``normalizePluginId`` (config-state-CtMlHVRM.js:17-23)
-    closely enough for allow/deny comparison -- trim, fold a KNOWN alias to its canonical
+    """B-421: replicate OpenClaw's ``normalizePluginId`` (config-state-CtMlHVRM.js:17-23 on
+    2026.9.x; config-state-wnnTmmuG.mjs:19-23 on 2026.10.2 lowercases a miss -- see the
+    comment above ``_PLUGIN_ID_ALIASES``) closely enough for allow/deny comparison -- trim, fold a KNOWN alias to its canonical
     id (the lookup itself is case-insensitive), otherwise return the trimmed value AS-IS.
     Deliberately NOT lowercased on a miss -- that matches the real fallback, not a
     stronger case-insensitive comparison the real normalizer does not perform."""
@@ -7986,19 +7995,22 @@ def _memory_default_owner_blocked(plugins: dict) -> bool:
 
     Two real functions gate this; either one blocking is enough to suppress disclosure:
 
-    * ``resolvePluginActivationDecisionShared`` (config-normalization-shared-w2iz0aeC.js
-      :70-100, general plugin activation) returns ``activated:false`` on
-      ``!config.enabled`` (:70, cause ``"plugins-disabled"``),
-      ``config.deny.includes(id)`` (:77, ``"blocked-by-denylist"``), or
-      ``entry?.enabled === false`` (:85, ``"disabled-in-config"``) -- each checked
-      BEFORE the slot-selection grant at :100, so any one of the three wins over slot
+    * ``resolvePluginActivationStateShared`` (config-activation-shared-DnNUje5Q.mjs
+      :117-182 on openclaw@2026.10.2, read 2026-10-12; named
+      ``resolvePluginActivationDecisionShared`` in config-normalization-shared-w2iz0aeC.js
+      :70-100 on 2026.9.x, general plugin activation) returns a disabled decision on
+      ``!config.enabled`` (:137, reason ``"plugins disabled"``),
+      ``config.deny.includes(policyId)`` (:139, ``"blocked by denylist"``), or
+      ``entry?.enabled === false`` (:141, ``"disabled in config"``) -- each checked
+      BEFORE the memory-slot grant at :145, so any one of the three wins over slot
       ownership, including the implicit default.
-    * ``resolveMemorySlotStartupPluginId`` (gateway-startup-plugin-ids-COmsQTCi.js
-      :603-614) -- the function that actually resolves which plugin id backs the memory
+    * ``resolveMemorySlotStartupPluginId`` (gateway-startup-plugin-config-4WJh5_BE.mjs
+      :630-640 on openclaw@2026.10.2; gateway-startup-plugin-ids-COmsQTCi.js:603-614 on
+      2026.9.x) -- the function that actually resolves which plugin id backs the memory
       slot at gateway startup when ``plugins.slots.memory`` is left unset -- has its OWN
       extra guard on the implicit-default fallback specifically: a non-empty
       ``plugins.allow`` that omits the default id means the implicit default is never
-      even selected as a candidate (:610) -- this is exactly ``fixtures/home_safe``'s
+      even selected as a candidate (:635) -- this is exactly ``fixtures/home_safe``'s
       shape (``plugins.allow: ["trentclaw"]``, no ``memory-core`` entry anywhere).
 
     Only the UNSET/blank ``plugins.slots.memory`` path is gated by this helper -- an
@@ -8012,9 +8024,11 @@ def _memory_default_owner_blocked(plugins: dict) -> bool:
 def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
     """The ``plugins.*`` setting that keeps *plugin_id* from activating, or None.
 
-    The four disabling legs of ``resolvePluginActivationDecisionShared`` (grounded for
+    The four disabling legs of ``resolvePluginActivationStateShared`` (grounded for
     B-421 above, re-read for B-831 against openclaw@2026.9.5
-    ``dist/config-normalization-shared-*.mjs:82-102``): ``plugins.enabled`` false,
+    ``dist/config-normalization-shared-*.mjs:82-102`` where it was still called
+    ``resolvePluginActivationDecisionShared``; re-read on openclaw@2026.10.2 in
+    ``config-activation-shared-DnNUje5Q.mjs:137-141``): ``plugins.enabled`` false,
     *plugin_id* in ``plugins.deny``, ``plugins.entries.<id>.enabled`` false, and a
     non-empty ``plugins.allow`` that omits it. Factored out of
     ``_memory_default_owner_blocked`` unchanged (same order) so both callers share one
@@ -8022,13 +8036,13 @@ def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
 
     B-831 round 2: the comparison on all three of ``deny``/``entries``/``allow`` is now
     case-insensitive (trimmed + lowercased), matching the real
-    ``normalizePluginPolicyId`` (``plugin-policy-id-1GfPFu0U.mjs:10-12``, 2026.10.1) that
-    ``resolvePluginActivationDecisionShared`` actually compares *plugin_id* against -
+    ``normalizePluginPolicyId`` (``plugin-policy-id-1GfPFu0U.mjs:10-12``, 2026.10.2) that
+    ``resolvePluginActivationStateShared`` actually compares *plugin_id* against -
     verbatim: "Canonicalizes a plugin id for comparison against ``plugins.allow``,
     ``plugins.deny``, and ``plugins.entries``, which are lowercase-normalized when config
     is normalized." This is deliberately a PLAIN case fold, not
     ``_normalize_plugin_id``'s alias table (``google-gemini-cli`` -> ``google``,
-    ``config-state-CIAkTpZu.mjs:19-23``'s ``normalizePluginId``, 2026.10.1) -- that is a different
+    ``config-state-wnnTmmuG.mjs:19-23``'s ``normalizePluginId``, 2026.10.2) -- that is a different
     function for a different comparison (the B342 allow/deny CONTRADICTION check), and
     replicating its alias table here would be fabricating a codex/memory-core alias that
     does not exist. A case-only variant of a NON-alias id (``Memory-Core`` vs
@@ -8088,10 +8102,14 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
 
     B-401 - the ``memory`` slot has the SAME "unset is not the safe state" defect as
     B341, grounded independently against the normalization layer (not just the schema):
-    ``config-normalization-shared-w2iz0aeC.js:314-323`` -
-    ``memory: memorySlot === void 0 ? defaultSlotIdForKey("memory") : memorySlot`` -
+    ``config-normalization-shared-w2iz0aeC.js:314-323`` on 2026.9.x -
+    ``memory: memorySlot === void 0 ? defaultSlotIdForKey("memory") : memorySlot`` (on
+    openclaw@2026.10.2, read 2026-10-12, the same default is applied by
+    ``resolveSlotSelection``, slots-DarSawuQ.mjs:44-49, called from
+    ``normalizePluginsConfigWithResolverCore``, config-activation-shared-DnNUje5Q.mjs:80) -
     where ``defaultSlotIdForKey("memory")`` resolves to the literal bundled plugin id
-    ``"memory-core"`` (``DEFAULT_SLOT_BY_KEY``, slots-kpL659LX.js:6-8; the plugin itself
+    ``"memory-core"`` (``DEFAULT_SLOT_BY_KEY``, slots-kpL659LX.js:6-8 on 2026.9.x,
+    slots-DarSawuQ.mjs:8-11 on 2026.10.2; the plugin itself
     ships from ``src/plugin-sdk/memory-core-bundled-runtime.ts``). ``memorySlot`` comes
     from ``normalizeSlotValue``, same file, which folds ANY non-string value - absent,
     JSON ``null``, or a non-``"none"`` empty/whitespace string - to ``undefined``. So an
@@ -8117,7 +8135,8 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     means that default never actually takes effect (``plugins.enabled: false``,
     ``memory-core`` denied, its entry explicitly disabled, or a non-empty
     ``plugins.allow`` that omits it -- see ``_memory_default_owner_blocked`` above,
-    grounded against ``resolvePluginActivationDecisionShared`` and
+    grounded against ``resolvePluginActivationStateShared`` (formerly
+    ``resolvePluginActivationDecisionShared``) and
     ``resolveMemorySlotStartupPluginId`` in the installed dist). It fired WARN on this
     project's own ``fixtures/home_safe`` (``plugins.allow: ["trentclaw"]``) for exactly
     this reason. The implicit-default disclosure is now gated on all four conditions;

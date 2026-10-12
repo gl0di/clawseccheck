@@ -715,8 +715,12 @@ def _resolve_sandbox_backend(sandbox: dict, fallback: str) -> str:
 
 
 def _resolve_exec_host(agent_tools: dict, fallback: str) -> str:
-    """Mirrors resolveExecHost (dist/exec-filesystem-policy-CTlB-k7U.js:11):
-    ``params.agentExec?.host ?? params.globalExec?.host ?? "auto"``.
+    """Mirrors resolveExecHost (dist/exec-filesystem-policy-CTlB-k7U.js:11 on 2026.9.x):
+    ``params.agentExec?.host ?? params.globalExec?.host ?? "auto"``. On openclaw@2026.10.2
+    (read 2026-10-12) ``resolveExecHost`` / ``normalizeExecHost`` no longer exist as functions:
+    the same expression is inlined into ``collectExecFilesystemPolicyDriftHits`` as
+    ``context.tools?.exec?.host ?? globalExec?.host ?? "auto"``
+    (exec-filesystem-policy-B2SaVS0R.mjs:31).
 
     Field path is the top-level ``tools.exec.host`` globally / ``agents.list[N]
     .tools.exec.host`` per agent -- NOT under ``.sandbox`` at all. See
@@ -726,7 +730,10 @@ def _resolve_exec_host(agent_tools: dict, fallback: str) -> str:
     KNOWN LIMIT (documented, not fixed here -- C-135 round 4 follow-up): the REAL
     exec-target resolution chain has more links than this function models --
     ``execOverrides?.host ?? sessionEntry?.execHost ?? agentExec?.host ??
-    globalExec?.host ?? "auto"`` (dist/exec-defaults-BLH0Yltk.js:27) -- and an
+    globalExec?.host ?? "auto"`` (dist/exec-defaults-BLH0Yltk.js:27 on 2026.9.x; on
+    openclaw@2026.10.2 exec-defaults-C2wD2D4U.mjs:22 reads
+    ``execOverrides?.host ?? normalizeExecTarget(sessionEntry?.execHost) ?? agentExec?.host
+    ?? globalExec?.host ?? "auto"``) -- and an
     ``elevatedRequested`` exec is forced to ``"gateway"`` regardless of the
     resolved default. So a config reading ``host: "auto"`` here can still route an
     elevated exec off the sandbox at runtime; this function cannot see that from
@@ -2155,7 +2162,8 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
     2. the trajectory log contains a ``tool.call`` whose session was opened from a
        GROUP or CHANNEL surface on THAT SAME channel (``EXTERNAL_ORIGIN_KINDS`` - the
        same bucket OpenClaw's own ``sessionKey.includes(":group:") ||
-       includes(":channel:")`` discriminator uses, status-message-CQq9FqoB.js:445);
+       includes(":channel:")`` discriminator uses, status-message-CQq9FqoB.js:445 on 2026.9.x; the
+       same test is at status-message-D8z66EwB.mjs:390 on openclaw@2026.10.2, read 2026-10-12);
     3. that verb classifies EXEC / DESTRUCTIVE / MAILBOX_CONFIG (see
        ``_R21_BLAST_CLASSES`` on why EGRESS is excluded).
 

@@ -7,7 +7,9 @@ Two sub-signals under one check ID:
     is writable by another local account is a FAIL (checks/_shared
     _dir_replaceable_by_others, on both the file itself and its parent directory).
   - profiles.<name>.mcpCommand (existing-session driver only) overrides the vendor
-    default (npx -y chrome-devtools-mcp@latest) with zero OpenClaw-side validation --
+    default (node running the chrome-devtools-mcp copy bundled in the OpenClaw package;
+    measured by executing normalizeChromeMcpOptions on openclaw@2026.10.2, 2026-10-12 --
+    an unset or "npx" mcpCommand is NOT an npx download) with zero OpenClaw-side validation --
     WARN-only, scored=False on that branch (B192/B324 precedent: a legitimate,
     plausibly-hardening customization, not to be punished with a FAIL).
 
@@ -107,8 +109,9 @@ def test_mcp_command_on_non_existing_session_driver_is_ignored(tmp_path):
 
 
 def test_mcp_command_equal_to_vendor_default_is_not_flagged(tmp_path):
-    """An explicit mcpCommand="npx" is textually identical to the vendor default
-    (DEFAULT_CHROME_MCP_COMMAND) -- not a real override, must not WARN."""
+    """An explicit mcpCommand="npx" is what the vendor treats as unset
+    (normalizeChromeMcpOptions maps it to the bundled copy) -- not a real override,
+    must not WARN."""
     home = _home(tmp_path, config={"browser": {"profiles": {
         "user": {"driver": "existing-session", "mcpCommand": "npx", "color": "#00AA00"}
     }}})

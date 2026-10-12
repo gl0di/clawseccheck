@@ -97,6 +97,15 @@ def _grant(pattern="/usr/bin/git", *, arg_pattern=None, source="allow-always") -
     return entry
 
 
+def _grant_current(pattern="/usr/bin/git", *, gid="3f1c9d5e-8a4b-4c2d-9e61-7b0a5d2c4e18") -> dict:
+    """An entry in the shape OpenClaw 2026.10.1 and later persist: it carries an `id`.
+
+    `_grant` above builds the shape OpenClaw wrote before 2026.10.1 (no `id`), which the
+    current parser refuses until the store is repaired; the tests that only count grants
+    keep using it on purpose, because the collector must count both."""
+    return {"id": gid, "pattern": pattern, "source": "allow-always"}
+
+
 def _projection(doc) -> tuple:
     """(socket_path, has_socket_token, default_security, default_ask, default_ask_fallback,
     auto_allow_skills, agent_count, allowlist_count) the way the vendor's `projectionValues`
@@ -317,6 +326,65 @@ def test_the_legacy_default_agent_alias_is_reported_as_its_own_entry(tmp_path):
     ctx, f = _audit(home)
     assert f.status == WARN
     assert sum(g["allow_always_count"] for g in ctx.exec_approvals_grants) == 1
+
+
+# ---------------------------------------------------------------------------
+# Row shape: pre-2026.10.1 entries are persisted but not in force until repair
+# ---------------------------------------------------------------------------
+
+_NOT_IN_FORCE = "persisted but not in force"
+
+
+def test_a_current_shape_row_warns_and_says_nothing_about_repair(tmp_path):
+    home = _home(tmp_path)
+    _write_state_db(home, _doc({"main": {"allowlist": [_grant_current()]}}))
+    ctx, f = _audit(home)
+    assert f.status == WARN
+    assert sum(g["allow_always_count"] for g in ctx.exec_approvals_grants) == 1
+    assert ctx.exec_approvals_legacy_row_shape is False
+    assert _NOT_IN_FORCE not in (f.fix or "")
+
+
+def test_an_entry_without_an_id_is_counted_and_flagged_not_in_force(tmp_path):
+    home = _home(tmp_path)
+    _write_state_db(home, _doc({"main": {"allowlist": [_grant()]}}))
+    ctx, f = _audit(home)
+    assert f.status == WARN
+    assert sum(g["allow_always_count"] for g in ctx.exec_approvals_grants) == 1
+    assert ctx.exec_approvals_legacy_row_shape is True
+    assert _NOT_IN_FORCE in (f.fix or "")
+    assert "2026.10.1" in (f.fix or "")
+
+
+@pytest.mark.parametrize("doc_agents", [
+    {"main": {"allowlist": [dict(_grant_current(), commandText="git status")]}},
+    {"default": {"allowlist": [_grant_current()]}},
+    {"main": {"allowlist": [_grant_current(), "/usr/bin/ls"]}},
+    # a well-formed grant is refused with the rest of the row when ANY entry is old
+    {"main": {"allowlist": [_grant_current()]},
+     "other": {"allowlist": [{"pattern": "/bin/ls"}]}},
+])
+def test_each_pre_10_1_shape_flags_the_whole_row(tmp_path, doc_agents):
+    home = _home(tmp_path)
+    _write_state_db(home, _doc(doc_agents))
+    ctx, f = _audit(home)
+    assert f.status == WARN
+    assert ctx.exec_approvals_legacy_row_shape is True
+    assert _NOT_IN_FORCE in (f.fix or "")
+
+
+def test_the_row_shape_disclosure_never_changes_detail_or_the_count(tmp_path):
+    """`detail` is fingerprinted: the same grant must produce the same detail in either
+    row shape apart from the evidence it names."""
+    old_home = _home(tmp_path / "old")
+    new_home = _home(tmp_path / "new")
+    _write_state_db(old_home, _doc({"main": {"allowlist": [_grant()]}}))
+    _write_state_db(new_home, _doc({"main": {"allowlist": [_grant_current()]}}))
+    _, old = _audit(old_home)
+    _, new = _audit(new_home)
+    assert old.detail == new.detail
+    assert old.evidence == new.evidence
+    assert old.status == new.status == WARN
 
 
 # ---------------------------------------------------------------------------

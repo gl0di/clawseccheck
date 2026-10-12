@@ -2202,7 +2202,11 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
 
     Returns a Finding that REPLACES the config-derived PASS, or None to let it stand.
 
-    ``resolveCacheTraceConfig`` (dist/selection-JInn13lc.js:1047-1055) computes::
+    ``resolveCacheTraceConfig`` (dist/selection-JInn13lc.js:1047-1055 on 2026.9.x; inlined into ``createCacheTrace``,
+    builtin-openclaw-DkEpBBN1.mjs:15551-15556 on openclaw@2026.10.2, read 2026-10-12, which
+    spells it ``env.OPENCLAW_CACHE_TRACE`` parsed ?? ``params.cfg?.diagnostics?.cacheTrace?.enabled``
+    ?? false and takes its file ONLY from ``env.OPENCLAW_CACHE_TRACE_FILE`` or the state-dir default --
+    it no longer reads a config ``filePath``) computes::
 
         enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
 
@@ -2333,7 +2337,8 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
         rejected outright. Reading it made this check's "not configured" branch an
         affirmative FALSE claim for every user who actually HAD cache tracing on.
 
-    The enable gate is ``enabled``, NOT ``filePath`` - ``resolveCacheTraceConfig`` reads::
+    The enable gate is ``enabled``, NOT ``filePath`` - ``resolveCacheTraceConfig`` (inlined
+    into ``createCacheTrace`` on openclaw@2026.10.2, see the B282 helper above) reads::
 
         enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
 
@@ -4013,7 +4018,9 @@ def check_leak(ctx: Context) -> Finding:
     hands `cfg?.redactPatterns` straight through, and the shared `resolvePatterns()` it
     feeds REPLACES `DEFAULT_REDACT_PATTERNS` outright for a non-empty list -- that is the
     console-output, warnings, and `openclaw logs` path. Identical on OpenClaw 2026.9.4
-    (`dist/redact-Ck-hjLec.mjs:1432-1441`) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
+    (`dist/redact-Ck-hjLec.mjs:1432-1441`), on 2026.10.2 (`resolvePatterns`,
+    `dist/redact-DJ8j6ADa.mjs:2609-2629`: a non-empty custom list is parsed on its own
+    and only the AWS secret-access-key matcher is appended; read 2026-10-12) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
     1987`, `:2327-2333`) -- B-836; an earlier version of this docstring
     described the union as universal, which it is not. An empty list falls through to
     the defaults on every path. No env var disables it either -- the only
@@ -4052,7 +4059,10 @@ def check_leak(ctx: Context) -> Finding:
             "built-in patterns on console output, warnings, and `openclaw logs` (it only "
             "adds to them for transcripts/tool payloads) -- include the built-in shapes "
             "in your list, or leave the field unset, unless you have verified your "
-            "list's own coverage.",
+            "list's own coverage. A pattern of your own is also matched in 16 KiB chunks "
+            "once the text exceeds 32 KiB, so a credential that straddles a chunk "
+            "boundary can survive it; on OpenClaw 2026.10.2 the built-in patterns are "
+            "scanned over the whole text.",
         )
     # A PRESENT value keeps its original verdict on every build. An earlier version of this
     # fix collapsed "off" and "tools" into one WARN on a modern build, reasoning that an
@@ -4802,13 +4812,18 @@ def check_browser_executable_path(ctx: Context) -> Finding:
         (checks/_host.py check_bundled_root_override).
     (B) profiles.<name>.mcpCommand (existing-session driver only) overrides the
         subprocess binary OpenClaw hands the Chrome DevTools MCP session to -
-        normalizeChromeMcpOptions (chrome-mcp-BZM3Tb7R.js:174-183) passes it through
-        with zero validation of any kind (no trustedDirs-style scoping, no existence
-        check). The vendor default is itself an unpinned `npx -y
-        chrome-devtools-mcp@latest` (DEFAULT_CHROME_MCP_COMMAND/
-        DEFAULT_CHROME_MCP_PACKAGE_ARGS, chrome-mcp-BZM3Tb7R.js:35-36) - so an explicit,
-        non-default mcpCommand is at least as plausibly a *hardening* move (pinning a
-        known binary instead of trusting an unpinned npx auto-install) as a downgrade.
+        normalizeChromeMcpOptions (chrome-mcp-options-BBANJrqD.mjs:815-855, read and
+        EXECUTED in node on openclaw@2026.10.2, 2026-10-12) passes it through with zero
+        validation of any kind (no trustedDirs-style scoping, no existence check). The
+        vendor default is NOT an npx auto-install: with no mcpCommand, or with
+        mcpCommand "npx", it returns node (process.execPath) running the
+        chrome-devtools-mcp copy bundled inside the OpenClaw package
+        (require.resolve("chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js");
+        the 2026.10.2 package carries chrome-devtools-mcp 1.10.1) - only a custom
+        command bypasses it. So an explicit, non-default mcpCommand replaces a pinned,
+        vendor-shipped copy with a binary OpenClaw has not vetted; that is at least as
+        plausibly a *hardening* move (pinning a known binary of the operator's own) as
+        a downgrade, and a config cannot tell which.
         WARN-only, and `scored=False` on that specific branch (this check's CheckMeta
         otherwise stays scored - see the FAIL branch above), mirroring B192/B324's
         precedent for a legitimate, commonly-wanted customization a FAIL would punish.
@@ -4878,7 +4893,8 @@ def check_browser_executable_path(ctx: Context) -> Finding:
             if isinstance(mcp_cmd, str) and mcp_cmd.strip() and mcp_cmd.strip() != "npx":
                 mcp_warn_ev.append(
                     f"browser.profiles.{name}.mcpCommand={mcp_cmd.strip()!r} overrides "
-                    "the vendor default (npx -y chrome-devtools-mcp@latest) \u2014 OpenClaw "
+                    "the vendor default (the chrome-devtools-mcp copy bundled with "
+                    "OpenClaw, run by node) \u2014 OpenClaw "
                     "does not validate this command/path before spawning it"
                 )
             # B-653: mcpArgs, mcpCommand's sibling - see the module comment above for
@@ -5321,10 +5337,11 @@ def check_browser_existing_session_profile(ctx: Context) -> Finding:
     """B322 - browser.profiles.*.{cdpUrl,userDataDir,driver:"existing-session"}.
 
     driver:"existing-session" switches OpenClaw from launching its own managed Chrome to
-    spawning a third-party `chrome-devtools-mcp` subprocess (vendor default `npx -y
-    chrome-devtools-mcp@latest`, chrome-mcp-BZM3Tb7R.js:35-36) and handing it cdpUrl /
-    userDataDir as raw CLI args (chrome-mcp-BZM3Tb7R.js normalizeChromeMcpOptions /
-    buildChromeMcpConnectionArgs - confirmed against the installed dist). Two distinct
+    spawning a third-party `chrome-devtools-mcp` subprocess (vendor default: node running
+    the copy bundled in the OpenClaw package, not an npx download - normalizeChromeMcpOptions,
+    chrome-mcp-options-BBANJrqD.mjs:815-855, executed on openclaw@2026.10.2, 2026-10-12)
+    and handing it cdpUrl / userDataDir as raw CLI args (same function, `connectionArgs` -
+    confirmed against the installed dist). Two distinct
     concerns live under this one check ID:
 
     * userDataDir pointed at a real (non-dedicated) browser profile directory would hand

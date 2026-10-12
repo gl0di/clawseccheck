@@ -3729,6 +3729,19 @@ def check_gateway(ctx: Context) -> Finding:
         # OPENCLAW_GATEWAY_TOKEN/_PASSWORD, this bind is authenticated and the FAIL was a
         # false positive on a correctly secured host.
         #
+        # Bundle names cited in this block (auth-resolve-NyPBrh8F.js, server-runtime-config-
+        # r5ejxORO.js, auth-B27MflKU.js, audit-UjVvFwCi.js) are 2026.7.x-9.x builds and no longer
+        # exist. Re-read on openclaw@2026.10.2 (2026-10-12): the mode derivation is
+        # `finalizeResolvedGatewayAuth`, auth-resolve-q8YYhgR6.mjs:22-23 (`mode =
+        # authOverride?.mode ?? authConfig.mode ?? (password ? "password" : "token")` - an
+        # absent mode is token, or password when a password is present); the bind guard is
+        # `assertGatewayRuntimeSecurityConfig`, server-runtime-config-DOMQs_gF.mjs:54,64
+        # (`hasSharedSecret`, a non-empty token/password for that mode); the missing-credential
+        # rejection is `assertGatewayAuthConfigured`, auth-BB5XWQP-.mjs:37-52; and OpenClaw's own
+        # length bar is audit-McsNcemT.mjs:268-269 (`value.length < 24` -> checkId
+        # `gateway.${credential}_too_short`, i.e. `gateway.token_too_short`; the rule id is
+        # built from a template there, which is why a plain grep for it finds nothing).
+        #
         # `auth == "none"` is deliberately NOT softened: "none" is truthy in the dist, so
         # the mode stays "none", `hasSharedSecret` stays false, and
         # server-runtime-config-r5ejxORO.js:78 refuses the non-loopback bind outright.
@@ -4873,7 +4886,9 @@ def check_sandbox(ctx: Context) -> Finding:
 #   dist/startup-state-readiness-DmC3_8HF.mjs:4736
 #     const DEFAULT_NODE_WORKER_CONTAINER_IMAGE = "node:24.21.0-slim";
 #   dist/schema-wLxTLL31.mjs:909 -- same "Node 24.16+ or 26.1+" help text and same default,
-#     with a second sentence about digest-pinned/private-registry images; the `isolation`
+#     with a second sentence about digest-pinned/private-registry images (that sentence is
+#     not new in 2026.10.1: the 2026.9.9 release tarball's schema bundle carries it in the
+#     same "nodeHost.workerRuns.containerImage" description, read 2026-10-12); the `isolation`
 #     enum ("none"/"container"), its default and the `containerImage` schema
 #     (dist/zod-schema.root-support-B_04-6fB.mjs:147-152) are unchanged, and the worker
 #     still falls back to the constant only when no image is configured (:4951).
@@ -4964,10 +4979,15 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
             "B391",
             PASS,
             "nodeHost.workerRuns.enabled is not set to true (the vendor default), so "
-            "this node does not host worker sessions dispatched by a paired Gateway \u2014 "
-            "the isolation setting is moot.",
+            "this config does not enable hosting of worker sessions dispatched by a "
+            "paired Gateway \u2014 the isolation setting is moot unless the node process "
+            "is started with --session-host or --ephemeral, which a config-only audit "
+            "cannot see.",
             "No action needed unless you intend this node to host sessions for other "
-            "nodes; if you do enable it, review nodeHost.workerRuns.isolation first.",
+            "nodes; if you do enable it, review nodeHost.workerRuns.isolation first. "
+            "If this host runs 'openclaw node run' or 'openclaw connect' yourself, check "
+            "that its command line (or the node service unit) carries neither "
+            "--session-host nor --ephemeral.",
             config_field_paths={"nodeHost.workerRuns.enabled"},
         )
     isolation = dig(cfg, "nodeHost.workerRuns.isolation")
@@ -5694,7 +5714,13 @@ def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
         "Move the value to `openclaw secrets configure` (a SecretRef indirection), "
         "or to a path OpenClaw's redactor does recognize (a key name containing "
         "password/secret/token/apiKey) \u2014 never a bare Authorization/bearer/key field "
-        "or a plural token array.",
+        "or a plural token array. Scope of the sentence above, per key (measured by "
+        "executing OpenClaw 2026.10.2's structured-field log redactor): config-get output "
+        "masks none of these paths; in trajectory and other structured logs a bare "
+        "Authorization or key field IS masked, like a token field, but only down to its "
+        "first six and last four characters, while a bearer field and a plural token "
+        "array are left in clear, and a plain `key=...` text line is not masked at all. "
+        "Whether a relayed message channel masks any of them was not verified.",
         evidence=paths,
     )
 
@@ -8415,7 +8441,12 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
 
     PORTAL AUTH IS ALWAYS THE SAME, AND IT IS STRONG. Each portal gets a per-portal
     ``token: randomBytes(32).toString("hex")`` (256 bits,
-    ``createGatewayPortalService``, ``server-start-BkBmUb8t.mjs:6324`` on 2026.9.8).
+    ``createGatewayPortalService``, ``server-start-BkBmUb8t.mjs:6324`` on 2026.9.8; on
+    openclaw@2026.10.2, read 2026-10-12, the portal service moved out of server-start
+    into ``portal-service-Be3QsZbM.mjs``: ``createGatewayPortalService`` :559,
+    ``randomBytes(32)`` :668, ``authorizePortalRequest`` :129-138, ``tokensEqual`` :84,
+    ``proxyHeaders`` :185-200, ``handlePortalProxyRequest`` :234 -- every ``:NNNN``
+    line number below is the 2026.9.8 server-start one, not re-read on 2026.10.2).
     ``authorizePortalRequest`` (``:5840-5850``) accepts only that token, compared
     timing-safe (``tokensEqual``, ``:5792``). Never gateway.auth, trusted-proxy identity
     or any front-door access layer: ``handlePortalProxyRequest`` (``:5945``) calls

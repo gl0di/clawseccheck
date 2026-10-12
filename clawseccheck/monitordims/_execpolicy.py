@@ -105,7 +105,10 @@ def _resolve_mode_from_policy(security, ask) -> str:
     return "ask"
 
 
-#: `shouldSandboxSession` (`runtime-status-BRnZ3ffr.js`) is unconditional for these two and
+#: `shouldSandboxSession` (`runtime-status-BRnZ3ffr.js`; inlined into
+#: `resolveSandboxRuntimeStatusForClassification`, runtime-status-BrQA2iWu.mjs:138 on
+#: openclaw@2026.10.2, read 2026-10-12, where a per-session `sandboxMode: "off"` entry also
+#: overrides the config) is unconditional for these two and
 #: genuinely session-dependent for `"non-main"`. Absent means `"off"` (`config-Dy4vED5-.js`).
 _SANDBOX_ALWAYS = "all"
 _SANDBOX_NEVER = "off"

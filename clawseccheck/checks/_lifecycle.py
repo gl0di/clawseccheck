@@ -2408,7 +2408,13 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     WARN    - at least one agent has 1+ "allow-always" allowlist entries: name them so
               the user can review/revoke stale standing grants. Checked BEFORE the
               unreadable-store branch: a grant found in a store that WAS read stands
-              even if the other store could not be read.
+              even if the other store could not be read. A state-database row in the
+              pre-2026.10.1 entry shape (no ``id``, a ``commandText``, a bare string, or
+              ``agents.default``) is counted the same -- the grants are real and
+              persisted -- but OpenClaw 2026.10.1 and later refuse to load that row until
+              the store is repaired (``parsePersistedExecApprovals``, executed on the
+              installed 2026.10.2), so they are not in force until then; the advice says
+              so (``ctx.exec_approvals_legacy_row_shape``). 2026.9.9 honoured the row.
     PASS    - a store was read and no agent has an "allow-always" entry (the common
               case -- e.g. freshly-provisioned defaults/agents are both empty `{}`, or
               the state database's table holds no row, which OpenClaw itself reads as
@@ -2575,6 +2581,20 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
         fix += "."
     else:
         fix += " (or inspect ~/.openclaw/exec-approvals.json directly)."
+    if ctx.exec_approvals_legacy_row_shape and any(
+        g.get("store") == "sqlite" for g in grants
+    ):
+        # The grants are real and persisted, so the WARN stands and the counts are
+        # unchanged; but OpenClaw 2026.10.1 and later refuse a row in the older shape
+        # until the store is repaired (collector._exec_approvals_row_has_pre_10_1_shape),
+        # so those grants are not in force until then. Advice text only: `detail` is
+        # fingerprinted.
+        fix += (
+            " The state database row holds entries in the shape OpenClaw wrote before "
+            "2026.10.1 (no id, a commandText, or an agents.default key): OpenClaw "
+            "2026.10.1 and later refuse to load that row until the store is repaired, so "
+            "those grants are persisted but not in force until then."
+        )
     if ctx.exec_approvals_parse_error:
         # The WARN above stands, but a present store was not read in full: the list is
         # what the readable store(s) hold, not necessarily every standing grant.
@@ -4280,7 +4300,13 @@ def check_self_modification(ctx: Context) -> Finding:
 # skills.workshop.autonomous.enabled=true lets the agent AUTHOR brand-new executable
 # skill proposals from conversation signals with no explicit user request
 # (get-reply-OTG64ybi.js: `skillSuggestionEnabled = !autonomous.enabled` - autonomous
-# mode replaces the normal suggest-then-ask flow). approvalPolicy="auto" removes the
+# mode replaces the normal suggest-then-ask flow; 2026.7.1 dist. On openclaw@2026.10.2,
+# read 2026-10-12, the symbol `skillSuggestionEnabled` no longer exists (zero matches for
+# `skillSuggestion` in dist/*.mjs) and the schema keys this behaviour on
+# `skills.workshop.autonomous.mode` -- "off" keeps only the suggestion nudge, "propose"
+# creates proposals: schema-Bc7Xr5WK.mjs:1017, context-engine-lifecycle-CMMQY2BB.mjs:162 --
+# not on an `enabled` flag; whether this check's `autonomous.enabled` path still matches the
+# schema is a separate re-grounding question, not decided by this comment). approvalPolicy="auto" removes the
 # human confirmation step for EVERY skill_workshop lifecycle call
 # (propose/apply/reject/quarantine) - agent-tools.before-tool-call-C95DXQXZ.js:608:
 # `if (resolveSkillWorkshopConfig(params.config).approvalPolicy === "auto") return;`
@@ -4300,7 +4326,15 @@ def check_self_modification(ctx: Context) -> Finding:
 #     sandboxed (`...options?.sandboxed ? [] : [createSkillWorkshopTool(...)]`), and
 #     status-message-CQq9FqoB.js:73 makes agents.defaults.sandbox.mode == "all"
 #     unconditionally sandboxed (`if (sandboxMode === "all") return true;`) - not a
-#     misconfigurable policy, a hard guarantee.
+#     misconfigurable policy, a hard guarantee. CORRECTION (read 2026-10-12): that status-message
+#     line is a display-label fallback, never the sandbox decision. The decision is
+#     `resolveSandboxRuntimeStatusForClassification` in runtime-status-BrQA2iWu.mjs:138
+#     on openclaw@2026.10.2, read 2026-10-12 (`sandboxed` needs the session entry's
+#     `sandboxMode` to be other than "off", `mode` other than "off", and `mode === "all"` or a
+#     non-main session key; `sandboxRequired` short-circuits it to true)
+#     -- on 2026.10.2 a per-session `sandboxMode: "off"` entry overrides even
+#     `mode: "all"` unless the session is `sandboxRequired`, so "hard guarantee" holds for
+#     the CONFIG only. (shouldSandboxSession in runtime-status-*.js was the 2026.9.x name.)
 #   - tool-policy-BHUGxE3p.js / effective-tool-policy-CRZGJ2R3.js run tools.deny and
 #     tools.allow (global and per-agent, via agents.list[].tools.*) as a pipeline of
 #     narrowing filters: any single layer denying "skill_workshop", or any non-"*"

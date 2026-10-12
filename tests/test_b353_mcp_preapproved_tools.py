@@ -648,7 +648,9 @@ def test_d3_a_per_requester_server_with_its_own_mode_is_not_unmoded(tmp_path):
     {"allow": ["telegram"]},
 ], ids=["plugins-disabled", "denied", "not-in-allowlist"])
 def test_d4_a_deactivated_codex_plugin_is_no(tmp_path, plugins_top):
-    """`resolvePluginActivationDecisionShared` deactivates the plugin in all three. The
+    """`resolvePluginActivationStateShared` (named `resolvePluginActivationDecisionShared`
+    before 2026.10; config-activation-shared-DnNUje5Q.mjs:137-141 on openclaw@2026.10.2)
+    deactivates the plugin in all three. The
     gate is the one B-421 already grounded for memory-core, now shared
     (`_plugin_activation_blocked`) rather than re-implemented."""
     cfg = _yolo()

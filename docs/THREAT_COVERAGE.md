@@ -291,12 +291,17 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   `${VAR_NAME}` env-var interpolation (`dist/env-substitution-CATXLg7n.js`, `substituteString`/
   `resolveConfigEnvVars`) is a character-scan literal lookup against `process.env`; the
   Discord/status presence text fields (`dist/provider-DNXfDOia.js`, a second, unrelated
-  `renderTemplate`) substitute only one fixed `{reason}` placeholder. The two real `vm.Script`/
-  `eval` sinks found in the dist - `runModelCode` (`dist/tool-search-B8B4Spes.js`, the
-  `tool_search` agent-tool feature, `src/agents/local-model-lean.ts`) and the Playwright
-  browser `evaluate` action (`dist/pw-ai-BHPU7V7C.js`) - both run code the AGENT supplies as an
+  `renderTemplate`) substitute only one fixed `{reason}` placeholder. Re-grepped 2026-10-12 on
+  openclaw@2026.10.2: the one real dynamic-code sink in OpenClaw's
+  own modules is the Playwright browser `evaluate` action (`eval` / `new Function` in
+  `dist/pw-ai-dAui1wpq.mjs` on 2026.10.2), which runs code the AGENT supplies as an
   explicit tool-call argument at runtime, never a value read from a static config field, so
-  they are a different, already-in-scope surface (agent tool-use), not this bug class. Secret
+  it is a different, already-in-scope surface (agent tool-use), not this bug class. The only
+  other `new Function` hit in a module OpenClaw owns is a no-op capability probe
+  (`new Function("")` in `dist/json-schema-processors-C6KO_BFy.mjs`, which compiles nothing
+  from input). An earlier revision of this paragraph also named a `runModelCode` function in
+  the `tool_search` feature as a sink; that name is in neither openclaw@2026.10.2 nor
+  openclaw@2026.9.9 (zero matches for `runModelCode` in each), so it is no longer claimed. Secret
   references (`dist/resolve-configured-secret-input-string-BefspyML.js`) are a typed
   `{source,provider,id}` dispatch, not expression parsing; the Shiki syntax-highlighting
   grammars bundled under names like `jinja`/`handlebars` are dead JSON grammar data for code-

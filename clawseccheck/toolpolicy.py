@@ -506,7 +506,13 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
 
     B-712. This used to return a confident boolean for a property the config does not
     determine. The vendor's own predicate is four lines and says exactly where the boundary
-    falls (``runtime-status-*.js``)::
+    falls (``runtime-status-*.js``, 2026.9.x; inlined into
+    ``resolveSandboxRuntimeStatusForClassification`` at runtime-status-BrQA2iWu.mjs:138 on
+    openclaw@2026.10.2, read 2026-10-12, where ``sandboxed`` is true when the session key is
+    present and (``sandboxRequired``, or the session entry's ``sandboxMode`` is not "off" and
+    ``mode`` is not "off" and (``mode === "all"`` or the session key differs from the main one))
+    -- on 2026.10.2 it also honours a per-session ``sandboxMode: "off"`` override, which has no
+    representation in ``openclaw.json``)::
 
         function shouldSandboxSession(cfg, sessionKey, mainSessionKey, sandboxRequired) {
             if (sandboxRequired) return true;

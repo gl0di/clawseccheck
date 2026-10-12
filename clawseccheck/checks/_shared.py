@@ -625,7 +625,9 @@ def _env_default_operator(ctx) -> str:
 # 2026.9.7 dist: `ref-contract-D0kWy5jy.mjs` (`isSecretRef`: exactly three keys;
 # `isValidSecretRef`: provider alias, per-source id grammar, `validateExecSecretRefId`,
 # `isValidFileSecretRefId`), `zod-schema.core-ZkrXdN0m.mjs:357-385` (every variant is
-# `.strict()`), and `types.secrets-BXEuin38.mjs` (`isLegacySecretRefWithoutProvider`, the
+# `.strict()`; on openclaw@2026.10.2, read 2026-10-12, the SecretRef variants moved to
+# `zod-schema.sensitive-bEFwMmOC.mjs:5-21`: `createSecretRefSchema` builds each one with
+# `strictObject`, `SecretRefSchema` is the discriminated union of the four sources), and `types.secrets-BXEuin38.mjs` (`isLegacySecretRefWithoutProvider`, the
 # two-key `{source, id}` form the runtime still coerces).
 _SECRET_REF_SOURCES = ("env", "file", "exec", "store")
 _SECRET_REF_PROVIDER_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
@@ -944,7 +946,8 @@ def _effective_gateway_bind(ctx, cfg, raw) -> "tuple[object, str | None]":
     the process environment overrides the env block, so it is treated as not seen and the
     note says so. Everything else - no default, a loopback default, an unseen variable, a
     value that is itself a template, a malformed or embedded template, a bare ``$NAME`` (OpenClaw
-    substitutes only ``${...}``, ``parseEnvTokenAt``) - is unresolved and the *note* names the
+    substitutes only ``${...}``, ``iterateEnvTemplateTokens`` since 2026.9.7,
+    ``parseEnvTokenAt`` before) - is unresolved and the *note* names the
     template verbatim, so a caller reports UNKNOWN instead of reading the template text as a
     host (`parse_bind_host` would lowercase it and split it at its first colon).
     """

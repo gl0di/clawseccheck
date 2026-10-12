@@ -1000,6 +1000,12 @@ class Context:
     # not valid JSON). Distinguishes that failure from a legacy-JSON one; both set
     # `exec_approvals_parse_error`.
     exec_approvals_sqlite_unreadable: bool = False
+    # The state database's exec-approvals row carries at least one entry in the shape
+    # OpenClaw wrote before 2026.10.1 (see `_exec_approvals_row_has_pre_10_1_shape`).
+    # Builds from 2026.10.1 on refuse to load such a row until the store is repaired, so
+    # its grants are persisted but not in force; B172 says so in its advice. It is a
+    # disclosure flag only -- it never changes a count or a verdict.
+    exec_approvals_legacy_row_shape: bool = False
     # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
     # the installed_plugin_index.install_records_json column in the shared state SQLite DB
     # (~/.openclaw/state/openclaw.sqlite) -- OR, since OpenClaw's state-consolidation-v13
@@ -5719,7 +5725,10 @@ _AUTH_PROFILE_STORE_KEY = "authProfiles.store"
 # Q1 - is credentials/ still populated on some installs? Grounded against the 2026.9.7
 # dist: `resolveOAuthDir` is `<state dir>/credentials` unless OPENCLAW_OAUTH_DIR overrides
 # it (paths-CtO6iw0c.mjs:237). The doctor treats `credentials/auth-profiles/<32-hex>.json`
-# as a LEGACY OAuth secret sidecar to list and migrate
+# as a LEGACY OAuth secret sidecar to list and migrate (2026.9.7 reading; on openclaw@2026.10.2,
+# read 2026-10-12, no `doctor-auth-oauth-sidecar-*` bundle exists any more and the directory
+# `<oauth dir>/auth-profiles` is named only as a legacy path, doctor-auth-legacy-paths-
+# BtYQLXx6.mjs:95 -- i.e. a retired location there, not a live store)
 # (doctor-auth-oauth-sidecar-DAcfHuls.mjs: `listUnreferencedLegacyOAuthSidecars`,
 # `applyLegacyOAuthSidecarMaterial`; dirname constant at :20/:177). The live store is in the
 # state database (`SHARED_STORE_STATE_KEY = "authProfiles.store"`,
@@ -7578,6 +7587,45 @@ def _ingest_exec_approvals_document(
         ctx.exec_approvals_grants.append(grant)
 
 
+def _exec_approvals_row_has_pre_10_1_shape(store: dict) -> bool:
+    """True when an exec-approvals document holds an entry in the pre-2026.10.1 shape.
+
+    MEASURED by executing the vendor's ``parsePersistedExecApprovals``
+    (``exec-approvals-migration-gate-4cEEb67t.mjs`` on the installed openclaw@2026.10.2,
+    2026-10-12) on four documents that differ from a current one in exactly one respect:
+    an allowlist entry WITHOUT an ``id``, an entry WITH a ``commandText`` key, a bare-string
+    entry, and an ``agents.default`` key each come back as the vendor's legacy-policy
+    diagnostic (error text beginning "Legacy exec approval policy requires"); the same
+    entry with an ``id`` parses. ``readExecApprovalsConfigRow`` turns that diagnostic into
+    ``ExecApprovalsMigrationRequiredError``, so the whole row is refused until repaired --
+    including the grants of agents whose entries are well-formed. The 2026.9.9 release
+    tarball has neither that diagnostic nor the ``commandText: never()`` constraint (zero
+    matches), i.e. it honoured such a row.
+
+    Only the four shapes above are recognised. The vendor's persisted schema is stricter in
+    other respects (for instance an entry ``source`` other than ``"allow-always"``), and
+    this deliberately does not re-implement it: ``False`` is "none of the four seen", never
+    "the vendor will load this row". Bounded by the same agent cap the grant scan uses.
+    """
+    agents = store.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    if "default" in agents:
+        return True
+    for agent in list(agents.values())[:_MAX_EXEC_APPROVALS_AGENTS]:
+        allowlist = agent.get("allowlist") if isinstance(agent, dict) else None
+        if not isinstance(allowlist, list):
+            continue
+        for entry in allowlist:
+            if isinstance(entry, str):
+                return True
+            if isinstance(entry, dict):
+                entry_id = entry.get("id")
+                if "commandText" in entry or not (isinstance(entry_id, str) and entry_id):
+                    return True
+    return False
+
+
 def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
     """Read the exec-approvals store OpenClaw keeps in the shared state database.
 
@@ -7605,6 +7653,12 @@ def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
     * table present, no ``current`` row -> ``exec_approvals_sqlite_read`` + ``found``: a
       verified-empty store (the vendor treats an absent row as empty approvals).
     * row parsed                         -> ingested via the shared helper, tagged "sqlite".
+      A row whose entries are in the pre-2026.10.1 shape (no ``id``, a ``commandText``,
+      a bare string, or ``agents.default``) is counted exactly as before -- the grants are
+      real and persisted -- and ``exec_approvals_legacy_row_shape`` is set, because 2026.10.1
+      and later refuse to load such a row until the store is repaired (executed against the
+      installed 2026.10.2; see ``_exec_approvals_row_has_pre_10_1_shape``): those grants are
+      not in force until then, and 2026.9.9 honoured them.
     * anything else (a view / virtual table / rootpage alias standing in for the table,
       an unknown column set, a document over the byte cap, invalid JSON, ``version`` other
       than 1, ``agents`` of the wrong type, an unreadable DB) -> ``found`` +
@@ -7721,6 +7775,8 @@ def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
         return
     _ingest_exec_approvals_document(store, ctx, where, "sqlite")
     ctx.exec_approvals_sqlite_read = True
+    if _exec_approvals_row_has_pre_10_1_shape(store):
+        ctx.exec_approvals_legacy_row_shape = True
     if shallow.elided:
         # The grants read stay (a WARN found in what WAS read stands); the store is also
         # flagged as not read in full, so "no grant" can never be a clean verdict over it.
