@@ -915,6 +915,15 @@ class Context:
     update_runs_read: bool = False        # the table was present and queried at all
     update_runs_parse_error: bool = False  # table present but the read genuinely failed
     update_runs_truncated: bool = False   # the _MAX_UPDATE_RUNS row cap was hit
+    # C-687: OpenClaw's config-health record (`config_health_entries` in the state DB, which
+    # replaced `logs/config-health.json`), normalised to the legacy file's `entries` shape.
+    # `config_health_status` is "" when nothing collected it (a bare Context), otherwise one
+    # of the CONFIG_HEALTH_* statuses -- "no table" and "could not look" never collapse.
+    # `_unread` counts cells that exist but were not parsed; see `read_config_health_entries`.
+    config_health_status: str = ""
+    config_health_entries: dict = field(default_factory=dict)
+    config_health_unread: int = 0
+    config_health_truncated: bool = False
     # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite,
     # OR (B-709) its task_runs successor on a database that has run the migration -- see
     # _collect_cron_run_logs's docstring, and note it selects on the OBSERVED TABLES, not
@@ -5965,6 +5974,154 @@ def read_config_audit_rows(home, max_bytes: int, max_rows: int = CONFIG_AUDIT_MA
     return CONFIG_AUDIT_OK, payloads, truncated, int(oversized or 0), int(null_rows)
 
 
+# C-687: OpenClaw's config-health record moved out of ``logs/config-health.json`` into the
+# state database -- table ``config_health_entries`` (dist ``io.health-state.kernel-*.mjs``):
+# one row per tracked config path, two JSON "fingerprint" columns and the vendor's own tamper
+# signal ``last_observed_suspicious_signature``. The vendor's ``decodeConfigHealthRows`` turns
+# the rows into the SAME ``{"entries": {<config_path>: {lastKnownGood, lastPromotedGood,
+# lastObservedSuspiciousSignature}}}`` object the legacy file held; this reader returns that
+# shape, so a consumer judges either container with one function. The table holds one row per
+# tracked config file (a handful), so the row bound is generous and a cell bound only exists
+# to keep a hostile database from handing back a gigabyte string.
+CONFIG_HEALTH_TABLE = "config_health_entries"
+CONFIG_HEALTH_MAX_ROWS = 1_000
+CONFIG_HEALTH_MAX_CELL_BYTES = 64 * 1024
+_CONFIG_HEALTH_MAX_PATH_CHARS = 1_024
+_CONFIG_HEALTH_MAX_SIGNATURE_CHARS = 256
+# Read statuses of :func:`read_config_health_entries`. Same discipline as the config-audit
+# statuses above: "the table is not there" and "I could not look" never collapse.
+CONFIG_HEALTH_OK = "ok"                # a real table with >= 1 row
+CONFIG_HEALTH_EMPTY = "empty"          # a real table, no rows
+CONFIG_HEALTH_NO_DB = "no_db"          # no state database
+CONFIG_HEALTH_NO_TABLE = "no_table"    # a state DB that predates the table
+CONFIG_HEALTH_UNREADABLE = "unreadable"  # present but refused / locked / corrupt / not a table
+
+
+@dataclass
+class ConfigHealthRead:
+    """What :func:`read_config_health_entries` found. *entries* is the legacy file's
+    ``entries`` object (``config_path -> {lastKnownGood?, lastPromotedGood?,
+    lastObservedSuspiciousSignature}``); *unread* counts cells that exist but were not parsed
+    (over the cell bound, not JSON, nested past the bound, or not an object) -- the caller
+    must say so rather than count them as clean; *truncated* means rows beyond the row cap
+    were not returned."""
+    status: str
+    entries: dict = field(default_factory=dict)
+    unread: int = 0
+    truncated: bool = False
+
+
+def _config_health_fingerprint(cell):
+    """``(fingerprint dict | None, unread)`` for one fingerprint column. SQL NULL (what the
+    vendor writes for "unset") is absent, not unread; a cell that was dropped by the size
+    bound arrives here as NULL too, so the caller passes *oversized* separately."""
+    if cell is None:
+        return None, 0
+    if isinstance(cell, bytes):
+        cell = cell.decode("utf-8", "replace")
+    if not isinstance(cell, str):
+        return None, 1
+    try:
+        parsed = _loads_bounded(cell)
+    except (ValueError, RecursionError):
+        return None, 1
+    if not isinstance(parsed, dict):
+        return None, 1
+    return parsed, 0
+
+
+def read_config_health_entries(
+    home, max_rows: int = CONFIG_HEALTH_MAX_ROWS,
+    max_cell_bytes: int = CONFIG_HEALTH_MAX_CELL_BYTES,
+) -> ConfigHealthRead:
+    """The config-health record in ``<home>/state/openclaw.sqlite`` (``config_health_entries``),
+    normalised to the shape ``logs/config-health.json`` had. Never raises.
+
+    Same rules as ``read_config_audit_rows`` above: ``trajectorystore._open_and_verify_table``
+    opens read-only (``mode=ro`` + ``query_only``), refuses a FIFO/device at the database or a
+    sidecar path before ``sqlite3.connect``, and refuses a name that is not a REAL TABLE in the
+    file's own schema (view / virtual table / rootpage alias / generated column) inside the one
+    transaction that also runs the SELECT. The signature column is read as a bounded string
+    because the only question asked of it is "is it set"; the config PATH is kept (a caller
+    reports it by basename). A cell the bound drops is counted in *unread*, never skipped.
+    """
+    db_path = Path(home).expanduser() / "state" / "openclaw.sqlite"
+    try:
+        if not pathprobe.exists(db_path):
+            return ConfigHealthRead(CONFIG_HEALTH_NO_DB)
+    except OSError:
+        return ConfigHealthRead(CONFIG_HEALTH_UNREADABLE)
+    conn, kind, unreadable = _trajectorystore._open_and_verify_table(
+        db_path, CONFIG_HEALTH_TABLE
+    )
+    if unreadable:
+        return ConfigHealthRead(CONFIG_HEALTH_UNREADABLE)
+    if conn is None:  # kind == "absent"
+        return ConfigHealthRead(CONFIG_HEALTH_NO_TABLE)
+    # The SELECT is written INLINE at its `.execute()` call (not a named constant):
+    # `scripts/state_db_drift_gate.py` extracts only literal strings handed to `.execute()`.
+    try:
+        cur = conn.execute(
+            "SELECT substr(config_path, 1, ?), "
+            "CASE WHEN length(CAST(last_known_good_json AS BLOB)) <= ? "
+            "THEN last_known_good_json END, "
+            "length(CAST(last_known_good_json AS BLOB)) > ?, "
+            "CASE WHEN length(CAST(last_promoted_good_json AS BLOB)) <= ? "
+            "THEN last_promoted_good_json END, "
+            "length(CAST(last_promoted_good_json AS BLOB)) > ?, "
+            "substr(last_observed_suspicious_signature, 1, ?), "
+            "last_observed_suspicious_signature IS NOT NULL "
+            "FROM config_health_entries ORDER BY config_path LIMIT ?",
+            (_CONFIG_HEALTH_MAX_PATH_CHARS, max_cell_bytes, max_cell_bytes, max_cell_bytes,
+             max_cell_bytes, _CONFIG_HEALTH_MAX_SIGNATURE_CHARS, max_rows + 1),
+        )
+        rows = cur.fetchall()
+    except sqlite3.Error:
+        return ConfigHealthRead(CONFIG_HEALTH_UNREADABLE)
+    finally:
+        conn.close()
+    result = ConfigHealthRead(CONFIG_HEALTH_OK if rows else CONFIG_HEALTH_EMPTY)
+    if len(rows) > max_rows:
+        result.truncated = True
+        rows = rows[:max_rows]
+    for path, known_good, known_big, promoted, promoted_big, signature, signature_set in rows:
+        key = path.decode("utf-8", "replace") if isinstance(path, bytes) else str(path)
+        # The key is only ever shown by basename; a clash after the length cut must not let
+        # one row overwrite another row's signature.
+        while key in result.entries:
+            key += "#"
+        entry: dict = {}
+        for name, cell, big in (("lastKnownGood", known_good, known_big),
+                                ("lastPromotedGood", promoted, promoted_big)):
+            parsed, unread = _config_health_fingerprint(cell)
+            result.unread += unread + (1 if big else 0)
+            if parsed is not None:
+                entry[name] = parsed
+        # Anything but SQL NULL is a recorded signature (the vendor stores a string); the
+        # value itself is never reported. "Set" is decided by `IS NOT NULL` BEFORE the
+        # substr(): substr() of a zero-length BLOB is NULL, which would read as unset.
+        if not signature_set:
+            signature = None
+        elif signature is None:
+            signature = ""
+        elif isinstance(signature, bytes):
+            signature = signature.decode("utf-8", "replace")
+        entry["lastObservedSuspiciousSignature"] = (
+            None if signature is None else str(signature)
+        )
+        result.entries[key] = entry
+    return result
+
+
+def _collect_config_health(home: Path, ctx: Context) -> None:
+    """C-687: record what the state database's config-health table holds on *ctx*."""
+    read = read_config_health_entries(home)
+    ctx.config_health_status = read.status
+    ctx.config_health_entries = read.entries
+    ctx.config_health_unread = read.unread
+    ctx.config_health_truncated = read.truncated
+
+
 # B-845: the row key every real read/write of the per-agent store uses.
 # Grounded against the installed dist (2026.9.5, sqlite-Cp6HSWY4.mjs): `PRIMARY_ROW_KEY
 # = "primary"`, and every one of `readPersistedAuthProfileStoreRaw` /
@@ -9868,6 +10025,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
     _collect_update_runs(home, ctx)    # F-192: OpenClaw's own self-update ledger
+    _collect_config_health(home, ctx)  # C-687: config-health record, state-DB era
     _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
     _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only

@@ -351,7 +351,7 @@ config. **The scanner itself makes no network calls.** Full read scope:
 
 - `~/.openclaw/openclaw.json` and workspace bootstrap files (`SOUL.md`, `AGENTS.md`, etc.)
 - text of installed skills/plugins (Python files are AST-parsed, never executed)
-- the config-write journal (`diagnostic_events` rows, scope `config-audit`, in `~/.openclaw/state/openclaw.sqlite`; older installs: `~/.openclaw/logs/config-audit.jsonl`) and `config-health.json` (config-log checks)
+- the config-write journal (`diagnostic_events` rows, scope `config-audit`, in `~/.openclaw/state/openclaw.sqlite`; older installs: `~/.openclaw/logs/config-audit.jsonl`) and the config-health record (`config_health_entries` rows in the same database; older installs: `~/.openclaw/logs/config-health.json`) (config-log checks)
 - `~/.openclaw/agents/.../sessions/*.jsonl` (approval-policy posture)
 - the cron job store, the two global OpenClaw dotenv files (`.env`/`gateway.env` - these can hold
   real operational secrets; parsed in full, but only a handful of named toggle/URL keys are ever

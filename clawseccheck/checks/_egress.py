@@ -22,13 +22,18 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    CONFIG_HEALTH_EMPTY,
+    CONFIG_HEALTH_OK,
+    CONFIG_HEALTH_UNREADABLE,
     LIMIT_DOMAIN_CONFIG,
     LIMIT_DOMAIN_STATE_DB,
     Context,
     agent_roster,
     dig,
     note_limit,
+    read_config_health_entries,
 )
+from ..collector import ConfigHealthRead as _ConfigHealthRead
 from .. import configjournal as _configjournal
 from .. import trajectorystore as _trajectorystore
 from ..configloader import loads_bounded as _loads_bounded
@@ -2688,37 +2693,30 @@ def check_config_audit_log(ctx: Context) -> Finding:
 # ---------------------------------------------------------------------------
 # B78 - Config-health integrity tracker review
 # ---------------------------------------------------------------------------
-def check_config_health_integrity(ctx: Context) -> Finding:
-    health_path = ctx.home / "logs" / "config-health.json"
-    if not pathprobe.is_file(health_path):
-        return _finding(
-            "B78",
-            UNKNOWN,
-            "config-health integrity file not found \u2014 cannot evaluate config integrity history.",
-            "Keep config-health tracking (logs/config-health.json) enabled so OpenClaw can "
-            "detect and flag suspicious config states.",
-        )
-    try:
-        data = _loads_bounded(health_path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return _finding(
-            "B78",
-            UNKNOWN,
-            "config-health integrity file present but unreadable or malformed \u2014 cannot "
-            "evaluate config integrity history.",
-            "Ensure logs/config-health.json is valid JSON and owner-readable.",
-        )
+# C-687: the SQLite-era wording. The legacy-file strings below are unchanged byte for byte
+# - a fingerprint hashes `detail` - so only inputs that reach a NEW situation (a state-database
+# record, or both containers at once) get new text; the advice (`fix`) is not hashed.
+_B78_FIX_KEEP = (
+    "Keep config-health tracking enabled so OpenClaw can detect and flag suspicious config "
+    "states: current OpenClaw records it in the state database (state/openclaw.sqlite, table "
+    "config_health_entries); older versions wrote logs/config-health.json."
+)
+_B78_WARN_FIX = (
+    "Treat this as possible config tampering: compare the live config against the "
+    "last-known-good, restore from a trusted backup if it diverged, and rotate any "
+    "credentials that may have been exposed."
+)
+_B78_PASS_FIX = "Keep config-health tracking enabled and review it after any unexpected config change."
+_B78_DB_SCOPE = " in the state database"
+# Most severe first, as for B77: an UNKNOWN must never be outvoted by a clean PASS from the
+# other container.
+_B78_RANK = {WARN: 2, UNKNOWN: 1, PASS: 0}
 
-    entries = data.get("entries") if isinstance(data, dict) else None
-    if not isinstance(entries, dict) or not entries:
-        return _finding(
-            "B78",
-            UNKNOWN,
-            "config-health file has no tracked config entries \u2014 nothing to evaluate.",
-            "Keep config-health tracking (logs/config-health.json) enabled so OpenClaw can "
-            "detect and flag suspicious config states.",
-        )
 
+def _b78_judge_entries(entries: dict, scope: str = "", unread_note: str = "") -> tuple:
+    """``(status, detail, fix, evidence)`` for one container's ``entries`` object. *scope* is
+    empty for the legacy file (its text is unchanged byte for byte) and names the state
+    database otherwise; *unread_note* is non-empty when part of the container was not read."""
     evidence: list[str] = []
     for path, info in entries.items():
         if not isinstance(info, dict):
@@ -2729,22 +2727,151 @@ def check_config_health_integrity(ctx: Context) -> Finding:
 
     if evidence:
         n = len(evidence)
-        return _finding(
-            "B78",
+        fix = _B78_WARN_FIX
+        if unread_note:
+            fix += f" Also: {unread_note}, so other entries may be affected."
+        return (
             WARN,
-            f"config integrity alert: {n} tracked config(s) recorded a suspicious signature "
-            "\u2014 OpenClaw observed a config state it could not verify as known-good.",
-            "Treat this as possible config tampering: compare the live config against the "
-            "last-known-good, restore from a trusted backup if it diverged, and rotate any "
-            "credentials that may have been exposed.",
-            evidence=evidence[:10],
+            f"config integrity alert: {n} tracked config(s){scope} recorded a suspicious "
+            "signature \u2014 OpenClaw observed a config state it could not verify as known-good.",
+            fix,
+            evidence[:10],
         )
-    return _finding(
-        "B78",
+    if unread_note:
+        # A record that was not read is not a clean record (Golden Rule #4).
+        return (
+            UNKNOWN,
+            f"{len(entries)} tracked config(s){scope} show no suspicious signature, but "
+            f"{unread_note} \u2014 cannot confirm the record is clean.",
+            "Review state/openclaw.sqlite (table config_health_entries) directly for the "
+            "rows or columns this scan did not read.",
+            [],
+        )
+    if scope:
+        # The vendor sets the signature only for four structural anomalies (size drop, missing
+        # meta, missing gatewayMode, update-channel-only root) and clears it on any healthy
+        # observation, so a clean row says "the latest observation was healthy" - not that the
+        # config's history is clean. The legacy-file wording below predates this and is
+        # byte-identical (a fingerprint hashes it).
+        return (
+            PASS,
+            f"OpenClaw's own record for {len(entries)} tracked config(s){scope} shows no "
+            "suspicious signature on its latest observation (it records only structural "
+            "anomalies and clears the mark after a healthy observation; it is not a "
+            "content-integrity history).",
+            _B78_PASS_FIX,
+            [],
+        )
+    return (
         PASS,
         f"all {len(entries)} tracked config(s) have a clean integrity history "
         "(no suspicious signatures observed).",
-        "Keep config-health tracking enabled and review it after any unexpected config change.",
+        _B78_PASS_FIX,
+        [],
+    )
+
+
+def _b78_judge_file(health_path: Path) -> tuple:
+    try:
+        data = _loads_bounded(health_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return (
+            UNKNOWN,
+            "config-health integrity file present but unreadable or malformed \u2014 cannot "
+            "evaluate config integrity history.",
+            "Ensure logs/config-health.json is valid JSON and owner-readable.",
+            [],
+        )
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict) or not entries:
+        return (
+            UNKNOWN,
+            "config-health file has no tracked config entries \u2014 nothing to evaluate.",
+            _B78_FIX_KEEP,
+            [],
+        )
+    return _b78_judge_entries(entries)
+
+
+def _b78_judge_db(status: str, entries: dict, unread: int, truncated: bool) -> tuple:
+    if status == CONFIG_HEALTH_UNREADABLE:
+        return (
+            UNKNOWN,
+            "the state database is present but its config-health record (table "
+            "config_health_entries) could not be read \u2014 cannot evaluate config "
+            "integrity history.",
+            "Check that state/openclaw.sqlite is a valid, owner-readable SQLite database "
+            "and that config_health_entries is a real table, not a view.",
+            [],
+        )
+    if status == CONFIG_HEALTH_EMPTY:
+        return (
+            UNKNOWN,
+            "the state database's config-health table has no tracked config entries "
+            "\u2014 nothing to evaluate.",
+            _B78_FIX_KEEP,
+            [],
+        )
+    reasons = []
+    if unread:
+        reasons.append(f"{unread} stored fingerprint value(s) could not be read")
+    if truncated:
+        reasons.append("more rows exist than this scan's row limit")
+    return _b78_judge_entries(entries, _B78_DB_SCOPE, " and ".join(reasons))
+
+
+def check_config_health_integrity(ctx: Context) -> Finding:
+    health_path = ctx.home / "logs" / "config-health.json"
+    # A Context the collector filled carries the state-database read; a bare one (a unit test,
+    # a caller that built it by hand) is read here, never assumed absent.
+    if ctx.config_health_status:
+        db = _ConfigHealthRead(ctx.config_health_status, ctx.config_health_entries,
+                               ctx.config_health_unread, ctx.config_health_truncated)
+    else:
+        db = read_config_health_entries(ctx.home)
+
+    # Judge whichever container exists, by presence - never by a version string. A state
+    # database that is present but unreadable is a container that could not be judged (UNKNOWN),
+    # not an absent one; a database without the table is simply a legacy install.
+    judged: list[tuple] = []
+    if pathprobe.is_file(health_path):
+        judged.append(("legacy file logs/config-health.json", "legacy file",
+                       _b78_judge_file(health_path)))
+    if db.status in (CONFIG_HEALTH_OK, CONFIG_HEALTH_EMPTY, CONFIG_HEALTH_UNREADABLE):
+        judged.append(("state database", "state database",
+                       _b78_judge_db(db.status, db.entries, db.unread, db.truncated)))
+
+    if not judged:
+        return _finding(
+            "B78",
+            UNKNOWN,
+            "config-health integrity file not found \u2014 cannot evaluate config integrity history.",
+            _B78_FIX_KEEP,
+        )
+    if len(judged) == 1:
+        status, detail, fix, evidence = judged[0][2]
+        return _finding("B78", status, detail, fix, evidence=evidence)
+
+    # Both containers exist (a rollback re-created the file beside a database that already holds
+    # the record): neither speaks for the other. Judge each, take the most severe verdict, and
+    # name both so a clean database can never hide a suspicious file, or the reverse.
+    judged.sort(key=lambda item: -_B78_RANK[item[2][0]])
+    status, _, fix, _ = judged[0][2]
+    if status == PASS:
+        fix = ("Keep config-health tracking enabled and review it after any unexpected config "
+               "change; keep only the container your OpenClaw version writes (the state "
+               "database record or logs/config-health.json).")
+    parts, evidence = [], []
+    for long_name, tag, (_, detail, _, ev) in judged:
+        parts.append(f"{long_name}: {detail}")
+        evidence.extend(f"[{tag}] {e}" for e in ev)
+    return _finding(
+        "B78",
+        status,
+        "config-health records exist in two places and were each checked \u2014 "
+        + " ".join(parts),
+        fix,
+        evidence=evidence[:10],
     )
 
 

@@ -3,7 +3,7 @@
 -- openclaw-version: 2026.10.2
 -- state-schema-version: 20
 -- generated: 2026-10-12
--- tables: 13
+-- tables: 14
 --
 -- What this is
 -- ------------
@@ -104,6 +104,14 @@ CREATE TABLE IF NOT EXISTS capture_events (
   meta_json TEXT,
   FOREIGN KEY (session_id) REFERENCES capture_sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (data_blob_id) REFERENCES capture_blobs(blob_id) ON DELETE SET NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS config_health_entries (
+  config_path TEXT NOT NULL PRIMARY KEY,
+  last_known_good_json TEXT,
+  last_promoted_good_json TEXT,
+  last_observed_suspicious_signature TEXT,
+  updated_at_ms INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS config_machine_state (
