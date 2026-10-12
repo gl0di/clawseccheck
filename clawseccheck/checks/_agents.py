@@ -2068,16 +2068,21 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
     agent_dir/workspace_dir/spawn_mode/outcome) is judged here - they are surfaced as-is.
 
     NARROWS, does not close: this reads recorded activity, never a durable audit trail.
-    ``subagent_runs`` rows are pruned well before they could serve as forensic history (the
-    default is ~60 minutes after the run was SPAWNED/REGISTERED, not after it completes -
-    ``archiveAtMs = now + archiveAfterMs`` is computed once at registration time
-    (``subagent-registry-DexSZ4w1.js:2238-2240``, and again at steer-restart/replace,
-    ``:2156-2158``) and never recomputed at completion, so a long-running subagent's
-    retention window can already be nearly spent by the time it finishes; see the
-    collector's own docstring and ``docs/research/openclaw-schema-recon.md`` §28), so a
-    populated table proves RECENT (or explicitly ``cleanup:"keep"``) activity - never "this
-    is every subagent ever spawned", and an EMPTY table is never proof no subagent has ever
-    run (retention, not absence).
+    Retention was measured by EXECUTING the installed build's own
+    ``updateSubagentArchiveAtMs`` (``tests/test_c690_dist_retention_grounding.py`` repeats it
+    on every local run): the removal clock starts when a run COMPLETES, not when it is
+    spawned, and only a run that was spawned with ``cleanup:"delete"`` (or a collector run)
+    gets one (default 60 minutes, ``agents.defaults.subagents.archiveAfterMinutes``). A
+    ``cleanup:"keep"`` spawn - the spawn tool's default - and a run still in flight get no
+    removal time and are never swept by that clock; a session-mode run is dropped ~5 minutes
+    after its cleanup completes. So a populated table proves activity that may well be old
+    (a ``keep`` spawn's row stays), an absent row proves nothing (a finished ``delete`` spawn
+    is gone an hour later), and an EMPTY table is never proof no subagent has ever run. The
+    retention rule is spelled out in the finding's ``fix``; ``detail`` only says the rows are
+    a working registry. ``detail`` was reworded (it used to claim spawns are pruned within an
+    hour of being SPAWNED, which is false), so the B18 disk-disclosure fingerprints moved -
+    they already varied with the spawn count and no fixture pins one. See the collector's own
+    docstring and ``docs/research/openclaw-schema-recon.md`` section 28.
 
     The subagent's own delegated ``task`` text is deliberately never echoed into evidence
     here (§8 - it is free-form content the agent was asked to act on, potentially sensitive);
@@ -2119,19 +2124,26 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
         "Config declares no subagent delegation, but the OpenClaw state database's "
         f"subagent_runs table records {n} spawn(s) that actually ran \u2014 config and disk "
         "disagree. This is a disclosure, not proof of an active misconfiguration: these "
-        "rows are pruned well before they could serve as durable forensic history (recorded "
-        "spawns are typically pruned within about an hour of being SPAWNED, not of "
-        "completing \u2014 a long-running spawn's retention window can already be nearly gone "
-        "by the time it finishes; sooner still for session-mode runs), so this may reflect "
-        "delegation that has since been removed "
-        "from config rather than a hidden capability that is still live.",
+        "rows are OpenClaw's working registry, not a durable forensic history (how long a "
+        "row is kept depends on how the spawn was started \u2014 see the advice below), so "
+        "this may reflect delegation that has since been removed from config rather than a "
+        "hidden capability that is still live.",
         "If subagent delegation is intentional, declare it explicitly under "
         "agents.subagents / agents.defaults.subagents / "
         f"{_key_advice(ctx, 'agents.list', 'agents.entries')} so the normal "
         "approval-gate check (this same B18) applies to it going forward. If it is not "
         "intentional, use the child_session_key values below to find out what spawned "
         "these runs before assuming the capability is gone \u2014 it may simply be unrecorded "
-        "by config, not absent."
+        "by config, not absent. Retention: how long OpenClaw keeps these rows depends on "
+        "how the spawn was started. A spawn with cleanup 'delete' (or a collector run) is "
+        "removed "
+        "about 60 minutes after it COMPLETED (agents.defaults.subagents.archiveAfterMinutes, "
+        "counted from completion, not from the spawn, and never while the run is still in "
+        "flight); a spawn with the default cleanup 'keep' has no removal time and is not "
+        "swept by that clock; a session-mode run is dropped about 5 minutes after its "
+        "cleanup completes. So an old row can still be here and a finished 'delete' spawn "
+        "can already be gone \u2014 an empty or short table never proves that no subagent "
+        "ever ran."
         + (
             f" Note: {ctx.subagent_runs_elided} of these row(s) hold data nested deeper "
             "than the audit reads, so content below that depth was never examined."

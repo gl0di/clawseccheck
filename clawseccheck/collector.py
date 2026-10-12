@@ -1032,10 +1032,12 @@ class Context:
     # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
     # task (capped, see _MAX_SUBAGENT_TASK_CHARS), outcome (parsed outcome_json dict, or None
     # when the run has not ended / no outcome was recorded yet), ended_reason, created_at.
-    # B-709: on the MODERN (payload_json column present) table shape, agent_dir/workspace_dir/
-    # spawn_mode/task are permanently None -- that schema does not carry them at all (see
-    # _collect_subagent_runs's docstring). A one-time LIMIT_DOMAIN_AGENTS disclosure names
-    # this per collection run; a consumer must not read the None as "no workspace recorded".
+    # B-709/C-690: on the MODERN (payload_json column present) table shape, agent_dir/
+    # workspace_dir/spawn_mode/task are read from the payload blob (and from parentCompletion
+    # when the completion target is the parent); a row whose payload lacks one keeps None. A
+    # one-time LIMIT_DOMAIN_AGENTS disclosure is emitted only when NO row read carries any of
+    # the four (see _collect_subagent_runs's docstring); a consumer must not read a None as
+    # "no workspace recorded".
     # DISCLOSURE ONLY - see checks/_agents.py::_disk_subagent_disclosure for the consumer;
     # there is deliberately no FAIL-capable predicate anywhere over this data (CLAUDE.md GR#5,
     # the task's own out-of-tree-workspace_dir / model-fallback traps).
@@ -8282,6 +8284,24 @@ def _parse_subagent_modern_payload(raw, elided_out: "list | None" = None) -> "tu
     return {}, True
 
 
+def _subagent_payload_text(fields: dict, key: str, *, cap: "int | None" = None) -> "str | None":
+    """C-690: one named string out of a MODERN subagent payload record, or ``None``.
+
+    ``agentDir`` / ``workspaceDir`` / ``spawnMode`` / ``task`` are written by the vendor's
+    serializer (``bindSubagentRunRecord``) but are optional - an undefined value is dropped
+    by ``JSON.stringify`` - so a missing key, a blank string or a non-string value is simply
+    "this row does not say" (``None``), never a fabricated empty value. ``cap`` truncates the
+    way the legacy ``task`` column is truncated, so nothing downstream holds an unbounded
+    blob.
+    """
+    value = fields.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if cap is not None and len(value) > cap:
+        return value[:cap] + "...(truncated)"
+    return value
+
+
 def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     """B-296 (DISK-5 increment 1): read-only collection of the OpenClaw subagent-spawn
     registry (``subagent_runs`` in ``~/.openclaw/state/openclaw.sqlite``) into
@@ -8297,27 +8317,31 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     §28 for the full insert/retention grounding; the two facts that shape this collector:
 
     INSERT SEMANTICS (population was UNPROVEN at filing time - GR#4 required grounding
-    before shipping): a row is written SYNCHRONOUSLY at spawn time, before the subagent does
-    any work. ``subagent-registry-DexSZ4w1.js`` (the register path): ``params.runs.set(runId,
-    entry)`` followed immediately by ``params.persistOrThrow()`` (-> ``saveSubagentRegistryToSqlite``
-    -> an upsert into ``subagent_runs`` keyed on ``run_id``), with the newly-set entry rolled
-    back on a persist failure. So a row proves a spawn was REGISTERED - not necessarily that
-    it ran to completion; ``outcome_json`` is what distinguishes the two (absent/null while
-    the run is still in flight).
+    before shipping): a row is written when the spawn is REGISTERED - after the child turn
+    has been dispatched, not before it does any work. So a row proves a spawn was
+    REGISTERED - not necessarily that it ran to completion; the outcome is what
+    distinguishes the two (absent while the run is still in flight). Rows are committed
+    through the registry's own mutation path (``mutateSubagentRuns``); the older
+    whole-snapshot ``saveSubagentRegistryToSqlite`` replace this reader was first grounded
+    against no longer exists.
 
-    RETENTION IS SHORT - do not imply durable forensic history. The same module's periodic
-    sweep deletes a completed run's row via the whole-snapshot
-    ``deleteFrom("subagent_runs").where("run_id","not in", runIds)`` replace once
-    ``archiveAtMs`` (``now + agents.defaults.subagents.archiveAfterMinutes`` - default 60
-    MINUTES after the run was SPAWNED/REGISTERED (``resolveArchiveAfterMs``), NEVER
-    recomputed at completion - a long-running run's window can already be nearly spent
-    by the time it ends) has passed, or ~5 minutes after
-    cleanup completes for session-mode runs with no ``archiveAtMs`` at all
-    (``SESSION_RUN_TTL_MS = 5 * 60_000``). The one documented exception: a run registered
-    with ``cleanup:"keep"`` (non-session spawn mode) gets NO ``archiveAtMs`` and the sweep
-    skips it outright - kept until something else (e.g. the owning session's own lifecycle)
-    removes it. So: a populated table proves RECENT (or explicitly kept) activity, never a
-    complete history of every subagent ever spawned.
+    RETENTION - grounded by EXECUTING the vendor's own ``updateSubagentArchiveAtMs`` over
+    synthetic entries (``tests/test_c690_dist_retention_grounding.py`` re-does this on every
+    local run; nothing here is a reading of the source). ``archiveAtMs`` is the only removal
+    clock, and it is NOT set at registration (the registered entry carries
+    ``archiveAtMs: undefined``): that function is the single assignment site, and it runs
+    when a run COMPLETES (and at kill and at restore). It arms ``completedAt +
+    agents.defaults.subagents.archiveAfterMinutes`` (default 60 MINUTES) only for a run that
+    has ended AND either was spawned with ``cleanup:"delete"`` or is a collector run; a run
+    still in flight, a ``cleanup:"keep"`` run (the spawn tool's DEFAULT) and a session-mode
+    run get NO ``archiveAtMs``. The periodic sweep skips a row with no ``archiveAtMs`` when
+    it is a non-session ``cleanup:"keep"`` run (kept until something else, e.g. the owning
+    session's own lifecycle, removes it); a session-mode run with no ``archiveAtMs`` is
+    removed ~5 minutes after its cleanup completes (``SESSION_RUN_TTL_MS = 5 * 60_000``). So
+    the clock starts at COMPLETION, not at spawn, and a default-``keep`` spawn's row is never
+    swept: a populated table is NOT a complete history of every subagent ever spawned (a
+    finished ``delete`` run is gone an hour after it ended), but it is also stronger
+    evidence than "a short window" - never describe it as pruned within an hour of SPAWNING.
 
     WAL LAG: opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same
     pattern every other reader of this database uses. A reader connection sees the last
@@ -8360,16 +8384,22 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     created_at
     ===================  =========================================
 
-    ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` appear NOWHERE in that
-    canonical read - they are GONE, not moved (``task`` is literally the pre-v13 schema
-    marker in the migration gate, ``dist/openclaw-state-db-*.js:1900`` - the
-    ``workspace_attestations`` marker re-verified present in openclaw@2026.9.1, line
-    read on 2026.8.2). They are set
-    ``None`` on the modern path, and a consumer must not read that ``None`` as "no
-    workspace" - a ONE-TIME (per collection run, not per row) disclosure is emitted via
-    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` naming exactly which fields are
-    unavailable on this schema, so ``limit_hits_for(ctx, LIMIT_DOMAIN_AGENTS)`` lets a
-    consumer tell "no workspace was ever recorded" apart from "this schema cannot say".
+    ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` do not appear in that
+    canonical READ's alias list, but they are NOT gone: the vendor's serializer
+    (``bindSubagentRunRecord``, ``dist/subagent-registry.store.sqlite-*.mjs``) writes the
+    whole canonical record into ``payload_json``, so each lives at ``$.agentDir``,
+    ``$.workspaceDir``, ``$.spawnMode`` and ``$.task`` (under ``$.parentCompletion`` when the
+    completion target is the parent - the same unwrap the vendor's reader does, handled in
+    ``_parse_subagent_modern_payload``). Executed, not read: rows produced by that
+    serializer and read back through this collector carry all four. They were UNREAD, not
+    absent. Each is taken only when it is a string of the expected type (``task`` capped at
+    ``_MAX_SUBAGENT_TASK_CHARS`` like the legacy column); a row that lacks one - the key is
+    optional and ``JSON.stringify`` drops an undefined value - keeps ``None``, which B18
+    shows as ``?``. A ONE-TIME (per collection run, not per row) disclosure via
+    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` is emitted ONLY when NONE of the
+    rows read carries any of the four (a data-driven statement about the rows, never a claim
+    about the schema), so ``limit_hits_for(ctx, LIMIT_DOMAIN_AGENTS)`` still lets a consumer
+    tell "no workspace was ever recorded" apart from "no row here could say".
 
     Which shape a given install has is decided by PROBING ``PRAGMA table_info(subagent_runs)``
     once and branching on COLUMN PRESENCE - never by trying one SELECT and catching
@@ -8384,7 +8414,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     already gets, with the columns actually seen recorded (never a guessed mapping).
 
     Named-key extraction only on the modern path (§8) - ``payload_json`` itself is never
-    stored or emitted whole, only the four keys above are pulled out of it.
+    stored or emitted whole, only the named keys above are pulled out of it.
     """
     state_dir = home / "state"
     sqlite_candidates = (
@@ -8463,17 +8493,6 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     truncated = len(rows) > _MAX_SUBAGENT_RUNS
     rows = rows[:_MAX_SUBAGENT_RUNS]  # discard the probe row; scanned set stays capped
 
-    if modern and rows:
-        # B-709: the lost-field disclosure -- ONE per collection run (not per row), only on
-        # the modern path, only when at least one row was actually read. Wording matched as
-        # closely as the code allows to what other consumers of this schema-change expect.
-        note_limit(
-            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
-            f"subagent_runs in '{db_path}' uses the consolidated payload schema: "
-            "agent_dir, workspace_dir, spawn_mode and task are not present on this "
-            "state schema \u2014 NOT read",
-        )
-
     good: list[dict] = []
     bad_count = 0
     elided_rows: list = []
@@ -8499,11 +8518,12 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
             good.append({
                 "child_session_key": child_session_key,
                 "model": model,
-                "agent_dir": None,       # B-709: gone, not moved -- see docstring
-                "workspace_dir": None,   # B-709: gone, not moved -- see docstring
-                "spawn_mode": None,      # B-709: gone, not moved -- see docstring
+                # C-690: unread, not absent -- see docstring.
+                "agent_dir": _subagent_payload_text(fields, "agentDir"),
+                "workspace_dir": _subagent_payload_text(fields, "workspaceDir"),
+                "spawn_mode": _subagent_payload_text(fields, "spawnMode"),
                 "run_timeout_seconds": run_timeout_seconds,
-                "task": None,            # B-709: gone, not moved -- see docstring
+                "task": _subagent_payload_text(fields, "task", cap=_MAX_SUBAGENT_TASK_CHARS),
                 "outcome": outcome,
                 "ended_reason": ended_reason,
                 "created_at": created_at,
@@ -8530,6 +8550,21 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
                 "ended_reason": ended_reason,
                 "created_at": created_at,
             })
+
+    if modern and good and not any(
+        run[key] is not None for run in good
+        for key in ("agent_dir", "workspace_dir", "spawn_mode", "task")
+    ):
+        # C-690: a statement about the ROWS, not about the schema -- the four fields are
+        # written by the vendor serializer, so a row set where none of them is present is
+        # worth saying out loud (B18 shows "?" for each), and one where any row carries
+        # them is not (a single row lacking one is just that row's "?").
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
+            f"subagent_runs in '{db_path}' uses the consolidated payload schema: none of the "
+            f"{len(good)} row(s) read carries agent_dir, workspace_dir, spawn_mode or task "
+            "in its payload_json \u2014 shown as unknown, not as empty",
+        )
 
     ctx.subagent_runs_elided = len(elided_rows)
     if elided_rows:
