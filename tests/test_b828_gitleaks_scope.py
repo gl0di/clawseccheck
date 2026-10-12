@@ -56,6 +56,9 @@ _PINNED_FINGERPRINTS = {
     # the shell variable $f); both are split into fragments at HEAD.
     "47fb954d43148120217c6373353be1e868da1542:tests/test_b997_placeholder_patterns.py:generic-api-key:91",
     "234c5577f980a73ac772a509221b6fa99caac6c3:tests/test_b894_shell_loop_cred_taint.py:curl-auth-header:720",
+    # A settings string under a credential-named key, published on dev before the 4.4.0 scan
+    # caught it; split into fragments at HEAD.
+    "4fe23739704b3b2d91bed2ed90c5ce5e0f67c0ae:tests/test_c688_plaintext_at_vendor_sensitive_paths.py:generic-api-key:269",
 }
 
 # gitleaks allowlist keys that broaden an exemption beyond one exact, anchored value:
