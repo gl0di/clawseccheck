@@ -19,9 +19,10 @@ hide a plugin or skill, and a symlink loop, an unreadable plugin manifest or a n
 longer crashes, hangs or passes.
 
 **Breaking:** the minimum supported Python is now 3.10, because 3.9 has been end of life
-since October 2025 (this is a minor release by the maintainer's decision, although dropping a Python version is a
-breaking change under SemVer). On Python 3.9 the command-line tool exits with "needs Python 3.10+
-(found X.Y)" instead of running. Two other changes can alter an exit code: `--vet`,
+since October 2025 (this is a minor release by the maintainer's decision, although dropping a
+Python version is a breaking change under SemVer). On Python 3.9 the command-line tool exits
+with "needs Python 3.10+ (found X.Y)" instead of running. Two other changes can alter an exit
+code: `--vet`,
 `--vet-skill` and `--advise` on a folder with the scanner's own engine layout now answer
 CAUTION and exit 1, not INSTALL and 0, for a tree they never opened; and `audit.py` exits 2
 when importable files sit beside it. Because several checks stopped answering PASS where they
