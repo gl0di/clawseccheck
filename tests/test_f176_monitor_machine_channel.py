@@ -92,7 +92,9 @@ def _mock(monkeypatch, *, alerts, notes, baseline_status=BASELINE_OK):
     Patches the names `clawseccheck/cli.py` actually calls (it imports them by name from
     `.monitor`), not `clawseccheck.monitor`'s own attributes.
     """
-    monkeypatch.setattr(cli, "diff_with_notes", lambda prev, curr: (list(alerts), list(notes)))
+    # `**_kw`: the shell also passes `members_out=` (C-718), which this fake has no use for.
+    monkeypatch.setattr(cli, "diff_with_notes",
+                        lambda prev, curr, **_kw: (list(alerts), list(notes)))
     monkeypatch.setattr(cli, "read_baseline",
                         lambda path: (baseline_status, {"x": 1} if baseline_status == BASELINE_OK
                                      else None))

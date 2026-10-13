@@ -257,10 +257,9 @@ def test_a_real_coverage_loss_reaches_the_exit_code(home, tmp_path):
     """End to end, through the real CLI, including `--fail-on medium` and the exit code a
     cron job reads — which is the whole point of the task.
 
-    The loss is genuine and is not otherwise announced: a second skill that declares no
-    version means the watch can no longer compare version numbers for it. The alert lands
-    on the run AFTER the skill first appears, because the version note only fires for
-    skills present on both sides."""
+    The loss is genuine: the skill declared a version at the last check and does not now,
+    so the watch can no longer compare version numbers for it. (A skill that NEVER declared
+    one is not a loss - the previous run did not compare it either; C-718 pins that.)"""
     store = tmp_path / "store"
     skills = home / "workspace" / "skills"
     (skills / "base").mkdir(parents=True)
@@ -271,11 +270,9 @@ def test_a_real_coverage_loss_reaches_the_exit_code(home, tmp_path):
     _run(home, store)
     assert _payload(_run(home, store))["alerts"] == [], "not steady before the change"
 
-    (skills / "noversion").mkdir()
-    (skills / "noversion" / "SKILL.md").write_text(
-        "---\nname: noversion\ndescription: declares no version\n---\n\nHelper.\n",
+    (skills / "base" / "SKILL.md").write_text(
+        "---\nname: base\ndescription: baseline helper\n---\n\nHelper.\n",
         encoding="utf-8")
-    _run(home, store)  # the skill appears; the version note cannot fire yet
 
     res = subprocess.run(
         [sys.executable, "-m", "clawseccheck.cli", "--monitor", "--json",

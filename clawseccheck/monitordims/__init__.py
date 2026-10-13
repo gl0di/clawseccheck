@@ -86,11 +86,18 @@ from ._configfile import (  # noqa: F401
 from ._coverage import (  # noqa: F401
     _COVERAGE_ALREADY_ANNOUNCED,
     _COVERAGE_DIGITS_RE,
+    _COVERAGE_EVENT_RE,
+    _COVERAGE_GAIN_RE,
     _COVERAGE_MAX_ENTRIES,
+    _COVERAGE_MEMBERS_MARK,
     _COVERAGE_NAME_CAP,
     _coverage_key,
     _coverage_live_text,
+    _coverage_member_digest,
+    _coverage_member_entries,
+    _coverage_recorded_members,
     _coverage_signature,
+    _coverage_standing,
     _diff_coverage,
 )
 

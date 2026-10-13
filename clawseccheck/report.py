@@ -5290,7 +5290,8 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False, persisted: bool = True,
                    baseline_corrupt: bool = False, live_test_skipped: bool = False,
-                   notes=None, verbose: bool = False, baseline_ref: str = "") -> str:
+                   notes=None, verbose: bool = False, baseline_ref: str = "",
+                   probe: bool = False) -> str:
     """Render the --monitor body.
 
     *baseline* - this was a genuine first run (no prior state file at all).
@@ -5301,6 +5302,11 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     for ongoing monitoring that is not in fact running. Alerts computed this run ARE still
     real (the comparison happened against a real baseline) and are still shown; the CLI
     prints the failure verdict on stderr and exits non-zero.
+
+    *probe* - C-718: this was a ``--monitor --probe`` run, which persists nothing by design.
+    ``persisted`` is False for it on an otherwise ordinary comparison (a failed journal or
+    state write sets it False too, and is not a probe), so a probe that found no drift may
+    say so; it still makes no claim about the baseline.
 
     *baseline_corrupt* - B-270: a prior baseline existed but could not be used. This is
     NOT a first run (saying "Baseline saved." there is what made a destroyed baseline look
@@ -5371,6 +5377,12 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         # B-271: nothing was written, so make no claim about the baseline either way.
         if alerts:
             lines += _alert_lines()
+        elif probe and not baseline and not baseline_corrupt and not live_test_skipped:
+            # C-718: a probe persists nothing by design, so it fell through here and never
+            # said the one thing an unchanged check says. Same claim, same scoping as the
+            # ordinary run's all-clear below - it is about drift, not about the baseline.
+            lines += ["", "No new threats among what was compared." if notes
+                      else f"No new threats since last check. {ok}"]
         if live_test_skipped:
             # B-379: distinguish "deliberately not persisted" from "write failed" -
             # the CLI does not treat this as an error, and neither should this text.
@@ -5403,10 +5415,14 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     #
     # Suppressed on three branches. A first run and a corrupt-baseline run compared nothing
     # at all and already say so in words, so a count would be a second, vaguer voice for a
-    # state that is already named precisely. The unpersisted branch is subtler: it
-    # deliberately makes NO affirmation about this run, so a qualifier there would scope a
-    # claim that was never made - the reader is handed a caveat with nothing to attach it to.
-    if not baseline and not baseline_corrupt and persisted:
+    # state that is already named precisely. The unpersisted branch is subtler: a run whose
+    # write failed, or whose grade was not recorded, deliberately makes NO affirmation
+    # about itself, so a qualifier there would scope a claim that was never made - the
+    # reader is handed a caveat with nothing to attach it to. A probe is the exception
+    # (C-718): it reports its alerts or says that nothing changed, exactly as an ordinary
+    # run does, so it carries the same qualifier.
+    _probe_claims = probe and not live_test_skipped
+    if not baseline and not baseline_corrupt and (persisted or _probe_claims):
         lines += _not_compared_lines(notes, verbose, ascii_only)
     # F-173: printed on every run that actually advanced the baseline, including the very
     # first - a first run is exactly when a user has nothing to compare against later, so

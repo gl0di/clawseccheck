@@ -12,6 +12,7 @@ It is the only part of ClawSecCheck that persists state: a single JSON snapshot
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json  # noqa: F401  (re-export; see tests/monitor_public_api.txt)
 import re
@@ -93,11 +94,18 @@ from .monitordims import (  # noqa: F401  (re-export: `monitor` is the import si
     _LABEL_CAP,
     _COVERAGE_ALREADY_ANNOUNCED,
     _COVERAGE_DIGITS_RE,
+    _COVERAGE_EVENT_RE,
+    _COVERAGE_GAIN_RE,
     _COVERAGE_MAX_ENTRIES,
+    _COVERAGE_MEMBERS_MARK,
     _COVERAGE_NAME_CAP,
     _coverage_key,
     _coverage_live_text,
+    _coverage_member_digest,
+    _coverage_member_entries,
+    _coverage_recorded_members,
     _coverage_signature,
+    _coverage_standing,
     _credential_names,
     _credentials_sig,
     _safe_store_label,
@@ -904,7 +912,53 @@ def diff(prev: dict | None, curr: dict) -> list[tuple[str, str]]:
     return diff_with_notes(prev, curr)[0]
 
 
-def diff_with_notes(prev: dict | None, curr: dict
+def _coverage_ahead(snap: dict) -> "tuple[list, dict | None]":
+    """C-718: ``(notes, members)`` an UNCHANGED next run will produce against this snapshot -
+    the snapshot diffed against itself (same members, same missing detail).
+
+    A comparison is only skipped for a member present on BOTH sides, so the run that first
+    sees a new tool server or a new unversioned skill skips nothing for it; the next,
+    unchanged run does, for the first time, and the coverage arm used to call that "a
+    comparison it made at the last check". Knowing one run early which members a
+    comparison cannot be made for is what lets this run (a) say that a blind spot opens
+    with it and (b) record those members, so the next run can tell them from a member that
+    really lost its comparison.
+
+    Contained: a failure returns ``([], None)``. ``None`` is not "no names": the record is
+    then written WITHOUT its member marker (``_coverage_record``), so the next run judges
+    by key exactly as it did before names were stored. Writing the marker with no names
+    would instead make every standing name read as lost on every later run.
+    """
+    try:
+        members: dict = {}
+        _alerts, notes = diff_with_notes(copy.deepcopy(snap), copy.deepcopy(snap),
+                                         members_out=members)
+        return list(notes), members
+    except Exception:  # noqa: BLE001 - a convenience; never take a run down
+        return [], None
+
+
+def _coverage_record(live_signature: list, ahead_members: "dict | None" = None) -> list:
+    """What to store as ``not_compared``: the standing keys this run skipped, then - after a
+    marker - the members each per-name comparison cannot be made for in this snapshot's
+    own state (``_coverage_ahead``).
+
+    The keys are stored exactly as before C-718 (event notes excepted, see
+    ``_COVERAGE_EVENT_RE``); nothing is recorded early under a key, because a key carries
+    no names and a key recorded for one member silenced a real loss for another. The
+    member entries are strings in the same list, so a state file written here still loads
+    in an older version, which reads them as keys it never matches. ``ahead_members`` of
+    ``None`` (the self-diff failed) writes keys only, with no marker.
+    """
+    out = sorted(set(_coverage_standing(live_signature)))[:_COVERAGE_MAX_ENTRIES]
+    if ahead_members is None:
+        return out
+    out.append(_COVERAGE_MEMBERS_MARK)
+    out.extend(_coverage_member_entries(ahead_members))
+    return out
+
+
+def diff_with_notes(prev: dict | None, curr: dict, members_out: "dict | None" = None
                     ) -> "tuple[list[tuple[str, str]], list[tuple[str, str]]]":
     """Return ``(alerts, notes)``.
 
@@ -932,6 +986,20 @@ def diff_with_notes(prev: dict | None, curr: dict
 
     def note(category: str, sentence: str) -> None:
         notes.append((category, sentence))
+
+    def note_members(category: str, sentence: str, members) -> None:
+        """A note counted per NAME, plus - for a caller that asked - which names.
+
+        C-718: the sentence carries only a count, and the coverage arm keys on the
+        sentence with its digits removed. That made "the comparison was skipped for
+        server B" indistinguishable from "it is now skipped for server A as well", so a
+        real loss for A went unreported whenever B was already uncomparable. ``members_out``
+        maps the same key to short digests of the names (never the names themselves).
+        """
+        note(category, sentence)
+        if members_out is not None:
+            members_out[_coverage_key(category, sentence)] = sorted(
+                {_coverage_member_digest(m) for m in members})
 
     # C-418: several comparisons are gated on a SUB-key inside a dimension rather than on
     # the dimension itself, so the `watched` manifest above cannot see them - it lists
@@ -1437,31 +1505,43 @@ def diff_with_notes(prev: dict | None, curr: dict
     # first - a tool server's observed surface is the live rug-pull signature, a skill's
     # capability set is what an update quietly widens.
     if _mcp_surface_unknown:
-        note(NOTE_UNDETERMINED,
-             f"The tools actually offered to your model by {len(_mcp_surface_unknown)} "
-             f"server(s) were not compared \u2014 no session transcript was available for one "
-             f"of the two runs, so a server that started offering new tools would not show.")
+        note_members(
+            NOTE_UNDETERMINED,
+            f"The tools actually offered to your model by {len(_mcp_surface_unknown)} "
+            f"server(s) were not compared \u2014 no session transcript was available for one "
+            f"of the two runs, so a server that started offering new tools would not show.",
+            _mcp_surface_unknown)
     if _mcp_tools_unknown:
-        note(NOTE_NO_PRIOR_RECORD,
-             f"The tool list declared by {len(_mcp_tools_unknown)} server(s) was not "
-             f"compared with last time.")
+        note_members(
+            NOTE_NO_PRIOR_RECORD,
+            f"The tool list declared by {len(_mcp_tools_unknown)} server(s) was not "
+            f"compared with last time.",
+            _mcp_tools_unknown)
     if _mcp_pkg_unknown:
-        note(NOTE_NO_PRIOR_RECORD,
-             f"Which package {len(_mcp_pkg_unknown)} server(s) launch was not compared \u2014 "
-             f"your saved record predates that detail, so a swap under a trusted name "
-             f"would not show.")
+        note_members(
+            NOTE_NO_PRIOR_RECORD,
+            f"Which package {len(_mcp_pkg_unknown)} server(s) launch was not compared \u2014 "
+            f"your saved record predates that detail, so a swap under a trusted name "
+            f"would not show.",
+            _mcp_pkg_unknown)
     if _skill_caps_unknown:
-        note(NOTE_NO_PRIOR_RECORD,
-             f"What {len(_skill_caps_unknown)} skill(s) are able to do was not compared "
-             f"with last time, so an update that widened them would not show.")
+        note_members(
+            NOTE_NO_PRIOR_RECORD,
+            f"What {len(_skill_caps_unknown)} skill(s) are able to do was not compared "
+            f"with last time, so an update that widened them would not show.",
+            _skill_caps_unknown)
     if _skill_ver_unknown:
-        note(NOTE_NO_PRIOR_RECORD,
-             f"Version numbers were not compared for {len(_skill_ver_unknown)} skill(s) \u2014 "
-             f"they do not declare one on both sides.")
+        note_members(
+            NOTE_NO_PRIOR_RECORD,
+            f"Version numbers were not compared for {len(_skill_ver_unknown)} skill(s) \u2014 "
+            f"they do not declare one on both sides.",
+            _skill_ver_unknown)
     if _chan_partial:
-        note(NOTE_NO_PRIOR_RECORD,
-             f"Some settings of {len(_chan_partial)} contact channel(s) had nothing to "
-             f"compare against \u2014 they are recorded on only one of the two runs.")
+        note_members(
+            NOTE_NO_PRIOR_RECORD,
+            f"Some settings of {len(_chan_partial)} contact channel(s) had nothing to "
+            f"compare against \u2014 they are recorded on only one of the two runs.",
+            _chan_partial)
     # B-500: a check that ran last time and not this time. The comparison loop walks the
     # CURRENT set only, so before this these ids were never visited at all.
     #

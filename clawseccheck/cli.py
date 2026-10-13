@@ -54,7 +54,8 @@ from .locking import journal_lock
 from .monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
     BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
-    _coverage_signature, _diff_coverage, _home_identity,
+    _coverage_ahead, _coverage_record, _coverage_signature, _diff_coverage,
+    _home_identity,
     diff_with_notes, home_mismatch, read_baseline, snapshot_reference,
     witnessed_reference_for_state,
 )
@@ -6311,7 +6312,11 @@ def _main(argv=None) -> int:
         # deliberately NOT passed to record_events below - a note is not an event, and a
         # tamper-evident timeline of what changed must not fill with entries about what
         # did not.
-        alerts, monitor_notes = diff_with_notes(prev, snap)
+        # C-718: `_cov_members_now` is filled with the NAMES (as digests) each per-name
+        # comparison was skipped for, so the coverage arm below can tell one member from
+        # another instead of comparing a count with its digits removed.
+        _cov_members_now: dict = {}
+        alerts, monitor_notes = diff_with_notes(prev, snap, members_out=_cov_members_now)
         # F-175 tier 3: an update is the moment a vetted setup silently becomes an unvetted
         # one. When the install records show a skill moved, re-run the vetting for THAT
         # skill and report the verdict - not merely "the version is different". This is the
@@ -6434,12 +6439,20 @@ def _main(argv=None) -> int:
         # regression now simply IS an alert, so `--fail-on medium` picks it up like any
         # other drift.
         _coverage_now = _coverage_signature(monitor_notes)
+        # C-718: what an unchanged next run will be unable to compare against this
+        # snapshot, and for which names. Computed once: the arm discloses a blind spot
+        # that opens with this run, and the record below stores the names so the next run
+        # can tell them from a name that really lost its comparison.
+        _cov_ahead_notes, _cov_ahead_members = _coverage_ahead(snap)
         _diff_coverage(prev, snap, monitor_notes, alerts,
-                       lambda _cat, _msg: monitor_notes.append((_cat, _msg)))
+                       lambda _cat, _msg: monitor_notes.append((_cat, _msg)),
+                       members_now=_cov_members_now, ahead_notes=_cov_ahead_notes,
+                       members_ahead=_cov_ahead_members)
         if base_status == BASELINE_OK:
             # Conditional on a USABLE baseline: a run that compared nothing must not store
             # an empty list, which would mean "the watch skipped nothing last time".
-            snap["not_compared"] = _coverage_now
+            # C-718: plus the names each per-name comparison cannot be made for.
+            snap["not_compared"] = _coverage_record(_coverage_now, _cov_ahead_members)
         # -- B-278 + B-271: write order is a deliberate choice, documented here ----------
         # Journal FIRST, then advance the baseline, and skip the advance if the journal
         # write failed. The alternative (advance first) is what lost drift permanently: a
@@ -6608,7 +6621,7 @@ def _main(argv=None) -> int:
                                  live_test_skipped=_skip_live_test_persist,
                                  notes=monitor_notes,
                                  verbose=bool(getattr(args, "verbose", False)),
-                                 baseline_ref=_reference))
+                                 baseline_ref=_reference, probe=_probe))
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure

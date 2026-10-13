@@ -383,15 +383,25 @@ def _seed_a_versioned_skill(home, store):
 
 
 def _add_an_unversioned_skill(home, store):
-    """B-676's own case: a comparison the watch made last time it can no longer make.
+    """A blind spot that OPENS: a skill that declares no version appears, so from now on
+    the watch cannot compare its version.
 
-    Needs one settle run — the version note only fires for skills present on BOTH sides,
-    so the run where the skill first appears cannot show it.
+    Judged on the run that brings the skill (no settle run). It used to be judged one run
+    later, on "could not make a comparison it made at the last check" - a sentence that
+    was false for it, since the previous run had not made that comparison either (C-718).
     """
     d = home / "workspace" / "skills" / "noversion"
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(
         "---\nname: noversion\ndescription: declares no version\n---\n\nHelper.\n",
+        encoding="utf-8")
+
+
+def _the_versioned_skill_drops_its_version(home, store):
+    """B-676's own case: a comparison the watch made last time it can no longer make. The
+    skill declared a version at the last check and does not now."""
+    (home / "workspace" / "skills" / "base" / "SKILL.md").write_text(
+        "---\nname: base\ndescription: baseline helper\n---\n\nHelper.\n",
         encoding="utf-8")
 
 
@@ -463,8 +473,11 @@ INCOMPLETENESS = {
     "baseline-corrupted":
         (None, _corrupt_the_baseline, 0, "previous monitor baseline could not be read"),
     "coverage-lost-skill-version":
-        (_seed_a_versioned_skill, _add_an_unversioned_skill, 1,
+        (_seed_a_versioned_skill, _the_versioned_skill_drops_its_version, 0,
          "could not make a comparison it made at the last check"),
+    "blind-spot-opens-with-an-unversioned-skill":
+        (_seed_a_versioned_skill, _add_an_unversioned_skill, 0,
+         "A new blind spot opens with this check"),
     # C-675: a credential landing in an agent's existing empty store row. Judged on the
     # sentence rather than on "any alert": on a real home this write also flips the
     # Lethal Trifecta, which is an alert whether or not the credential is reported.
