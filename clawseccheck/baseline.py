@@ -143,7 +143,10 @@ def load_ignore_entries(home: Path | str) -> "list[IgnoreEntry]":
     if not pathprobe.is_file(p):
         return []
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig drops ONE leading byte-order mark (C-716): an editor that saves the file
+        # with a BOM would otherwise glue it to the first line and that entry (or the comment
+        # that heads the file) would never match. A mark anywhere else stays content.
+        text = p.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return []
     out: "list[IgnoreEntry]" = []

@@ -90,8 +90,14 @@ def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
 
     Returns (record_dict, None) on success, or (None, reason) where reason is
     "no_actionable_findings" (refused -- an incident needs a real basis, never a
-    fabricated one) or "write_failed".
+    fabricated one), "no_config_found" (refused -- C-716: no OpenClaw configuration was
+    found, so the audit ran over nothing; the WARN/FAIL findings such a run still emits,
+    e.g. A1/B16, describe the absence of a setup, not a setup in trouble) or "write_failed".
+    A duck-typed *ctx* without ``config_found`` is treated as a found setup (the same
+    default the CLI's blind-run gate uses), so only a real collector Context can refuse.
     """
+    if not getattr(ctx, "config_found", True):
+        return None, "no_config_found"
     actionable = [f for f in findings if f.status in ACTIONABLE_STATUSES]
     if not actionable:
         return None, "no_actionable_findings"

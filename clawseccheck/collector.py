@@ -10514,6 +10514,15 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     )
             except OSError as exc:
                 ctx.errors.append(f"could not read {f}: {exc}")
+                # C-716: recorded the way an unreadable workspace DIRECTORY is above, so a
+                # file that exists but cannot be opened (chmod 000) is a disclosed gap, not
+                # a silent absence. B6 reads this: with nothing else read it says the file
+                # could not be read; beside a readable clean file it degrades PASS (B-657).
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
+                    f"could not read '{f}' ({exc.__class__.__name__}) \u2014 this bootstrap "
+                    "file was NOT scanned",
+                )
 
     _collect_global_dotenv(home, ctx)
     # Must precede _read_installed_skills: a bundled-skills-root relocation observed here

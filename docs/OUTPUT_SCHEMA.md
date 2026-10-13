@@ -2111,9 +2111,12 @@ still returned, but some of them may predate the incident, and a reader must not
 ### Notes
 
 **`--incident-open` refuses, rather than fabricates, when there is nothing to link.** It
-filters this run's findings to `catalog.ACTIONABLE_STATUSES` (the same shared FAIL-weight/
-WARN vocabulary every other consumer of that split uses) and exits 1 with no record
-written when none are actionable - an incident record needs a real basis.
+refuses (exit 1, no record written) when no OpenClaw configuration was found under
+`--home` - the WARN/FAIL findings such a run still emits describe the missing setup, not
+a setup in trouble - and otherwise filters this run's findings to
+`catalog.ACTIONABLE_STATUSES` (the same shared FAIL-weight/WARN vocabulary every other
+consumer of that split uses), exiting 1 with no record written when none are actionable -
+an incident record needs a real basis.
 
 **`pid`/`process_name` are best-effort, and narrowly sourced.** The only producer of a
 PID anywhere in this tool is `checks/_config.py`'s `check_effective_bind` (B340), and even

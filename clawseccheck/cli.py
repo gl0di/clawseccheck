@@ -3667,8 +3667,9 @@ def _main(argv=None) -> int:
                    help="INCIDENT-LIFECYCLE: open a PERSISTED incident record (status=open) linked to "
                         "this run's actionable findings, a best-effort PID when one of them "
                         "names one, and the current --events journal position \u2014 stored under "
-                        "--data-dir, never in the audited home. Refuses if nothing actionable "
-                        "was found this run")
+                        "--data-dir, never in the audited home. Refuses (non-zero exit, nothing "
+                        "written) if no OpenClaw configuration was found under --home, or if "
+                        "nothing actionable (a FAIL or WARN) was found this run")
     p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
                    help="INCIDENT-LIFECYCLE: transition a --incident-open record's status. STATUS is one "
                         "of open/investigating/mitigated/closed \u2014 forward moves one step at "
@@ -6008,6 +6009,11 @@ def _main(argv=None) -> int:
         if _inc_err == "no_actionable_findings":
             print("--incident-open: no actionable (WARN/FAIL-weight) findings this run \u2014 "
                   "nothing to open an incident about.", file=sys.stderr)
+            return 1
+        if _inc_err == "no_config_found":
+            print("--incident-open: no OpenClaw configuration was found under --home, so "
+                  "there is no setup to open an incident about; nothing was recorded.",
+                  file=sys.stderr)
             return 1
         if _inc_err == "write_failed":
             print(f"--incident-open: could not write to {_incidents_path(args)} \u2014 see "

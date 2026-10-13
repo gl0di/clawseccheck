@@ -1304,6 +1304,21 @@ def check_backups(ctx: Context) -> Finding:
 def check_bootstrap_injection(ctx: Context) -> Finding:
     """Coverage gap: the native audit does not scan bootstrap-file content; this check does."""
     if not ctx.bootstrap:
+        # C-716: "none found" and "could not look" are different facts. The collector
+        # records a bootstrap-domain limit hit when a workspace directory or file could not
+        # be checked/read (e.g. chmod 000), and that case used to be reported as absence.
+        # The status is unchanged; only the unreadable case gets new wording, so the
+        # sentence below (which baseline.fingerprint() hashes) stays byte-identical for a
+        # truly absent workspace.
+        if limit_hits_for(ctx, LIMIT_DOMAIN_BOOTSTRAP):
+            return _finding(
+                "B6",
+                UNKNOWN,
+                "No bootstrap files could be inspected: a workspace directory or "
+                "bootstrap file could not be read, so their absence is not established.",
+                "Make the workspace directory and its SOUL.md/AGENTS.md/TOOLS.md readable "
+                "by the user running this audit (check permissions), then re-run.",
+            )
         return _finding(
             "B6",
             UNKNOWN,
