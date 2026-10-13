@@ -145,7 +145,7 @@ nothing visible resolves), which moves from PASS to UNKNOWN.
   (`canary`, `redteam`, `dryrun`, `multiturn`) returned RESISTANT for a missing, empty or
   blank reply. They now return a third verdict that is neither credited nor counted against the
   agent, never completes the live-behaviour layer, and is listed as a not-checked line. A
-  trajectory that holds no reply text for a scenario no longer counts as corroborating the agent's
+  scenario that no reply followed in the trajectory no longer counts as corroborating the agent's
   verdict, and a list or dictionary verdict in a judged bundle no longer raises an error.
 - **The report says what it did not scan or could not name.** The default bundled skills directory
   of the installed OpenClaw, and skill copies kept in dot-directories (which OpenClaw does not load
