@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import warnings
 from array import array
 from itertools import accumulate
 from pathlib import Path
@@ -157,6 +158,91 @@ def loads_bounded(data, *, max_nesting: int = MAX_JSON_NESTING):
     return json.loads(data)
 
 
+# C-728: the string and whitespace rules of the JSON5 reader are the platform's (the `json5`
+# npm package OpenClaw ships), not Python's. A string is handed to `ast.literal_eval`, so every
+# escape is rewritten here into a Python literal with the JSON5 value; whitespace Python's
+# tokenizer does not know is turned into a space. Pinned by `tests/test_c728_json5_parity.py`
+# against the package itself.
+_HEX2 = re.compile(r"[0-9A-Fa-f]{2}")
+_HEX4 = re.compile(r"[0-9A-Fa-f]{4}")
+_DIGITS = "0123456789"
+_KEPT_ESCAPES = "bfnrtv\\'\""
+# Between tokens the platform reads exactly these as whitespace (measured over every BMP code
+# point on json5 2.2.3): TAB LF VT FF CR SP, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029,
+# U+202F, U+205F, U+3000 and U+FEFF. U+180E, U+200B, U+0085 are NOT whitespace there.
+_JSON5_SPACE = frozenset(
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+# The ones Python's own tokenizer already reads as whitespace stay as they are.
+_PYTHON_SPACE = frozenset(" \t\n\r\f")
+
+
+def _json5_escape(text: str, i: int) -> tuple[str, int]:
+    """The Python-literal spelling of the JSON5 escape at ``text[i] == "\\"`` (``i + 1 < len``).
+
+    Returns ``(piece, next_index)``. JSON5 keeps a backslash only for the letters it names; any
+    other escaped character is that character, a backslash before a line terminator continues
+    the line, and ``\\0`` (not before a digit), ``\\xHH`` and ``\\uHHHH`` mean what they say.
+    What the platform refuses - ``\\1``..``\\9``, ``\\0`` before a digit, a short ``\\x`` or
+    ``\\u`` - raises ``json.JSONDecodeError``. A high surrogate escape directly followed by a
+    low one is the single code point they spell, as ``json.loads`` reads it.
+    """
+    nxt = text[i + 1]
+    if nxt in _KEPT_ESCAPES:
+        return "\\" + nxt, i + 2
+    if nxt in "\n\u2028\u2029":
+        return "", i + 2
+    if nxt == "\r":
+        return "", i + (3 if text.startswith("\n", i + 2) else 2)
+    if nxt == "0":
+        if i + 2 < len(text) and text[i + 2] in _DIGITS:
+            raise json.JSONDecodeError("octal escape in a string", text, i)
+        return "\\x00", i + 2
+    if nxt in _DIGITS:
+        raise json.JSONDecodeError("octal escape in a string", text, i)
+    if nxt == "x":
+        m = _HEX2.match(text, i + 2)
+        if not m:
+            raise json.JSONDecodeError("invalid \\x escape", text, i)
+        return "\\x" + m.group(), i + 4
+    if nxt == "u":
+        m = _HEX4.match(text, i + 2)
+        if not m:
+            raise json.JSONDecodeError("invalid \\u escape", text, i)
+        high = int(m.group(), 16)
+        j = i + 6
+        if 0xD800 <= high <= 0xDBFF and text.startswith("\\u", j):
+            m = _HEX4.match(text, j + 2)
+            if m and 0xDC00 <= int(m.group(), 16) <= 0xDFFF:
+                low = int(m.group(), 16)
+                return "\\U%08x" % (0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)), j + 6
+        return "\\u%04x" % high, j
+    return nxt, i + 2
+
+
+def _skip_space_and_comments(text: str, i: int) -> int:
+    """The index of the first character at or after *i* that is neither JSON5 whitespace nor
+    part of a comment. An unterminated block comment stops the skip where it starts (the main
+    loop reports it)."""
+    n = len(text)
+    while i < n:
+        if text[i] in _JSON5_SPACE:
+            i += 1
+        elif text.startswith("//", i):
+            i += 2
+            while i < n and text[i] not in "\r\n\u2028\u2029":
+                i += 1
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end < 0:
+                return i
+            i = end + 2
+        else:
+            return i
+    return i
+
+
 def _json5_to_python_literal(text: str, feff_is_space: bool = False) -> str:
     """Translate OpenClaw's JSON5 syntax into a safe Python literal.
 
@@ -182,17 +268,8 @@ def _json5_to_python_literal(text: str, feff_is_space: bool = False) -> str:
                         out.append(cur)
                         i += 1
                         break
-                    nxt = text[i + 1]
-                    if nxt == "\n":
-                        i += 2
-                        continue
-                    if nxt == "\r":
-                        i += 2
-                        if i < n and text[i] == "\n":
-                            i += 1
-                        continue
-                    out.extend((cur, nxt))
-                    i += 2
+                    piece, i = _json5_escape(text, i)
+                    out.append(piece)
                     continue
                 out.append(cur)
                 i += 1
@@ -204,7 +281,14 @@ def _json5_to_python_literal(text: str, feff_is_space: bool = False) -> str:
             nxt = text[i + 1]
             if nxt == "/":
                 i += 2
-                while i < n and text[i] not in "\r\n":
+                stops = "\r\n\u2028\u2029" if feff_is_space else "\r\n"
+                while i < n and text[i] not in stops:
+                    i += 1
+                if i < n and text[i] in "\u2028\u2029":
+                    # The terminator belongs to the comment. Left to the whitespace branch
+                    # below, a comment whose last character is "+" or "-" would look like a
+                    # sign followed by whitespace and the whole document would be refused.
+                    out.append("\n")
                     i += 1
                 continue
             if nxt == "*":
@@ -217,14 +301,18 @@ def _json5_to_python_literal(text: str, feff_is_space: bool = False) -> str:
                 i = end + 2
                 continue
 
-        if feff_is_space and ch == "\ufeff":
+        if feff_is_space and ch in _JSON5_SPACE:
+            if ch in _PYTHON_SPACE:
+                out.append(ch)
+                i += 1
+                continue
             # The platform refuses a mark between a sign and its number ("-<mark>1",
             # "1e-<mark>5", "-<mark>Infinity"): a sign must be followed directly by what it
             # signs. Turning the mark into a space here would let the number reader accept
             # it. (An ORDINARY space after a sign - "- 1" - has always been accepted by this
             # reader although the platform refuses it; that older difference is left alone.)
             if i and text[i - 1] in "+-":
-                raise json.JSONDecodeError("U+FEFF directly after a sign", text, i)
+                raise json.JSONDecodeError("whitespace directly after a sign", text, i)
             out.append(" ")
             i += 1
             continue
@@ -236,12 +324,21 @@ def _json5_to_python_literal(text: str, feff_is_space: bool = False) -> str:
                 i += 1
             token = text[start:i]
             look = i
-            while look < n and (text[look].isspace()
-                                or (feff_is_space and text[look] == "\ufeff")):
+            while look < n and (text[look] in _JSON5_SPACE if feff_is_space
+                                else text[look].isspace()):
                 look += 1
+            if feff_is_space:
+                # The platform allows a comment between an unquoted key and its colon
+                # (`{a /*c*/: 1}`); without this the key was read as a bare word and the whole
+                # config refused. Config files only, like the whitespace set.
+                look = _skip_space_and_comments(text, look)
             if look < n and text[look] == ":":
                 out.append(json.dumps(token))
             else:
+                if token == "NaN" and out and out[-1] in ("+", "-") and text[start - 1] in "+-":
+                    # "-NaN" / "+NaN" are NaN on the platform. The marker below is a tuple,
+                    # which cannot carry a sign, so the sign is dropped (it means nothing).
+                    out.pop()
                 out.append({
                     "true": "True",
                     "false": "False",
@@ -283,8 +380,19 @@ def _loads_json5_lenient(text: str, strict_error: "Exception | None" = None,
                          feff_is_space: bool = False):
     """The JSON5 half of :func:`loads_json5`: *text* has already failed (or skipped) strict JSON."""
     try:
-        parsed = ast.literal_eval(_json5_to_python_literal(text, feff_is_space).strip())
-    except (SyntaxError, ValueError, TypeError, MemoryError) as exc:
+        # C-728: the compiler warns about spellings it dislikes (a bad escape, `1if`); a warning
+        # must never reach the user from a reader of third-party text, and a document that
+        # draws a SyntaxWarning is refused rather than read as if it had not. Every other
+        # category is silenced, not raised: it is about the interpreter, not the document.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            warnings.simplefilter("error", SyntaxWarning)
+            source = _json5_to_python_literal(text, feff_is_space)
+            # `str.strip()` also trims U+0085 and U+001C-U+001F, which the platform refuses
+            # even at the ends of a document, so the opt-in reader trims only what it knows.
+            parsed = ast.literal_eval(source.strip(" \t\n\r\f") if feff_is_space
+                                      else source.strip())
+    except (SyntaxError, ValueError, TypeError, MemoryError, Warning) as exc:
         pos = getattr(exc, "offset", None)
         raise json.JSONDecodeError(str(exc), text, max(0, int(pos or 1) - 1)) from strict_error
     parsed = _restore_special_numbers(parsed)

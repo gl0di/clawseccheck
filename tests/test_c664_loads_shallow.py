@@ -423,18 +423,16 @@ def test_json5_nan_infinity_unquoted_keys_and_trailing_commas():
 
 
 def test_json5_strict_json_is_read_by_the_json_parser_not_the_literal_one():
-    # `\/` is a valid JSON escape ("/") but, in a Python literal, a backslash and a slash.
-    # loads_json5 asks json.loads first, so a document that is valid JSON gets "/", also when
-    # it is deep; a document that needs the JSON5 reader gets the literal reading, also deep.
+    # `\/` is a valid JSON escape ("/"). loads_json5 asks json.loads first, so a document that
+    # is valid JSON gets "/", also when it is deep; a document that needs the JSON5 reader gets
+    # "/" too (C-728: the JSON5 reader applies JSON5's escape rules, not Python's, which read
+    # a backslash and a slash), also deep.
     strict = '{"p": "a\\/b", "pad": %s}' % _nested(100)
     assert loads_shallow(strict, json5=True, max_depth=4).value["p"] == "a/b"
     lenient = "// c\n{\"p\": \"a\\/b\", \"pad\": %s}" % _nested(100)
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # the literal reader warns about the invalid escape
-        expected = loads_json5(lenient)["p"]
-        assert loads_shallow(lenient, json5=True, max_depth=4).value["p"] == expected
-    assert expected == "a\\/b"
+    expected = loads_json5(lenient)["p"]
+    assert loads_shallow(lenient, json5=True, max_depth=4).value["p"] == expected
+    assert expected == "a/b"
 
 
 @pytest.mark.parametrize("text", [
