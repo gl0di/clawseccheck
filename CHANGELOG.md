@@ -123,6 +123,45 @@ nothing visible resolves), which moves from PASS to UNKNOWN.
   Doctor refuses the file). It now says `allowlist` with only your own ids in `allowFrom` (and
   `groupAllowFrom` on the channels that have it), or `disabled`, and only where the channel has the
   field. Verdicts and `detail` text are unchanged.
+- **C015 now reads the agent workspace.** The home scan spent its 500-file budget alphabetically,
+  so `agents/`, `npm/` and `logs/` could use it up before `workspace/` was opened (on a real home
+  none of the workspace's 143 text files was looked at). The home's own files, `credentials/`,
+  `identity/`, `devices/` and `workspace*/` are now walked first, then `backups/`, then
+  everything else with what is left, under the same 500-file total. When the scan stops early,
+  the `fix` text names the top-level directories it did not finish. The `detail` text is
+  unchanged. A file the scan used to reach late in a bulk directory can now fall outside the
+  budget, and the list of unreached directories says so.
+- **B357 judges the restart handoff by what OpenClaw 2026.10.2 actually keeps.** From that build the
+  handoff is a row of the `gateway_restart_handoff` table in the state database, and nothing reads
+  the old `gateway-supervisor-restart-handoff.json`. B357 now reads the table (read-only, one
+  column) and treats an expired row as a leftover OpenClaw ignores, not as a crashed supervisor;
+  its advice no longer promises that a restart clears it. The old JSON file is described as a
+  retired leftover. Builds before 2026.10.2, and an unknown build, keep the previous answer.
+- **B19 does not warn about data no other user can reach.** A loose directory or log under a home
+  whose own mode, or a parent's, removes the group and other execute bits is reported as not
+  traversable instead of group/world-readable (symlinks, hard links and paths it cannot stat keep
+  the warning). The warning's `detail` is unchanged when it still fires.
+- **An empty live-test reply is INCONCLUSIVE, not resistance.** The four self-test evaluators
+  (`canary`, `redteam`, `dryrun`, `multiturn`) returned RESISTANT for a missing, empty or
+  blank reply. They now return a third verdict that is neither credited nor counted against the
+  agent, never completes the live-behaviour layer, and is listed as a not-checked line. A
+  trajectory that holds no reply text for a scenario no longer counts as corroborating the agent's
+  verdict, and a list or dictionary verdict in a judged bundle no longer raises an error.
+- **The report says what it did not scan or could not name.** The default bundled skills directory
+  of the installed OpenClaw, and skill copies kept in dot-directories (which OpenClaw does not load
+  but the audit still reads), are named in the coverage notes; `--vet-source` says when the IOC
+  dataset holds no entries for the queried ecosystem; and a truncated compact card names the
+  sections it dropped. No verdict changes.
+- **The first screen defines its five layers and the coverage lines agree.** A gradeless run now
+  says what the five layers are, no longer offers a trend or a badge it cannot produce, splits the
+  undetermined checks into not applicable and no verdict (keeping the HIGH-or-worse count), and
+  shows Logs and trajectories as not fully examined when the store itself was not read. `--json`
+  carries an additive `unexamined` flag on that inventory row.
+- **`--explain` and several fix texts stop misdescribing the setup.** `--explain` drops tracker ids
+  where that reads cleanly; the Skill Workshop defaults are stated as measured (both default to
+  `auto` from 2026.8.1); B181 says when reinstalling from ClawHub would downgrade a newer local
+  copy; B150, B341, B351 and B370 say what the check can know. Only `fix` and explanation text
+  change.
 - **Wording and citations match the installed build.** B321/B322, B391, B172, B381 and B9
   explanations were corrected against the vendor code (for example B172 notes that grants stored
   in the pre-2026.10.1 shape are persisted but not in force until repair), and moved vendor
