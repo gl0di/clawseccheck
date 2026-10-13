@@ -60,6 +60,7 @@ from ._shared import (
     _B55_FS_WRITE_TOOLS,
     _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
     _c015_has_secret,
+    _c015_md_credential_list_hit,
     _c015_text_without_managed_github_ids,
     _vendor_secret_slot_paths,
     _canonical_ipv4,
@@ -5601,8 +5602,10 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             text_scanned = _c015_text_without_managed_github_ids(text, ctx.config)
         else:
             text_scanned = text
-        if _c015_has_secret(text_scanned) or (
-            _c015_is_cfg and _vendor_secret_slot_paths(ctx.config)
+        if (
+            _c015_has_secret(text_scanned)
+            or _c015_md_credential_list_hit(text_scanned)
+            or (_c015_is_cfg and _vendor_secret_slot_paths(ctx.config))
         ):
             try:
                 rel = path.relative_to(ctx.home)

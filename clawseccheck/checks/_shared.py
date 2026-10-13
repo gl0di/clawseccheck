@@ -1063,6 +1063,111 @@ def _c015_has_secret(text: str) -> bool:
     )
 
 
+# C-708: a markdown credential list (`- **Password:** `value``). The shared keyword pattern
+# captures the closing bold marker `**` that sits between the colon and the value, so it never
+# sees the value; widening SECRET_PATTERNS would also feed B1, A1 and the log redactor and
+# convict benign placeholders, so this shape lives here, is NOT in `_c015_has_secret` (A1 reads
+# that), and is called by C015's hit loop only. The rules are structural rather than word lists
+# (a substring list rejected the real password `Contest2024!x` because of "test"):
+#   label  - the markup `**L:**` / `**L**:` / `*L:*` / `__L:__`, split on whitespace, `_` and `-`;
+#            its LAST word is a credential noun, or its last two words are a key phrase
+#            (`DB_PASSWORD`, `gateway-token`, `OPENAI_API_KEY`; not `Token expires`, `Passwords`);
+#   value  - one code span right after the label, or the whole rest of the line as one token;
+#   secret - see `_c015_md_value_is_real_secret`.
+# Declared limits: English labels only, no markup-free `Password: x`, no table cell, no value on
+# the next line, no HTML, no quoted or letters-only value; a miss is a miss, never a PASS claim.
+_C015_MD_LINE_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?(?:\[[ xX]\][ \t]+)?"
+    r"(?P<d>\*\*|__|\*)(?P<label>[^\n*:`]{1,64}?)(?:(?P=d)[ \t]*:|:(?P=d))[ \t]*(?P<value>[^\n]*)",
+    re.M,
+)
+_C015_MD_LABEL_SPLIT_RE = re.compile(r"[\s_-]+")
+_C015_MD_LABEL_LAST = frozenset({"password", "passphrase", "passcode", "secret", "token"})
+_C015_MD_LABEL_LAST_TWO = frozenset(
+    {("api", "key"), ("private", "key"), ("secret", "key"), ("access", "key")}
+)
+_C015_MD_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+_C015_MD_REFERENCE_RE = re.compile(
+    r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|<[^<>]*>|\{[^{}]*\}|\{\{.*\}\}|%[A-Za-z_][A-Za-z0-9_]*%"
+    r"|secretref-.*",
+    re.I,
+)
+_C015_MD_PLACEHOLDER_TOKENS = frozenset(
+    {"your", "example", "changeme", "placeholder", "redacted", "password", "passphrase", "secret",
+     "token", "sample", "dummy", "todo", "tbd", "here", "none", "null", "na"}
+)
+
+
+def _c015_md_label_is_credential(label: str) -> bool:
+    """C-708: *label* (the text between the markup) names a credential: at most 5 words, the last
+    one a credential noun or the last two a key phrase."""
+    words = [w for w in _C015_MD_LABEL_SPLIT_RE.split(label.strip().lower()) if w]
+    if not words or len(words) > 5:
+        return False
+    return words[-1] in _C015_MD_LABEL_LAST or tuple(words[-2:]) in _C015_MD_LABEL_LAST_TWO
+
+
+def _c015_md_value_is_real_secret(value: str) -> bool:
+    """C-708: does *value* (a markdown credential line's value) look like a real inline secret?
+    ASCII printable, 8-128 characters, no whitespace; a letter plus either a digit or three of the
+    four character classes; and none of:
+    a reference, an ALL-CAPS identifier, a mask, a URL or path or 0x address, code or a CLI flag
+    (brackets, parentheses, quotes, a backtick, a leading `-`), hyphen/underscore prose (3+ parts,
+    at most one with a digit), or a placeholder word as a WHOLE token."""
+    if not 8 <= len(value) <= 128 or not all("!" <= c <= "~" for c in value):
+        return False
+    if not any(c.isalpha() for c in value):
+        return False
+    # A digit, or three of the four character classes. Letters with one kind of separator and
+    # no digit are names, not secrets: a token pair (`USDC/WETH`), a two-word slug
+    # (`local-model`), a CamelCase identifier.
+    classes = (
+        any(c.islower() for c in value) + any(c.isupper() for c in value)
+        + any(c.isdigit() for c in value) + any(not c.isalnum() for c in value)
+    )
+    if not any(c.isdigit() for c in value) and classes < 3:
+        return False
+    if _C015_MD_REFERENCE_RE.fullmatch(value) or _is_secret_reference(value):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
+        return False
+    if re.search(r"(.)\1{3}|\*\*\*|\.\.\.", value, re.I):
+        return False
+    if (
+        "://" in value
+        or value.startswith(("/", "~/", "./", "../"))
+        or re.fullmatch(r"0[xX][0-9a-fA-F]{40,}", value)
+    ):
+        return False
+    if re.search(r"[\[\]()\"'`]", value) or value.startswith("-"):
+        return False
+    parts = re.split(r"[-_]", value)
+    if len(parts) >= 3 and sum(any(c.isdigit() for c in p) for p in parts) <= 1:
+        return False
+    tokens = {t for t in re.split(r"[^A-Za-z0-9]+", value.lower()) if t}
+    return not tokens & _C015_MD_PLACEHOLDER_TOKENS
+
+
+def _c015_md_credential_lines(text: str):
+    """C-708: yield ``(line_number, label, value)`` for every markdown credential-list line in
+    *text* whose label names a credential and whose value looks like a real secret."""
+    for m in _C015_MD_LINE_RE.finditer(text):
+        label = m.group("label")
+        if not _c015_md_label_is_credential(label):
+            continue
+        rest = m.group("value")
+        span = _C015_MD_CODE_SPAN_RE.match(rest)
+        value = span.group(1) if span else rest.rstrip()
+        if _c015_md_value_is_real_secret(value):
+            yield text.count("\n", 0, m.start()) + 1, label.strip(), value
+
+
+def _c015_md_credential_list_hit(text: str) -> bool:
+    """C-708: *text* has a markdown credential-list line (`- **Password:** `value``,
+    `**Token**: value`, `*API key:* value`) whose value is a real-looking inline secret."""
+    return next(_c015_md_credential_lines(text), None) is not None
+
+
 # Credential/secret access is only malicious when EXFILTRATED.
 # Same-line rule: a line that touches a secret path AND ships it out (avoids flagging a
 # skill that merely loads its own config).
