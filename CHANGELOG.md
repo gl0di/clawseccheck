@@ -28,7 +28,9 @@ exit code: `--vet`,
 CAUTION and exit 1, not INSTALL and 0, for a tree they never opened; every vet mode that
 inspects a target (`--vet`, `--vet-skill`, `--vet-plugin`, `--advise`, `--vet-mcp`) exits 1
 whenever its verdict is CAUTION, including for a target that exists but could not be assessed,
-which used to exit 0; and `audit.py` exits 2 when importable files sit beside it. Because
+which used to exit 0; and `audit.py` exits 2 when importable files sit beside it. Smaller
+exit-code changes (a closed pipe, an empty `--save` or `--seed`, a trajectory path that is
+not a regular file) are listed with their entries under Fixed. Because
 several checks stopped answering PASS where they could not know, a setup that was clean on
 4.3.1 can now read WARN, UNKNOWN or FAIL; the most common case is a gateway token written as
 `${OPENCLAW_GATEWAY_TOKEN}` (or any other reference nothing visible resolves), which moves
@@ -243,6 +245,55 @@ from PASS to UNKNOWN.
   guide now points at `audit.py`, which refuses and executes nothing. Without `--dashboard`
   only one output file is written per run, in a fixed precedence. The two chain verifiers
   cannot see lines deleted from the end of a journal.
+- **`--watch` works for a skill install.** The watcher re-ran the monitor as
+  `python -m clawseccheck` with no path, so when it was started the documented way
+  (`python3 <skill-dir>/audit.py --watch`) from any other directory, every detected change
+  ended in "No module named clawseccheck" and nothing was compared. The re-scan is now
+  started the way the watcher itself was. A re-scan that fails is reported with its whole
+  output as a run that did not complete. One store has one watcher: a running watcher holds
+  a lock, so a second start is refused, and a planted or stale heartbeat file can neither
+  block a start nor make `--watch-status` report a watcher that is not there.
+- **A config saved with a byte order mark is read.** OpenClaw accepts an `openclaw.json`
+  that starts with a UTF-8 byte order mark (measured with its validator on 2026.10.2); the
+  audit did not parse it, answered UNKNOWN on about 199 checks and gave no grade. The loader
+  now treats the mark as the platform does, in the config, its included fragments and the
+  legacy config name. A config without the mark is read exactly as before.
+- **A live-test trajectory hint cannot hide a contradicting session.** The `liveTest`
+  bucket is written by the agent under test, and its `trajectory.path` narrowed the
+  cross-check to one file: an agent that complied with the canary in one session and
+  resisted in another could point at the second and be credited. A hint now only adds a
+  file to the scan, each recorded reply is judged on its own, and `sessionId`, which the
+  schema promised and nothing read, is documented as having no effect. A re-test needs a
+  fresh `--seed`.
+- **A self-report is no longer credited against what it says.** B43 ignored a declared
+  approval-bypass actor when every gate read "required"; every declared actor now counts.
+  B84 answered PASS for a proven high-blast verb whose own gate is "auto", and for a proven
+  verb of a class the same attestation declares no tool for; both are WARN, and a PASS no
+  longer claims a gate that was not reported. An attestation with no answers in it (a bare
+  schema line, a note, the unfilled template) no longer completes the self-report layer.
+- **Odd input files and closed pipes.** A named pipe given to `--attest`, `--judged`,
+  `--judged-bundle`, `--state` or another input flag blocked forever; a state file that was
+  not valid UTF-8 ended every `--monitor` run with an internal error. Input files now go
+  through one bounded reader that refuses anything but a regular file, and undecodable
+  state is a corrupt baseline. A reader that closes the pipe early (`... --json | head`) is
+  no longer reported as an internal error: the run ends silently with exit 141. `--save`
+  survives a file name that is not valid UTF-8, and `--save ""` exits 2 like the other
+  output flags. `--analyze-trajectory` and `--behavioral` given a path that is not a
+  regular file say so and exit 1 instead of reporting "no sidecars".
+- **Machine output stays machine-readable.** Under `--json`, stdout is exactly one JSON
+  document: the "run saved as" and "report saved to" lines go to stderr, the `--sbom` run
+  line always does, `--monitor --probe --json` carries its probe notice as a field, and an
+  unreadable home is a JSON error object. SBOM text values use one reversible escape for
+  control and invisible characters, so a name can no longer carry a terminal sequence and
+  two different names never become one.
+- **`--explain` names no internal ids.** The explanations of 69 checks printed tracker
+  references ("C-135 re-pass, B-238: ..."); they are removed with their clause, and a test
+  sweeps the explanation of every catalog id.
+- **Monitor details.** `--cron-recipe` with `--data-dir` emitted one command without it, so
+  the scheduled brief read the default store. A `--monitor` run refused because the baseline
+  belongs to another home no longer appends a history row. The run that loses a race with a
+  parallel `--monitor` says so instead of printing only its header. An empty or over-long
+  `--seed` is refused at the command line (exit 2).
 - **Nested or padded JSON no longer ends an audit or hides a record.** A 100,000-level file
   ended the audit with an internal error, and a JSON5 plugin manifest with 201 levels of
   padding lost its skills list, so a malicious bundled skill was CAUTION, not
