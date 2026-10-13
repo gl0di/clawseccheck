@@ -761,12 +761,18 @@ def _c015_candidate_files(
 
         One file of lookahead: a pass that filled its cap EXACTLY lost nothing, and only the
         file left behind says which top-level dir really lost files."""
+        # `capped=` is passed so the truncation is recorded the way every capped walk records
+        # it (tests/test_paired_call_sites.py); the decision below uses the lookahead file
+        # instead, which is the stronger signal: a walk that ends on exactly cap + 1 files
+        # holds a file beyond the cap even though nothing was left to stop it.
+        cap_hit: list = []
         got = walk_dir_safely(
             ctx.home,
             max_files=cap + 1,
             exclude_pycache=True,
             prune_dir=prune,
             keep_file=keep,
+            capped=cap_hit,
             unreadable_dirs=gaps,
         )
         if len(got) > cap:
