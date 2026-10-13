@@ -2259,6 +2259,11 @@ def _refuse_unexpandable_paths(args) -> None:
             else:
                 reason = "the '~user' in it names no account on this machine"
             raise UnusableInputPath(value, reason) from None
+    # Every path option is usable; the tool's own defaults under `~` (the store, the
+    # history, the ledger) still need a home directory. Asked here, before anything is
+    # produced, so a run cannot print a report and then fail at the first default it needs -
+    # and can never fall back to a directory literally named `~` under the working directory.
+    pathprobe.require_home()
 
 
 def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
@@ -3437,6 +3442,17 @@ def _guarded_main(argv=None) -> int:
         if "--debug" in raw:
             raise
         print(f"clawseccheck: {exc.text}. Nothing was produced; fix the path and re-run.",
+              file=sys.stderr)
+        return 1
+    except pathprobe.NoHomeDirectory as exc:
+        # C-729: a default location under `~` could not be resolved. Not a defect of this
+        # tool and not a path the user typed, so neither the bug-report banner nor the
+        # "fix the path" line fits. Nothing was read or written under a literal `~`.
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(f"clawseccheck: {exc}, so this tool's own files under ~/.clawseccheck cannot be "
+              "located. Nothing was produced; set HOME to your home directory and re-run.",
               file=sys.stderr)
         return 1
     except BrokenPipeError:

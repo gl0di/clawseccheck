@@ -118,15 +118,59 @@ def test_expand_user_leaves_an_unknown_account_as_written():
         assert pathprobe.expand_user(raw) == Path(raw), raw
 
 
-def test_expand_user_leaves_an_unresolvable_tilde_alone(monkeypatch):
-    """`~` / `~/x` with neither HOME nor a passwd entry also raise RuntimeError."""
+def test_expand_user_refuses_the_current_users_tilde_when_there_is_no_home(monkeypatch):
+    """`~` / `~/x` with neither HOME nor a passwd entry: never returned unexpanded. A
+    literal `~/.clawseccheck` would be a directory under the WORKING directory, so the
+    tool's own state would be written into, and read from, wherever it was started."""
     from clawseccheck import pathprobe
 
     def boom(self):
         raise RuntimeError("Could not determine home directory.")
 
     monkeypatch.setattr(Path, "expanduser", boom)
-    assert pathprobe.expand_user("~/x") == Path("~/x")
+    for raw in ("~", "~/x", "~/.clawseccheck/state.json", Path("~/x")):
+        with pytest.raises(pathprobe.NoHomeDirectory):
+            pathprobe.expand_user(raw)
+    assert issubclass(pathprobe.NoHomeDirectory, RuntimeError)
+    # an unknown account is a different fact and keeps its answer
+    assert pathprobe.expand_user("~nobody_at_all/x") == Path("~nobody_at_all/x")
+
+
+_NO_HOME_RUNNER = """
+import os, pwd, sys
+def _nope(*_a, **_k):
+    raise KeyError("no passwd entry")
+pwd.getpwuid = _nope
+os.environ.pop("HOME", None)
+sys.path.insert(0, sys.argv[1])
+from clawseccheck.cli import main
+sys.exit(main(sys.argv[2:]))
+"""
+
+
+@pytest.mark.parametrize("extra", [[], ["--monitor"], ["--json"], ["--watch-status"]],
+                         ids=["audit", "monitor", "json", "watch-status"])
+def test_no_home_directory_never_puts_the_store_under_the_working_directory(tmp_path, extra):
+    """HOME unset and no passwd entry, with an explicit --home: the default store
+    (`~/.clawseccheck`) cannot be located. The run must stop with one line and must not
+    create - or read - a directory literally named `~` in the working directory."""
+    import shutil
+
+    repo = Path(__file__).resolve().parent.parent
+    home = tmp_path / "audited"
+    shutil.copytree(repo / "fixtures" / "home_safe", home)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    planted = cwd / "~" / ".clawseccheck"
+    env = {k: v for k, v in os.environ.items() if k != "HOME"}
+    r = subprocess.run([sys.executable, "-B", "-c", _NO_HOME_RUNNER, str(repo),
+                        "--home", str(home), *extra],
+                       cwd=cwd, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 1, (r.returncode, r.stderr[-300:])
+    assert r.stdout == ""
+    assert "no home directory for the current user" in r.stderr and "Traceback" not in r.stderr
+    assert "unexpected internal error" not in r.stderr
+    assert not planted.exists() and sorted(os.listdir(cwd)) == []
 
 
 # ------------------------------------------------------------------------- the config sweep

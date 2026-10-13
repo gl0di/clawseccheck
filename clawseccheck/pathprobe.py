@@ -215,23 +215,58 @@ def walk_segments(root: "str | os.PathLike[str]", segments: "list[str] | tuple[s
     return _walk(Path(root), segs, errors)
 
 
+class NoHomeDirectory(RuntimeError):
+    """``~`` or ``~/x`` cannot be expanded: ``HOME`` is unset and the current account has no
+    passwd entry. A ``RuntimeError`` like the one ``Path.expanduser`` raises, with a name a
+    caller can catch on its own."""
+
+
 def expand_user(path: "str | os.PathLike[str]") -> Path:
-    """``Path(path).expanduser()``, except that an unresolvable ``~`` is left as written (C-729).
+    """``Path(path).expanduser()``, except that an unknown ``~name`` is left as written (C-729).
 
     ``Path.expanduser`` raises ``RuntimeError`` - not ``OSError`` - when ``~name`` names no
     account on this machine, and for ``~`` / ``~/x`` when neither ``HOME`` nor a passwd
     entry exists. Nothing on the audit path catches that, so one config value such as
     ``agents.defaults.workspace: "~nosuchuser/x"`` ended the whole run with "unexpected
-    internal error". The platform itself expands only ``~``, ``~/`` and ``~\\`` and reads
-    ``~name/x`` as an ordinary relative path (see ``collector._expand_user_path``), so the
-    unexpanded path is both what OpenClaw would use and a path that is simply not there.
+    internal error". The two cases are different facts and get different answers:
+
+    * ``~name/x`` with no such account: the path is returned UNEXPANDED. The platform itself
+      expands only ``~``, ``~/`` and ``~\\`` and reads ``~name/x`` as an ordinary relative
+      path (see ``collector._expand_user_path``), so this is both what OpenClaw would use and
+      a path that is simply not there.
+    * ``~`` / ``~/x`` with no home directory for the current user: `NoHomeDirectory` is
+      raised. Returning the path unexpanded here would turn every default of this tool -
+      its baseline, history, ledger and ignore store under ``~/.clawseccheck`` - into a
+      directory literally named ``~`` under the WORKING directory: state would be written
+      into, and read back from, whatever directory the tool happens to be started in. A
+      loud, named failure is the only safe answer; the CLI prints it as one line.
 
     Identical to ``Path(path).expanduser()`` for every input that does not raise today.
-    A path the USER typed on the command line must not take this fallback (an output flag
-    would create a directory literally named ``~name``); ``cli`` refuses those up front.
+    A path the USER typed on the command line must not take the ``~name`` fallback either
+    (an output flag would create a directory literally named ``~name``); ``cli`` refuses
+    those up front.
     """
     p = Path(path)
     try:
         return p.expanduser()
     except RuntimeError:
+        if p.parts and p.parts[0] == "~":
+            raise NoHomeDirectory(_NO_HOME_TEXT) from None
         return p
+
+
+_NO_HOME_TEXT = ("this machine gives no home directory for the current user (HOME is not set "
+                 "and the account has no passwd entry)")
+
+
+def require_home() -> None:
+    """Raise `NoHomeDirectory` when ``~`` cannot be expanded for the current user.
+
+    For an entry point to call BEFORE it produces anything: this tool's own defaults live
+    under ``~``, so without a home directory a run would fail half way through (after a
+    report was already printed) at the first one it needs.
+    """
+    try:
+        Path("~").expanduser()
+    except RuntimeError:
+        raise NoHomeDirectory(_NO_HOME_TEXT) from None
