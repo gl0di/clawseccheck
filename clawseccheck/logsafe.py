@@ -248,11 +248,24 @@ class _SecureFileHandler(logging.Handler):
         super().__init__()
         self.path = Path(path)
         self.terminator = "\n"
+        self._given_up = False
 
     def emit(self, record: logging.LogRecord) -> None:
+        if self._given_up:
+            return
         try:
             msg = self.format(record)
             secure_append_text(self.path.expanduser(), msg + self.terminator)
+        except OSError as exc:
+            # C-721: a path that cannot be opened (missing directory, no permission, a
+            # symlink target) is the user's input, not a logging bug. One plain line, then
+            # the file sink is dropped for the rest of the run; the stderr sink and the
+            # audit carry on, and the exit code is untouched.
+            self._given_up = True
+            shown = "".join(c if c.isprintable() else "?" for c in str(self.path))
+            reason = exc.strerror or type(exc).__name__
+            print(f"clawseccheck: the log file {shown} could not be opened ({reason}); "
+                  "continuing without it.", file=sys.stderr)
         except Exception:  # pragma: no cover - safety net; logging should never raise
             self.handleError(record)
 

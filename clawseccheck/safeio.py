@@ -137,8 +137,13 @@ def secure_write_bytes(path: Path, data: bytes) -> None:
 
 
 def secure_write_text(path: Path, data: str) -> None:
-    """Atomically overwrite *path* with *data* (UTF-8) - see `secure_write_bytes`."""
-    secure_write_bytes(path, data.encode("utf-8"))
+    """Atomically overwrite *path* with *data* (UTF-8) - see `secure_write_bytes`.
+
+    A lone surrogate - how a file name that is not valid UTF-8 reaches a report - is
+    written as the escape ``\\udcff`` (what ``--json`` shows for the same byte) rather
+    than raising and losing the whole file.
+    """
+    secure_write_bytes(path, data.encode("utf-8", errors="backslashreplace"))
 
 
 def secure_append_text(path: Path, data: str) -> None:

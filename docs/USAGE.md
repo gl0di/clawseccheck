@@ -136,8 +136,8 @@ python3 audit.py --home ~/.openclaw
 
 The terminal report is colourised (grade, score-bar, severity icons) **only** when output is
 an interactive terminal. Colour is switched off automatically when the output is piped or
-redirected, by `--no-color`, or by the [`NO_COLOR`](https://no-color.org) environment variable;
-`FORCE_COLOR` forces it on. Saved reports (`--save`) are always written as plain text.
+redirected, by `--no-color`, by the [`NO_COLOR`](https://no-color.org) environment variable, or by
+`TERM=dumb`; `FORCE_COLOR` forces it on (but not past `NO_COLOR` or `TERM=dumb`). Saved reports (`--save`) are always written as plain text.
 
 On **Windows** use `python` (or `py`); the script auto-detects consoles that can't render
 unicode and falls back to ASCII, or force it with `--ascii`:
@@ -912,9 +912,9 @@ The same idea as `--save-run`/`--diff` above, for the bill-of-materials instead 
 snapshot, since `--sbom`'s own output is never retained.
 
 ```bash
-clawseccheck --sbom --save-sbom-run                    # prints: (SBOM run saved as 2026-09-10T09:15:23 - ...)
+clawseccheck --sbom --save-sbom-run                    # stderr: (SBOM run saved as 2026-09-10T09:15:23 - ...)
 # ... time passes, a skill is added or updated ...
-clawseccheck --sbom --save-sbom-run                    # prints: (SBOM run saved as 2026-09-12T11:02:07 - ...)
+clawseccheck --sbom --save-sbom-run                    # stderr: (SBOM run saved as 2026-09-12T11:02:07 - ...)
 clawseccheck --sbom-diff 2026-09-10T09:15:23 2026-09-12T11:02:07
 ```
 
@@ -1392,6 +1392,21 @@ themselves, has **no effect** on `--vet`/`--vet-skill`/`--vet-plugin`/`--vet-mcp
 - **3** - a real, severity-tripping FAIL at the `--fail-on`/`--exit-code` gate.
 - **2 is never returned by this logic** - argparse itself owns exit code 2 for a usage error
   (a mistyped flag), the identical reservation `--monitor`'s own 0/1/3 scheme already makes.
+- **2** is also what an empty output path gets (`--save ""`, like `--html ""`, `--sarif ""`,
+  `--badge ""` and `--pdf ""`): a usage message on stderr and nothing written.
+- **141** - the reader of stdout closed the pipe early (`clawseccheck --json | head -c 0`), the
+  shell convention 128 + SIGPIPE. Nothing is printed about it: that is normal use, not an error.
+  When the pipe closed only after the run had finished computing, the run's own exit code is
+  returned instead, so `--exit-code` still reports its verdict.
+
+Under `--json`, stdout is exactly one JSON document. The human lines that follow a run -
+`(run saved as ...)`, `(report saved to ...)` - go to stderr instead of trailing the document
+(without `--json` they stay on stdout). `--sbom` always prints a document, so its
+`(SBOM run saved as ...)` line is always on stderr. If the OpenClaw home cannot be
+read, `--json` prints `{"error": ..., "tool": "clawseccheck", "version": ...}` on stdout and the
+same sentence on stderr; the exit code is `1` as before. `--json` has no effect with `--badge`,
+`--html`, `--sarif` or `--pdf` (a note on stderr says so): those modes print their own
+confirmation line, not a JSON document.
 
 ```bash
 clawseccheck --fail-on high --exit-code-scheme graduated
@@ -2121,7 +2136,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   that may hold secrets are redacted before being written. `--verbose`/`--debug` set what
   reaches the **console** (stderr); `--log PATH` writes to a **file** and raises the file's
   level to INFO on its own, so you never get an empty log for asking for one - it does not
-  make the console chattier. Nothing is written anywhere without `--log`.
+  make the console chattier. Nothing is written anywhere without `--log`. A `--log` path
+  that cannot be opened (missing directory, no permission) gets one line on stderr naming the
+  path and the reason; the audit carries on without the file and its exit code is unchanged.
 - **`--yes`** skips the confirmation prompt for `--purge` and `--apply-ignore-proposals`, the
   only two commands that have one. Pass it with anything else and the run says so on stderr
   rather than accepting it silently - a script that thinks it disabled a gate it never

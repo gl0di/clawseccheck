@@ -44,14 +44,15 @@ def should_color(*, no_color_flag: bool = False, stream=None, env=None) -> bool:
 
     Precedence (first match wins):
       1. ``--no-color`` flag        -> off (explicit user opt-out).
-      2. ``NO_COLOR`` present       -> off (any value, incl. empty; the no-color.org spec).
+      2. ``NO_COLOR`` present       -> off (any value, incl. empty; the no-color.org spec),
+         and so is ``TERM=dumb`` (a terminal that declares it cannot render escapes).
       3. ``FORCE_COLOR`` present    -> on  (explicit opt-in, even when not a TTY).
       4. ``stream.isatty()``        -> on when interactive, else off.
     """
     env = os.environ if env is None else env
     if no_color_flag:
         return False
-    if "NO_COLOR" in env:
+    if "NO_COLOR" in env or env.get("TERM") == "dumb":
         return False
     if "FORCE_COLOR" in env:
         return True

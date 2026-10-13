@@ -329,8 +329,24 @@ def _with_next_actions(card: str, findings, score, ascii_only: bool,
     return card.rstrip("\n") + "\n\n" + render_next_actions(actions, ascii_only)
 
 
+# C-721: set for the run when the user asked for --ascii and the output is a human report,
+# so an em dash that arrives inside a finding's detail or a pipeline note (text the report
+# renderers do not own) is folded here, the one place every printed line passes through.
+# Never set for --json or the machine-format modes: folding a typographic quote to '"'
+# inside a JSON string would break the document.
+_EMIT_ASCII = False
+_ASCII_EMIT_MODES = frozenset({"dashboard", "dashboard_findings", "monitor"})
+
+
+def _set_emit_ascii(on: bool) -> None:
+    global _EMIT_ASCII
+    _EMIT_ASCII = bool(on)
+
+
 def _emit(text: str) -> None:
     """Print, falling back to ASCII-safe bytes if the console can't encode it."""
+    if _EMIT_ASCII:
+        text = asciify(text)
     if _EMIT_CAPTURE is not None:
         # B-723: intercepted, not copied - the line is replayed later, in its own slot.
         _EMIT_CAPTURE.append(text)
@@ -341,6 +357,20 @@ def _emit(text: str) -> None:
         print(text)
     except UnicodeEncodeError:
         print(asciify(text))
+
+
+def _emit_trailer(args, text: str, *, machine_output: bool = False) -> None:
+    """C-721: a human line that follows the primary output ("(run saved as ...)").
+
+    Under ``--json`` stdout must stay exactly one JSON document, so the line goes to
+    stderr; otherwise it is an ordinary ``_emit`` line on stdout, as documented.
+    ``machine_output`` is for a mode whose stdout is a document whatever the flags say
+    (``--sbom`` prints JSON in all three formats): its trailer always goes to stderr.
+    """
+    if machine_output or getattr(args, "json", False):
+        print(text, file=sys.stderr)
+    else:
+        _emit(text)
 
 
 @contextlib.contextmanager
@@ -3204,7 +3234,59 @@ def _run_single_check(finding_id: str, args):
     return chk(ctx), None
 
 
+_EXIT_SIGPIPE = 141  # 128 + SIGPIPE: the shell convention for "my reader went away"
+
+
+def _stdout_to_devnull() -> None:
+    """C-721: point fd 1 at the null device after the reader of our stdout has gone.
+
+    Whatever is still buffered in ``sys.stdout`` then flushes into the void, so the
+    interpreter's own flush at exit has nothing left to fail on (it would otherwise print
+    "Exception ignored ... BrokenPipeError" and turn the exit code into 120). Best effort:
+    a stdout with no file descriptor (an embedding host, a test capture) has nothing to
+    redirect.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def main(argv=None) -> int:
+    """C-721: the outermost wrapper - settles stdout before the interpreter does.
+
+    A reader that closes the pipe early (``... | head -1``) is normal use, not a defect.
+    The flush is done HERE, inside a handler, because the interpreter's own flush at exit
+    cannot be caught: output smaller than the buffer only fails there. When the pipe
+    broke after the run had finished computing, the run's own exit code stands; when it
+    broke mid-run, ``_guarded_main`` has already answered 141.
+    """
+    try:
+        code = _guarded_main(argv)
+    except SystemExit:
+        _settle_stdout()
+        raise
+    finally:
+        _set_emit_ascii(False)
+    _settle_stdout()
+    return code
+
+
+def _settle_stdout() -> None:
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _stdout_to_devnull()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _guarded_main(argv=None) -> int:
     """Thin top-level guard (B-101): never dump a raw traceback at users.
 
     Any unexpected error inside the audit/render pipeline becomes a clean one-line
@@ -3301,6 +3383,11 @@ def main(argv=None) -> int:
         print(f"clawseccheck: {exc.text}. Nothing was produced; fix the path and re-run.",
               file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # C-721: the reader of stdout went away mid-run. Not an internal error and not
+        # worth a word: no message, and the shell convention for the exit code.
+        _stdout_to_devnull()
+        return _EXIT_SIGPIPE
     except Exception as exc:  # noqa: BLE001 - a security tool must fail readably, not crash
         raw = list(sys.argv[1:] if argv is None else argv)
         if "--debug" in raw:
@@ -4175,10 +4262,20 @@ def _main(argv=None) -> int:
               "Pass a path, slug, or URL.", file=sys.stderr)
         return 2
 
+    # C-721: --save is a modifier, not a primary mode, so the check above never sees it:
+    # `--save ""` was falsy at the `if args.save:` write site and silently produced
+    # nothing at rc 0, where --html/--sarif/--badge/--pdf given "" are a usage error.
+    if args.save is not None and not args.save.strip():
+        print("--save needs a path \u2014 got an empty value. "
+              "Pass the file to write the report to.", file=sys.stderr)
+        return 2
+
     # C-426 part B: _PRIMARY_MODES decides which mode runs. Every branch below asks this
     # one value rather than re-testing its own flag, so the table's order IS the dispatch
     # order instead of a hand-maintained mirror of it (see _resolve_mode).
     _mode = _resolve_mode(args)
+    _set_emit_ascii(args.ascii and not args.json
+                    and (not _mode or _mode in _ASCII_EMIT_MODES))
 
     # standalone modes that don't audit ~/.openclaw
     if _mode == "purge":
@@ -5221,8 +5318,18 @@ def _main(argv=None) -> int:
                                      exhaustive=args.exhaustive,
                                      progress_cb=_default_audit_progress_cb(args))
     except (PermissionError, OSError) as exc:
-        _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
-        _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
+        _problem = f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}"
+        _advice = "Fix the permissions (or run as the owning user) and re-run the audit."
+        if args.json:
+            # C-721: a consumer of --json parses stdout; a bare sentence there is not a
+            # document. The sentence stays human-readable on stderr; exit code unchanged.
+            _emit(json.dumps({"error": _problem, "tool": "clawseccheck",
+                              "version": __version__}, ensure_ascii=True, indent=2))
+            print(_problem, file=sys.stderr)
+            print(_advice, file=sys.stderr)
+            return 1
+        _emit(_problem)
+        _emit(_advice)
         return 1
     # B-464: record which subsystems the OPERATOR opted out of, so the score rationale can
     # disclose that its denominator was narrowed. Set here, from the parsed flags, because
@@ -6037,11 +6144,12 @@ def _main(argv=None) -> int:
             _saved_sbom_id = _save_sbom_run_snapshot(build_sbom(ctx), _sbom_runs_path(args),
                                                       version=__version__)
             if _saved_sbom_id is None:
-                _emit("\n(could not save SBOM run \u2014 see --data-dir's directory for "
-                      "write access)")
+                _emit_trailer(args, "\n(could not save SBOM run \u2014 see --data-dir's "
+                                    "directory for write access)", machine_output=True)
             else:
-                _emit(f"\n(SBOM run saved as {_saved_sbom_id} \u2014 diff it later with "
-                      f"--sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)")
+                _emit_trailer(args, f"\n(SBOM run saved as {_saved_sbom_id} \u2014 diff it "
+                                    f"later with --sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)",
+                              machine_output=True)
         return 0
 
     if _mode == "incident":
@@ -6626,6 +6734,14 @@ def _main(argv=None) -> int:
                                  notes=monitor_notes,
                                  verbose=bool(getattr(args, "verbose", False)),
                                  baseline_ref=_reference, probe=_probe))
+            # C-721: the loser of the race for the baseline (see the journal_lock block above)
+            # wrote nothing, and the renderer prints nothing at all for an unchanged
+            # comparison it did not persist - four header lines and silence. Say why.
+            if _baseline_moved and not _probe and not _skip_live_test_persist:
+                _emit("\nAnother --monitor run updated the baseline while this one was "
+                      "running, so this run recorded nothing" +
+                      ("." if alerts else " and shows no comparison.") +
+                      " Re-run --monitor to compare against the new baseline.")
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure
@@ -7156,9 +7272,9 @@ def _main(argv=None) -> int:
             # today's behaviour there.
             _saved = "\n".join([body, *_full_lines]) if _full_lines else body
             secure_write_text(_report_dest(args.save), strip_ansi(_saved))
-            _emit(f"\n(report saved to {args.save})")
+            _emit_trailer(args, f"\n(report saved to {args.save})")
         except OSError as exc:
-            _emit(f"\n(could not save report: {exc})")
+            _emit_trailer(args, f"\n(could not save report: {exc})")
             _save_failed = True
 
     # C-524: same tail slot as --save above, deliberately -- --save-run is reachable
@@ -7169,11 +7285,11 @@ def _main(argv=None) -> int:
         _saved_run_id = _save_run_snapshot(findings, _runs_path(args), home=args.home,
                                             version=__version__)
         if _saved_run_id is None:
-            _emit("\n(could not save run \u2014 see --data-dir/--history's directory "
-                  "for write access)")
+            _emit_trailer(args, "\n(could not save run \u2014 see --data-dir/--history's "
+                                "directory for write access)")
         else:
-            _emit(f"\n(run saved as {_saved_run_id} \u2014 diff it later with "
-                  f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
+            _emit_trailer(args, f"\n(run saved as {_saved_run_id} \u2014 diff it later with "
+                                f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
 
     # B-598: the guard this used to spell out inline now lives in
     # `_record_history_point`, which the --dashboard branch calls too. Its docstring
