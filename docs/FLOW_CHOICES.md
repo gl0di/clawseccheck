@@ -158,23 +158,36 @@ For **approval_gates** - answer this yourself, per action class (`exec`, `send`,
 not a single scalar):
 > For each of `exec`, `send`, `write`: are you required to call `request_approval` or `ask_user` before acting in that class? -> `"required"`. Do you act without asking? -> `"auto"`. Not sure? -> `"unknown"`.
 
+When the answer depends on the path, the sandbox, the action or an existing authorisation, answer
+`"unknown"` and put the condition in the `notes` rather than choosing `"auto"` or `"required"`.
+
 For **untrusted_to_action** - answer this yourself:
 > Combine: do you have any channel with open/allowlist/paired dmPolicy or groupPolicy (external ingress exists)? AND do you have outbound tools (email, webhook, exec, deploy, etc.) without an approval gate? If both -> `ungated`. If approval gate present -> `gated`.
 
 For **host_monitors** - try to answer it yourself first with a bounded, read-only probe using
 your own shell access (ClawSecCheck itself stays subprocess-free - this probe is *your* action,
 fed back through `--attest`, not the engine's). Look for common EDR/IDS/telemetry process,
-service, or module names:
-> - `systemctl list-units --type=service --state=running 2>/dev/null | grep -iE 'falcon|crowdstrike|sentinel|carbonblack|cbagent|cortex|defender|mdatp|auditd|ossec|wazuh|suricata|snort|zeek|clamav|osquery|tetragon|falco'`
-> - `ps -eo comm 2>/dev/null | grep -iE '<same list>'`
-> - `lsmod 2>/dev/null | grep -iE 'falcon|tetragon|<same list>'` (loaded EDR/telemetry kernel modules)
-> - (macOS) `launchctl list | grep -iE '<same list>'`
+service, or module names. The helper keeps each probed command's own exit status and error text
+visible; do not pipe a probed command straight into `grep` with its errors discarded, because a
+command that failed then looks exactly like one that found nothing:
+```sh
+P='falcon|crowdstrike|sentinel|carbonblack|cbagent|cortex|defender|mdatp|auditd|ossec|wazuh|suricata|snort|zeek|clamav|osquery|tetragon|falco'
+probe() { out=$("$@" 2>&1); rc=$?; echo "[$* exit=$rc]"; if [ "$rc" -eq 0 ]; then printf '%s\n' "$out" | grep -iE "$P"; else printf '%s\n' "$out" | head -n 3; fi; }
+probe systemctl list-units --type=service --state=running
+probe ps -eo comm
+probe lsmod
+probe launchctl list   # macOS only
+```
+Read each `exit=` line first, then any matches. If the probed command (not grep) exits non-zero
+or prints an error, that source could not be probed - its output says nothing about monitors.
 
-If the probe runs and finds one or more matches, set `host_monitors` to the matched name(s). If it
-runs clean (no matches), set `host_monitors` to `[]` - a probed "none found" is a real, agent-
-verified answer, not a guess. Only fall back to asking the user - "Is there any security
-monitoring on this machine that the host scan wouldn't see - a work EDR agent, a network IDS on the
-gateway?" -> `host_monitors` - when you have no shell access or the probe errors out.
+If a source that ran (`exit=0`) printed one or more matches, set `host_monitors` to the matched
+name(s). Set `host_monitors` to `[]` only when at least one source ran successfully and none of
+the sources that ran matched - that is a real, agent-verified "none found", though it covers only
+the sources that ran, so say which ones in the `notes`. If every source failed, answer `unknown`,
+or ask the user - "Is there any security monitoring on this machine that the host scan wouldn't
+see - a work EDR agent, a network IDS on the gateway?" -> `host_monitors` - and the same when you
+have no shell access.
 
 If neither the probe nor the user can answer, leave the field `unknown` - never invent an answer.
 
