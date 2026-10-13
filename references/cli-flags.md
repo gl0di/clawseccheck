@@ -170,3 +170,6 @@ pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with 
 `--exit-code` with `--sbom`), ClawSecCheck prints a `note: ...` to **stderr** naming what was
 ignored and continues - machine-readable stdout (`--json`/`--sarif`) stays clean. `--no-history`
 is honored everywhere except `--trend`/`--monitor`, which record a score point as part of their job.
+Among the four artifact flags the order is `--badge`, `--html`, `--sarif`, `--pdf`: with two of them
+(and no `--dashboard`) the earlier one is written and the other is named in a `note: ... ignored
+(running ...)` line.

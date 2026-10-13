@@ -486,8 +486,14 @@ and the package sits beside it: any `*.py`, `*.pyc`, `*.pyw`, `*.pyd`, `*.so`, `
 `sitecustomize*` or `usercustomize*` name, or a directory holding an `__init__.*` module.
 The message names the entries (up to ten); remove them or reinstall from a clean copy. If
 you did not put them there, treat the install as compromised. `--verify-self` reports the same
-entries as a `Coverage note` and still exits 0 - the digest itself is complete - so
-`python -m clawseccheck --verify-self` shows what is there without refusing.
+entries as a `Coverage note` and still exits 0 - the digest itself is complete.
+
+That note comes too late to protect you in the module form. `python -m clawseccheck
+--verify-self` puts the current directory first on Python's import path, so a stray `json.py`
+there (or in an install directory that is on `PYTHONPATH`) is imported and executed before
+the note is printed, and the command still exits 0. `python3 audit.py --verify-self` does not
+execute it: it refuses with exit 2 and names the entries. To inspect a suspect install,
+use that and the `ls -A` compare above, not the module form.
 
 **Residuals, stated plainly:** a modified `audit.py` is only caught by the per-file compare
 above; a file dropped in the instant after the scan and before the import cannot be ruled
@@ -796,6 +802,15 @@ The third one exists because deleting the store is the crudest tampering there i
 used to print `chain OK` with exit 0 over a file that was never opened. It is deliberately
 **not** reported as BROKEN either: a first run has no store yet, and calling that tampering
 would send you hunting an intruder who is not there.
+
+The chain cannot see one shape at all: whole lines deleted from the **end** of
+`history.jsonl` or `events.jsonl` leave a shorter, valid chain, so the verifier prints
+`chain OK` and exits 0 (checked by deleting the last line of each; deleting a line from the
+middle printed `chain BROKEN`, exit 1). Noticing a missing tail takes a copy of the last hash
+kept where an attacker cannot reach it, and this tool keeps none for these two journals
+([SECURITY_MODEL.md](../SECURITY_MODEL.md) says the same). The `Baseline reference` that
+`--monitor` prints, checked with `--verify-baseline`, anchors the drift baseline
+(`state.json`), not these journals.
 
 Which follow-up sentence you get is decided by **what is actually at the path**, not by
 whether you typed the flag. Nothing there at all reads as an ordinary first run; something
@@ -1331,6 +1346,15 @@ python3 audit.py --exit-code                # exit 1 on any FAIL verdict (six so
 The SARIF file is written to the path you choose - ClawSecCheck never uploads it anywhere.
 `--fail-on` and `--exit-code` do not change the default exit code (0) when omitted, preserving
 backward compatibility.
+
+**One output file per run.** Without `--dashboard`, passing two of `--badge`, `--html`,
+`--sarif`, `--pdf` writes only one of them: the earlier one in that list wins, and stderr
+names the other (`note: --sarif ignored (running --html)`). So `--sarif results.sarif --html
+report.html` writes the HTML and leaves no `results.sarif` for an upload step to find; give
+each artifact its own run. `--save` with `--html` behaves the same way (the HTML is written,
+`note: --save has no effect with --html`). With `--dashboard`, `--sarif` and `--html` together
+wrote both files. The order is also listed in [references/cli-flags.md](../references/cli-flags.md)
+under "Mode precedence".
 
 **Which modes the gate reaches.** `--fail-on`/`--exit-code` work on the default report path
 (including with `--json` or `--save`) and on every mode that renders that audit as an

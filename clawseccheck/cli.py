@@ -2539,7 +2539,15 @@ def _flag_coherence_notes(args) -> list[str]:
         if bool(getattr(args, "yes", False)):
             notes.append("note: --yes has no effect without --purge or "
                          "--apply-ignore-proposals")
-        return notes  # the default path honors every tracked global modifier
+        # C-719: --format / --save-sbom-run are honored only by --sbom (_MODE_HONORS["sbom"]),
+        # which is a primary mode - so reaching HERE means neither could have run. This
+        # branch used to return before naming them, so `--save-sbom-run` alone ran an
+        # ordinary audit and stored nothing without a word.
+        if getattr(args, "format", "native") != "native":
+            notes.append("note: --format has no effect without --sbom")
+        if bool(getattr(args, "save_sbom_run", False)):
+            notes.append("note: --save-sbom-run has no effect without --sbom")
+        return notes  # the default path honors the tracked global modifiers not noted above
     win_attr, win_flag = active[0]
     ignored = [
         f for a, f in active[1:]
