@@ -6969,8 +6969,10 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     return _finding(
         "B370", WARN, "; ".join(found[:8]),
         "One or more model entries name an explicit agentRuntime.id \u2014 confirm each "
-        "value is the CLI backend / plugin harness you intend, since it decides which "
-        "external process actually runs that model's turns.",
+        "value is the runtime you intend, since it decides what runs that model's "
+        "turns. 'openclaw' is OpenClaw's own built-in agent and tools, not a separate "
+        "process; any other value selects another runtime (a plugin harness, a CLI "
+        "backend, or a fallback mode) in its place.",
         evidence=found[:8],
     )
 
@@ -7866,6 +7868,7 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
         )
     offenders = []
     unresolved = []
+    switched_off = []
     for name, entry in plugins.items():
         if not isinstance(entry, dict):
             continue
@@ -7893,6 +7896,8 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
             malformed.append("allowConversationAccess")
         if grants:
             offenders.append(f"plugins.entries.{name}.hooks.{'/'.join(grants)}")
+            if entry.get("enabled") is False:
+                switched_off.append(str(name))
         if malformed:
             unresolved.append(f"plugins.entries.{name}.hooks.{'/'.join(malformed)}")
     if offenders:
@@ -7908,7 +7913,12 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
             "Confirm each listed plugin genuinely needs the grant. Set "
             "hooks.allowPromptInjection: false to withdraw the default prompt-mutation "
             "grant; leave hooks.allowConversationAccess unset (or false) unless the "
-            "plugin genuinely needs transcript access.",
+            "plugin genuinely needs transcript access."
+            + (f" Of the listed plugins, {', '.join(repr(n) for n in switched_off[:6])} "
+               f"{'carries' if len(switched_off) == 1 else 'carry'} enabled: false, so "
+               "OpenClaw is not expected to load "
+               f"{'it' if len(switched_off) == 1 else 'them'}; the grant matters only "
+               "if that flag is turned back on." if switched_off else ""),
             evidence=offenders,
         )
     if unresolved:

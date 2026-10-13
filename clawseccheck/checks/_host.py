@@ -960,6 +960,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
     any_openclaw_unit = False
     persistent_ev: list[str] = []
     other_ev: list[str] = []
+    not_linked: list[str] = []   # C-705: WantedBy= set, but no enable link on disk
 
     for unit_path in unit_files:
         try:
@@ -982,6 +983,16 @@ def check_systemd_persistence(ctx: Context) -> Finding:
             if wanted_by:
                 detail += f", WantedBy={wanted_by}"
             persistent_ev.append(detail)
+            if wanted_by:
+                link = user_units_dir / f"{wanted_by}.wants" / unit_path.name
+                try:
+                    linked = pathprobe.is_symlink(link) or pathprobe.exists(link)
+                except OSError:
+                    # WantedBy= is attacker-shaped text: an over-long or unreadable path
+                    # raises here. "Cannot tell" keeps today's WARN and adds no note.
+                    linked = True
+                if not linked:
+                    not_linked.append(unit_path.name)
         else:
             other_ev.append(unit_path.name)
 
@@ -1005,7 +1016,13 @@ def check_systemd_persistence(ctx: Context) -> Finding:
             "gateway service, not proof of compromise.",
             "Confirm this restart policy is intentional. If the service should not "
             "persist automatically, change Restart= to 'no' or 'on-failure', and "
-            "review any WantedBy= target that starts it automatically at login/boot.",
+            "review any WantedBy= target that starts it automatically at login/boot."
+            + (f" For {', '.join(not_linked[:6])} no enable link was found under "
+               "~/.config/systemd/user/<target>.wants/, so the unit file asks to start "
+               "automatically but it may not be enabled; this audit reads unit files "
+               "only and does not ask systemd - check with `systemctl --user "
+               "is-enabled <unit>` and `systemctl --user is-active <unit>`."
+               if not_linked else ""),
             evidence=persistent_ev,
         )
 

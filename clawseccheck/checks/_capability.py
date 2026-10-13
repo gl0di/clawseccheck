@@ -3574,7 +3574,12 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
             "it back on independently of the global setting). This audit cannot see a "
             "per-run CLI --code-mode override, a runtime /model switch, a run routed "
             "through the Codex harness (a separate engine this check does not read), or "
-            "an external provider plugin's own compat.codeMode manifest flag.",
+            "an external provider plugin's own compat.codeMode manifest flag."
+            + (" The models named in the finding are the ones whose CONFIG resolves to "
+               "auto, not a verified list of models that engage Code Mode: that depends "
+               "on each model's provider catalog marking compat.codeMode=\"preferred\", "
+               "which this audit does not read, so a named model may run with its "
+               "normal tool surface." if has_auto and model_auto else ""),
             evidence=evidence[:8] or None,
         )
 

@@ -2764,6 +2764,64 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     lines.append("")
 
 
+# docs/THREAT_COVERAGE.md is written for the maintainers and its Notes cells cite
+# task ids. --explain shows that text to the person who ran the audit, to whom those ids
+# mean nothing, so the ones that can be taken out WITHOUT rewriting a sentence are
+# removed HERE, at the one place that shows the text - the doc keeps them. Only tracker
+# shapes are matched (B-/C-/F-/I- plus 2-4 digits, or an epic E-0NN); public identifiers
+# (CVE-2026-..., CWE-78, RISK-03) and standards (P-256, E-164) are not, and nothing but the
+# id and its own separator or space is ever deleted. An id the sentence needs as its object
+# ("via B-121", "split out of B-121 as B-122") stays: a leftover id reads better than a
+# sentence with a hole in it.
+_TRACKER_ID_CORE = (r"(?:CLAWSECCHECK-)?(?:[BCFI]-\d{2,4}|E-0\d\d)"
+                    r"(?:/W\d+(?:\.\d+)?)?(?:[ \t]+(?:item|bug|round|part)[ \t]+\d+)?(?!\w)")
+_TRACKER_ID_BARE = r"(?:CLAWSECCHECK-)?(?:[BCFI]-\d{2,4}|E-0\d\d)(?!\w)"
+_TRACKER_ID_ANY_RE = re.compile(_TRACKER_ID_BARE)    # only a cheap "is there any?" gate
+# (a) a parenthesis or bracket holding nothing but ids and their separators - "(C-211)",
+# "(B-121, C-130)", "(see F-184)" - goes away with the one space before it.
+_TRACKER_ONLY_GROUP_RE = re.compile(
+    r" ?[(\[][ \t]*(?:(?:see|cf\.?|per)[ \t]+)?(?<![\w/.-])" + _TRACKER_ID_CORE
+    + r"(?:[ \t]*(?:[,;/+&]|and)[ \t]*" + _TRACKER_ID_CORE + r")*[ \t]*[)\]]")
+# (b) an id that opens a parenthesis, with the separator after it: "(C-411; the rule ...".
+_TRACKER_LEADING_RE = re.compile(
+    r"(?<=\()[ \t]*(?<![\w/.-])" + _TRACKER_ID_CORE + r"[ \t]*[;,][ \t]+")
+# (e) an id glued to a slash list, with that slash: "B-123/SkillTrustBench", "X/B-123".
+_TRACKER_SLASH_AFTER_RE = re.compile(
+    r"(?<![\w/.-])" + _TRACKER_ID_BARE + r"/(?!W\d)(?=[A-Za-z])")
+_TRACKER_SLASH_BEFORE_RE = re.compile(
+    r"(?<=[A-Za-z0-9)])/" + _TRACKER_ID_BARE + r"(?![/]|\.\w)")
+# (c) a label at the start of a sentence or line, with its colon: "B-243: the rule ...".
+_TRACKER_LABEL_RE = re.compile(
+    r"(?:^|(?<=[.!?:][ \t]))" + _TRACKER_ID_CORE + r":[ \t]+", re.MULTILINE)
+# (d) a modifier: "a B-123 pass", "the B-243 allowlist" - an article or pronoun before it and
+# a plain lowercase noun after it, and no function word that would make it a subject.
+_TRACKER_MODIFIER_RE = re.compile(
+    r"\b((?i:a|an|the|earlier|this|that|its|their))[ \t]+" + _TRACKER_ID_BARE
+    + r"[ \t]+(?=[a-z])(?!(?:and|or|as|is|was|are|were|has|had|have|can|does|did|will|would|"
+    r"should|may|must|not|so|also|for|to|of|in|on|at|with|by|from|but|that|which|where|when|"
+    r"if|then|than|it|be|been|via|per|into|over|under|about|after|before|because|since|while|"
+    r"whose|who)\b)")
+
+
+def _strip_internal_ids(text: str) -> str:
+    """*text* with the tracker ids removed that can go without leaving a hole in a sentence.
+
+    Text that carries no tracker id is returned unchanged.
+    """
+    if not _TRACKER_ID_ANY_RE.search(text):
+        return text
+    out = _TRACKER_ONLY_GROUP_RE.sub("", text)
+    out = _TRACKER_LEADING_RE.sub("", out)
+    for _ in range(4):                       # "B-1/B-2/Foo": each pass uncovers the next id
+        step = _TRACKER_SLASH_AFTER_RE.sub("", out)
+        step = _TRACKER_SLASH_BEFORE_RE.sub("", step)
+        if step == out:
+            break
+        out = step
+    out = _TRACKER_LABEL_RE.sub("", out)
+    return _TRACKER_MODIFIER_RE.sub(r"\1 ", out)
+
+
 def render_explain(f, *, coverage_note: "str | None" = None,
                    ascii_only: bool = False) -> str:
     """C-523: everything --explain/--retest show about ONE finding, and nothing else.
@@ -2796,7 +2854,8 @@ def render_explain(f, *, coverage_note: "str | None" = None,
         lines.append(f"  fix: {_sanitize(f.fix)}")
     if coverage_note:
         lines.append("")
-        lines.append(f"  coverage note (docs/THREAT_COVERAGE.md): {_sanitize(coverage_note)}")
+        lines.append("  coverage note (docs/THREAT_COVERAGE.md): "
+                     f"{_sanitize(_strip_internal_ids(coverage_note))}")
     return "\n".join(lines)
 
 

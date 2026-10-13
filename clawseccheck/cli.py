@@ -4800,6 +4800,17 @@ def _main(argv=None) -> int:
                                   version=__version__))
             return _vet_rc
         _emit(render_vet_dossier(profile, ascii_only=ascii_only))
+        if vet_kind == "skill" and getattr(getattr(f, "ctx", None),
+                                           "self_excluded_skills", None):
+            # C-705: the all-UNKNOWN dossier above is deliberate (a folder that merely
+            # matches this layout proves nothing), but it left the reader with no next
+            # step. The question "is this install the genuine, unmodified scanner" has
+            # its own command.
+            _emit("")
+            _emit("This folder is ClawSecCheck's own, so it is not scanned as a "
+                  "third-party skill. To check that this copy is unmodified, run "
+                  f"'{command_prefix()} --verify-self' and compare the digest it prints "
+                  "with the one published for your release.")
         return _vet_rc
 
     if _vet_route and _vet_route[0] == "mcp":

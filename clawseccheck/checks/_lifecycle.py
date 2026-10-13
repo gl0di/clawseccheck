@@ -7135,6 +7135,111 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None,
     return records
 
 
+_B181_VERSION_RE = re.compile(r"^version\s*:\s*[\"']?([0-9A-Za-z][0-9A-Za-z.+_-]{0,40})",
+                              re.MULTILINE)
+
+
+def _b181_recorded_version(record: dict):
+    """The version ClawHub recorded for this install: a lock entry's `version`, or an
+    origin.json's `installedVersion` (its own top-level `version` is a schema number).
+    The raw string only - `_b181_version_parts` decides whether it is fit to quote."""
+    for key in ("version", "installedVersion"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _b181_installed_version(skill_dir: Path):
+    """`version:` from the front matter of the skill's own SKILL.md, or None. Bounded read
+    of a regular file only; anything unreadable or absent is simply no answer."""
+    path = skill_dir / "SKILL.md"
+    try:
+        if pathprobe.is_symlink(path) or not pathprobe.is_file(path):
+            return None
+        with open(path, "rb") as fh:
+            head = fh.read(8192).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = head.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    block = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        block.append(line)
+    else:
+        return None
+    m = _B181_VERSION_RE.search("\n".join(block))
+    return m.group(1) if m else None
+
+
+# A version fit to be quoted in advice: an optional "v", one to four numbers, and a short
+# pre-release/build suffix. Anything else (free text, a sentence, control characters, a
+# very long string) is never printed.
+_B181_VERSION_OK_RE = re.compile(r"v?(\d+(?:\.\d+){0,3})([-+][0-9A-Za-z.-]{0,20})?")
+_B181_SLUG_OK_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def _b181_version_parts(value):
+    """(numbers, suffix, printable) of a plain version, else None."""
+    if not isinstance(value, str):
+        return None
+    m = _B181_VERSION_OK_RE.fullmatch(value.strip())
+    if m is None:
+        return None
+    numbers = tuple(int(p) for p in m.group(1).split("."))
+    return numbers, m.group(2) or "", m.group(0).lstrip("v")
+
+
+def _b181_version_notes(candidates: "list[tuple[str, Path, dict]]") -> str:
+    """Advice text for skills whose install record is for a DIFFERENT version than the
+    SKILL.md now on disk.
+
+    A newer local copy that replaced a ClawHub install fails the digest comparison just
+    like tampering does, and "reinstall it from ClawHub" then restores the OLDER bytes the
+    record describes - a downgrade the reader was never told about. Text only: this
+    reads two version strings and never touches a record or a digest. A version that is
+    not a plain version is compared as "different" without being printed, and a skill
+    name that is not a plain name is not printed either.
+    """
+    keep = ("if the copy on disk is a deliberate local one, keep a copy of it before "
+            "you reinstall")
+    notes = []
+    for slug, skill_dir, record in candidates[:3]:
+        recorded = _b181_recorded_version(record)
+        installed = _b181_installed_version(skill_dir)
+        if not recorded or not installed:
+            continue
+        who = f"'{slug}'" if _B181_SLUG_OK_RE.fullmatch(slug) else "the skill"
+        rec, inst = _b181_version_parts(recorded), _b181_version_parts(installed)
+        if rec is None or inst is None:
+            if recorded.strip() == installed.strip():
+                continue
+            notes.append(
+                f"{who}: the install record's version and the SKILL.md version on disk "
+                "could not be compared, so reinstalling from ClawHub might replace the "
+                f"files on disk with a different version - {keep}")
+            continue
+        width = max(len(rec[0]), len(inst[0]))      # 1.0 and 1.0.0 are the same version
+        rec_n = rec[0] + (0,) * (width - len(rec[0]))
+        inst_n = inst[0] + (0,) * (width - len(inst[0]))
+        if rec_n == inst_n and rec[1] == inst[1]:
+            continue
+        older = rec_n < inst_n
+        notes.append(
+            f"{who}: the install record is for version {rec[2]}, but the SKILL.md on "
+            f"disk declares version {inst[2]}"
+            + (", so reinstalling from ClawHub would be a downgrade" if older else
+               ", so reinstalling from ClawHub would replace the files on disk with "
+               "the recorded version")
+            + f" - {keep}")
+    if not notes:
+        return ""
+    return " Version note: " + "; ".join(notes) + "."
+
+
 def check_skill_install_tamper(ctx: Context) -> Finding:
     """B181 (B-257) - an installed skill's bytes no longer match the SHA-256 digests
     ClawHub recorded for it at install time.
@@ -7168,6 +7273,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
     missing: list[str] = []
     linked: list[str] = []
     unverifiable: list[str] = []
+    drifted: "dict[str, tuple[str, Path, dict]]" = {}   # C-705: slug -> what to compare
     verified = 0
     budget = _B181_MAX_FILES_TOTAL
 
@@ -7215,8 +7321,10 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
                 else:
                     tampered.append(f"{slug}: '{rel}' does not match the digest recorded "
                                     f"in {source} at install time")
+                    drifted.setdefault(slug, (slug, skill_dir, record))
             elif state == "missing":
                 missing.append(f"{slug}: '{rel}' is recorded in {source} but is gone")
+                drifted.setdefault(slug, (slug, skill_dir, record))
             else:
                 unverifiable.append(f"{slug}: '{rel}' could not be hashed ({state})")
 
@@ -7232,7 +7340,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             "from ClawHub to restore the verified bytes, and review the modified file "
             "first \u2014 if you did not edit it yourself, something else on this machine "
             "(another agent, another skill, or an attacker) rewrote a skill the agent "
-            "auto-loads.",
+            "auto-loads." + _b181_version_notes(list(drifted.values())),
             evidence=tampered[:6],
         )
 
@@ -7246,7 +7354,8 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             "fully matched to what is on disk: " + "; ".join(items[:6]) + extra,
             "A file recorded at install time that is now gone, or a skill directory linked "
             "to a working tree, both mean the bytes running today are not the bytes "
-            "ClawHub verified. Reinstall the skill if the change was not deliberate.",
+            "ClawHub verified. Reinstall the skill if the change was not deliberate."
+            + _b181_version_notes(list(drifted.values())),
             evidence=items[:6],
         )
 
