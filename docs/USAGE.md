@@ -1084,7 +1084,7 @@ The staleness ladder, and where the numbers come from:
 | --- | --- |
 | under 3 days | nothing - healthy and quiet |
 | 3-14 days | longer than this setup's usual gap - confirm the schedule is still in place |
-| over 14 days | monitoring is effectively not running |
+| over 14 days | ClawSecCheck's own monitor has not run (a run with `--no-history`, or another tool, leaves no trace in its journal) |
 
 Three days is not a guess. Measured on a real machine's history, the gap between consecutive
 checks has a median near zero, a 90th percentile of 0.07 days and a **maximum of 1.90 days** - so

@@ -4323,12 +4323,7 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     findings = deduplicate_findings(findings)
     notice = (suppressed_notice_lines(findings, limit=_DASHBOARD_NOTICE_LIMIT)
               if suppression_notice else [])
-    qualifying = [
-        f for f in findings
-        if f.status in ACTIONABLE_STATUSES
-        and not getattr(f, "suppressed", False)
-        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
-    ]
+    qualifying = _headline_qualifying_findings(findings)
     if not qualifying:
         ok = "[OK]" if ascii_only else "\u2705"
         out = f"No high-confidence issues to fix. {ok}\n"
@@ -4538,8 +4533,57 @@ def _glance_qualifying_findings(findings: list[Finding]) -> list[Finding]:
     ]
 
 
+def _headline_qualifying_findings(findings: list[Finding]) -> list[Finding]:
+    """The complement of `_glance_qualifying_findings`: the non-suppressed FAIL/WARN
+    findings that are NOT MEDIUM/ATTESTED confidence - the set the card's subject blocks
+    (`render_dashboard_findings`) and its "Most urgent" lines (`_card_top_urgent_lines`)
+    draw from. One filter shared by both and by the header's issue-count clause (C-712), so
+    the count the header reconciles against is the list the renderer prints."""
+    return [
+        f for f in findings
+        if f.status in ACTIONABLE_STATUSES
+        and not getattr(f, "suppressed", False)
+        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
+    ]
+
+
+# How many lower-confidence findings the --full card prints under "Worth a glance".
+_GLANCE_LIMIT = 12
+_GLANCE_LIMIT_COMPACT = 6
+
+
+def _issues_count_phrase(findings: list[Finding], n_issues: int, *, compact: bool,
+                         reconcile: bool) -> str:
+    """The header's "N issues", plus (C-712) the split when the subject blocks below do not
+    add up to it. `n_issues` counts every non-suppressed FAIL/WARN; the subject blocks print
+    only the high-confidence ones, so a card with lower-confidence findings used to show
+    "38 issues" over blocks that listed 28 and say nothing about the other 10.
+
+    `reconcile` is False for the overview card (no subject blocks: its pointer line carries
+    the reconciliation instead). Both parts are measured with the filters the renderers use,
+    and the clause appears only when both parts exist and add up to `n_issues` - a count it
+    cannot reconcile is left plain rather than guessed."""
+    word = "issue" if n_issues == 1 else "issues"
+    phrase = f"{n_issues} {word}"
+    if not reconcile:
+        return phrase
+    n_high = len(_headline_qualifying_findings(findings))
+    n_low = len(_glance_qualifying_findings(findings))
+    if not n_low or n_high + n_low != n_issues:
+        return phrase
+    if compact:
+        # --compact: the glance section is short and the budget cut usually removes it, so
+        # promise only what holds in every case - the full report carries every finding.
+        where = "see the full report"
+    elif n_low <= _GLANCE_LIMIT:
+        where = "listed further down"
+    else:
+        where = f"{_GLANCE_LIMIT} listed further down, the rest in the full report"
+    return f"{phrase} ({n_high} high-confidence, {n_low} lower-confidence: {where})"
+
+
 def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
-                          limit: int = 12, compact: bool = False,
+                          limit: int = _GLANCE_LIMIT, compact: bool = False,
                           why_drop_severities: frozenset = frozenset()) -> list[str]:
     """MEDIUM/ATTESTED-confidence findings for the combined pipeline Dashboard
     (F-153) - the exact complement of render_dashboard_findings's own filter (which
@@ -4688,12 +4732,7 @@ def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
     Returns `(lines, n_named)`; the caller reconciles `n_named` against the header's own
     issue count and DISCLOSES the difference (Golden Rule #4 - a card that quietly names
     5 of 26 findings would read as a complete list)."""
-    qualifying = [
-        f for f in findings
-        if f.status in ACTIONABLE_STATUSES
-        and not getattr(f, "suppressed", False)
-        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
-    ]
+    qualifying = _headline_qualifying_findings(findings)
     qualifying.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), _STATUS_ORDER.get(f.status, 9)))
     named = qualifying[:limit] if limit else []
     lines = [
@@ -4704,7 +4743,7 @@ def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
 
 
 def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool = False,
-                               full: bool = False) -> list[str]:
+                               full: bool = False, n_lower: int = 0) -> list[str]:
     """Where the rest of the detail is. Two jobs: disclose how many findings the card did
     NOT name, and point at the full report.
 
@@ -4725,7 +4764,19 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
                      " second-opinion and coverage blocks") if full else ""
     if n_more > 0:
         word = "finding" if n_more == 1 else "findings"
-        lines.append(f"(+{n_more} more {word} not named above \u2014 the full list is in the report.)")
+        # C-712: when some of the unnamed findings are lower-confidence, say how many, so
+        # the header count equals the named lines plus each remainder (`n_lower` comes from
+        # the same filter list as the render; it is clamped so the parts never exceed n_more).
+        n_lower = max(0, min(n_lower, n_more))
+        if n_lower:
+            n_high_more = n_more - n_lower
+            parts = ([f"{n_high_more} high-confidence"] if n_high_more else []) + [
+                f"{n_lower} lower-confidence"]
+            split = ", ".join(parts) + "; "
+        else:
+            split = ""
+        lines.append(f"(+{n_more} more {word} not named above \u2014 {split}"
+                     "the full list is in the report.)")
     if pdf_path:
         lines.append(f"Full detail \u2014 every finding, with its why and evidence{full_pipeline}"
                      " \u2014 is in the attached PDF report.")
@@ -4840,7 +4891,19 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # Grade"/"- Findings -" spots, a middle-dot for the "Grade F · 49/100" spot) - a
     # visible drift within the same string. One brand separator everywhere now.
     sep = brand.ASCII_SEPARATOR.strip() if ascii_only else brand.SEPARATOR.strip()
-    issues_word = "issue" if n_issues == 1 else "issues"
+    # C-712: the subject blocks print only the high-confidence findings, so over them the
+    # header splits the count; the overview card (default / --full with a PDF) has no such
+    # blocks and reconciles in its pointer line instead.
+    _reconcile = bool(full and not pdf_path)
+    issues_phrase_split = _issues_count_phrase(
+        findings, n_issues, compact=compact, reconcile=_reconcile)
+    # --compact is tuned to the ~4096-char budget and, on a big home, already sits at the
+    # hard-truncation step: the extra ~70 characters displaced the Skills "not graded" note
+    # (measured on a real home). So the compact card is rendered with the plain phrase and
+    # the split is substituted into the header AFTER the budget is enforced, only when the
+    # whole card still fits - the clause can add a clause, never cost the card a line.
+    issues_phrase = (_issues_count_phrase(findings, n_issues, compact=compact, reconcile=False)
+                     if compact else issues_phrase_split)
     # B-444 bug B: this used to hand-assemble "{mascot}OpenClaw Security Audit" as an
     # f-string, bypassing brand.header() entirely -- so brand.WORDMARK ("ClawSecCheck")
     # never reached the single most-seen surface (the card a host agent pastes into
@@ -4856,13 +4919,13 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         grade_lines = [
             f"{head} {sep} Grade {score.grade} {sep} {score.score}/100",
             f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
-            f"  {sep}  {n_issues} {issues_word}",
+            f"  {sep}  {issues_phrase}",
         ]
     else:
         _headline = _urgent_headline(findings, risk=risk)
         grade_lines = [
             f"{head} {sep} {_headline}",
-            f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
+            f"{_missing_layers_sentence(score)}  {sep}  {issues_phrase}",
         ]
         if not compact:
             # C-704: the sentence above counts layers it never names; the compact card
@@ -4999,6 +5062,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # above") instead of letting the header count and the rendered list silently
         # disagree - and every one of those N IS in the PDF, which renders all
         # FAIL/WARN regardless of confidence.
+        n_lower = len(_glance_qualifying_findings(findings))
         summary_lines = _card_summary_lines(findings, ctx, plugin_sweep=plugin_sweep,
                                             ascii_only=ascii_only,
                                             logs_unexamined=_logs_unexamined(score))
@@ -5017,7 +5081,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             elif n_issues == 0:
                 out += f"\nNo known attack pattern matched. Keep it that way. {ok}\n"
             out += ("\n" + "\n".join(_card_detail_pointer_lines(
-                n_issues - n_named, pdf_path, ascii_only=ascii_only, full=full)) + "\n")
+                n_issues - n_named, pdf_path, ascii_only=ascii_only, full=full,
+                n_lower=n_lower)) + "\n")
             return out + card_skills_block
 
         return _finalize_card(_assemble_card, ascii_only=ascii_only)
@@ -5102,7 +5167,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # ATTESTED findings could blow the char budget on its own even after Section 2
         # is trimmed.
         glance_lines = _worth_a_glance_lines(
-            findings, ascii_only=ascii_only, limit=6 if compact else 12, compact=compact,
+            findings, ascii_only=ascii_only, limit=_GLANCE_LIMIT_COMPACT if compact else _GLANCE_LIMIT, compact=compact,
             why_drop_severities=why_drop_severities)
         if glance_lines:
             out += ("\n" + f"{sep} {glance_marker}{_SEC_GLANCE} {sep}" + "\n"
@@ -5118,8 +5183,15 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
         return out + footer_block
 
-    return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only,
-                                       reserve=compact_reserve)
+    result = _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only,
+                                         reserve=compact_reserve)
+    if compact and issues_phrase_split != issues_phrase:
+        anchor = f"  {sep}  {issues_phrase}\n"
+        widened = result.replace(anchor, f"  {sep}  {issues_phrase_split}\n", 1)
+        if (widened != result
+                and len(widened) <= max(_COMPACT_CHAR_BUDGET - max(compact_reserve, 0), 0)):
+            return widened
+    return result
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
@@ -7460,9 +7532,14 @@ def render_brief(state: "dict | None", events: "list | None",
                          "ago it was taken cannot be determined.")
         elif age >= _BRIEF_DEAD_DAYS:
             lines.append(
-                f"Monitoring is effectively not running \u2014 nothing has checked this setup "
-                f"for {int(age)} days. Stopping the schedule is the cheapest way to "
-                "silence a monitor, and it leaves no trace in the files it watches.")
+                # C-712: the evidence is ClawSecCheck's own monitor journal, not the
+                # machine's monitoring in general - a run with --no-history, or another
+                # tool, never writes to it - so the sentence says whose monitor it is.
+                f"ClawSecCheck's own monitor has not run for {int(age)} days \u2014 its "
+                "journal records no check of this setup in that time (a run with "
+                "--no-history, or another tool, leaves no trace there). Stopping the "
+                "schedule is the cheapest way to silence a monitor, and it leaves no "
+                "trace in the files it watches.")
         elif age >= _BRIEF_STALE_DAYS:
             lines.append(
                 "That is longer than this setup's usual gap between checks. Confirm the "
