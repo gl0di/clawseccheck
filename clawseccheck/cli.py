@@ -2775,6 +2775,8 @@ _PURGE_FILENAMES = (
     # C-517: --watch's liveness heartbeat (pid + the absolute home path + timestamps).
     # Written to <store>/watch_heartbeat.json by _watch_heartbeat_path; read by --watch-status.
     "watch_heartbeat.json",
+    # C-725: the advisory lock a running --watch holds (<store>/watch.lock, empty file).
+    "watch.lock",
     # The bare --pdf default (_default_pdf_target's fallback, <store>/report.pdf). The four
     # "openclaw-security-report.*" names above are F-162's guess at default names; this is
     # the name the tool actually writes for PDF. NOT clawseccheck-report.pdf: that is the
@@ -2822,8 +2824,10 @@ def _run_watch_cli(args) -> int:
 def _run_watch_status(args) -> int:
     """--watch-status: read the heartbeat --watch writes and say whether it is
     still alive - read-only, writes nothing (same contract as --brief)."""
-    hb, problem = _watch.read_heartbeat_ex(_watch_heartbeat_path(args))
-    word, sentence = _watch.describe_liveness(hb, problem)
+    hb_path = _watch_heartbeat_path(args)
+    hb, problem = _watch.read_heartbeat_ex(hb_path)
+    word, sentence = _watch.describe_liveness(
+        hb, problem, _watch.probe_watch_lock(_watch.lock_path_for(hb_path)))
     _emit(f"{word}: {sentence}")
     return 0 if word == "ALIVE" else 1
 

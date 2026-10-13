@@ -759,8 +759,9 @@ imports the same copy of ClawSecCheck the watcher itself runs, from whatever dir
 was started in: when you start it as `python3 <skill-dir>/audit.py --watch`, the re-scan runs
 through that same `audit.py`, so it keeps its refusal to run beside stray importable files. If a
 re-scan cannot complete (it exits with anything other than `0` or `3`), the watcher prints a
-`RE-SCAN FAILED` block with the re-scan's own output and says that change has not been checked;
-it then keeps watching, and `--watch-status` shows the failed code.
+`RE-SCAN FAILED` heading, the re-scan's full output (which may still hold the comparison it made
+before it stopped) and a line saying it is still watching; `--watch-status` shows the failed
+code. Every re-scan's output is printed in full, failed or not.
 
 A burst of writes collapses to **one** re-scan, not one per file touched: `--watch` waits for a
 quiet window (`--watch-debounce`, default 2s) after the last detected change before running the
@@ -778,19 +779,29 @@ every re-scan, and periodically while idle. Check on it from anywhere with:
 clawseccheck --watch-status --home ~/.openclaw --data-dir ~/.clawseccheck
 ```
 
-which reports `ALIVE`, `STALE` (no heartbeat update in a while - it may have hung), `STOPPED`
-(a clean shutdown was recorded, or the process is confirmed gone), `STALE RECORD` (the recorded
-pid cannot be a watcher, or is now some other program's process, so no watcher is running),
-`UNREADABLE` (the heartbeat file is corrupt or cannot be read - not the same as never having
-run), or `NOT RUNNING` (never started, or pointed at the wrong `--data-dir`). Whether a live pid
-is a watcher is read from `/proc/<pid>/cmdline`; where that does not exist, a live pid is
-reported `ALIVE` with a note that its identity could not be confirmed. Read-only - it never
-starts a watch itself.
+which reports `ALIVE`, `STALE` (the watcher holds its lock but has not updated its heartbeat in
+a while - it may have hung), `STOPPED` (a clean shutdown was recorded and no watcher holds the
+lock), `STALE RECORD` (the heartbeat says a watcher was running, but nothing holds the lock, so
+none is - it exited or was killed without a clean stop), `UNREADABLE` (the heartbeat file is
+corrupt or cannot be read - not the same as never having run), or `NOT RUNNING` (never started,
+or pointed at the wrong `--data-dir`). Read-only - it never starts a watch itself.
 
-One watcher per store: starting a second `--watch` on a `--data-dir` whose recorded watcher is
-still alive is refused with a non-zero exit, so it cannot overwrite the first one's heartbeat. A
-record whose process is gone is replaced, and the start says so. The check reads the heartbeat
-and then writes it; it is not a lock, so two starts in the same instant can both pass.
+**What decides "a watcher is running" is a lock, not the heartbeat.** A running `--watch` holds an
+exclusive advisory lock on `<data-dir>/watch.lock` for as long as it lives, and the operating
+system drops it when the process exits for any reason, `kill -9` included. `--watch-status`
+probes that lock for an instant (it never leaves it held) and trusts it over anything written in
+the heartbeat, which is only a file in the store: the pid it names is shown for information and
+is never used to decide whether to refuse a start. A heartbeat that cannot be parsed, or carries
+a value of the wrong type or range, is reported as `UNREADABLE`.
+
+One watcher per store: a second `--watch` on a `--data-dir` whose lock another watcher holds is
+refused ("another --watch holds this store's lock") with a non-zero exit, so it cannot overwrite
+the first one's heartbeat. If the lock is free, the start goes ahead whatever the heartbeat says,
+and replaces a record of a watcher that is gone with a line saying so. On a platform with no
+file locks the check falls back to the recorded pid and refuses only for a process it can
+confirm is a clawseccheck watcher; an unconfirmed one produces a warning and the start goes
+ahead. If the lock file itself cannot be used (for example it is a symlink), the watcher warns
+and starts without the single-watcher protection.
 
 Like `--monitor`, `--watch` only ever writes under its own store directory - never under the
 audited `--home`.
@@ -2209,11 +2220,11 @@ clawseccheck --purge          # lists the files, asks for confirmation, then del
 clawseccheck --purge --yes    # skip the prompt (for scripted uninstall)
 ```
 
-`--purge` only ever touches its own known files: the eight store files (`history.jsonl`,
+`--purge` only ever touches its own known files: the nine store files (`history.jsonl`,
 `events.jsonl`, `state.json`, `coverage.json`, `runs.jsonl`, `sbom_runs.jsonl`, `incidents.jsonl`,
-`watch_heartbeat.json` - the last four are `--save-run`'s, `--save-sbom-run`'s,
+`watch_heartbeat.json`, `watch.lock` - the last five are `--save-run`'s, `--save-sbom-run`'s,
 `--incident-open`'s and `--watch`'s opt-in files, present only if you ever used them; the
-heartbeat holds the watcher's pid and your home path)
+heartbeat holds the watcher's pid and your home path, and `watch.lock` is an empty lock file)
 **and** the five default-named report outputs
 (`openclaw-security-badge.svg`, `openclaw-security-report.html`, `openclaw-security-report.sarif`,
 `openclaw-security-report.pdf`, and `report.pdf`, which is what a bare `--pdf` writes into the

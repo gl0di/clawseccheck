@@ -7,6 +7,7 @@ then kill) and every wait has a hard timeout. Homes and stores live under ``tmp_
 """
 from __future__ import annotations
 
+import fcntl
 import io
 import json
 import os
@@ -184,7 +185,8 @@ def test_a_rescan_that_cannot_run_is_announced_loudly_with_its_reason(tmp_path):
     text = buf.getvalue()
     assert text.count("RE-SCAN FAILED") == 1, text
     assert "definitely-not-a-flag" in text, "the child's own reason must be shown"
-    assert "NOT been checked" in text and "still watching" in text, text
+    assert "did not complete" in text and "still watching" in text, text
+    assert "NOT been checked" not in text, "the block must not claim nothing was checked"
     assert "no change" not in text.lower(), text
     hb = watch.read_heartbeat(store / "watch_heartbeat.json")
     assert hb["last_scan_rc"] not in (0, 3, None)
@@ -246,7 +248,7 @@ def test_a_second_watch_on_a_live_store_is_refused_and_the_first_stays_truthful(
             f2.close()
         text2 = o2.read_text(encoding="utf-8")
         assert rc2 != 0, text2
-        assert str(first.pid) in text2 and "already" in text2.lower(), text2
+        assert "holds this store's lock" in text2, text2
         assert watch.read_heartbeat(hb_path)["pid"] == first.pid == hb1["pid"]
         assert first.poll() is None, "the refused start must not touch the first watcher"
         status = subprocess.run(
@@ -278,21 +280,6 @@ def test_a_stale_record_is_replaced_and_the_start_says_so(tmp_path):
     assert watch.read_heartbeat(hb_path)["pid"] == os.getpid()
 
 
-def test_run_watch_refuses_when_the_recorded_pid_is_a_live_watcher(tmp_path, monkeypatch):
-    store = tmp_path / "store"
-    hb_path = store / "watch_heartbeat.json"
-    watch._write_heartbeat(hb_path, pid=os.getpid(), status="running", mode="inotify",
-                           updated_at=watch._now_iso())
-    monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: True)
-    buf = io.StringIO()
-    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
-                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
-                         heartbeat_path=hb_path, max_cycles=0, install_signal_handlers=False,
-                         stream=buf)
-    assert rc != 0
-    assert watch.read_heartbeat(hb_path)["status"] == "running", "the record must be untouched"
-
-
 def test_a_live_pid_that_is_not_a_watcher_does_not_block_a_start(tmp_path, monkeypatch):
     store = tmp_path / "store"
     hb_path = store / "watch_heartbeat.json"
@@ -309,12 +296,20 @@ def test_a_live_pid_that_is_not_a_watcher_does_not_block_a_start(tmp_path, monke
 # ------------------------------------------------------ item 3: --watch-status honesty
 
 
-@pytest.mark.parametrize("bad_pid", [0, -1, 1, True, "12", None])
+@pytest.mark.parametrize("bad_pid", [0, -1, 1])
 def test_a_pid_that_cannot_be_a_watcher_is_a_stale_record_not_alive(bad_pid):
     word, sentence = watch.describe_liveness({
         "status": "running", "pid": bad_pid, "mode": "inotify",
         "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
     assert word == "STALE RECORD", (word, sentence)
+
+
+@pytest.mark.parametrize("bad_pid", [True, "12", None, 10 ** 30, 1.5])
+def test_a_pid_of_the_wrong_type_or_range_is_a_corrupt_record(bad_pid):
+    word, sentence = watch.describe_liveness({
+        "status": "running", "pid": bad_pid, "mode": "inotify",
+        "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
+    assert word == "UNREADABLE" and "corrupt" in sentence, (word, sentence)
 
 
 def test_a_live_pid_that_is_not_a_watcher_is_a_stale_record(monkeypatch):
@@ -381,3 +376,292 @@ def test_a_failed_last_rescan_is_visible_in_the_status_sentence(monkeypatch):
         "status": "running", "pid": os.getpid(), "mode": "inotify", "cycles": 1,
         "last_scan_rc": 2, "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
     assert word == "ALIVE" and "FAILED" in sentence
+
+
+# ============================================================ follow-up: lock, hostile input, output
+
+def _hold_lock(store: Path) -> int:
+    store.mkdir(parents=True, exist_ok=True)
+    fd = os.open(store / "watch.lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def _lock_is_free(store: Path) -> bool:
+    fd = os.open(store / "watch.lock", os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _plant(store: Path, **fields) -> Path:
+    hb = {"status": "running", "pid": os.getpid(), "mode": "inotify", "cycles": 1,
+          "updated_at": watch._now_iso(), "heartbeat_interval_s": 30}
+    hb.update(fields)
+    store.mkdir(parents=True, exist_ok=True)
+    path = store / "watch_heartbeat.json"
+    path.write_text(json.dumps(hb), encoding="utf-8")
+    return path
+
+
+def _status(store: Path, capsys) -> "tuple[int, str]":
+    capsys.readouterr()
+    rc = main(["--watch-status", "--home", str(HOME_SAFE), "--data-dir", str(store)])
+    return rc, capsys.readouterr().out
+
+
+def test_status_lock_held_is_alive_whatever_the_heartbeat_says(tmp_path, capsys):
+    store = tmp_path / "store"
+    fd = _hold_lock(store)
+    try:
+        _plant(store, status="stopped", pid=1)
+        rc, out = _status(store, capsys)
+        assert rc == 0 and out.startswith("ALIVE"), out
+        assert "information" in out or "contradict" in out, out
+    finally:
+        os.close(fd)
+    assert _lock_is_free(store), "the status probe must not leave the lock held"
+
+
+def test_status_lock_held_and_heartbeat_missing_or_corrupt_is_still_alive(tmp_path, capsys):
+    store = tmp_path / "store"
+    fd = _hold_lock(store)
+    try:
+        rc, out = _status(store, capsys)
+        assert rc == 0 and out.startswith("ALIVE") and "missing" in out, out
+        (store / "watch_heartbeat.json").write_text("{nope", encoding="utf-8")
+        rc, out = _status(store, capsys)
+        assert rc == 0 and out.startswith("ALIVE") and "corrupt" in out, out
+    finally:
+        os.close(fd)
+
+
+def test_status_lock_free_and_heartbeat_running_is_a_stale_record(tmp_path, capsys):
+    store = tmp_path / "store"
+    # A live, watcher-looking pid does not matter: only the lock says a watcher runs.
+    decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
+                              "--watch", "audit.py"])
+    try:
+        _plant(store, pid=decoy.pid)
+        rc, out = _status(store, capsys)
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=10)
+    assert rc == 1 and out.startswith("STALE RECORD"), out
+    assert "no watcher is running" in out, out
+
+
+def test_status_lock_free_and_heartbeat_stopped_is_stopped(tmp_path, capsys):
+    store = tmp_path / "store"
+    _plant(store, status="stopped")
+    rc, out = _status(store, capsys)
+    assert rc == 1 and out.startswith("STOPPED"), out
+
+
+def test_status_lock_free_and_heartbeat_corrupt_is_unreadable(tmp_path, capsys):
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "watch_heartbeat.json").write_text("{nope", encoding="utf-8")
+    rc, out = _status(store, capsys)
+    assert rc == 1 and out.startswith("UNREADABLE") and "corrupt" in out, out
+
+
+def test_a_second_start_cannot_take_a_held_lock_and_leaves_the_record_alone(tmp_path):
+    store = tmp_path / "store"
+    fd = _hold_lock(store)
+    try:
+        hb_path = _plant(store, pid=4242)
+        before = hb_path.read_text(encoding="utf-8")
+        rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                             events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                             heartbeat_path=hb_path, max_cycles=0,
+                             install_signal_handlers=False, stream=io.StringIO())
+        assert rc != 0
+        assert hb_path.read_text(encoding="utf-8") == before
+    finally:
+        os.close(fd)
+
+
+def test_the_lock_is_released_when_run_watch_returns(tmp_path):
+    store = tmp_path / "store"
+    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                         heartbeat_path=store / "watch_heartbeat.json", max_cycles=0,
+                         install_signal_handlers=False, stream=io.StringIO())
+    assert rc == 0 and _lock_is_free(store)
+
+
+def test_a_planted_heartbeat_naming_this_tests_live_pid_does_not_suppress_a_start(tmp_path):
+    store = tmp_path / "store"
+    hb_path = _plant(store, pid=os.getpid())
+    buf = io.StringIO()
+    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                         heartbeat_path=hb_path, max_cycles=0,
+                         install_signal_handlers=False, stream=buf)
+    assert rc == 0
+    assert "stale" in buf.getvalue().lower(), buf.getvalue()
+    assert watch.read_heartbeat(hb_path)["status"] == "stopped"
+
+
+def test_a_live_decoy_process_named_in_the_heartbeat_does_not_suppress_a_real_watcher(tmp_path):
+    """The attack: plant a heartbeat naming a live process whose argv looks like a watch."""
+    home = _copy_home(tmp_path)
+    store = tmp_path / "store"
+    _seed_baseline(home, store)
+    decoy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
+                              "--watch", "audit.py"])
+    real = f = None
+    try:
+        hb_path = _plant(store, pid=decoy.pid)
+        real, out_path, f = _start_cli_watch(tmp_path, home, store, "w1")
+        _wait_for(lambda: (watch.read_heartbeat(hb_path) or {}).get("pid") == real.pid, 20,
+                  "the real watcher to take over the heartbeat")
+        assert real.poll() is None
+        assert "stale" in out_path.read_text(encoding="utf-8").lower()
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=10)
+        if real is not None:
+            _stop(real)
+        if f is not None:
+            f.close()
+
+
+def test_a_watcher_killed_with_sigkill_frees_the_lock_for_the_next_start(tmp_path, capsys):
+    home = _copy_home(tmp_path)
+    store = tmp_path / "store"
+    _seed_baseline(home, store)
+    hb_path = store / "watch_heartbeat.json"
+    first, _o1, f1 = _start_cli_watch(tmp_path, home, store, "w1")
+    second = f2 = None
+    try:
+        _wait_for(lambda: (watch.read_heartbeat(hb_path) or {}).get("pid") == first.pid, 20,
+                  "the first heartbeat")
+        first.kill()
+        first.wait(timeout=10)
+        rc, out = _status(store, capsys)
+        assert rc == 1 and out.startswith("STALE RECORD"), out
+        second, o2, f2 = _start_cli_watch(tmp_path, home, store, "w2")
+        _wait_for(lambda: (watch.read_heartbeat(hb_path) or {}).get("pid") == second.pid, 20,
+                  "the second watcher to take over")
+        assert second.poll() is None
+        assert "stale" in o2.read_text(encoding="utf-8").lower()
+    finally:
+        if first.poll() is None:
+            first.kill()
+            first.wait(timeout=10)
+        f1.close()
+        if second is not None:
+            _stop(second)
+        if f2 is not None:
+            f2.close()
+
+
+def test_without_fcntl_a_confirmed_live_watcher_still_blocks_a_second_start(tmp_path, monkeypatch):
+    monkeypatch.setattr(watch, "fcntl", None)
+    monkeypatch.setattr(watch, "_HAS_FCNTL", False)
+    monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: True)
+    store = tmp_path / "store"
+    hb_path = _plant(store, pid=os.getpid())
+    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                         heartbeat_path=hb_path, max_cycles=0,
+                         install_signal_handlers=False, stream=io.StringIO())
+    assert rc != 0
+
+
+def test_without_fcntl_an_unconfirmed_identity_warns_and_starts(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(watch, "fcntl", None)
+    monkeypatch.setattr(watch, "_HAS_FCNTL", False)
+    monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: None)
+    store = tmp_path / "store"
+    hb_path = _plant(store, pid=os.getpid())
+    capsys.readouterr()
+    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                         heartbeat_path=hb_path, max_cycles=0,
+                         install_signal_handlers=False, stream=io.StringIO())
+    assert rc == 0
+    assert "could not be confirmed" in capsys.readouterr().err
+
+
+def test_a_symlinked_lock_file_is_never_followed_and_does_not_suppress_a_start(tmp_path, capsys):
+    store = tmp_path / "store"
+    store.mkdir()
+    target = tmp_path / "elsewhere"
+    target.write_text("keep", encoding="utf-8")
+    os.symlink(target, store / "watch.lock")
+    capsys.readouterr()
+    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                         heartbeat_path=store / "watch_heartbeat.json", max_cycles=0,
+                         install_signal_handlers=False, stream=io.StringIO())
+    assert rc == 0
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert "lock" in capsys.readouterr().err.lower()
+
+
+# ------------------------------------------------- hostile heartbeat: never an exception
+
+_HOSTILE = {
+    "huge_int": 10 ** 30, "negative_int": -7, "float": 1.5, "nan": float("nan"),
+    "bool": True, "string": "abc", "list": [1, 2], "dict": {"a": 1}, "null": None,
+    "megabyte_string": "A" * 1_000_000,
+}
+_FIELDS = ("status", "pid", "updated_at", "heartbeat_interval_s", "mode", "cycles",
+           "last_scan_rc", "last_scan_at")
+_STATUS_WORDS = ("ALIVE", "STALE RECORD", "STALE", "STOPPED", "UNREADABLE", "NOT RUNNING")
+
+
+@pytest.mark.parametrize("label", sorted(_HOSTILE))
+@pytest.mark.parametrize("field", _FIELDS)
+def test_a_hostile_heartbeat_value_never_raises_in_status_or_start(
+        tmp_path, capsys, field, label):
+    store = tmp_path / "store"
+    path = _plant(store, **{field: _HOSTILE[label]})
+    # on disk (the megabyte case exceeds the reader's size bound: corrupt, not a crash)
+    rc, out = _status(store, capsys)
+    assert out.split(":", 1)[0] in _STATUS_WORDS, out[:200]
+    assert "Traceback" not in out and len(out) < 3000, out[:200]
+    # the same dict handed straight to the describer, under every lock state
+    hb = {"status": "running", "pid": os.getpid(), "mode": "inotify", "cycles": 1,
+          "updated_at": watch._now_iso(), "heartbeat_interval_s": 30,
+          "last_scan_rc": 0, "last_scan_at": watch._now_iso()}
+    hb[field] = _HOSTILE[label]
+    for lock in (None, "free", "held"):
+        word, sentence = watch.describe_liveness(hb, None, lock)
+        assert word in _STATUS_WORDS and len(sentence) < 3000, (lock, word, sentence[:200])
+    # the start path replaces the record without raising
+    rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
+                         events_path=store / "e.jsonl", history_path=store / "h.jsonl",
+                         heartbeat_path=path, max_cycles=0, install_signal_handlers=False,
+                         stream=io.StringIO())
+    assert rc == 0
+    assert watch.read_heartbeat(path)["pid"] == os.getpid()
+
+
+# --------------------------------------------- a failed re-scan keeps the child's whole output
+
+def test_a_failed_rescan_prints_every_line_of_the_childs_output(tmp_path, monkeypatch):
+    script = ("import sys\n"
+              "for i in range(60):\n"
+              "    print('ALERT new skill mal-%d' % i if i == 12 else 'line %d' % i)\n"
+              "sys.exit(1)\n")
+    monkeypatch.setattr(watch, "_child_launch", lambda: (["-c", script], dict(os.environ)))
+    home = _copy_home(tmp_path)
+    store = tmp_path / "store"
+    buf = io.StringIO()
+    t, _result = _run_watch_in_thread(home, store, stream=buf, max_cycles=1)
+    (home / "poke.txt").write_text("x", encoding="utf-8")
+    t.join(timeout=30)
+    assert not t.is_alive()
+    text = buf.getvalue()
+    assert "RE-SCAN FAILED" in text and "did not complete" in text, text
+    for i in range(60):
+        assert ("ALERT new skill mal-12" if i == 12 else f"line {i}\n") in text, i
+    assert "NOT been checked" not in text

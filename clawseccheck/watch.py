@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import errno
 import json
+import math
 import os
 import select
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -41,7 +44,14 @@ from pathlib import Path
 from . import pathprobe
 from .invocation import _shim_beside_the_package, cmd
 from .monitorstore import _now_iso
-from .safeio import secure_dir, secure_write_text
+from .safeio import _open_owner_only, secure_dir, secure_write_text
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover - exercised on POSIX CI; real gap on Windows
+    fcntl = None  # type: ignore[assignment]
+    _HAS_FCNTL = False
 
 # --------------------------------------------------------------------------- inotify
 #
@@ -370,51 +380,208 @@ def _write_heartbeat(path: Path, **fields) -> None:
         pass
 
 
+#: A real heartbeat is well under 1 KB; anything past this is not one, and an unbounded
+#: read of a file anyone can write into the store would be a memory hazard.
+_HEARTBEAT_MAX_BYTES = 65536
+
+
+def _is_int(v, lo: int, hi: int) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def _is_str(v, limit: int) -> bool:
+    return isinstance(v, str) and len(v) <= limit
+
+
+def _is_pos_finite(v, hi: float) -> bool:
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and 0 < v <= hi)
+
+
+#: field -> (required, validator). A field that is present with the wrong type or range -
+#: including null where a value is expected - makes the whole record corrupt. `last_scan_*`
+#: really are null before the first re-scan, so null is valid for those two only.
+_HEARTBEAT_FIELDS = {
+    "status": (True, lambda v: _is_str(v, 32)),
+    "pid": (True, lambda v: _is_int(v, -2 ** 31, 2 ** 31 - 1)),
+    "updated_at": (False, lambda v: _is_str(v, 64)),
+    "heartbeat_interval_s": (False, lambda v: _is_pos_finite(v, 1e7)),
+    "mode": (False, lambda v: _is_str(v, 32)),
+    "cycles": (False, lambda v: _is_int(v, 0, 2 ** 53)),
+    "last_scan_rc": (False, lambda v: v is None or _is_int(v, -2 ** 31, 2 ** 31 - 1)),
+    "last_scan_at": (False, lambda v: v is None or _is_str(v, 64)),
+}
+
+
+def _heartbeat_invalid(hb) -> "str | None":
+    """Name of the first heartbeat field whose type or range is wrong, else None. The
+    heartbeat is a plain file in the store - anything that can write there can put any
+    JSON in it - so no reader may use a value before it has passed through here."""
+    if not isinstance(hb, dict):
+        return "heartbeat"
+    for key, (required, ok) in _HEARTBEAT_FIELDS.items():
+        if key not in hb:
+            if required:
+                return key
+            continue
+        try:
+            good = ok(hb[key])
+        except (TypeError, ValueError, OverflowError):  # pragma: no cover - defensive
+            good = False
+        if not good:
+            return key
+    return None
+
+
+def _printable(v, limit: int = 64) -> str:
+    """A validated heartbeat value, safe to print: printable ASCII only, bounded."""
+    text = str(v)[:limit]
+    return "".join(c if " " <= c <= "~" else "?" for c in text)
+
+
 def read_heartbeat_ex(path: "str | Path") -> "tuple[dict | None, str | None]":
-    """``(heartbeat, problem)``. *problem* is None when the file parsed, else one of
-    ``"absent"`` (no such file: --watch has not run against this store),
-    ``"unreadable"`` (it exists but cannot be read) or ``"corrupt"`` (it was read but is
-    not a heartbeat object). Three different facts, so a caller can name the right one
-    instead of collapsing a damaged record into "never ran". Never raises."""
+    """``(heartbeat, problem)``. *problem* is None when the file parsed AND every field
+    has a sane type and range, else one of ``"absent"`` (no such file: --watch has not
+    run against this store), ``"unreadable"`` (it exists but cannot be read) or
+    ``"corrupt"`` (it was read but is oversized, not JSON, not an object, or carries a
+    field of the wrong type or range). Three different facts, so a caller can name the
+    right one instead of collapsing a damaged record into "never ran". Never raises."""
     try:
-        text = Path(path).expanduser().read_text(encoding="utf-8")
+        with open(Path(path).expanduser(), "rb") as fh:
+            raw = fh.read(_HEARTBEAT_MAX_BYTES + 1)
     except FileNotFoundError:
         return None, "absent"
     except OSError:
         return None, "unreadable"
-    except ValueError:  # UnicodeDecodeError: bytes that are not UTF-8
+    if len(raw) > _HEARTBEAT_MAX_BYTES:
         return None, "corrupt"
     try:
-        data = json.loads(text)
-    except (ValueError, RecursionError):
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
         return None, "corrupt"
-    return (data, None) if isinstance(data, dict) else (None, "corrupt")
+    if _heartbeat_invalid(data) is not None:
+        return None, "corrupt"
+    return data, None
 
 
 def read_heartbeat(path: "str | Path") -> "dict | None":
     """Read back a heartbeat file for a liveness check. None if absent, unreadable,
-    or not valid JSON - never raises. Use `read_heartbeat_ex` to tell those apart."""
+    or not a valid heartbeat - never raises. Use `read_heartbeat_ex` to tell those apart."""
     return read_heartbeat_ex(path)[0]
 
 
-# ------------------------------------------------- who owns the heartbeat (C-725)
+# ------------------------------------------------- who owns the store (C-725)
+#
+# One watcher per store is decided by a LOCK, never by what the heartbeat file says: the
+# heartbeat is a plain file anyone with write access to the store can plant, so a decision
+# that trusted it (a live pid, a process whose argv looks like a watch) would let that
+# writer switch the watcher off. The running watcher holds an exclusive advisory flock on
+# <store>/watch.lock for as long as it runs; the kernel drops it when the process exits
+# for ANY reason (SIGKILL included), so a crashed watcher can never wedge its store.
+
+_LOCK_NAME = "watch.lock"
+#: errno values flock() uses for "somebody else holds it".
+_CONTENDED = (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES)
+#: A status probe holds a shared lock for an instant; a starting watcher retries this
+#: briefly before it concludes the lock is really held.
+_LOCK_TRIES = 6
+_LOCK_RETRY_S = 0.05
+
+
+def lock_path_for(heartbeat_path: "str | Path") -> Path:
+    return Path(heartbeat_path).expanduser().with_name(_LOCK_NAME)
+
+
+def _acquire_watch_lock(lock_path: Path) -> "tuple[str, int | None]":
+    """``("acquired", fd)`` | ``("held", None)`` (another watcher has it) |
+    ``("no_fcntl", None)`` (this platform has no flock) | ``("unavailable", None)`` (the
+    lock file cannot be opened or flock fails for another reason - a planted symlink, a
+    read-only store, a filesystem without locks). The fd is non-inheritable, so the
+    re-scan child never holds the watcher's lock."""
+    if not _HAS_FCNTL or fcntl is None:
+        return "no_fcntl", None
+    try:
+        secure_dir(lock_path.parent)
+        fd = _open_owner_only(lock_path, 0)  # O_NOFOLLOW: a symlink is refused, not followed
+    except OSError:
+        return "unavailable", None
+    contended = False
+    for attempt in range(_LOCK_TRIES):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return "acquired", fd
+        except OSError as exc:
+            if exc.errno not in _CONTENDED:
+                break
+            contended = True
+            if attempt + 1 < _LOCK_TRIES:
+                time.sleep(_LOCK_RETRY_S)
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return ("held", None) if contended else ("unavailable", None)
+
+
+def _release_watch_lock(fd: "int | None") -> None:
+    if fd is None:
+        return
+    try:
+        os.close(fd)  # closing the descriptor releases the flock
+    except OSError:
+        pass
+
+
+def probe_watch_lock(lock_path: Path) -> "str | None":
+    """``"held"`` (a watcher is running), ``"free"`` (none is) or None (cannot tell here).
+
+    Opens the lock file read-only without creating it and takes a SHARED non-blocking lock
+    for an instant, released by the close below - so a probe never leaves the lock held and
+    never writes anything. An absent lock file is "free": a watcher creates it before it
+    does anything else."""
+    if not _HAS_FCNTL or fcntl is None:
+        return None
+    try:
+        fd = os.open(lock_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return "free"
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            return "held" if exc.errno in _CONTENDED else None
+        return "free"
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
 
 def _plausible_pid(pid) -> bool:
     """A real process id a watcher could have: an int (not a bool) above 1. `os.kill(0, 0)`
     and `os.kill(-1, 0)` address a whole process group / every process and succeed, so a
     record naming them must never be read as a live watcher."""
-    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 1
+    return isinstance(pid, int) and not isinstance(pid, bool) and 1 < pid <= 2 ** 31 - 1
 
 
-def _pid_alive(pid: int) -> "bool | None":
+def _pid_alive(pid) -> "bool | None":
     """True/False from a signal-0 probe; None when the platform cannot tell (a process
-    owned by someone else, or no such probe)."""
+    owned by someone else, a value the OS rejects, or no such probe)."""
+    if not _plausible_pid(pid):
+        return None
     try:
         os.kill(pid, 0)
         return True
     except ProcessLookupError:
         return False
-    except (OSError, PermissionError):
+    except (OSError, OverflowError, ValueError, TypeError):
         return None
 
 
@@ -437,12 +604,14 @@ def _cmdline_is_watcher(argv: "list[str]") -> bool:
 def _pid_is_watcher(pid: int) -> "bool | None":
     """Is *pid* a clawseccheck ``--watch`` process? Read from ``/proc/<pid>/cmdline`` (no
     subprocess). True / False, or None when that cannot be determined here (no procfs, or
-    the file is not readable) - the caller then falls back to liveness alone and says the
-    identity was not confirmed."""
+    the file is not readable). INFORMATION only where a lock is available - a process can
+    be made to look like a watcher, so this never decides to refuse a start there."""
+    if not _plausible_pid(pid):
+        return False
     if not pathprobe.is_dir(Path("/proc/self")):
         return None
     try:
-        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except (FileNotFoundError, ProcessLookupError):
         return False
     except OSError:
@@ -451,12 +620,10 @@ def _pid_is_watcher(pid: int) -> "bool | None":
     return _cmdline_is_watcher(argv)
 
 
-def recorded_watcher(heartbeat_path: "str | Path") -> "tuple[str, str]":
-    """What the store's heartbeat says about an EARLIER watcher: ``("none", "")`` (nothing
-    recorded, or a clean stop), ``("live", why)`` (that pid is alive and is - or could not
-    be ruled out as - a clawseccheck watcher) or ``("stale", why)`` (a record that no live
-    watcher stands behind, or one that cannot be read)."""
-    hb, problem = read_heartbeat_ex(heartbeat_path)
+def _pid_record_state(hb, problem) -> "tuple[str, str]":
+    """The PRE-LOCK way to read a record, kept only for platforms with no ``fcntl``:
+    ``("none", "")`` | ``("live", why)`` (alive AND confirmed a watcher) |
+    ``("unconfirmed", why)`` (alive, identity unknown) | ``("stale", why)``."""
     if hb is None:
         if problem in ("unreadable", "corrupt"):
             return "stale", f"its heartbeat file is {problem} and will be replaced"
@@ -465,32 +632,52 @@ def recorded_watcher(heartbeat_path: "str | Path") -> "tuple[str, str]":
         return "none", ""
     pid = hb.get("pid")
     if not _plausible_pid(pid):
-        return "stale", f"it names pid {pid!r}, which cannot be a watcher"
+        return "stale", f"it names pid {_printable(pid)}, which cannot be a watcher"
     if _pid_alive(pid) is False:
         return "stale", f"pid {pid} is gone"
     ident = _pid_is_watcher(pid)
     if ident is False:
         return "stale", f"pid {pid} is running but is not a clawseccheck --watch process"
-    return "live", f"pid {pid}" + ("" if ident else ", identity not confirmed")
+    if ident:
+        return "live", f"pid {pid}"
+    return "unconfirmed", f"pid {pid} is alive but could not be confirmed as a watcher"
+
+
+def _refusal(why: str, heartbeat_path) -> str:
+    return (f"{cmd('--watch')}: refusing to start - another --watch holds this store's lock "
+            f"({why}). A second watcher would overwrite its heartbeat and make --watch-status "
+            f"report the wrong thing. Stop that one first, or use a different --data-dir.")
 
 
 def can_start(heartbeat_path: "str | Path") -> "tuple[bool, str]":
-    """Single-watcher guard for one store. ``(False, refusal)`` when a watcher recorded
-    here is still alive: a second one would overwrite its heartbeat, and after it stopped
-    `--watch-status` would report a clean stop while the first is still running.
-    ``(True, note)`` otherwise - *note* names a stale record that the new watcher replaces
-    (empty when there was nothing). Check-then-write, not a lock: two starts within the
-    same instant can both pass."""
-    state, why = recorded_watcher(heartbeat_path)
-    if state == "live":
-        return False, (f"{cmd('--watch')}: refusing to start - a watcher is already running "
-                       f"for this store ({why}). A second one would overwrite its heartbeat "
-                       f"and make --watch-status report the wrong thing. Stop that one first, "
-                       f"use a different --data-dir, or - if that process is not a "
-                       f"clawseccheck watcher - delete {heartbeat_path}.")
-    if state == "stale":
-        return True, (f"{cmd('--watch')}: replacing a stale watcher record ({why}).")
+    """Early, side-effect-free form of the single-watcher check, for the CLI to run before
+    it announces a watch: ``(False, refusal)`` only when another watcher demonstrably holds
+    this store's lock (or, where there is no ``fcntl``, a confirmed live watcher is
+    recorded). Never refuses on a heartbeat's say-so. `run_watch` takes the lock itself."""
+    lock = probe_watch_lock(lock_path_for(heartbeat_path))
+    if lock == "held":
+        return False, _refusal("the lock is held", heartbeat_path)
+    if lock is None and not _HAS_FCNTL:
+        hb, problem = read_heartbeat_ex(heartbeat_path)
+        state, why = _pid_record_state(hb, problem)
+        if state == "live":
+            return False, _refusal(why, heartbeat_path)
     return True, ""
+
+
+def _stale_note(heartbeat_path) -> str:
+    """A line for a start that has the lock but finds a record claiming a watcher ran."""
+    hb, problem = read_heartbeat_ex(heartbeat_path)
+    if hb is None:
+        if problem in ("unreadable", "corrupt"):
+            return (f"{cmd('--watch')}: replacing a stale watcher record (its heartbeat file "
+                    f"is {problem}).")
+        return ""
+    if hb.get("status") == "stopped":
+        return ""
+    return (f"{cmd('--watch')}: replacing a stale watcher record (heartbeat pid "
+            f"{_printable(hb.get('pid'))}, last update {_printable(hb.get('updated_at', '?'))}): "
+            f"nothing holds this store's lock, so that watcher is not running.")
 
 
 # ------------------------------------------------------------------------ the loop
@@ -512,10 +699,6 @@ _SHIM_MARKER = "from clawseccheck.cli import main"
 #: Anything else (1 = monitoring not established, 2 = refused/usage, a crash, a signal) is
 #: a re-scan that did not complete.
 _RESCAN_RAN_RC = (0, 3)
-
-#: How much of a failed re-scan's own output the watcher repeats back.
-_FAILED_RESCAN_TAIL_LINES = 20
-
 
 def _bundled_shim() -> "str | None":
     """Absolute path of this tool's own ``audit.py`` beside the package, or None."""
@@ -605,18 +788,20 @@ def _run_monitor_once(home: Path, state_path, events_path, history_path,
 
 
 def _failed_rescan_report(rc: int, output: str, when: str) -> str:
-    """The loud, self-contained block printed when the re-scan itself did not complete:
-    never worded as "re-scanned" and never as "no change"."""
-    lines = (output or "").strip().splitlines()
-    shown = lines[-_FAILED_RESCAN_TAIL_LINES:]
-    hidden = len(lines) - len(shown)
-    reason = "\n".join(shown) if shown else "(the re-scan printed nothing)"
-    if hidden > 0:
-        reason = f"({hidden} earlier line(s) not shown)\n" + reason
+    """The loud block printed when the re-scan itself did not complete. The child's WHOLE
+    output follows: `--monitor` exits 1 for "the comparison ran and its alerts were printed,
+    but the journal or state could not be written" too, so cutting the output short would
+    hide alerts, and the heading must not claim that nothing was checked."""
+    body = output if (output or "").strip() else "(the re-scan printed nothing)\n"
+    if not body.endswith("\n"):
+        body += "\n"
     return (f"\n=== {cmd('--watch')}: RE-SCAN FAILED at {when} (rc={rc}) ===\n"
-            f"A change was detected, but it has NOT been checked: the --monitor re-scan "
-            f"did not complete.\nReason (the re-scan's own output):\n{reason}\n"
-            f"This watcher is still watching and will try again on the next change.\n")
+            f"A change was detected and the --monitor re-scan did not complete (exit code "
+            f"{rc}). Its full output follows; if it printed a comparison, that is what it "
+            f"found before it stopped.\n"
+            f"{body}"
+            f"=== end of the failed re-scan's output; this watcher is still watching and "
+            f"will try again on the next change ===\n")
 
 
 def run_watch(
@@ -654,15 +839,52 @@ def run_watch(
     home = Path(home).expanduser()
     heartbeat_path = Path(heartbeat_path)
 
-    # C-725: one watcher per store. Refuse BEFORE anything is created or written, so the
-    # running watcher's heartbeat is left exactly as it wrote it.
-    may_start, start_note = can_start(heartbeat_path)
-    if not may_start:
-        sys.stderr.write(start_note + "\n")
+    # C-725: one watcher per store, decided by a LOCK (see the block above), never by what the
+    # heartbeat file says. Refuse BEFORE anything is created or written, so the running
+    # watcher's heartbeat is left exactly as it wrote it.
+    lock_state, lock_fd = _acquire_watch_lock(lock_path_for(heartbeat_path))
+    note = ""
+    if lock_state == "held":
+        sys.stderr.write(_refusal("the lock is held", heartbeat_path) + "\n")
         return 1
-    if start_note:
-        out.write(start_note + "\n")
+    if lock_state == "acquired":
+        note = _stale_note(heartbeat_path)
+    elif lock_state == "no_fcntl":
+        # Today's pid check, for a platform with no flock. An unconfirmed identity is a
+        # warning, not a refusal: a record anyone can plant must not stop the watcher.
+        hb, problem = read_heartbeat_ex(heartbeat_path)
+        state, why = _pid_record_state(hb, problem)
+        if state == "live":
+            sys.stderr.write(_refusal(why, heartbeat_path) + "\n")
+            return 1
+        if state == "unconfirmed":
+            sys.stderr.write(f"{cmd('--watch')}: warning - {why}; starting anyway "
+                             f"(this platform has no file lock to settle it).\n")
+        elif state == "stale":
+            note = f"{cmd('--watch')}: replacing a stale watcher record ({why})."
+    else:
+        sys.stderr.write(f"{cmd('--watch')}: warning - could not take this store's lock "
+                         f"(is {_printable(lock_path_for(heartbeat_path))} a symlink or "
+                         f"unwritable?); starting without single-watcher protection.\n")
+    if note:
+        out.write(note + "\n")
+        if hasattr(out, "flush"):
+            out.flush()
 
+    try:
+        return _run_watch_locked(
+            home, state_path, events_path, history_path, heartbeat_path, debounce_s,
+            poll_interval_s, select_timeout_s, heartbeat_interval_s, extra_monitor_args,
+            max_cycles, install_signal_handlers, stop_event, out)
+    finally:
+        _release_watch_lock(lock_fd)
+
+
+def _run_watch_locked(home, state_path, events_path, history_path, heartbeat_path,
+                      debounce_s, poll_interval_s, select_timeout_s, heartbeat_interval_s,
+                      extra_monitor_args, max_cycles, install_signal_handlers, stop_event,
+                      out) -> int:
+    """`run_watch`'s loop, run while it holds the store's lock (or knowingly without one)."""
     watcher = make_watcher(home, poll_interval_s=poll_interval_s)
     started_at = _now_iso()
     pid = os.getpid()
@@ -753,56 +975,7 @@ def run_watch(
     return 0
 
 
-def describe_liveness(heartbeat: "dict | None", problem: "str | None" = None
-                      ) -> "tuple[str, str]":
-    """(status_word, sentence) for a heartbeat dict - the `--watch-status` surface.
-
-    Not two outcomes but several, for the same reason `--verify-baseline` refuses to
-    collapse "no baseline" into "tampered": a watcher that never ran, one that shut
-    down cleanly, one whose heartbeat cannot be read, a record no live watcher stands
-    behind (a pid that cannot be a watcher, or one that is now somebody else's process),
-    and one that is either running or has silently hung are different facts calling for
-    different reactions. *problem* is `read_heartbeat_ex`'s second value.
-    """
-    if heartbeat is None:
-        if problem in ("unreadable", "corrupt"):
-            return ("UNREADABLE", "The watch heartbeat file exists but is unreadable or "
-                    "corrupt, so nothing can be said about a watcher \u2014 this is not the "
-                    "same as --watch never having run. Delete it to start clean.")
-        return "NOT RUNNING", "No watch heartbeat found \u2014 --watch has not run yet."
-    status = heartbeat.get("status")
-    pid = heartbeat.get("pid")
-    updated_at = heartbeat.get("updated_at")
-    interval = heartbeat.get("heartbeat_interval_s")
-    interval = interval if isinstance(interval, (int, float)) and interval > 0 \
-        else DEFAULT_HEARTBEAT_INTERVAL_S
-    if status == "stopped":
-        return "STOPPED", f"The watcher (pid {pid}) shut down cleanly at {updated_at}."
-    if not _plausible_pid(pid):
-        return ("STALE RECORD", f"The heartbeat names pid {pid!r}, which cannot be a watcher "
-                f"process, so no watcher is running for this store. Last update: {updated_at}.")
-    # Exists, owned by someone else, or platform can't tell is not evidence either way;
-    # it stays "cannot determine" rather than "gone".
-    pid_alive = _pid_alive(pid)
-    if pid_alive is False:
-        return ("STOPPED", f"The watcher process (pid {pid}) is gone but never recorded a "
-                           f"clean shutdown \u2014 it may have crashed. Last update: {updated_at}.")
-    identity = _pid_is_watcher(pid)
-    if identity is False:
-        return ("STALE RECORD", f"The heartbeat names pid {pid}, which is running but is not "
-                f"a clawseccheck --watch process (the pid was probably reused after the "
-                f"watcher died), so no watcher is running for this store. "
-                f"Last update: {updated_at}.")
-    tail = ""
-    if identity is None:
-        tail += (" The pid is alive, but its identity as a clawseccheck watcher could not "
-                 "be confirmed on this platform.")
-    last_rc = heartbeat.get("last_scan_rc")
-    if isinstance(last_rc, int) and not isinstance(last_rc, bool) \
-            and last_rc not in _RESCAN_RAN_RC:
-        tail += (f" The last re-scan FAILED (rc={last_rc}): changes since then have not "
-                 f"been checked.")
-    age_s = None
+def _heartbeat_age(updated_at, interval) -> "float | None":
     try:
         from datetime import datetime  # noqa: PLC0415 - only needed here
         # `_now_iso()` (monitorstore.py), the sole producer of `updated_at`, writes
@@ -812,13 +985,87 @@ def describe_liveness(heartbeat: "dict | None", problem: "str | None" = None
         # if a future producer ever switches to an aware timestamp (the "Z" -> "+00:00"
         # rewrite below exists for exactly that case, not today's).
         upd = datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))
-        age_s = (datetime.now(upd.tzinfo) - upd).total_seconds()
-    except (ValueError, TypeError):
-        age_s = None
+        return (datetime.now(upd.tzinfo) - upd).total_seconds()
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def describe_liveness(heartbeat: "dict | None", problem: "str | None" = None,
+                      lock: "str | None" = None) -> "tuple[str, str]":
+    """(status_word, sentence) for a heartbeat dict - the `--watch-status` surface.
+
+    *lock* is `probe_watch_lock`'s answer: ``"held"`` (a watcher is running - the ONLY
+    thing that says so), ``"free"`` (none is) or None (cannot probe here: no flock, or the
+    lock file is unusable - then the old pid-based reading is used, as information).
+    *problem* is `read_heartbeat_ex`'s second value. The heartbeat is a file anyone with
+    write access to the store can plant, so a value of the wrong type or range makes the
+    record corrupt - it never raises - and a "running" record is never believed over the
+    lock.
+
+    Different facts, different words: a watcher that never ran, one that shut down
+    cleanly, one whose heartbeat cannot be read, a record no live watcher stands behind,
+    and one that is running (or has silently hung) call for different reactions, for the
+    same reason `--verify-baseline` refuses to collapse "no baseline" into "tampered".
+    """
+    if heartbeat is not None and _heartbeat_invalid(heartbeat) is not None:
+        heartbeat, problem = None, "corrupt"
+    if heartbeat is None:
+        if lock == "held":
+            what = {"unreadable": "unreadable", "corrupt": "corrupt"}.get(problem, "missing")
+            return ("ALIVE", f"A --watch process holds this store's lock, so a watcher is "
+                    f"running. Its heartbeat file is {what}, so its mode and re-scan count "
+                    f"are unknown.")
+        if problem in ("unreadable", "corrupt"):
+            return ("UNREADABLE", "The watch heartbeat file exists but is unreadable or "
+                    "corrupt, so nothing can be said about a watcher \u2014 this is not the "
+                    "same as --watch never having run. Delete it to start clean.")
+        return "NOT RUNNING", "No watch heartbeat found \u2014 --watch has not run yet."
+    status = heartbeat.get("status")
+    pid = heartbeat.get("pid")
+    updated_at = heartbeat.get("updated_at")
+    upd = _printable(updated_at) if updated_at is not None else "unknown"
+    interval = heartbeat.get("heartbeat_interval_s", DEFAULT_HEARTBEAT_INTERVAL_S)
+    tail = ""
+    last_rc = heartbeat.get("last_scan_rc")
+    if last_rc is not None and last_rc not in _RESCAN_RAN_RC:
+        tail += (f" The last re-scan FAILED to complete (rc={last_rc}); the watcher's own "
+                 f"output has what it printed.")
+    if lock == "free":
+        if status == "stopped":
+            return "STOPPED", f"The watcher (pid {pid}) shut down cleanly at {upd}."
+        return ("STALE RECORD", f"The heartbeat says a watcher was running (pid {pid}, last "
+                f"update {upd}), but nothing holds this store's lock, so no watcher is running "
+                f"\u2014 it exited or was killed without recording a clean stop.")
+    if lock == "held":
+        if status == "stopped":
+            tail += (" The heartbeat says 'stopped', which does not match the held lock; the "
+                     "lock is trusted.")
+        info = f"(the heartbeat names pid {pid}, for information)"
+    else:
+        info = f"(pid {pid})"
+        if status == "stopped":
+            return "STOPPED", f"The watcher (pid {pid}) shut down cleanly at {upd}."
+        if not _plausible_pid(pid):
+            return ("STALE RECORD", f"The heartbeat names pid {pid}, which cannot be a watcher "
+                    f"process, so no watcher is running for this store. Last update: {upd}.")
+        # Exists, owned by someone else, or platform can't tell is not evidence either
+        # way; it stays "cannot determine" rather than "gone".
+        if _pid_alive(pid) is False:
+            return ("STOPPED", f"The watcher process (pid {pid}) is gone but never recorded a "
+                    f"clean shutdown \u2014 it may have crashed. Last update: {upd}.")
+        identity = _pid_is_watcher(pid)
+        if identity is False:
+            return ("STALE RECORD", f"The heartbeat names pid {pid}, which is running but is "
+                    f"not a clawseccheck --watch process (the pid was probably reused after "
+                    f"the watcher died), so no watcher is running for this store. "
+                    f"Last update: {upd}.")
+        tail += (" This store's lock could not be checked here, so the watcher was judged by "
+                 "its pid alone" + ("" if identity else "; its identity as a clawseccheck "
+                 "watcher could not be confirmed") + ".")
+    age_s = _heartbeat_age(updated_at, interval) if updated_at is not None else None
     if age_s is not None and age_s > interval * STALE_HEARTBEAT_MULTIPLE:
-        return ("STALE", f"The watcher (pid {pid}) has not updated its heartbeat in "
-                         f"{int(age_s)}s (expected every {int(interval)}s) \u2014 it may have hung."
-                         + tail)
-    return "ALIVE", (f"The watcher (pid {pid}) is running, mode={heartbeat.get('mode')}, "
+        return ("STALE", f"The watcher {info} has not updated its heartbeat in "
+                f"{int(age_s)}s (expected every {int(interval)}s) \u2014 it may have hung." + tail)
+    return "ALIVE", (f"The watcher {info} is running, mode={_printable(heartbeat.get('mode'))}, "
                      f"{heartbeat.get('cycles', 0)} re-scan(s) so far. Last update: "
-                     f"{updated_at}." + tail)
+                     f"{upd}." + tail)
