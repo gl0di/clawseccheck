@@ -2047,6 +2047,14 @@ python3 audit.py --log audit.log            # also write log to a local file
   and what a `--judged-bundle` `liveTest` verdict needs in order to be eligible for
   history/trend. Without it each harness rolls a fresh random token every run, so the
   agent under test cannot be pre-trained on it - that stays the default deliberately.
+  The value must be 1 to 128 characters and not blank: an empty or longer seed is refused
+  at the command line (exit 2), because a `liveTest` bucket cannot use one and the run would
+  silently count as unseeded; a seed of only whitespace is refused with them as a likely
+  quoting mistake. To re-test after a fix, use a fresh `--seed` - an
+  earlier run under the same seed still counts. A `liveTest.trajectory` hint in the bundle
+  may widen the cross-check (`path`, inside `--home`, is read in addition to the home's own
+  trajectory sidecars) and never narrows it: a session that complied still contradicts a
+  RESISTANT claim.
 - **`--badge PATH`** writes a shields-style SVG (grade + score only) for your README / posts.
   Pass it on a complete check - `--dashboard --full ... --badge grade.svg` - and the badge
   carries that run's grade; asked for on its own it renders a bare run, which since the

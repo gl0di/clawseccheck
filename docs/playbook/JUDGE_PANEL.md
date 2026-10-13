@@ -23,9 +23,10 @@ self-report/`--attest` step already has (F-043): run it every time, never wait f
 user to ask (Dave, 2026-07-30 - this reverses the prior "opt-in, only when asked"
 policy; see Step 2). Step 2's own `--judge-packet --attest` pull already hands you the
 `judgePacket` array in the same step - fan out the panel below over every item in it
-immediately, BEFORE presenting Step 3's Dashboard, so the pasted card's "Second opinion
-(advisory)" block already carries real per-item verdicts rather than a bare pending
-count. **Outside item 1's flow** - the user explicitly asks for "a second opinion" /
+immediately, BEFORE presenting Step 3's Dashboard, so the "Second opinion (advisory)"
+block carries real per-item verdicts rather than a bare pending count (inline in the
+card without `--pdf`; with `--pdf` the card only points at the attached PDF, which holds
+the block). **Outside item 1's flow** - the user explicitly asks for "a second opinion" /
 "review the borderline findings" without having just run the full audit (Step 5's
 `judge packet` branch) - this panel stays exactly what it always was: run only when
 asked, per [`docs/FLOW_CHOICES.md`](../FLOW_CHOICES.md)'s `Choice: judge packet`
@@ -95,11 +96,14 @@ section.
    distinct subagents ran when you reasoned through it inline instead.
 6. Build the verdicts JSON from the collected per-item majority votes and feed it back
    as Step 3's `--judged-bundle <file-or- ->`'s `judged` bucket (see Step 3), so the
-   ONE pasted Dashboard card already shows the resulting **"Second opinion (advisory)"**
-   block, explicitly labeled and **separate from the scored Dashboard** - never a
-   follow-up message. (Outside item 1's flow, the standalone `--judge-packet` this
-   panel answered is instead fed back with `--judged <file>`, which renders just the
-   audit's grade/findings plus this same advisory panel - see
+   ONE Dashboard run carries the resulting **"Second opinion (advisory)"** block,
+   explicitly labeled and **separate from the scored Dashboard** - inline in the pasted
+   card without `--pdf`, in the attached PDF with `--pdf` (the card then says so) -
+   never a follow-up message. (Outside item 1's flow, the standalone `--judge-packet`
+   this panel answered is instead fed back with `--judged <file>`, which prints the
+   whole `--json` document - the audit's score, grade and findings unchanged - plus a
+   `secondOpinion` array holding this same advisory panel, whether or not `--json` is
+   given - see
    [`docs/FLOW_CHOICES.md`](../FLOW_CHOICES.md).) This extends the "Verdicts are
    advisory narration only" rule in [`docs/ISOLATION.md`](../ISOLATION.md): a judge
    panel can re-rank or annotate a finding the engine already reported, but it can

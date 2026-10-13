@@ -3690,6 +3690,23 @@ class _SuggestingParser(argparse.ArgumentParser):
         super().error(message)
 
 
+def _seed_argument(value: str) -> str:
+    """C-724: ``--seed`` takes the same seed the ``liveTest`` bucket will accept.
+
+    The harness would happily render scenarios from an empty seed, but the bucket reads an
+    empty or over-long one as unusable and the verdict then runs "unseeded" - so a CI
+    script that passed ``--seed ""`` got a run it could never reproduce, with nothing said.
+    A seed of only whitespace is refused with them: the bucket would take it, but it is a
+    quoting mistake far more often than a choice. Any non-blank seed up to the bucket's
+    bound keeps working exactly as before."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty or blank")
+    if len(value) > _pipeline._MAX_LIVE_TEST_SEED_LEN:
+        raise argparse.ArgumentTypeError(
+            f"must be at most {_pipeline._MAX_LIVE_TEST_SEED_LEN} characters")
+    return value
+
+
 def _main(argv=None) -> int:
     _JUDGED_BUNDLE_CACHE.clear()
     p = _SuggestingParser(
@@ -3852,7 +3869,7 @@ def _main(argv=None) -> int:
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
                    help="print a live red-team payload suite for adversarial self-testing")
-    p.add_argument("--seed", default=None, metavar="VALUE",
+    p.add_argument("--seed", default=None, metavar="VALUE", type=_seed_argument,
                    # B-475: this reached make_suite only, so `--seed X --self-test` gave
                    # reproducible red-team tokens and freshly random canary/dry-run/
                    # multi-turn ones in the same output - three of the four harnesses
@@ -3861,7 +3878,8 @@ def _main(argv=None) -> int:
                         "--redteam, --dryrun, --multiturn and the --self-test/--full "
                         "sections that render them (reproducible CI runs, and the seed a "
                         "--judged-bundle liveTest verdict must carry to be eligible for "
-                        "history/trend); default is a fresh random seed each run")
+                        "history/trend); 1 to 128 characters, not blank; default is a fresh "
+                        "random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--multiturn", action="store_true",

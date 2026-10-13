@@ -87,6 +87,10 @@ kept here so the always-loaded playbook stays lean.
   the file's top level instead of inside `judged` is applied as the judged bucket with a
   `note:` saying so (an explicit `judged` always wins over it), and a file none of whose
   top-level keys is a bucket is reported rather than treated as an empty submission.
+  A `liveTest` bucket's optional `trajectory` hint can only widen the cross-check (`path`,
+  inside `--home`, is read in addition to the home's own sidecars; `sessionId` is ignored),
+  never narrow it. `--seed` (the harness flags) takes 1 to 128 characters and refuses an
+  empty, blank or longer value with exit 2.
 - `--verbose` / `--debug` / `--log PATH` - local logging with secret redaction.
 - `--no-native` - skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--no-deptree` - skip the OpenClaw dependency-tree walk behind B349 ("Obfuscated install-time

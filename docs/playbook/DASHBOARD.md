@@ -135,7 +135,7 @@ attack, choose the live test from the menu below."
 Append immediately at the end of the Dashboard (see Step 4 for routing detail). No "deeper scan"
 item - the capability self-report already ran automatically in Step 2 (F-043) - and no "second
 opinion" item either - the mandatory judge panel already ran in Step 2 and its verdicts are
-already in the pasted card above (C-297) - so there's nothing left to offer as a separate
+already in the Dashboard above, inline or in its PDF (C-297) - so there's nothing left to offer as a separate
 follow-up for either (C-132). Render menus as ordinary text - do NOT wrap them
 in a code block or monospace fence:
 

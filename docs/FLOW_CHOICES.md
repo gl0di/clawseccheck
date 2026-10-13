@@ -456,7 +456,8 @@ it's large:**
 3. If the user wants an actual second opinion rather than just a listing, run the
    "Judge-panel fan-out for `--judge-packet` items" protocol in [`SKILL.md`](../SKILL.md)
    (spawn 3 lensed judge subagents per item, majority-vote, feed the verdicts back via
-   `--judged`) - that section already covers presenting the resulting
+   `--judged`, which prints the whole `--json` document with a `secondOpinion` array added,
+   with or without `--json`) - that section already covers presenting the resulting
    "Second opinion (advisory)" panel.
 
 An empty array (`"judgePacket": []`) means nothing borderline was found - say so plainly;

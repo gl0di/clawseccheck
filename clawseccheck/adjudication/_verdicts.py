@@ -307,6 +307,27 @@ def _vote_tally(verdict: str, votes) -> "tuple[int, int]":
     return (hit, total) if total > 0 else (0, 0)
 
 
+def _votes_exclude_verdict(verdict: str, votes) -> bool:
+    """C-724: True when *votes* tallies at least one vote but none for *verdict* itself
+    (``DANGEROUS`` beside ``{"SAFE": 3}``). A ``0/3`` there reads as a lone dissenting
+    lens or as a split; what was submitted is a verdict its own votes do not back, and
+    the line says so instead of counting."""
+    hit, total = _vote_tally(verdict, votes)
+    return bool(total) and hit == 0
+
+
+def _panel_split_text(verdict: str, votes) -> str:
+    """The ``detail`` suffix for a vet verdict whose panel did not agree unanimously, or
+    ``""``. Unchanged for every tally that has a vote for *verdict*; C-724: when none of
+    the submitted votes is for it, the suffix says that instead of ``0/N``."""
+    hit, total = _vote_tally(verdict, votes)
+    if not total or hit >= total:
+        return ""
+    if hit == 0:
+        return f" (the submitted votes do not include it: {total} under other labels)"
+    return f" (panel split: {hit}/{total} {verdict})"
+
+
 def _annotate(engine_disposition: str, entry: dict | None, abstained: bool = False) -> str:
     """Plain-language re-rank line for one packet item, e.g. "engine: WARN
     ... judges: 3/3 DANGEROUS -> treat as high priority". ``entry`` is None
@@ -319,9 +340,33 @@ def _annotate(engine_disposition: str, entry: dict | None, abstained: bool = Fal
         return "not yet reviewed by a judge"
     verdict = entry["verdict"]
     hit, total = _vote_tally(verdict, entry.get("votes"))
-    judges_desc = f"judges: {hit}/{total} {verdict}" if total else f"judge: {verdict}"
+    if _votes_exclude_verdict(verdict, entry.get("votes")):
+        # C-724: the verdict and its priority are unchanged; only the tally is not shown
+        # as "0/N", which reads as a lone dissenting judge rather than a mismatch.
+        judges_desc = f"judge: {verdict} (the submitted votes do not include it: {total} under other labels)"
+    else:
+        judges_desc = f"judges: {hit}/{total} {verdict}" if total else f"judge: {verdict}"
     priority = _PRIORITY_BY_VERDICT.get(verdict, "worth a closer look")
     return f"engine: {engine_disposition} · {judges_desc} \u2192 {priority}"
+
+
+def _note_unmatched_entries(verdicts_map: dict, abstained, packet_keys) -> None:
+    """C-724: say, once, how many submitted entries matched no packet item.
+
+    A well-formed entry whose ``finding_id`` is unknown, whose ``target`` is wrong, or whose
+    id is a FAIL and so was never offered, is dropped when it is looked up - and with one
+    other usable entry beside it nothing said so. Counted per ``(finding_id, target)`` pair
+    as submitted (an ABSTAIN for a non-packet item included), reported as a number only:
+    the ids and targets are the submitter's text and are never echoed. What is applied is
+    unchanged."""
+    unmatched = (set(verdicts_map) | set(abstained)) - set(packet_keys)
+    if not unmatched:
+        return
+    n = len(unmatched)
+    _note(f"{n} submitted (finding_id, target) pair{'' if n == 1 else 's'} matched no item in "
+          "the judge packet (an unknown finding_id, a target that is not the packet item's "
+          "own, or a finding the audit already decided) and had no effect; every entry that "
+          "does match was applied as usual.")
 
 
 def _second_opinion(ctx, findings, verdicts_map: dict,
@@ -333,7 +378,10 @@ def _second_opinion(ctx, findings, verdicts_map: dict,
     unreviewed - and only its annotation says why.
     """
     items = []
-    for item in build_judge_packet(ctx, findings):
+    packet = build_judge_packet(ctx, findings)
+    _note_unmatched_entries(verdicts_map, abstained,
+                            {(item["finding_id"], item["target"]) for item in packet})
+    for item in packet:
         entry = verdicts_map.get((item["finding_id"], item["target"]))
         items.append({
             "finding_id": item["finding_id"],
@@ -718,8 +766,7 @@ def _escalate_finding(f, verdicts_map: dict):
     new_status = _escalated_status(f.status, verdict)
     if new_status is None:
         return f
-    hit, total = _vote_tally(verdict, entry.get("votes"))
-    split = f" (panel split: {hit}/{total} {verdict})" if total and hit < total else ""
+    split = _panel_split_text(verdict, entry.get("votes"))
     return dc_replace(
         f, status=new_status,
         detail=f"[escalated by host-agent judge: {verdict}{split}] {f.detail}",
@@ -748,7 +795,11 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
     stale verdicts file replayed against a later, unrelated run).
     """
     if _verdicts_fingerprint_matches(verdicts_raw, _vet_run_fingerprint(target)):
-        verdicts_map = _parse_verdicts(verdicts_raw)
+        verdicts_map, abstained = _parse_verdicts_with_abstentions(verdicts_raw)
+        if verdicts_map or abstained:
+            _note_unmatched_entries(verdicts_map, abstained, {
+                (item["finding_id"], item["target"])
+                for item in build_vet_judge_packet(engine_output, target)})
     else:
         # B-330: this rejection bypasses _parse_verdicts entirely, so it needs its own
         # diagnostic -- a whole verdicts file discarded on a fingerprint mismatch was
@@ -894,8 +945,7 @@ def _vet_attest_new_findings(target_name: str, verdicts_map: dict) -> list:
         status = _VET_ATTEST_NEW_FINDING_STATUS.get(verdict) if isinstance(verdict, str) else None
         if status is None:
             continue
-        hit, total = _vote_tally(verdict, entry.get("votes"))
-        split = f" (panel split: {hit}/{total} {verdict})" if total and hit < total else ""
+        split = _panel_split_text(verdict, entry.get("votes"))
         out.append(Finding(
             fid, _VET_ATTEST_TITLES[fid], MEDIUM, status,
             f"[host-agent pre-install attestation, verdict {verdict}{split}] "

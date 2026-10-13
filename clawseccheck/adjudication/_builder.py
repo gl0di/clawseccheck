@@ -1566,12 +1566,12 @@ def build_bundle_template() -> dict:
                 # agent's own local trajectory log when one is readable - omit this
                 # entirely and the audited home's own sidecars are scanned
                 # automatically; there is nothing to fill in for the common case.
-                # Set ONLY when the run used a non-default session or an explicit
-                # trajectory file the agent wants pointed at directly (a path outside
-                # --home is ignored, not followed).
+                # Set ONLY when a sidecar lives somewhere the default layout does not
+                # reach. C-724: a hint only ever ADDS a file to the home's own scan; it
+                # cannot exclude one (a path outside --home is ignored, not followed).
                 "trajectory": {
-                    "sessionId": "optional \u2014 narrows the scan to one session",
-                    "path": "optional \u2014 an explicit .trajectory.jsonl, must be inside --home",
+                    "sessionId": "optional \u2014 ignored; it neither adds nor removes a session",
+                    "path": "optional \u2014 an extra .trajectory.jsonl inside --home, read in addition to the home's own",
                 },
                 "verdicts": [{
                     "tool": "canary",

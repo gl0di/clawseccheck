@@ -869,10 +869,17 @@ entries are dropped per-entry (never a crash), mirroring `judged`/`vetJudged`'s 
 defensive parsing.
 
 **`trajectory` (F-193, optional):** a `canary` entry is cross-checked against the
-audited home's own local trajectory log when one is readable - this object narrows or
-redirects that scan (`sessionId` to one session, `path` to one explicit
-`.trajectory.jsonl`; a `path` outside `--home` is rejected and the home's own sidecars
-are scanned instead) and is never required - omitting it scans the home directly. Two
+audited home's own local trajectory log when one is readable. This object can only
+WIDEN that scan, never narrow it, because the agent under test writes it: the home's own
+sidecars are always scanned, `path` (an explicit `.trajectory.jsonl` inside `--home`, for
+a sidecar kept somewhere the default layout does not reach) is read IN ADDITION, and
+`sessionId` is accepted and ignored - it adds nothing and removes nothing. Each recorded
+reply is judged on its own, so an echo of the token in any file read is a contradiction
+whatever the other files hold, and pointing `path` at a session that resisted cannot hide
+one that complied. What the cross-check cannot defend is the log itself: an agent that
+rewrites or deletes its own sidecars leaves nothing to contradict it. A `path` outside `--home` is rejected and not read. The
+object is never required - omitting it scans the home directly. To re-test after a fix,
+use a fresh `--seed`: an earlier run under the same seed still counts. Two
 independent legs: a submitted `canary` `id` that could not have come from THIS bucket's
 own `seed` (`canary.make_canary(seed)` is deterministic) is a proven contradiction with
 no trajectory needed at all; when a trajectory is also readable, the submitted verdict
@@ -1045,6 +1052,21 @@ total: one `DANGEROUS` and two `ABSTAIN` read as `1/3 DANGEROUS`, so the split s
 how few lenses stood behind the verdict. `--vet-judged` reads the same entries, so there
 an `ABSTAIN` is simply no escalation; a `--vet-judge-packet` never offers it.
 
+An entry that is well formed but matches **no packet item** (an unknown `finding_id`, a
+real id with a `target` that is not the packet item's own, or an id the audit already
+decided as a `FAIL`, which the packet never offers) has no effect, and is counted: one
+`note:` line on stderr, `N submitted (finding_id, target) pair(s) matched no item in the
+judge packet`, on `--judged`, on `--judged-bundle` (the `judged` bucket) and on `--vet-judged`.
+It is a count of `(finding_id, target)` pairs as submitted - an `ABSTAIN` for a non-packet
+item included - and never repeats an entry's text. Nothing that does match is changed by
+it, and it stays quiet when every entry matched or none was submitted.
+
+A verdict whose optional `votes` object has votes but none for the submitted verdict
+(`DANGEROUS` beside `{"SAFE": 3}`) keeps its verdict and its priority, and its `annotation`
+reads `judge: DANGEROUS (the submitted votes do not include it: 3 under other labels)` rather than a
+`0/3` tally; `--vet-judged` words its escalation attribution the same way instead of as a
+panel split.
+
 Dropping is not silent, though. When a **non-empty** payload yields **zero** usable
 entries, a `note:` line naming the reason (`0 of N submitted entries were usable`,
 `it is not valid JSON`, `it has no "verdicts" array`, a `--vet-judged`
@@ -1163,8 +1185,9 @@ what the proposals file already listed, and already-present entries are skipped
 
 **This gains no new suppression authority.** A suppressed score-capping
 `CRITICAL`/`HIGH` `FAIL`, or a sensitive check id (`B1`, `B2`, `B13`, `B20`), still
-surfaces regardless of how the suppressing line got into `.clawseccheckignore` (see
-`surfaced_despite_suppression`, §2), and any change to that file - including one made
+surfaces regardless of how the suppressing line got into `.clawseccheckignore` (§2's
+finding entry carries `suppressed: true` beside `status: "FAIL"`, and the finding still
+caps the grade and still counts in `fail_counts_by_severity`), and any change to that file - including one made
 this way - is still flagged by `--monitor` as drift (`ignore_hash`, §1).
 
 **Residual, stated plainly (not solved away):** if the host agent generating the

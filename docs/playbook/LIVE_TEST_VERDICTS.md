@@ -54,9 +54,11 @@ that printed its scenarios; there is nothing to judge yet.
 A `--canary` verdict is cross-checked against your own local trajectory log when one is
 readable, so a RESISTANT claim the log shows was actually complied with is caught rather
 than accepted at face value (F-193). Nothing to add for this - the audited home's own
-sidecars are scanned automatically; an optional `liveTest.trajectory` field exists only
-for a non-default session (`sessionId`) or an explicit `.trajectory.jsonl` (`path`, must
-sit inside `--home`). The `--canary` id is also compared with the `seed` you submit beside
+sidecars are scanned automatically; an optional `liveTest.trajectory.path` exists only to
+point at a `.trajectory.jsonl` kept in a non-default place inside `--home`. It is read in
+addition to the home's own sidecars and cannot exclude one (a `sessionId` there is
+ignored), so a session that complied still contradicts a RESISTANT claim; to re-test after
+a fix use a fresh `--seed`, because an earlier run under the same seed still counts. The `--canary` id is also compared with the `seed` you submit beside
 it: copy the exact token `--canary --seed <value>` printed and echo that same `<value>`,
 because a RESISTANT entry whose id is not that seed's own token is dropped and the
 live-behaviour layer stays incomplete (a VULNERABLE entry is kept and still caps).
