@@ -217,12 +217,43 @@ def _b181(home):
     return check_skill_install_tamper(Context(home=Path(home)))
 
 
-def test_b181_says_reinstalling_would_downgrade(tmp_path):
+_B181_FIRST = ("Treat the skill as untrusted until you can explain the change. Reinstall it "
+               "from ClawHub to restore the verified bytes")
+
+
+def test_b181_states_what_reinstalling_replaces_without_judging_it(tmp_path):
     f = _b181(_b181_home(tmp_path, "a", lock_version="1.0.0", skill_version="2.0.0"))
     assert f.status == FAIL
-    assert "1.0.0" in f.fix and "2.0.0" in f.fix
-    assert "downgrade" in f.fix
-    assert "demo-skill" in f.fix
+    assert "reinstalling replaces the files on disk with the recorded version 1.0.0" in f.fix
+    assert "version 2.0.0" in f.fix and "'demo-skill'" in f.fix
+
+
+def test_b181_the_remediation_comes_first_and_is_byte_identical(tmp_path):
+    """A skill that was tampered with can carry any `version:` it likes. Whatever the
+    versions say, the instruction to reinstall is the same sentence it is without a note."""
+    baseline = _b181(_b181_home(tmp_path, "b", lock_version="2.0.0", skill_version="2.0.0"))
+    assert baseline.fix.startswith(_B181_FIRST)
+    for name, rec, inst in (("h", "1.0.0", "9.9.9"),        # looks like a newer local copy
+                            ("l", "3.0.0", "2.0.0"),
+                            ("g", "latest", "2.0.0")):      # not a plain version
+        f = _b181(_b181_home(tmp_path, name, lock_version=rec, skill_version=inst))
+        assert f.fix.startswith(baseline.fix), name
+        assert f.fix[len(baseline.fix):].startswith(" Version note: "), name
+
+
+@pytest.mark.parametrize("rec, inst", [("1.0.0", "9.9.9"), ("3.0.0", "2.0.0"),
+                                       ("latest", "2.0.0"), ("1.2.3-beta", "1.2.3")])
+def test_b181_the_note_says_the_disk_version_proves_nothing_and_never_discourages(
+        tmp_path, rec, inst):
+    f = _b181(_b181_home(tmp_path, "a", lock_version=rec, skill_version=inst))
+    note = f.fix[f.fix.index("Version note"):]
+    assert "comes from the modified files themselves" in note
+    assert "does not show who changed them" in note
+    assert "cannot tell a deliberate newer local copy from tampering" in note
+    low = f.fix.lower()
+    for forbidden in ("do not reinstall", "before you reinstall", "keep a copy", "downgrade",
+                      "don't reinstall"):
+        assert forbidden not in low, forbidden
 
 
 def test_b181_detail_is_unchanged_by_the_version_note(tmp_path):
@@ -251,7 +282,6 @@ def test_b181_no_version_note_when_either_version_is_unknown(tmp_path, lock_vers
 def test_b181_a_differing_but_not_older_record_is_not_called_a_downgrade(tmp_path):
     f = _b181(_b181_home(tmp_path, "a", lock_version="3.0.0", skill_version="2.0.0"))
     assert "Version note" in f.fix and "version 3.0.0" in f.fix and "version 2.0.0" in f.fix
-    assert "downgrade" not in f.fix
 
 
 def test_b181_the_advice_never_offers_to_rewrite_a_digest(tmp_path):
@@ -279,12 +309,25 @@ def test_b175_explain_describes_the_real_workshop_defaults():
 _REPO = Path(__file__).resolve().parent.parent
 
 
-def test_vet_skill_on_the_scanner_itself_points_to_verify_self(capsys):
+def test_vet_skill_on_the_scanner_layout_does_not_vouch_for_the_folder(capsys):
     from clawseccheck.cli import main
     main(["--vet-skill", str(_REPO), "--no-deptree", "--no-host"])
     out = capsys.readouterr().out
     assert "NOT SCANNED" in out                  # the existing fact is still there
-    assert "--verify-self" in out
+    # --verify-self checks the RUNNING scanner, and a lookalike folder's own audit.py
+    # could print any digest: the advice must not suggest either as proof.
+    assert "compare the digest it prints" not in out
+    assert "unmodified, run" not in out
+    assert "checks the scanner you are running" in out
+    assert "not proof that it is ClawSecCheck" in out
+    assert "SHA256SUMS.txt" in out and "Verify your copy is genuine" in out
+    assert "never run this folder's own audit.py to vouch for itself" in out
+
+
+def test_the_readme_really_has_the_verification_steps_the_message_points_to():
+    readme = (_REPO / "README.md").read_text(encoding="utf-8")
+    assert "Verify your copy is genuine" in readme
+    assert "SHA256SUMS.txt" in readme and "sha256sum" in readme
 
 
 def test_vet_skill_on_another_folder_does_not_mention_verify_self(tmp_path, capsys):
@@ -293,7 +336,9 @@ def test_vet_skill_on_another_folder_does_not_mention_verify_self(tmp_path, caps
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: plain-skill\n---\nhello\n", encoding="utf-8")
     main(["--vet-skill", str(skill), "--no-deptree", "--no-host"])
-    assert "--verify-self" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "--verify-self" not in out and "SHA256SUMS" not in out
+    assert "has ClawSecCheck's layout" not in out
 
 
 # ------------------------------------------------- item 4: B370 and the built-in runtime

@@ -4804,13 +4804,18 @@ def _main(argv=None) -> int:
                                            "self_excluded_skills", None):
             # C-705: the all-UNKNOWN dossier above is deliberate (a folder that merely
             # matches this layout proves nothing), but it left the reader with no next
-            # step. The question "is this install the genuine, unmodified scanner" has
-            # its own command.
+            # step. `--verify-self` is NOT that step: it digests the scanner that is
+            # RUNNING, not this folder, and running a lookalike folder's own audit.py
+            # would execute its code and let it print any digest. So point at the
+            # published checksums and say to use tools from outside the folder.
             _emit("")
-            _emit("This folder is ClawSecCheck's own, so it is not scanned as a "
-                  "third-party skill. To check that this copy is unmodified, run "
-                  f"'{command_prefix()} --verify-self' and compare the digest it prints "
-                  "with the one published for your release.")
+            _emit("This folder has ClawSecCheck's layout, so it is not scanned as a "
+                  "third-party skill. That layout is not proof that it is ClawSecCheck: "
+                  "a folder can imitate it. `--verify-self` checks the scanner you are "
+                  "running, not this folder. To check this copy, compare its files with "
+                  "the SHA256SUMS.txt published with the release (see \"Verify your copy "
+                  "is genuine\" in the README), using tools outside this folder; never "
+                  "run this folder's own audit.py to vouch for itself.")
         return _vet_rc
 
     if _vet_route and _vet_route[0] == "mcp":

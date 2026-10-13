@@ -7194,18 +7194,18 @@ def _b181_version_parts(value):
 
 
 def _b181_version_notes(candidates: "list[tuple[str, Path, dict]]") -> str:
-    """Advice text for skills whose install record is for a DIFFERENT version than the
-    SKILL.md now on disk.
+    """Neutral facts about the versions, appended AFTER the remediation sentence.
 
     A newer local copy that replaced a ClawHub install fails the digest comparison just
-    like tampering does, and "reinstall it from ClawHub" then restores the OLDER bytes the
-    record describes - a downgrade the reader was never told about. Text only: this
-    reads two version strings and never touches a record or a digest. A version that is
-    not a plain version is compared as "different" without being printed, and a skill
-    name that is not a plain name is not printed either.
+    like tampering does, and reinstalling then replaces it with the version the record
+    describes. This states that fact - and nothing that argues against reinstalling: the
+    SKILL.md `version:` is read from the very files that failed the digest check, so a
+    tampered skill can declare any version it likes, and the install record cannot tell a
+    deliberate newer copy from tampering. Text only: it reads two version strings and
+    never touches a record or a digest. A version that is not a plain version is compared
+    as "different" without being printed, and a skill name that is not a plain name is not
+    printed either.
     """
-    keep = ("if the copy on disk is a deliberate local one, keep a copy of it before "
-            "you reinstall")
     notes = []
     for slug, skill_dir, record in candidates[:3]:
         recorded = _b181_recorded_version(record)
@@ -7219,25 +7219,24 @@ def _b181_version_notes(candidates: "list[tuple[str, Path, dict]]") -> str:
                 continue
             notes.append(
                 f"{who}: the install record's version and the SKILL.md version on disk "
-                "could not be compared, so reinstalling from ClawHub might replace the "
-                f"files on disk with a different version - {keep}")
+                "could not be compared; reinstalling replaces the files on disk with "
+                "the recorded version")
             continue
         width = max(len(rec[0]), len(inst[0]))      # 1.0 and 1.0.0 are the same version
         rec_n = rec[0] + (0,) * (width - len(rec[0]))
         inst_n = inst[0] + (0,) * (width - len(inst[0]))
         if rec_n == inst_n and rec[1] == inst[1]:
             continue
-        older = rec_n < inst_n
         notes.append(
-            f"{who}: the install record is for version {rec[2]}, but the SKILL.md on "
-            f"disk declares version {inst[2]}"
-            + (", so reinstalling from ClawHub would be a downgrade" if older else
-               ", so reinstalling from ClawHub would replace the files on disk with "
-               "the recorded version")
-            + f" - {keep}")
+            f"{who}: the install record is for version {rec[2]}, and the SKILL.md on "
+            f"disk declares version {inst[2]}; reinstalling replaces the files on disk "
+            f"with the recorded version {rec[2]}")
     if not notes:
         return ""
-    return " Version note: " + "; ".join(notes) + "."
+    return (" Version note: " + "; ".join(notes) + ". The version number on disk comes "
+            "from the modified files themselves, so it does not show who changed them, "
+            "and the install record cannot tell a deliberate newer local copy from "
+            "tampering.")
 
 
 def check_skill_install_tamper(ctx: Context) -> Finding:
