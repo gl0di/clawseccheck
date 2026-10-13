@@ -73,6 +73,17 @@ _GATE_CLASS_FOR_BLAST = {
 }
 
 
+def _attested_name(value, limit: int = 64) -> str:
+    """C-723: an attestation string made safe to print in a finding.
+
+    The agent wrote it, so it may be attacker-influenced: control and ANSI characters are
+    removed by the report boundary's own sanitiser, whitespace is folded to single spaces
+    and the result is cut to *limit* characters.
+    """
+    from ..report import _sanitize  # noqa: PLC0415 - report imports the checks package
+    return " ".join(_sanitize(str(value)).split())[:limit]
+
+
 _B31_BYPASS_CANDIDATES = ("apply_patch", "exec", "process")
 
 
@@ -345,9 +356,13 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
     evidence = [f"{cls}: {', '.join(sorted(set(names)))}" for cls, names in high.items()]
     label = ", ".join(c.lower().replace("_", "-") for c in high)
     bypass_actors = _approval_bypass_actors(ctx, set(_attest.approval_gates_auto(att)), set(high))
+    declared_known, declared_other = _attest.declared_bypass_actors(att)
+    declared_known = sorted(declared_known)
     if bypass_actors or _attest.is_ungated(att):
         if bypass_actors:
             evidence.append(f"approval bypass actor(s): {', '.join(sorted(set(bypass_actors)))}")
+        if declared_other:  # C-723: counted, never named (see below)
+            evidence.append(f"{declared_other} other declared bypass actor(s)")
         # B-315: was FAIL, downgraded to WARN. B43 is ATTESTED/scored=False - the verdict
         # rests on the audited agent's OWN self-report, so a grade cap it could talk itself
         # into/out of is unsound (Dave's ruling: unscored checks cap at WARN).
@@ -360,6 +375,36 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             "Drop the dangerous verbs the agent does not need (least privilege at "
             "the capability level), or require human approval before send/exec/write "
             "and for any mailbox-config change.",
+            evidence=evidence,
+        )
+    # C-723: an actor the agent itself declares in approval_bypass_actors starts tool
+    # calls with no human in the loop, so "every gate is required" does not describe
+    # those calls. _approval_bypass_actors above only consults the list when some held
+    # class is 'auto'; with every gate 'required' (or unreported) the declaration was
+    # dropped and the wording was identical to an attestation with no actors at all.
+    # A declared actor counts whatever it is called: a name is printed only when it is in
+    # the closed vocabulary (cron, heartbeat, scheduled, sleeper); every other one is
+    # counted and never quoted, because the name is the agent's own text. Still WARN at
+    # most (B-315): the verdict rests on the agent's own self-report.
+    if declared_known or declared_other:
+        if declared_known and declared_other:
+            who = f"{', '.join(declared_known)} and {declared_other} other declared actor(s)"
+        elif declared_known:
+            who = ", ".join(declared_known)
+        else:
+            who = f"{declared_other} declared actor(s)"
+        evidence.append(f"approval bypass actor(s): {who}")
+        return _finding(
+            "B43",
+            WARN,
+            f"The agent holds high-blast-radius verbs ({label}) AND declares "
+            f"actor(s) that fire tool calls without human confirmation "
+            f"({who}) \u2014 per its own self-report the approval gates it "
+            "lists do not cover calls those actors start, so holding these verbs "
+            "widens the blast radius even where every gate reads 'required'.",
+            "Remove any dangerous verb the agent does not strictly need, and put "
+            "the listed actors behind the same human approval as an interactive call "
+            "(or keep them away from these verbs).",
             evidence=evidence,
         )
     # B-805: this used to say "An approval gate is reported" whenever ANY class
@@ -422,7 +467,11 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
               high-blast verb fired without an approval gate.
     WARN    - a proven high-blast verb fired AND the attested posture is ungated
               (untrusted_to_action == 'ungated', or a runtime approval-bypass actor
-              is reported) - evidence of an actual dangerous invocation, unguarded.
+              is reported, or - C-723 - the attested approval gate for that verb's
+              own action class is 'auto') - evidence of an actual dangerous
+              invocation, unguarded. Also WARN (C-723): an attested proven verb that
+              the same attestation's 'tools' inventory does not list - the self-report
+              contradicts itself.
     UNKNOWN - no attestation, or no 'proven_tools' evidence cited (silent by default;
               this check needs runtime/log evidence, which most setups won't have).
     """
@@ -481,13 +530,50 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
     bypass_actors = sorted(set(_attest.approval_bypass_actors(att)))
     ungated = _attest.is_ungated(att) or bool(bypass_actors)
 
+    # C-723: the attestation's own gate for the proven verb's action class. B-805's rule -
+    # a held class is judged by ITS gate and no other class's - so a send that fired is not
+    # excused (or condemned) by what the exec gate says. 'auto' is the agent saying it acts
+    # without asking for that class, and the verb did fire: the PASS sentence below ("no
+    # proven high-blast verb fired without an approval gate") would be false for it.
+    auto_classes = set(_attest.approval_gates_auto(att))
+    auto_gated = sorted({
+        gc
+        for v in proven_high
+        for gc in _GATE_CLASS_FOR_BLAST.get(_attest.classify_verb(v), ())
+        if gc in auto_classes
+    })
+    # C-723: a proven verb whose class NO tool in the same attestation's `tools` list falls
+    # in. Compared by the class the engine assigns (attest.classify_verb), not by spelling:
+    # `shell` vs `bash`, `read` vs `read_file` and `send-email` vs `send_email` are the same
+    # kind of verb, and a verb the engine cannot classify has no class to compare. Only the
+    # attestation's own two columns are compared (and only when `tools` is a usable list):
+    # log-observed verbs routinely include built-ins that no inventory names, and a verb the
+    # config grants is B44's question, so neither is called a contradiction here.
+    outside_by_class: dict[str, list[str]] = {}
+    if not observed and effective:
+        declared_classes = {_attest.classify_verb(t) for t in effective}
+        for v in sorted(proven):
+            cls = _attest.classify_verb(v)
+            if cls == "UNKNOWN" or cls in declared_classes or _canon_tool(v) in declared:
+                continue
+            outside_by_class.setdefault(cls, []).append(v)
+    outside = [(v, cls) for cls, vs in sorted(outside_by_class.items()) for v in vs]
+    contradiction = (
+        ["proven without a declared tool of its class: "
+         + ", ".join(f"{_attested_name(v)} ({cls})" for v, cls in outside[:8])
+         + (f" (+{len(outside) - 8} more)" if len(outside) > 8 else "")]
+        if outside else []
+    )
+    declared_known, declared_other = _attest.declared_bypass_actors(att)
+
     if proven_high and ungated:
-        evidence = [f"proven high-blast verb: {v}" for v in proven_high]
+        evidence = [f"proven high-blast verb: {_attested_name(v)}" for v in proven_high]
         if bypass_actors:
             evidence.append(f"approval bypass actor(s): {', '.join(bypass_actors)}")
         elif _attest.is_ungated(att):
             evidence.append("untrusted_to_action: ungated")
         evidence.append(f"proven source: {proven_source}")
+        evidence.extend(contradiction)
         return _finding(
             "B84",
             WARN,
@@ -501,6 +587,39 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             confidence=conf,
         )
 
+    if proven_high and auto_gated:
+        evidence = [f"proven high-blast verb: {_attested_name(v)}" for v in proven_high]
+        evidence.extend(f"approval gate for {gc}: auto" for gc in auto_gated)
+        evidence.append(f"proven source: {proven_source}")
+        evidence.extend(contradiction)
+        return _finding(
+            "B84",
+            WARN,
+            "The agent has PROVEN (log/trace evidence, not just self-reported "
+            "capability) that it actually invoked a high-blast-radius verb, and its own "
+            "attested approval gate for that verb's action class is 'auto' (it acts "
+            "without asking) \u2014 an evidenced dangerous invocation with no approval gate.",
+            "Require human approval (not 'auto') for the action class that verb belongs "
+            "to, or remove the verb from the agent's reach.",
+            evidence=evidence,
+            confidence=conf,
+        )
+
+    if outside:
+        return _finding(
+            "B84",
+            WARN,
+            "The attestation contradicts itself: 'proven_tools' includes a verb of class "
+            f"{', '.join(sorted(outside_by_class))} while its own 'tools' list declares "
+            "nothing of that class \u2014 the effective grant and the proven use cannot "
+            "both be right.",
+            "Re-attest: list the verb in 'tools' if the agent really holds it (and "
+            "review why the inventory missed it), or drop it from 'proven_tools' if no "
+            "log or trace shows it.",
+            evidence=[f"proven source: {proven_source}"] + contradiction,
+            confidence=conf,
+        )
+
     evidence = [f"proven source: {proven_source}"]
     dead_grants = sorted((declared or effective) - proven)
     if dead_grants:
@@ -508,11 +627,41 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             f"declared/effective but never proven (informational, not a finding): "
             f"{', '.join(dead_grants)}"
         )
+    # C-723: the "no proven high-blast verb fired without an approval gate" clause is a
+    # claim about gates, so it is made only when the attestation establishes it: every proven
+    # high-blast verb's OWN gate class is reported 'required' and no bypass actor is
+    # declared. Otherwise the status is unchanged and the sentence says which part is not
+    # established, in fixed wording (class names come from closed vocabularies, never from
+    # attestation text).
+    not_established: list[str] = []
+    if proven_high:
+        gates_map = att.get("approval_gates")
+        gates_map = gates_map if isinstance(gates_map, dict) else {}
+        proven_classes = {_attest.classify_verb(v) for v in proven_high}
+        unreported = sorted({
+            gc for cls in proven_classes for gc in _GATE_CLASS_FOR_BLAST.get(cls, ())
+            if str(gates_map.get(gc, "")).strip().lower() != "required"
+        })
+        no_setting = sorted(c for c in proven_classes if c not in _GATE_CLASS_FOR_BLAST)
+        if unreported:
+            not_established.append(
+                "no approval gate was reported as 'required' for "
+                + ", ".join(unreported) + " calls")
+        if no_setting:
+            not_established.append(
+                "the attestation has no gate setting for "
+                + ", ".join(c.lower().replace("_", "-") for c in no_setting) + " verbs")
+        if declared_known or declared_other:
+            not_established.append("a bypass actor is declared (see B43)")
     return _finding(
         "B84",
         PASS,
         "Proven tool use stays within the declared/effective grant, and no proven "
-        "high-blast verb fired without an approval gate.",
+        "high-blast verb fired without an approval gate."
+        if not not_established else
+        "Proven tool use stays within the declared/effective grant. Not established: "
+        "that the proven high-blast verb(s) ran behind an approval gate ("
+        + "; ".join(not_established) + ").",
         "Keep the trajectory sidecar (or attested 'proven_tools') current so this check "
         "keeps reflecting actual invocation, not just intent.",
         evidence=evidence,

@@ -474,7 +474,10 @@ def test_b43_warn_when_a_gate_is_auto_with_unknown_bypass_actor():
     }
     f = check_capability_blast_radius(_ctx(attestation=att))
     assert f.status == WARN
-    assert not any("approval bypass actor(s):" in e for e in f.evidence)
+    # C-723: a declared actor counts whatever it is called - it was dropped here before -
+    # but a name outside the known vocabulary is counted, never printed.
+    assert "approval bypass actor(s): 1 declared actor(s)" in f.evidence
+    assert "1 declared actor(s)" in f.detail and "unknown" not in f.detail
 
 
 def test_b43_warns_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():

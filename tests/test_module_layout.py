@@ -420,7 +420,7 @@ _EXEMPT = {
                          "and risk.py, the same cross-topic-leaf shape B-247 already "
                          "established. A finer split (the grounding prose into a doc, the "
                          "tables kept here) is a later cycle, not this one.",
-    "checks/_capability.py": "~3,514 lines (restated 2026-09-25, B-942 — was ~2,977) — "
+    "checks/_capability.py": "~4,097 lines (restated 2026-10-13, C-723, was ~3,514 and before that ~2,977) — "
                              "the declared-vs-effective capability /"
                              "manifest topic (B44/B55/B68/B84/B326 + helpers). Crossed the "
                              "budget with CLAWSECCHECK-B-376/B-369's B55 WARN->FAIL "

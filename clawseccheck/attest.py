@@ -480,6 +480,11 @@ def vet_attestation(att) -> tuple:
         out.pop(key)
         notes.append(f"the '{key}' list ({bad} of {len(raw)} "
                      f"{'member is' if bad == 1 else 'members are'} not a non-blank string)")
+    if notes and not out:
+        # C-723: everything the agent supplied was unusable. Returning {} would read as "no
+        # attestation was given" downstream; keep the bare schema so a caller can tell that
+        # one arrived and answered nothing (the same shape as a file holding only "schema").
+        out = {"schema": SCHEMA_ID}
     return (out, notes) if notes else (att, notes)
 
 
@@ -552,32 +557,8 @@ def approval_bypass_actors(att: dict) -> list[str]:
       - {"approval_bypass_actors": "heartbeat,scheduled"}
       - {"bypass_actors": "heartbeat,sleeper"} (legacy alias)
     """
-    if not isinstance(att, dict):
-        return []
-
-    actors: list[str] = []
-    raw = att.get("approval_bypass_actors")
-    if raw is None:
-        raw = att.get("bypass_actors")
-    if raw is None:
-        return actors
-
-    if isinstance(raw, dict):
-        items = [k for k, v in raw.items() if v]
-    elif isinstance(raw, (list, tuple, set)):
-        items = list(raw)
-    elif isinstance(raw, str):
-        if "," in raw:
-            items = raw.split(",")
-        elif raw.strip():
-            items = [raw]
-        else:
-            return []
-    else:
-        return []
-
     out: list[str] = []
-    for item in items:
+    for item in _bypass_items(att):
         if not isinstance(item, (str, bytes)):
             continue
         key = str(item).strip().lower().replace("-", "_")
@@ -587,4 +568,48 @@ def approval_bypass_actors(att: dict) -> list[str]:
         if mapped:
             out.append(mapped)
     return list(dict.fromkeys(out))
+
+
+def _bypass_items(att) -> list:
+    """The raw members of the bypass-actor declaration, whatever shape it came in."""
+    if not isinstance(att, dict):
+        return []
+    raw = att.get("approval_bypass_actors")
+    if raw is None:
+        raw = att.get("bypass_actors")
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return [k for k, v in raw.items() if v]
+    if isinstance(raw, (list, tuple, set)):
+        return list(raw)
+    if isinstance(raw, str):
+        if "," in raw:
+            return raw.split(",")
+        return [raw] if raw.strip() else []
+    return []
+
+
+def declared_bypass_actors(att) -> tuple:
+    """Every actor the attestation declares as bypassing approval, as ``(known, other)``.
+
+    C-723. ``approval_bypass_actors`` keeps only the names it recognises, so an actor the
+    agent called anything else (``nightly-job``, ``webhook``) vanished from every verdict. A
+    declared actor counts whatever it is called: *known* is the recognised names (the closed
+    vocabulary of ``_BYPASS_ALIAS_MAP`` values, de-duplicated) and *other* is the NUMBER of
+    distinct unrecognised ones - never their text, which is the agent's own and may be
+    attacker-influenced. A non-string or blank member (``is_blank_text``) is not an actor.
+    """
+    known: list[str] = []
+    other: set[str] = set()
+    for item in _bypass_items(att):
+        if not isinstance(item, (str, bytes)) or is_blank_text(item):
+            continue
+        key = str(item).strip().lower().replace("-", "_")
+        mapped = _BYPASS_ALIAS_MAP.get(key)
+        if mapped:
+            known.append(mapped)
+        else:
+            other.add(key)
+    return list(dict.fromkeys(known)), len(other)
 

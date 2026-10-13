@@ -105,10 +105,27 @@ high-blast verb that fired with no approval gate is "the agent did, ungated,"
 not just "the agent could." Leave as `[]` if you have no execution log to
 cite. Feeds **B84** (declared vs. effective vs. proven tool use), which
 prefers an OpenClaw trajectory-log source over this field when one is
-present, and otherwise falls back to it - WARN only when a proven high-blast
-verb fired AND the attested posture is ungated; UNKNOWN when there's no
-proven-tool evidence at all (most setups, since this needs runtime/log
-evidence).
+present, and otherwise falls back to it. B84 is WARN when a proven
+high-blast verb fired AND it is attested as ungated: `untrusted_to_action` is
+`"ungated"`, or a recognised bypass actor is reported, or the `approval_gates`
+entry for that verb's own action class is `"auto"` (a send is judged by the
+`send` gate, an exec by the `exec` gate, never by another class's). B84 is
+also WARN when `proven_tools` holds a verb of a class that no tool in the same
+attestation's `tools` list falls in (for example a send while `tools` holds
+only read verbs): the self-report contradicts itself. Verbs are compared by the
+class the engine gives them, not by spelling, so `shell` against `bash` or
+`read` against `read_file` is no contradiction, and a verb the engine cannot
+classify is never one. The comparison only runs when `tools` is given, only
+against the attestation's own list, and a verb that `tools.allow` grants is
+left to B44. B84 is UNKNOWN when there's no proven-tool evidence at all (most
+setups, since this needs runtime/log evidence). When none of that applies it
+reads PASS, and the PASS says only what the attestation establishes: the
+sentence "no proven high-blast verb fired without an approval gate" appears
+only when every proven high-blast verb's own gate class is reported
+`"required"` and no bypass actor is declared. Otherwise the status is the
+same but the sentence says which part is not established (no gate reported for
+that class, no gate setting exists for that class, or a bypass actor is
+declared).
 
 ### approval_gates
 
@@ -136,11 +153,16 @@ unsound); WARN is its ceiling.
 
 Actors that can fire tool calls without human confirmation based on runtime
 logs or execution traces.  Common values: `heartbeat`, `cron`, `scheduled`,
-`sleeper`.  Leave as `[]` if none.
+`sleeper`.  A declared actor counts whatever it is called, but only those four
+and a few spellings of them (`cronjob`, `scheduler`, `periodic`, `alarm`,
+`clock`) are printed by name; any other actor is counted ("N other declared
+actor(s)") and never quoted.  A non-string or blank entry is not an actor.
+Leave as `[]` if none.
 
-B43 escalates its WARN wording when a bypass actor is present alongside a high-blast
-verb even if `approval_gates` says `"required"` - but it never reaches FAIL (see
-above).
+B43 escalates its WARN wording when a bypass actor is present alongside a
+high-blast verb even if `approval_gates` says `"required"`: it says how many
+actors are declared, names the recognised ones, and says the listed gates do
+not cover calls they start.  It never reaches FAIL (see above).
 
 ### untrusted_to_action
 
@@ -265,6 +287,25 @@ Leave as `[]` when there is no delegation.
 
 Free-text field for context.  The engine ignores it.
 
+### What counts as an answer
+
+Under `--full` the attestation is the audit's "agent self-report" layer, and the
+layer counts as submitted only when the attestation answers at least one
+question the checks read: a non-empty `tools`, `proven_tools` or `host_monitors`
+list; an `approval_gates` entry for `exec`, `send` or `write` set to
+`"required"` or `"auto"`; `untrusted_to_action` set to `"gated"` or
+`"ungated"`; a recognised `approval_bypass_actors` name; a non-empty
+`paths.bootstrap` or a `paths.openclaw_install`; a valid `agents` roster; or a
+`delegation` edge.  A declared `approval_bypass_actors` entry counts whatever
+it is called.  A string counts only when it has a visible character: a
+zero-width space, a control byte or a path of only whitespace is as empty as
+`""`.  A bare `schema`, a `notes` string, the unfilled template that `--ask`
+prints (its defaults are `"unknown"`, empty lists and empty paths) and a name
+list with a blank member are not answers.  Such a file - and a file whose
+content was all ignored with the stderr warning about unusable parts - is
+reported as not submitted, with a line saying the attestation carried no
+answers: it does not count as the self-report layer having run.
+
 ---
 
 ## Minimal example
@@ -288,8 +329,10 @@ With this file the audit produces:
 
 - **B43 WARN** - agent holds MAILBOX_CONFIG and EGRESS verbs; approval gate
   prevents escalation to FAIL.
-- **B44 PASS or WARN** - depends on whether `tools.allow` in config lists a
-  high-blast verb absent from the attest `tools` array.
+- **B44 PASS or WARN, or UNKNOWN** - when the config has an explicit
+  `tools.allow` or `tools.alsoAllow` list, PASS or WARN depending on whether it
+  lists a high-blast verb absent from the attest `tools` array; when the config
+  has no such list there is nothing to compare, so B44 is UNKNOWN.
 - **B45 UNKNOWN** - no agent roster (single-agent setup).
 - **B47 UNKNOWN** - no delegation edges.
 - **B53 PASS (ATTESTED)** - CrowdStrike Falcon matches the EDR/AV category.

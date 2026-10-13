@@ -56,6 +56,7 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import attest as _attest
 from .attest import template as attest_template
 from .behavioral import analysis_incompleteness as behavioral_analysis_incompleteness
 from .behavioral import analysis_is_conclusive as behavioral_is_conclusive
@@ -1343,6 +1344,58 @@ class LiveTestSignal:
     reproducible: bool = False
 
 
+# The attestation fields the checks actually read (docs/ATTESTATION.md). `schema`,
+# `notes` and `_questions` are labels and documentation; the placeholder values --ask
+# prints ("unknown", empty lists, empty paths) are the absence of an answer.
+_ATTESTATION_NAME_LISTS = ("tools", "proven_tools", "host_monitors")
+
+
+def _attestation_has_answers(att) -> bool:
+    """C-723: True when *att* answers at least one question a check reads.
+
+    A bare ``schema``, a ``notes`` string, the unfilled ``--ask`` template and every
+    field left at its placeholder are NOT answers: the self-report layer is only
+    "submitted" when the agent said something. Every string that counts as an answer must
+    have a visible character (``attest.is_blank_text``: a zero-width space, a NUL or a
+    byte-order mark is as empty as ""). A name list counts only whole (a blank or
+    non-string member voids it, as ``attest.vet_attestation`` treats it), and a declared
+    bypass actor counts whatever it is called.
+    """
+    if not isinstance(att, dict):
+        return False
+
+    def _named(value) -> bool:
+        return isinstance(value, (str, bytes)) and not _attest.is_blank_text(value)
+
+    for key in _ATTESTATION_NAME_LISTS:
+        names = att.get(key)
+        if isinstance(names, list) and names and all(_named(n) for n in names):
+            return True
+    gates = att.get("approval_gates")
+    if isinstance(gates, dict) and any(
+            isinstance(gates.get(cls), str) and gates[cls].strip().lower() in ("required", "auto")
+            for cls in _attest.GATE_CLASSES):
+        return True
+    posture = att.get("untrusted_to_action")
+    if isinstance(posture, str) and posture.strip().lower() in ("gated", "ungated"):
+        return True
+    known, other = _attest.declared_bypass_actors(att)
+    if known or other:
+        return True
+    paths = att.get("paths")
+    if isinstance(paths, dict):
+        boot = paths.get("bootstrap")
+        if (isinstance(boot, list) and any(_named(p) for p in boot)) or _named(
+                paths.get("openclaw_install")):
+            return True
+    edges = att.get("delegation")
+    if isinstance(edges, list) and any(
+            isinstance(e, dict) and _named(e.get("from")) and _named(e.get("to"))
+            for e in edges):
+        return True
+    return bool(_attest.attested_agents(att))
+
+
 def _valid_live_test_entries(
     bucket, *, multiturn_freshly_issued: bool = False, proof=None, any_verdict: bool = False
 ) -> list[tuple[str, str, str]]:
@@ -1829,11 +1882,13 @@ class PipelineResult:
           same :func:`_worse_status` merge. ``not_reached`` is B164's own "N
           log/transcript sink(s) not scanned" figure (:func:`_b164_not_reached`),
           parsed from that Finding's own disclosure rather than re-derived.
-        * ``self_report`` - ``ran`` iff *attestation* is a non-empty, truthy dict (a
+        * ``self_report`` - ``ran`` iff *attestation* is a non-empty dict that answers
+          at least one question a check reads (:func:`_attestation_has_answers`; a
           genuinely-supplied, schema-valid attestation reached ``audit()`` - an
           absent or malformed one parses to ``{}``, see
-          ``attest.parse_attestation``), else ``unavailable`` (nothing to ask, by
-          construction - matches ``layers.STATUS_UNAVAILABLE``'s own meaning).
+          ``attest.parse_attestation``). A dict that answers none (C-723) is
+          ``not_submitted`` with a ``not_reached`` line saying so; an absent one is
+          ``not_submitted`` with none (nothing arrived, B-603).
           There is NO freshness concept in the attestation schema (no timestamp
           field), so ``ran`` can only ever mean "one was supplied", never "recently"
           - disclosed via ``not_reached`` rather than silently implied.
@@ -1973,7 +2028,18 @@ class PipelineResult:
             static_status = STATUS_RAN
         static_not_reached: tuple = tuple(static_reasons)
 
-        if attestation:
+        if attestation and not _attestation_has_answers(attestation):
+            # C-723: something arrived but it answers nothing (a bare schema, notes, the
+            # unfilled --ask template). Counting it as the agent's self-report would let a
+            # run be graded on zero attested content with nothing saying so.
+            self_report_status = STATUS_NOT_SUBMITTED
+            self_report_not_reached = (
+                "the attestation carried no answers \u2014 none of the fields the audit "
+                "reads held a usable value (a bare schema, notes, empty lists and "
+                "'unknown' placeholders are not answers), so no agent self-report was "
+                "obtained",
+            )
+        elif attestation:
             self_report_status = STATUS_RAN
             self_report_not_reached = (
                 "attestation freshness not verified \u2014 the schema carries no "
