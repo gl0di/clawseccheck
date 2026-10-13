@@ -30,6 +30,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from clawseccheck import canary
 from clawseccheck.catalog import ATTESTED, CRITICAL, FAIL, HIGH, MEDIUM, PASS, WARN, Finding
 from clawseccheck.checks._mcp import PluginSweep
 from clawseccheck.cli import main
@@ -487,7 +488,8 @@ class TestCapParity:
         bundle = tmp_path / "b.json"
         bundle.write_text(json.dumps({
             "liveTest": {"seed": "fixed-seed-value",
-                        "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]},
+                        "verdicts": [{"tool": "canary", "id": canary.make_canary("fixed-seed-value")["token"],
+                                     "verdict": "VULNERABLE"}]},
         }), encoding="utf-8")
         return str(bundle)
 

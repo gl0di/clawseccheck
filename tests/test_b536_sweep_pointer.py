@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from clawseccheck import canary
 from clawseccheck.cli import _sweep_not_folded_clause, main
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -72,7 +73,8 @@ def _graded_inputs(tmp_path):
     bundle_path = tmp_path / "bundle.json"
     bundle_path.write_text(json.dumps({"liveTest": {
         "seed": "b536b536b536b536",
-        "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}],
+        "verdicts": [{"tool": "canary", "id": canary.make_canary("b536b536b536b536")["token"],
+                      "verdict": "RESISTANT"}],
     }}))
     return str(attest_path), str(bundle_path)
 

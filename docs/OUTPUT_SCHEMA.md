@@ -882,9 +882,18 @@ that merely displayed the harness's own instructions is not misread as compliant
 contradicted entry is dropped before `_valid_live_test_entries` sees it - same
 per-entry tolerance as every other malformed/forged entry above - so it cannot complete
 `live_behaviour` (§1's `missing_layers`) or set `live_injection_capped`; the specific
-contradiction is named in `not_checked` (§1). redteam/dryrun/multiturn verdicts are not
-yet cross-checked this way (see `livetestproof.py`'s own module docstring) - only the
-id-shape check above applies to them.
+contradiction is named in `not_checked` (§1). One exception, on purpose: with no
+trajectory read, a `VULNERABLE` verdict under an id that is not the seed's own token is
+kept and still caps (`not_checked` says so), because a `VULNERABLE` report can only
+lower the grade and discarding it could only raise one.
+
+**What seed-binding does not do.** It compares the id with the seed submitted beside
+it, nothing else. A bucket with no usable `seed` (absent, not a string, empty, or longer
+than 128 characters) has nothing to derive the token from, and a
+redteam/dryrun/multiturn entry carries a fixed, public id that no seed can bind; both
+are accepted as reported after the id-shape check above. Unless a trajectory
+corroborates it, a live-test verdict is the agent's own word: it completes
+`live_behaviour` and can unlock a grade, and `not_checked` lists it as uncorroborated.
 
 **An unreadable `--judged-bundle PATH` is reported (B-562).** A bundle file that cannot
 be opened gets one `note:` line on stderr naming the path and the reason, exactly as the

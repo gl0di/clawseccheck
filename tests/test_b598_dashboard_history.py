@@ -35,13 +35,16 @@ from pathlib import Path
 
 import pytest
 
+from clawseccheck import canary
+
+_SEED_S_TOKEN = canary.make_canary("s")["token"]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VULN = str(REPO_ROOT / "fixtures" / "home_vuln")
 SAFE = str(REPO_ROOT / "fixtures" / "home_safe")
 
 _ATTEST = '{"schema": "clawseccheck-attest/1", "tools": ["read"], "network": "none"}'
-_SEEDED_OK = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
-              ' "verdict": "RESISTANT"}]}}')
+_SEEDED_OK = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "%s",'
+              ' "verdict": "RESISTANT"}]}}') % _SEED_S_TOKEN
 # No seed -> not reproducible: caps what this run reports, must never be persisted (F-155).
 _UNSEEDED_VULN = ('{"liveTest": {"verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
                   ' "verdict": "VULNERABLE"}]}}')

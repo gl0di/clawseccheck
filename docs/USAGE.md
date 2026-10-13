@@ -1763,10 +1763,15 @@ python3 audit.py --log audit.log            # also write log to a local file
     under `not_checked`. Only a run submitted with a `seed` is recorded into
     history/trend (see
     `docs/OUTPUT_SCHEMA.md` §12 for the exact shape). A `canary` entry is also cross-checked
-    against your own local trajectory when one is readable (F-193): a submitted id that could
-    not have come from the bucket's own `seed`, or a verdict the trajectory disproves, is
-    dropped before it can complete the live-behaviour ledger layer or set the cap - the same
-    treatment as no submission at all, not a special case. `--full`'s own printed section is
+    (F-193): a submitted id that is not the token of the `seed` submitted beside it, or -
+    when your own local trajectory is readable - a verdict the trajectory disproves, is
+    dropped before it can complete the live-behaviour ledger layer, the same treatment as no
+    submission at all. A `VULNERABLE` verdict under a wrong id is the one exception when no
+    trajectory was read: it is kept and still caps, because it can only lower the grade.
+    That check compares an id with its own seed and nothing more: a bundle with no usable
+    `seed`, and every `redteam`/`dryrun`/`multiturn` entry (their ids are fixed), is
+    accepted as reported, so without a readable trajectory a live-test verdict is the
+    agent's own word - it completes the layer and is listed as uncorroborated. `--full`'s own printed section is
     banner-titled `ADJUDICATION`; in `--json` the same data is the `secondOpinion` array.
 
     A bundle is advisory, so anything malformed degrades to inert rather than stopping the

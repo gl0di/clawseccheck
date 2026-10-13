@@ -32,19 +32,21 @@ from pathlib import Path
 import pytest
 
 from _pdftext import shown_strings
+from clawseccheck import canary
 from clawseccheck.catalog import CRITICAL, Finding
 from clawseccheck.report import _UNGRADED_CAP_TAIL, render_html
 from clawseccheck.scoring import compute
 
+_SEED_S_TOKEN = canary.make_canary("s")["token"]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VULN = str(REPO_ROOT / "fixtures" / "home_vuln")
 SAFE = str(REPO_ROOT / "fixtures" / "home_safe")
 
 _ATTEST = '{"schema": "clawseccheck-attest/1", "tools": ["read"], "network": "none"}'
-_SEEDED = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
-           ' "verdict": "RESISTANT"}]}}')
-_VULN_LIVE = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
-              ' "verdict": "VULNERABLE"}]}}')
+_SEEDED = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "%s",'
+           ' "verdict": "RESISTANT"}]}}') % _SEED_S_TOKEN
+_VULN_LIVE = ('{"liveTest": {"seed": "s", "verdicts": [{"tool": "canary", "id": "%s",'
+              ' "verdict": "VULNERABLE"}]}}') % _SEED_S_TOKEN
 
 # The em dash folds to "-" in the PDF: pdf.py ships base-14 fonts only (textnorm.asciify).
 _TAIL_PDF = _UNGRADED_CAP_TAIL.replace("—", "-")

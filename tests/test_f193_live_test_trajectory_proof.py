@@ -128,39 +128,37 @@ class TestUnseeded:
         assert proof.entries[0].status == lp.CORROBORATION_UNCHECKED
 
 
-class TestSeedBindingNeedsATrajectory:
-    """Seed-binding alone (no real trajectory backing the claim) is deliberately NOT
-    a standalone check — see livetestproof.py's own "why seed-binding needs a
-    trajectory too" note. A mismatched id with nothing else to go on stays
-    UNCHECKED, exactly like any other id this module cannot corroborate; the same
-    mismatch WITH a real trajectory present (TestSeedBindingWithATrajectory below)
-    is where it actually fires."""
+class TestSeedBindingWithoutATrajectory:
+    """C-713: seed-binding is a standalone check. `make_canary(seed)` is a pure function
+    of the seed, so an id that is not its token could not have come from this bundle with
+    or without a readable log - it is dropped (FORGED_ID, a status of its own so the
+    ledger line does not claim a trajectory said anything). The matching id is still
+    merely UNCHECKED when there is nothing to corroborate it against."""
 
-    def test_mismatched_id_with_no_trajectory_is_merely_unchecked(self):
+    def test_mismatched_id_with_no_trajectory_is_dropped_as_forged(self):
         wrong_token = "CLAWSECCHECK-CANARY-" + "F" * 10
         proof = lp.prove(_bucket("RESISTANT", token=wrong_token), SAFE)
         assert proof.trajectory_present is False
-        assert proof.entries[0].status == lp.CORROBORATION_UNCHECKED
-        assert lp.contradicted_ids(proof) == frozenset()
+        assert proof.entries[0].status == lp.CORROBORATION_FORGED_ID
+        assert lp.contradicted_ids(proof) == {("canary", wrong_token)}
 
-    def test_matching_id_with_no_trajectory_is_also_merely_unchecked(self):
+    def test_matching_id_with_no_trajectory_is_merely_unchecked(self):
         proof = lp.prove(_bucket("RESISTANT"), SAFE)
         assert proof.trajectory_present is False
         assert proof.entries[0].status == lp.CORROBORATION_UNCHECKED
         assert lp.contradicted_ids(proof) == frozenset()
 
-    def test_the_incident_shape_past_the_id_gate_stays_unchecked_with_no_trajectory(self):
+    def test_the_incident_shape_past_the_id_gate_is_dropped_with_no_trajectory(self):
         """E-087's actual bundle, past the static id-SHAPE gate this time (a real
-        prefix + real hex length, just not this seed's own value) — with no
-        trajectory to corroborate against, this module correctly says nothing,
-        deferring entirely to the static shape gate (`_is_generated_scenario_id`,
-        d67ef68) that already rejects the ORIGINAL incident's bare "canary" id."""
+        prefix + real hex length, just not this seed's own value): the seed-binding
+        leg now drops it on its own (it used to defer to the shape gate alone)."""
         incident = {"seed": "x", "verdicts": [
             {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",
              "verdict": "RESISTANT"}]}
         proof = lp.prove(incident, SAFE)
-        assert proof.entries[0].status == lp.CORROBORATION_UNCHECKED
-        assert lp.contradicted_ids(proof) == frozenset()
+        assert proof.entries[0].status == lp.CORROBORATION_FORGED_ID
+        assert lp.contradicted_ids(proof) == {
+            ("canary", "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123")}
 
 
 class TestSeedBindingWithATrajectory:
