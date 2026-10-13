@@ -231,7 +231,7 @@ def _b32_normalize_tools(raw) -> set:
 _C015_MAX_BYTES = 200_000
 # B-513: how many matching files the finding lists before it says "+N more".
 # Named rather than inline so the disclosure below cannot drift from the slice.
-_C015_MAX_EVIDENCE = 12
+_C015_MAX_EVIDENCE = 11
 
 
 _C015_MAX_SCAN_FILES = 500

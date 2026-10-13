@@ -296,7 +296,9 @@ def test_no_ledger_and_complete_ledger_agree_on_every_field_but_presence(finding
     # B-558 adds `layer_coverage` beside `ledger_present`: the second ledger-derived
     # field that exists to make a supplied ledger distinguishable from an absent one,
     # and — like the first — never an input to a score.
-    _ledger_only = ("ledger_present", "layer_coverage")
+    # C-704 adds `layer_not_reached` for the same reason: the per-layer attribution of
+    # `not_checked`, ledger-derived metadata a renderer reads and no input to a score.
+    _ledger_only = ("ledger_present", "layer_coverage", "layer_not_reached")
     a = {k: v for k, v in vars(without_ledger).items() if k not in _ledger_only}
     b = {k: v for k, v in vars(with_complete_ledger).items() if k not in _ledger_only}
     assert a == b, "a complete ledger changed a scoring field other than its own presence"
@@ -308,6 +310,8 @@ def test_no_ledger_and_complete_ledger_agree_on_every_field_but_presence(finding
     assert with_complete_ledger.ledger_present is True
     assert without_ledger.layer_coverage == ()
     assert len(with_complete_ledger.layer_coverage) == 5
+    assert without_ledger.layer_not_reached == ()
+    assert len(with_complete_ledger.layer_not_reached) == 5
 
 
 @pytest.mark.parametrize("findings", [FINDINGS_WITH_FAIL, FINDINGS_ALL_CLEAN, []])

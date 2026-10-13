@@ -119,11 +119,12 @@ def test_the_disclosed_card_size_counts_the_block(tmp_path):
 
 def test_an_ungraded_run_does_not_offer_a_grade_it_does_not_have(tmp_path):
     """`guide.suggest_actions` already adapts to `ScoreResult.graded`; this pins that the
-    dashboard passes it the REAL score object rather than a default. On an ungraded run the
-    badge item must say so instead of implying a letter exists."""
+    dashboard passes it the REAL score object rather than a default. C-704: on an ungraded
+    run the trend and badge items are withdrawn rather than reworded, so neither command
+    may appear in the block."""
     out = _run(tmp_path, "--dashboard", store="g1").stdout
     tail = out[out.index(BLOCK):]
-    assert "no grade" in tail.lower(), tail[-600:]
+    assert "--badge" not in tail and "--trend" not in tail, tail[-600:]
 
 
 def test_a_graded_run_offers_the_grade(tmp_path):

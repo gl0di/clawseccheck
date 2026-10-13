@@ -117,11 +117,12 @@ def test_ungraded_card_counts_the_layers_that_ran_not_the_ones_that_did_not():
 # ── guide.py: next-steps must not promise a grade this run has not got ───────
 
 def test_ungraded_next_steps_do_not_promise_a_grade():
+    # C-704: C-428 reworded these two actions for a gradeless run; C-704 withdrew them
+    # altogether (a trend that plots nothing and a badge reading "no grade yet" are advice
+    # that cannot work on this run), so the promise is now absent rather than reworded.
     actions = {a.id: a for a in suggest_actions(FINDINGS, _ungraded())}
-    share = actions["share_grade"]
-    assert "Share your result" in share.title
-    assert 'badge reads "no grade yet"' in share.why
-    assert "Only graded runs plot on the trend" in actions["track_trend"].why
+    assert "share_grade" not in actions
+    assert "track_trend" not in actions
 
 
 def test_ungraded_share_advice_does_not_then_promise_to_share_a_grade():
@@ -135,14 +136,11 @@ def test_ungraded_share_advice_does_not_then_promise_to_share_a_grade():
     asserts the new wording is PRESENT, which says nothing about the sentence next to it.
     That gap is the whole shape of this defect family (B-518, B-520).
     """
-    why = {a.id: a for a in suggest_actions(FINDINGS, _ungraded())}["share_grade"].why
-    assert 'badge reads "no grade yet"' in why, "the fact itself must stay"
-    assert "grade + score" not in why, (
-        "the ungraded branch still claims a grade and score get shared, two words after "
-        f"saying there is no grade: {why!r}")
-    # The privacy assurance is load-bearing — reword it, never drop it.
-    assert "never" in why and "findings" in why, (
-        "the 'your findings are not in the badge' promise must survive the rewording")
+    # C-704: the share action no longer exists on a gradeless run, so no sentence of it can
+    # promise a grade; the graded branch (below) keeps its own privacy promise.
+    actions = {a.id: a for a in suggest_actions(FINDINGS, _ungraded())}
+    assert "share_grade" not in actions
+    assert not any("grade + score" in a.why for a in actions.values())
 
 
 def test_graded_next_steps_are_unchanged():
@@ -152,11 +150,13 @@ def test_graded_next_steps_are_unchanged():
 
 
 def test_the_do_not_redraw_instruction_survives_both_branches():
-    """The host agent must attach the SVG, never regenerate it — on either branch."""
-    for score in (_graded(), _ungraded()):
-        why = {a.id: a for a in suggest_actions(FINDINGS, score)}["share_grade"].why
-        assert "do not redraw" in why
-        assert "attach grade.svg itself" in why
+    """The host agent must attach the SVG, never regenerate it. C-704: only a graded run
+    is offered the badge now, so the instruction is pinned on that branch and the
+    gradeless run is pinned to carry no badge step at all."""
+    why = {a.id: a for a in suggest_actions(FINDINGS, _graded())}["share_grade"].why
+    assert "do not redraw" in why
+    assert "attach grade.svg itself" in why
+    assert "share_grade" not in {a.id for a in suggest_actions(FINDINGS, _ungraded())}
 
 
 # ── the graded branch's COMMAND, which C-428 did not reach ───────────────────
@@ -202,7 +202,6 @@ def test_graded_share_step_command_stays_runnable_as_written():
         assert placeholder not in cmd
 
 
-def test_ungraded_share_step_is_untouched_by_the_graded_correction():
-    why = _share(_ungraded()).why
-    assert "This run has no grade" in why
-    assert "add `--badge grade.svg` to the same command" not in why
+def test_ungraded_run_has_no_share_step_for_the_graded_correction_to_touch():
+    # C-704: was "ungraded share step is untouched"; the step no longer exists there.
+    assert "share_grade" not in {a.id for a in suggest_actions(FINDINGS, _ungraded())}

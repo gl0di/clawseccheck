@@ -159,6 +159,19 @@ def describe_layer(layer: str, status: str) -> str:
     return f"{LAYER_LABEL[layer]} ({STATUS_PHRASE[status]})"
 
 
+def layers_definition_sentence() -> str:
+    """The five layers named once, in one sentence: ``A grade needs all 5 layers of
+    evidence: static config audit, installed skills and plugins, ...``.
+
+    C-704: the headline "No grade yet - 3 of 5 layers did not run: ..." counted layers it
+    never defined, so a first-time reader met "5 layers" with no way to know what they
+    were. Built from :data:`LAYER_LABEL` and :data:`LAYER_ORDER` only, so it can never
+    disagree with the per-layer wording `describe_layer` prints in the headline itself.
+    """
+    names = ", ".join(LAYER_LABEL[layer] for layer in LAYER_ORDER)
+    return f"A grade needs all {len(LAYER_ORDER)} layers of evidence: {names}."
+
+
 @dataclass(frozen=True)
 class LayerState:
     status: str
@@ -237,6 +250,14 @@ class LayerLedger:
         order is a second place for it to drift.
         """
         return tuple((layer, self.states[layer].coverage) for layer in LAYER_ORDER)
+
+    @property
+    def reasons(self) -> "tuple[tuple[str, tuple[str, ...]], ...]":
+        """C-704: every layer paired with ITS own ``not_reached`` entries, in
+        :data:`LAYER_ORDER` - the per-layer attribution :attr:`not_checked` (a flat,
+        de-duplicated union) cannot give. Ordering lives here for the same reason as
+        :attr:`coverages`."""
+        return tuple((layer, self.states[layer].not_reached) for layer in LAYER_ORDER)
 
     @property
     def complete(self) -> bool:

@@ -60,10 +60,10 @@ from .catalog import (
     WARN,
     Finding,
 )
-from .layers import LAYER_ORDER, describe_layer
+from .layers import LAYER_ORDER, describe_layer, layers_definition_sentence
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
-    _coverage_lines, _degraded_incomplete_clause, _EXPORT_FINDINGS_ONLY_NOTE,
+    _coverage_lines, _degraded_incomplete_clause, _logs_unexamined, _EXPORT_FINDINGS_ONLY_NOTE,
     _grounding_gap_line,
     _EXPORT_RISK_INCLUDED_NOTE,
     _group_issues_by_subject, _mcp_inventory_lines,
@@ -756,6 +756,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         )
         if missing_text:
             flow.wrapped(missing_text, size=9.5, color="#666666")
+        flow.wrapped(layers_definition_sentence(), size=9.5, color="#666666")
         flow.spacer(4.0)
 
     # C-423: the honesty invariant applies even on a graded run - a layer that ran
@@ -846,7 +847,8 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         flow.wrapped(_population, size=8.5, color="#666666")
 
     # -- Inventory by subject (summary table) -------------------------------------
-    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep,
+                                         logs_unexamined=_logs_unexamined(score))
     if summary_rows:
         flow.spacer(8.0)
         flow.line("Inventory by subject", size=12.5, bold=True, gap_after=6.0)

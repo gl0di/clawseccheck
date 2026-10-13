@@ -275,74 +275,63 @@ def suggest_actions(
             priority=5,
         ))
 
-    # C-428: both of these always-on actions promised a grade. On an ungraded run
-    # (fewer than five layers ran) `--trend` plots nothing for it and the badge
-    # renders "no grade yet" - so the promise was one the tool could not keep.
-    # Same fact, wording that matches what the user will actually get.
+    # C-428: both of these actions promised a grade. On an ungraded run (fewer than five
+    # layers ran) `--trend` plots nothing for it and the badge renders "no grade yet".
+    # C-428 reworded them; C-704 drops them: advice that cannot work on this run is
+    # noise on the first screen. A graded run keeps both, in the same order.
     graded = bool(getattr(score, "graded", True))
 
-    # track_trend: ALWAYS
-    actions.append(Action(
-        id="track_trend",
-        title=("Track your security score over time" if graded
-               else "Track your posture over time"),
-        # B-873: --data-dir only. --trend reads history.jsonl (and prints/records
-        # against it), which --data-dir moves; --home plays no part in which rows are
-        # shown (each row already carries its own recorded `home` as metadata, and the
-        # baseline/history store is keyed by --data-dir alone -- same B-781 fact
-        # setup_monitoring's comment above cites).
-        command=cmd("--trend" + _state_flags(
-            home, data_dir, wants_home=False, wants_data_dir=True)),
-        why=("See if you're getting safer or drifting." if graded else
-             "Only graded runs plot on the trend \u2014 this run is recorded, not plotted. "
-             "Complete all five layers to put a point on the line."),
-        priority=8,
-    ))
+    if graded:
+        # track_trend: graded runs only
+        actions.append(Action(
+            id="track_trend",
+            title="Track your security score over time",
+            # B-873: --data-dir only. --trend reads history.jsonl (and prints/records
+            # against it), which --data-dir moves; --home plays no part in which rows are
+            # shown (each row already carries its own recorded `home` as metadata, and the
+            # baseline/history store is keyed by --data-dir alone -- same B-781 fact
+            # setup_monitoring's comment above cites).
+            command=cmd("--trend" + _state_flags(
+                home, data_dir, wants_home=False, wants_data_dir=True)),
+            why="See if you're getting safer or drifting.",
+            priority=8,
+        ))
 
-    # share_grade: ALWAYS
-    actions.append(Action(
-        id="share_grade",
-        title=("Share your grade (safe \u2014 findings stay private)" if graded
-               else "Share your result (safe \u2014 findings stay private)"),
-        # B-873: needs BOTH, and more than the others above -- the `why` text right below
-        # already explains that this command STARTS A FRESH AUDIT (badge export never
-        # rides the run that produced `score`; see B-586/C-428 in that text). A fresh
-        # audit means the bare command re-targets the DEFAULT --home outright, not just a
-        # side write, which is the sharpest version of this whole bug: a badge for a
-        # setup the user never asked about. --data-dir alongside it for the same reason
-        # setup_monitoring's command carries it -- this also records a history point.
-        command=cmd("--badge grade.svg" + _state_flags(
-            home, data_dir, wants_home=True, wants_data_dir=True)),
-        why=(
-            # C-428 follow-up: the second sentence used to be carried over verbatim from
-            # the graded branch - "Only the grade + score is ever shared" two words after
-            # "this run has no grade". The privacy promise is load-bearing, so it is
-            # reworded to what the badge actually contains (measured: its only text nodes
-            # are "OpenClaw Security" and "no grade yet"), never dropped.
-            #
-            # C-428 fixed the ungraded branch's PROSE and left the graded branch's
-            # COMMAND promising what it cannot deliver. A grade needs all five layers,
-            # and per B-586 an export never honours `--full` on its own - it rides the
-            # run that genuinely completed those layers. So the bare command below opens
-            # a NEW, ungraded audit: on a run that had just earned "Grade A · 96/100" it
-            # wrote aria-label="OpenClaw Security: no grade yet" (measured). Telling a
-            # user to share the grade they just earned, with a command that cannot carry
-            # it, is worse than saying nothing.
-            # The wording deliberately does not quote the ungraded badge's own text
-            # here: tests/test_b604_dashboard_next_actions.py discriminates the two
-            # blocks by that phrase, and it is right to - a graded block that quotes
-            # it reads like an ungraded one to a user skimming.
-            ("Only the grade + score is shared, never your findings. As written this "
-             "command starts a fresh audit that will not complete all five layers, so "
-             "its badge would not carry this grade \u2014 add `--badge grade.svg` to the "
-             "same command that produced it. " if graded else
-             "This run has no grade, so the badge reads \"no grade yet\" \u2014 that phrase "
-             "is the whole of what it carries. Your findings are never in it. ")
-            + "This writes a real SVG file \u2014 attach grade.svg itself, do not redraw "
-              "or regenerate the badge image yourself."
-        ),
-        priority=9,
-    ))
+        # share_grade: graded runs only
+        actions.append(Action(
+            id="share_grade",
+            title="Share your grade (safe \u2014 findings stay private)",
+            # B-873: needs BOTH, and more than the others above -- the `why` text right
+            # below already explains that this command STARTS A FRESH AUDIT (badge export
+            # never rides the run that produced `score`; see B-586/C-428 in that text). A
+            # fresh audit means the bare command re-targets the DEFAULT --home outright,
+            # not just a side write, which is the sharpest version of this whole bug: a
+            # badge for a setup the user never asked about. --data-dir alongside it for
+            # the same reason setup_monitoring's command carries it -- this also records a
+            # history point.
+            command=cmd("--badge grade.svg" + _state_flags(
+                home, data_dir, wants_home=True, wants_data_dir=True)),
+            why=(
+                # C-428 follow-up: C-428 fixed the ungraded branch's PROSE and left the
+                # graded branch's COMMAND promising what it cannot deliver. A grade needs
+                # all five layers, and per B-586 an export never honours `--full` on its
+                # own - it rides the run that genuinely completed those layers. So the
+                # bare command below opens a NEW, ungraded audit: on a run that had just
+                # earned "Grade A · 96/100" it wrote aria-label="OpenClaw Security: no
+                # grade yet" (measured). The wording deliberately does not quote the
+                # ungraded badge's own text here: tests/test_b604_dashboard_next_actions.py
+                # discriminates the two blocks by that phrase, and it is right to - a
+                # graded block that quotes it reads like an ungraded one to a user
+                # skimming.
+                "Only the grade + score is shared, never your findings. As written this "
+                "command starts a fresh audit that will not complete all five layers, so "
+                "its badge would not carry this grade \u2014 add `--badge grade.svg` to the "
+                "same command that produced it. "
+                "This writes a real SVG file \u2014 attach grade.svg itself, do not redraw "
+                "or regenerate the badge image yourself."
+            ),
+            priority=9,
+        ))
 
     actions.sort(key=lambda a: (a.priority, a.id))
     return actions

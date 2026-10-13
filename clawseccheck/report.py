@@ -46,6 +46,7 @@ from .layers import (
     LAYER_LOGS_TRAJECTORIES,
     LAYER_ORDER,
     describe_layer,
+    layers_definition_sentence,
 )
 from . import openclawdist as _openclawdist
 from .scoring import ScoreResult, assessment_coverage
@@ -905,6 +906,19 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     return _NOTHING_URGENT_SENTENCE
 
 
+def _logs_unexamined(score) -> "tuple[str, ...]":
+    """What the log/trajectory LAYER itself reports it left unread (``()`` when nothing).
+
+    C-704: read from the ledger entry of that layer (`ScoreResult.layer_not_reached`), not
+    from the flat `not_checked` union by matching on wording - the layer's reasons come
+    from two producers with unrelated phrasing (B164's SQLite row counts, the behavioural
+    analysis's "no trajectory sidecar ..." reasons), and a phrase list silently stops
+    matching the day either is reworded. A "Logs & trajectories - clear" mark must never
+    sit over a non-empty result."""
+    return tuple(dict(getattr(score, "layer_not_reached", ()) or ()).get(
+        LAYER_LOGS_TRAJECTORIES, ()))
+
+
 def _not_fully_covered_line(score: ScoreResult) -> str:
     """``"Not fully covered: 79 of 132 log sinks not read; 3 plugin manifests
     unscanned."``, or ``""`` when `score.not_checked` is empty.
@@ -1517,8 +1531,12 @@ _COV_COLOR = {"checked": "green", "partial": "yellow", "roadmap": "grey", "not_c
 
 
 def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
-                    color: bool = False) -> list[str]:
+                    color: bool = False, compact: bool = False) -> list[str]:
     """Render the OpenClaw-surface coverage map for the terminal report.
+
+    ``compact`` (the chat card) keeps the short wording: that card trims findings text tier
+    by tier to stay inside ~4096 chars, so every extra word here costs a ``why:`` line
+    (C-704). The long renderers add the surface gloss and the not-applicable split.
 
     Grounded strictly in ``coverage.coverage()`` output - the 13 config surfaces split into
     ``checked``/``partial``, plus the static, recon-grounded ``not_checkable`` names and any
@@ -1537,10 +1555,12 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
 
     total = summary["checked"] + summary["partial"]  # the 13 config-checkable surfaces
     lines = [f"{rule} Coverage of OpenClaw surfaces {rule}"]
+    _gloss = "" if compact else (
+        "; a surface counts as checked once one of its checks gave a verdict")
     lines.append(
         f"{_g('checked')} checked {summary['checked']} {dot} "
         f"{_g('partial')} partial/unknown {summary['partial']}  "
-        f"(of {total} config surfaces)"
+        f"(of {total} config surfaces{_gloss})"
     )
     # B-504: the line above counts SURFACES, and a surface counts as "checked" once ONE
     # of its checks returns a verdict - so on the maintainer's own config it printed
@@ -1554,15 +1574,28 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
     _undetermined = [f for f in _scored if f.status == UNKNOWN]
     if _scored:
         if _undetermined:
+            # The "(N HIGH or worse)" figure is the baseline's and covers EVERY undetermined
+            # check, engine-degraded ones included; the long renderers then split the same
+            # population the way the JSON `undetermined` block does (C-704): checks the
+            # config positively confirmed absent vs checks that reached no verdict. Without
+            # the split, "29 did not" beside "checked 14, partial 0" read as a contradiction
+            # when 15 of the 29 were a surface the config does not have.
             _severe = sum(1 for f in _undetermined if f.severity in (CRITICAL, HIGH))
             _tail = f" ({_severe} HIGH or worse)" if _severe else ""
+            _absent = undetermined_summary(findings)["confirmed_absent"]
+            _split = ""
+            if _absent and not compact:
+                _split = (
+                    f": {_absent} not applicable (no such surface in your config), "
+                    f"{len(_undetermined) - _absent} with no verdict"
+                )
             lines.append(
                 f"{_g('partial')} checks {len(_scored) - len(_undetermined)} of "
                 f"{len(_scored)} scored checks reached a verdict {dot} "
                 # Plain ASCII punctuation on purpose: this block is ASCII-folded by
                 # `--ascii` and an em-dash here breaks that (caught by the terminal
                 # dashboard's own purity test, which is doing its job).
-                f"{len(_undetermined)} did not{_tail}; an undetermined check "
+                f"{len(_undetermined)} did not{_tail}{_split}; an undetermined check "
                 f"neither earns nor costs a point"
             )
         else:
@@ -2271,7 +2304,8 @@ def _group_issues_by_subject(issues):
     return out
 
 
-def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int = 0) -> str:
+def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int = 0,
+                        n_unexamined: int = 0) -> str:
     """The one phrase every subject rollup uses for "how did this subject do".
 
     Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear. Saying
@@ -2296,11 +2330,18 @@ def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int 
     ("Channels (none configured) - ? clear"). "not applicable" is neither "clear" (which
     implies a positive check ran and found nothing) nor "not assessed" (which implies a
     gap this tool could close) - a subject with a genuine coverage gap alongside any
-    not_applicable members still reads "not assessed", since that is the stronger claim."""
+    not_applicable members still reads "not assessed", since that is the stronger claim.
+
+    C-704: `n_unexamined` is the count of stores this subject read only in part (today only
+    the logs subject, from the ledger's own not-checked list). It sits ABOVE
+    "not applicable" and "clear" for the same reason the unassessed case does: a subject
+    that left part of its evidence unread has not been cleared."""
     if n_issues:
         return f"{n_issues} issue(s)"
     if n_unassessed:
         return "not assessed"
+    if n_unexamined:
+        return "not fully examined"
     if n_not_applicable:
         return "not applicable"
     return "clear"
@@ -2368,7 +2409,7 @@ def _skills_roster_text(inv: dict, ctx) -> str:
     return text
 
 
-def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
+def _subject_summary_rows(findings, ctx, *, plugin_sweep=None, logs_unexamined=()):
     """Uniform per-subject summary rows - one `(label, status, count_text)` tuple per
     catalog.SUBJECT_ORDER entry - for the HTML and PDF report headers. Derived entirely
     from `build_inventory()`, so this summary can never disagree with the JSON `inventory`
@@ -2377,13 +2418,15 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     already take)."""
     if ctx is None:
         return []
-    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep,
+                          logs_unexamined=logs_unexamined)
 
     def _issues_count(subj):
         bucket = inv[subj]
         return _subject_count_text(len(bucket.get("findings") or []),
                                    int(bucket.get("unassessed") or 0),
-                                   int(bucket.get("not_applicable_count") or 0))
+                                   int(bucket.get("not_applicable_count") or 0),
+                                   len(bucket.get("unexamined") or ()))
 
     rows = [
         (SUBJECT_LABEL["openclaw"], inv["openclaw"]["status"], _issues_count("openclaw")),
@@ -3102,7 +3145,7 @@ def _plugin_inventory(plugin_sweep) -> dict:
     }
 
 
-def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
+def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None, logs_unexamined=()) -> dict:
     """Build the additive `"inventory"` JSON payload (design §4.6, extended by F-163).
     Presentation-only: reads only what the main audit already collected on `ctx` (plus
     the optional `--full`-only `plugin_sweep`), and re-groups the SAME `findings` list
@@ -3148,6 +3191,17 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
     openclaw = _bucket("openclaw")
     host = _bucket("host")
     logs = _bucket("logs")
+    # C-704: the by-finding bucket cannot see an unread store - B164 PASSes on the rows it
+    # did read and states the rest in its own prose - so a logs subject with nothing wrong
+    # in what was read printed "clear" over "2293 SQLite transcript row(s) ... unexamined".
+    # The ledger's not-checked list is the one place that fact is structured; when it
+    # names a log store the bucket reads UNKNOWN and carries the entries (additive key,
+    # present only then). `status` only ever moves PASS -> UNKNOWN here; a FAIL/WARN stays.
+    _unexamined = tuple(logs_unexamined or ())
+    if _unexamined:
+        logs["unexamined"] = list(_unexamined)
+        if logs["status"] == PASS:
+            logs["status"] = UNKNOWN
 
     agents_roster, attested = _agents_roster(ctx)
     agents = _bucket("agents")
@@ -3191,7 +3245,8 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     fids = bucket.get("findings") or []
     marker = icon.get(status, icon.get(UNKNOWN, "?"))
     count_text = _subject_count_text(len(fids), int(bucket.get("unassessed") or 0),
-                                     int(bucket.get("not_applicable_count") or 0))
+                                     int(bucket.get("not_applicable_count") or 0),
+                                     len(bucket.get("unexamined") or ()))
     out = [f" {label} \u2014 {marker} {count_text}"]
     for fid in fids:
         f = by_id.get(fid)
@@ -3367,7 +3422,7 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
 
 def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
                               color: bool = False, plugin_sweep=None,
-                              plugins_deferred: bool = False) -> str:
+                              plugins_deferred: bool = False, logs_unexamined=()) -> str:
     """Owner-facing "Inventory by subject" block (F-131 Phase 1, extended by F-163) --
     OpenClaw core / Host machine / Agents / Skills / MCP / Plugins / Channels / Logs &
     trajectories, each with a rolled-up status; Skills, MCP and Plugins additionally get
@@ -3379,7 +3434,8 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     where the Plugins bucket honestly reports "not scanned" rather than a fake clear."""
     if ctx is None:
         return ""
-    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep,
+                          logs_unexamined=logs_unexamined)
     by_id = {f.id: f for f in findings}
     rule_char = "=" if ascii_only else "\u2550"
     lines: list[str] = ["== INVENTORY BY SUBJECT " + rule_char * 44]
@@ -3530,6 +3586,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     else:
         lines.append(_urgent_headline(findings, risk=risk))
         lines.append(_missing_layers_sentence(score))
+        lines.append(layers_definition_sentence())
     # C-423: the mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
     _covered_line = _not_fully_covered_line(score)
@@ -3964,7 +4021,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # is unavailable (mirrors the ctx-gated sections above).
     inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color,
                                          plugin_sweep=plugin_sweep,
-                                         plugins_deferred=plugins_deferred)
+                                         plugins_deferred=plugins_deferred,
+                                         logs_unexamined=_logs_unexamined(score))
     if inv_text:
         lines.append("")
         lines.extend(inv_text.split("\n"))
@@ -4009,6 +4067,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     if f.status == UNKNOWN and not getattr(f, "not_applicable", False)),
                 sum(1 for f in members
                     if f.status == UNKNOWN and getattr(f, "not_applicable", False)),
+                # C-704: same rule as the inventory block above (the logs subject only).
+                len(_logs_unexamined(score))
+                if subj_key == "logs" else 0,
             )
             if ascii_only:
                 lines.append(f"[{label_disp}] \u2014 {count_text}")
@@ -4042,7 +4103,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                              " resolve via `--ask` then `--attest`")
             if n_na:
                 na_icon = _AXIS_ICON_ASCII["N/A"] if ascii_only else _AXIS_ICON_UNI["N/A"]
-                lines.append(f"  {na_icon} {n_na} not applicable (no such surface in your config)")
+                lines.append(f"  {na_icon} {n_na} not applicable (no such surface in your config); "
+                             "counts unscored checks too")
             lines.append("")
 
     # Coverage map - "check OpenClaw the platform" framing: how many config surfaces this
@@ -4534,12 +4596,14 @@ def _card_trim_title(title: str, limit: int = _CARD_TITLE_LIMIT) -> str:
     return (cut or t[:limit]) + "\u2026"
 
 
-def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = False) -> list[str]:
+def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = False,
+                        logs_unexamined=()) -> list[str]:
     """Per-subject overview lines for the chat card - built from the SAME
     `_subject_summary_rows` the HTML and PDF summary tables use, so all three surfaces
     (and the JSON `inventory`) can never disagree. Returns [] when `ctx` is unavailable,
     the same skip-don't-guess stance `render_subject_inventory` already takes."""
-    rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep,
+                                 logs_unexamined=logs_unexamined)
     if not rows:
         return []
     icon = _ICON_ASCII if ascii_only else _ICON
@@ -4741,6 +4805,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             f"{head} {sep} {_headline}",
             f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
         ]
+        if not compact:
+            # C-704: the sentence above counts layers it never names; the compact card
+            # skips this line because it is tuned to fit ~4096 chars on a real home.
+            grade_lines.append(layers_definition_sentence())
         if _headline != _NOTHING_URGENT_SENTENCE:
             # CLAWSECCHECK headline-id-leak: this headline states the risk, never the
             # check id (design-system.md Layer 0), and this card's own Skills/MCP
@@ -4873,7 +4941,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # disagree - and every one of those N IS in the PDF, which renders all
         # FAIL/WARN regardless of confidence.
         summary_lines = _card_summary_lines(findings, ctx, plugin_sweep=plugin_sweep,
-                                            ascii_only=ascii_only)
+                                            ascii_only=ascii_only,
+                                            logs_unexamined=_logs_unexamined(score))
         ok = "[OK]" if ascii_only else "\u2705"
 
         def _assemble_card(limit: int) -> str:
@@ -4936,7 +5005,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         tail_block += ("\n" + f"{sep} {_SEC_SECOND_OPINION} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in second_opinion_lines) + "\n")
 
-    coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
+    coverage_lines = _coverage_lines(findings, ascii_only=ascii_only, compact=compact)
     if coverage_lines:
         tail_block += "\n" + "\n".join(coverage_lines) + "\n"
 
@@ -6569,7 +6638,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # F-131 Phase 1: "Inventory by subject" - additive top-level key (design §4.6).
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
     # when ctx is unavailable (build_inventory's own ctx-is-None fallback).
-    payload["inventory"] = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+    payload["inventory"] = build_inventory(findings, ctx, plugin_sweep=plugin_sweep,
+                                            logs_unexamined=_logs_unexamined(score))
     # F-149 JSON gap: present ONLY under --full (the caller passes None otherwise) -
     # matches the printed SKILL SWEEP section, which likewise only exists under
     # --full. Visibility only, same as the printed section: never folded into
@@ -6750,7 +6820,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # payload and the terminal "Inventory by subject" block use (single source of truth).
     # "" when ctx is unavailable (a bare render_html(findings, score) call) - degrades to
     # no table, never a fabricated one.
-    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep,
+                                         logs_unexamined=_logs_unexamined(score))
     if summary_rows:
         _st_color = {FAIL: "#d9534f", WARN: "#d9a406", PASS: "#1a7f37", UNKNOWN: "#8a8f98"}
         # B-755: both halves of this cell read the RAW status. The colour lookup missed and
@@ -6926,7 +6997,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         score_block_html = (
             '<div class="scorewrap">'
             f'<p class="meta">{esc(_urgent_headline(findings))}</p>'
-            f'<p class="meta">{esc(_missing_layers_sentence(score))}</p></div>'
+            f'<p class="meta">{esc(_missing_layers_sentence(score))}</p>'
+            f'<p class="meta">{esc(layers_definition_sentence())}</p></div>'
         )
 
     html_body = f'''<!doctype html>
