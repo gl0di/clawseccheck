@@ -192,7 +192,7 @@ card and `--badge` are, not because it is less redacted than `--pdf`.
 `MEDIA:<path>` directive off the agent's own reply and turns it into a real attachment, but only
 for a path its read tool is allowed to open - and on most homes that excludes anything outside the
 workspace. `<home>/media/outbound/` is the exception the runtime seeds unconditionally, so a bare
-`--pdf` writes `clawseccheck-report.pdf` there and prints `MEDIA:~/...`. Three guards on that:
+`--pdf` writes `clawseccheck-report.pdf` there and prints `MEDIA:~/...` (the full path when the run is sandboxed, where `~` would resolve on the wrong machine). Three guards on that:
 the directory must already exist and be writable, it is **never created**, and if it is missing
 the write falls back to `report.pdf` in your local store - `~/.clawseccheck/report.pdf`, or
 `<DIR>/report.pdf` under `--data-dir DIR` - and says so. This is the only case where an
@@ -802,6 +802,8 @@ clawseccheck --verify-events                       # checks the default ~/.claws
 clawseccheck --verify-events --events PATH         # or a specific journal
 ```
 
+A `broken at entry N` message counts entries from 0: entry 0 is the first line of the file.
+
 Both chain verifiers (`--verify-history` too) have **three** outcomes, not two:
 
 | Outcome | Means | Exit |
@@ -1074,7 +1076,7 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   `--data-dir`) does not itself scope a baseline to one OpenClaw home - nothing stops two
   different homes from sharing one path. Pointing `--monitor` at the same `--state`/`--data-dir`
   with a *different* `--home` than the one the stored baseline describes is refused outright
-  (`MONITORING NOT ESTABLISHED`, exit 1): nothing is compared and nothing is written, so the real
+  (`MONITORING NOT ESTABLISHED`, exit 1): nothing is compared and nothing is written (the score history included), so the real
   baseline is never silently rebased to the other home's values and the journal never fills with
   alerts about a machine that did not change. The identity check follows the resolved,
   symlink-and-`~`-expanded path, so the same home reached by two different spellings is never
@@ -1136,8 +1138,9 @@ clawseccheck --cron-recipe
 
 That prints **two** native OpenClaw cron jobs for your agent to create with its own `cron`
 tool, and you want both. If your OpenClaw home or the store is not the default, pass
-`--home` / `--data-dir` too: both are written, shell-quoted, into all three emitted
-commands, so the schedule watches the setup you named (`--home` appears only when it is not
+`--home` / `--data-dir` too: both are written, shell-quoted, into every command the recipe
+prints (the poll, the two `Run:` lines and the `--brief` the backstop's message names), so
+the schedule watches the setup you named (`--home` appears only when it is not
 `~/.openclaw`).
 
 1. **Tell me quickly.** Polls every five minutes using a `trigger.script` - OpenClaw's own

@@ -1797,6 +1797,8 @@ document describes; reading both from one invocation is expected.
 | `grade` | `str \| null` | This run's letter grade, or `null` when `graded` is `false`. |
 | `graded` | `bool` | Whether `score`/`grade` are a real verdict - `--monitor` runs the same five-layer rule as the default `--json` path (§1's `graded` field) and is `false` on most runs (`--monitor` never runs the installed-skill/plugin sweep or the behavioral replay, even under `--full`). |
 | `baseline_reference` | `str \| null` | F-173's off-machine anchor for the newly-saved baseline (a short hex fingerprint), or `null` when nothing was written this run (`persisted` is `false`) or there was nothing to read back. |
+| `probe` | `bool` | `true` when the run was a `--monitor --probe`: nothing was written, so `persisted` is `false` by design rather than by failure. |
+| `probe_notice` | `str \| null` | The sentence the text report prints after its body on a probe ("This was a probe: nothing was recorded ..."), carried here so stdout stays exactly one JSON document. `null` on an ordinary run. |
 
 ### `Alert` object
 
@@ -1829,12 +1831,17 @@ document describes; reading both from one invocation is expected.
   "score": null,
   "grade": null,
   "graded": false,
-  "baseline_reference": "4f660e3f33cf4d13ec634e1859c07e885698a50eac372820e92fbf39cb7ae896"
+  "baseline_reference": "4f660e3f33cf4d13ec634e1859c07e885698a50eac372820e92fbf39cb7ae896",
+  "probe": false,
+  "probe_notice": null
 }
 ```
 
 ### Notes
 
+- Stdout is exactly this one document on every `--monitor --json` run that reaches the
+  comparison, including a probe. A run refused before the comparison (a baseline recorded for
+  a different `--home`) prints nothing on stdout; its reason is on stderr and the exit status is 1.
 - Not part of the `--json` envelope (§1) - a separate, standalone artifact with no
   `version`/schema-number field of its own yet; treat additive new top-level keys as
   possible in a minor release, the same discipline §17 states for §1.
@@ -1860,7 +1867,7 @@ chain and `--trend` says so (see `SECURITY_MODEL.md` for the chain semantics).
 | `score` | `int` | Present only on a **graded** row. Omitted entirely otherwise - never `null`, never `0`. |
 | `grade` | `str` | Present only on a graded row, alongside `score`. |
 | `ts` | `str` | The run's timestamp. |
-| `home` | `str` | The audited home, sanitized - a real path never reaches this file. |
+| `home` | `str` | The audited home as it was named for the run, with control characters and secret-shaped substrings removed. The default home is stored in its `~` form; a `--home` given as an absolute path is stored as given, because this value is what keeps the histories of two homes apart (`--trend` and the monitor compare it), and the file never leaves your own store. `--trend` prints it the same way. |
 | `source` | `str` | What produced the row: `audit`, `test`/`dev` (via `CLAWSECCHECK_RUN_SOURCE`), `view` for a row written by `--trend` itself, or `legacy` when a pre-existing row recorded no source. |
 | `_schema` | `int` | Row schema version. Currently `1`. |
 | `graded` | `bool` | Present **only** when `false`, as an explicit ungraded marker. A graded row carries `score`/`grade` and omits this key rather than setting it `true`. |

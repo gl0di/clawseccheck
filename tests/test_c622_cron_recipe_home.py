@@ -88,12 +88,13 @@ def test_a_non_default_home_reaches_every_monitor_command():
 
 def test_the_cli_passes_home_through(capsys):
     """Must fail before the cli.py edit (guide.py alone is not enough): `--home` given on the
-    command line has to reach all three commands, not just the function's default."""
+    command line has to reach every command the recipe prints: the poll, the two `Run:` lines and
+    the `--brief` the backstop's message names (four since the --brief one gained its flags)."""
     rc = main(["--cron-recipe", "--home", "/srv/oc-alt", "--data-dir", "/var/lib/csc"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert out.count("--home") == 3, out
-    assert out.count("--home /srv/oc-alt") == 3, out
+    assert out.count("--home") == 4, out
+    assert out.count("--home /srv/oc-alt") == 4, out
 
 
 # ------------------------------------------------------------------ nothing else moves

@@ -143,7 +143,9 @@ def test_an_empty_target_is_refused_before_any_mode_runs(flag, attr, tmp_path, c
                "--no-history"])
     err = capsys.readouterr().err
     assert rc == 2, f"{flag} '' should be refused, got rc={rc}"
-    assert f"{flag} needs a target" in err, err
+    # C-726: --verify-baseline's argument is a reference value, not a vet target.
+    wanted = "needs a baseline reference" if flag == "--verify-baseline" else "needs a target"
+    assert f"{flag} {wanted}" in err, err
 
 
 @pytest.mark.parametrize("attr", _NARGS_OPTIONAL)

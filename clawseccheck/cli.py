@@ -3038,6 +3038,10 @@ def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
     not proceed as if this was verified. Giving "could not check" its own exit code would
     just move the collapse into a place no shell idiom looks.
     """
+    if msg.startswith("broken at entry "):
+        # C-726: the verifiers count entries from 0 (tests pin their messages), so say so
+        # here rather than let "entry 0" read as a miscount of the first line.
+        msg = f"{msg} (entries are counted from 0: entry 0 is the first line)"
     if ok is True:
         return f"{label} chain OK ({path}): {msg}", 0
     if ok is False:
@@ -3981,11 +3985,13 @@ def _main(argv=None) -> int:
                         "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if any unsuppressed FAIL finding exists. DIFFERENT "
-                        "contract with --monitor: exit 3 if any alert at HIGH severity "
-                        "or above was persisted this run (--fail-on moves that floor), "
-                        "exit 1 only if the monitor's local store could not be written, "
-                        "exit 0 otherwise -- 0 by default, opt-in, off unless this flag "
-                        "or --fail-on is also given. Exit 2 is argparse's own reserved "
+                        "contract with --monitor: exit 1 whenever the monitor's local "
+                        "store could not be written (with or without this flag - a bare "
+                        "--monitor exits 0 only when its writes landed), exit 3 if any "
+                        "alert at HIGH severity or above was persisted this run "
+                        "(--fail-on moves that floor), exit 0 otherwise -- the exit-3 "
+                        "arm is opt-in, off unless this flag or --fail-on is also "
+                        "given. Exit 2 is argparse's own reserved "
                         "code for a usage error on either path, never emitted by this "
                         "flag itself.")
     # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
@@ -4275,6 +4281,11 @@ def _main(argv=None) -> int:
     # disagreed - `--badge ""` printed a full default report at rc=0 while the coherence
     # note announced it was running --badge.
     _empty_flag = _empty_mode_target(args)
+    if _empty_flag == "--verify-baseline":
+        # C-726: its argument is the reference value a --monitor run printed, not a vet target.
+        print("--verify-baseline needs a baseline reference \u2014 got an empty value. "
+              "Pass the reference value a previous --monitor run printed.", file=sys.stderr)
+        return 2
     if _empty_flag:
         print(f"{_empty_flag} needs a target \u2014 got an empty value. "
               "Pass a path, slug, or URL.", file=sys.stderr)
@@ -5765,10 +5776,15 @@ def _main(argv=None) -> int:
                 return 1
             _emit(f"(could not write PDF report: {exc} \u2014 showing the full report inline)")
         if not args.dashboard:
+            # C-726: docs/USAGE.md promises a `MEDIA:~/...` line for a bare --pdf; the
+            # message used to carry the absolute path and no MEDIA line at all.
+            _pdf_shown = display_path_for_delivery(
+                args.pdf, sandboxed=getattr(ctx, "sandboxed", False))
             _emit(
-                f"(PDF report written to {args.pdf} \u2014 attach this file itself into the "
+                f"(PDF report written to {_pdf_shown} \u2014 attach this file itself into the "
                 "chat, do not re-render its contents or paste the path; a mobile client "
-                "opens a PDF inline where an HTML attachment would just be a download)"
+                "opens a PDF inline where an HTML attachment would just be a download)\n"
+                f"MEDIA:{_pdf_shown}"
             )
             _record_history_point(score, args, _live_signal, findings)          # B-601
             return _findings_exit_gate(args, findings, ctx, score=score)
@@ -6323,15 +6339,11 @@ def _main(argv=None) -> int:
                 "and silently rebase the real baseline to this run's values. Point "
                 "--data-dir at a location dedicated to this home, or re-run with the "
                 "--home this baseline was recorded for.", file=sys.stderr)
-            # The audit already ran and genuinely measured THIS home's score -- recorded
-            # for the same reason the failure paths below are (cli.py's own note there:
-            # "this run's score was really measured, and the trend should not gain a
-            # hole"). history.jsonl is additive and each row already names its own
-            # `home` (B-691), so a foreign row here is inert, never a corrupted baseline
-            # the way state.json would be.
-            if not _skip_live_test_persist and not _probe:
-                history_record(score, args.history, home=args.home,
-                               findings=findings, version=__version__)
+            # C-726: nothing is written on this path, the score history included -- the
+            # documented contract is "nothing is compared and nothing is written". This
+            # branch used to append the refused run's own score (the audit had really
+            # measured it), which put a row for a home the user did not mean to track into
+            # a store that belongs to another one.
             return 1
         # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
         # the reduced verdict. Two deliberate choices:
@@ -6751,6 +6763,14 @@ def _main(argv=None) -> int:
                 "grade": score.grade if getattr(score, "graded", True) else None,
                 "graded": bool(getattr(score, "graded", True)),
                 "baseline_reference": _reference or None,
+                # C-726: the probe sentence the text report prints after its body.
+                "probe": _probe,
+                "probe_notice": (
+                    "This was a probe: nothing was recorded, so your baseline still points "
+                    "at the last ordinary check."
+                    + (" The alerts in this document are still outstanding and the next ordinary run "
+                       "will report them again." if alerts else "")
+                ) if _probe else None,
             }
             _emit(json.dumps(_monitor_payload, ensure_ascii=True, indent=2))
         else:
@@ -6789,7 +6809,9 @@ def _main(argv=None) -> int:
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
         # With nothing to report it must not promise a repeat alert that will never come.
-        if _probe:
+        # C-726: under --json the sentence is the document's `probe_notice` field instead -
+        # stdout must stay exactly one JSON document.
+        if _probe and not args.json:
             print("\nThis was a probe: nothing was recorded, so your baseline still points "
                   "at the last ordinary check.")
             if alerts:

@@ -2774,7 +2774,8 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
 # ("via B-121", "split out of B-121 as B-122") stays: a leftover id reads better than a
 # sentence with a hole in it.
 _TRACKER_ID_CORE = (r"(?:CLAWSECCHECK-)?(?:[BCFI]-\d{2,4}|E-0\d\d)"
-                    r"(?:/W\d+(?:\.\d+)?)?(?:[ \t]+(?:item|bug|round|part)[ \t]+\d+)?(?!\w)")
+                    r"(?:/W\d+(?:\.\d+)?)?"
+                    r"(?:[ \t]+(?:(?:shortlist[ \t]+)?item|bug|round|part|Phase)[ \t]+\d+)?(?!\w)")
 _TRACKER_ID_BARE = r"(?:CLAWSECCHECK-)?(?:[BCFI]-\d{2,4}|E-0\d\d)(?!\w)"
 _TRACKER_ID_ANY_RE = re.compile(_TRACKER_ID_BARE)    # only a cheap "is there any?" gate
 # (a) a parenthesis or bracket holding nothing but ids and their separators - "(C-211)",
@@ -2784,10 +2785,10 @@ _TRACKER_ONLY_GROUP_RE = re.compile(
     + r"(?:[ \t]*(?:[,;/+&]|and)[ \t]*" + _TRACKER_ID_CORE + r")*[ \t]*[)\]]")
 # (b) an id that opens a parenthesis, with the separator after it: "(C-411; the rule ...".
 _TRACKER_LEADING_RE = re.compile(
-    r"(?<=\()[ \t]*(?<![\w/.-])" + _TRACKER_ID_CORE + r"[ \t]*[;,][ \t]+")
+    r"(?<=\()[ \t]*(?<![\w/.-])" + _TRACKER_ID_CORE + r"(?:[ \t]+re-pass)?[ \t]*[;,:][ \t]+")
 # (e) an id glued to a slash list, with that slash: "B-123/SkillTrustBench", "X/B-123".
 _TRACKER_SLASH_AFTER_RE = re.compile(
-    r"(?<![\w/.-])" + _TRACKER_ID_BARE + r"/(?!W\d)(?=[A-Za-z])")
+    r"(?<![\w/.-])" + _TRACKER_ID_BARE + r"/(?!W\d)(?=[A-Za-z`])")
 _TRACKER_SLASH_BEFORE_RE = re.compile(
     r"(?<=[A-Za-z0-9)])/" + _TRACKER_ID_BARE + r"(?![/]|\.\w)")
 # (c) a label at the start of a sentence or line, with its colon: "B-243: the rule ...".
@@ -2801,6 +2802,94 @@ _TRACKER_MODIFIER_RE = re.compile(
     r"should|may|must|not|so|also|for|to|of|in|on|at|with|by|from|but|that|which|where|when|"
     r"if|then|than|it|be|been|via|per|into|over|under|about|after|before|because|since|while|"
     r"whose|who)\b)")
+
+
+# Every rule below only DELETES. What is left is either the same sentence without the
+# reference, or (the last resort) the same text without the clause that could not be read
+# without one - nothing is ever added or reworded.
+# (f) "Split out of B-121 as B-122 - " / "..., " - the whole history clause and its dash.
+_TRACKER_SPLIT_RE = re.compile(
+    r"Split out of[ \t]+" + _TRACKER_ID_CORE + r"[ \t]+as[ \t]+" + _TRACKER_ID_CORE
+    + r"(?:[ \t]*[-,][ \t]+|(?=[.;)]))")
+# (g) "wrapping, via B-121, so a ..." keeps one comma; (h) "done via B-121." loses the phrase.
+_TRACKER_COMMA_CONNECTOR_RE = re.compile(
+    r",[ \t]+(?:via|since)[ \t]+" + _TRACKER_ID_CORE + r",")
+_TRACKER_CONNECTOR_RE = re.compile(
+    r"[ \t]+(?:via|since|per|of|from)[ \t]+" + _TRACKER_ID_CORE)
+# (i) a dash- or comma-separated list item: "payment - C-339, ESET ...", "(B338, E-065)".
+_TRACKER_LIST_ITEM_RE = re.compile(
+    r"(?:[ \t]-[ \t]|[,;][ \t]+)(?<![\w/.-])" + _TRACKER_ID_CORE
+    + r"(?=[,;)\]]|\.(?:\s|$)|$)")
+# (j) a label after a dash: "never FAIL - B-315: an unscored ..." keeps the dash.
+_TRACKER_DASH_LABEL_RE = re.compile(r"(?<=- )" + _TRACKER_ID_CORE + r":[ \t]+")
+# (k) "round-2 C-135 review", "its own independent C-135 pass" - the id (and its round) goes,
+# the plain noun stays.
+_TRACKER_BEFORE_NOUN_RE = re.compile(
+    r"(?:round[- ]\d+[ \t]+)?(?<![\w/.-])" + _TRACKER_ID_CORE
+    + r"[ \t]+(?=(?:pass|review|ruling|decision)\b)")
+
+
+def _drop_clause_around(text: str, start: int, end: int) -> str:
+    """*text* without the clause holding ``text[start:end]`` (a tracker id nothing else removed).
+
+    A clause runs between ``;``, a sentence end, a line break or an unmatched bracket, so a
+    balanced parenthesis inside it goes with it. The ``;`` that opened the clause goes too.
+    """
+    lo, depth, left = 0, 0, "start"
+    for i in range(start - 1, -1, -1):
+        c = text[i]
+        if c in ")]":
+            depth += 1
+        elif c in "([":
+            if depth == 0:
+                lo, left = i + 1, "open"
+                break
+            depth -= 1
+        elif depth == 0 and c == ";":
+            lo, left = i, "semi"
+            break
+        elif depth == 0 and (c == "\n" or (c in ".!?" and text[i + 1:i + 2].isspace())):
+            lo, left = i + 1, "sentence"
+            while lo < start and text[lo] in " \t":
+                lo += 1                                   # the gap after the period stays
+            break
+    hi, depth, right = len(text), 0, "end"
+    for i in range(end, len(text)):
+        c = text[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            if depth == 0:
+                hi, right = i, "close"
+                break
+            depth -= 1
+        elif depth == 0 and c == ";":
+            hi, right = i, "semi"
+            break
+        elif depth == 0 and c == "\n":
+            hi, right = i, "line"
+            break
+        elif depth == 0 and text[i:i + 3] == " - ":
+            hi, right = i, "dash"                         # "...; C-135 found X - the rest"
+            break
+        elif depth == 0 and c in ".!?" and text[i + 1:i + 2].isspace() or (
+                depth == 0 and c in ".!?" and i + 1 == len(text)):
+            hi, right = (i, "stop") if left == "semi" else (i + 1, "stop")
+            break
+    if left in ("open", "start", "sentence") and right == "semi":
+        hi += 1                                           # the clause and its own ";"
+    elif left != "semi" and right == "dash":
+        hi += 3                                           # no dash left hanging at the start
+    while left in ("open", "start", "sentence") and hi < len(text) and text[hi] in " \t":
+        hi += 1                                           # no gap left where the clause began
+    if left == "open" and right == "close":               # the whole parenthesis was the clause
+        lo, hi = lo - 1, hi + 1
+        if lo > 0 and text[lo - 1] in " \t":
+            lo -= 1
+    if left in ("sentence", "start") and lo > 0 and text[lo - 1] in " \t" \
+            and (hi >= len(text) or text[hi] in "\n)]"):
+        lo -= 1                                           # no space left dangling before it
+    return text[:lo] + text[hi:]
 
 
 def _strip_internal_ids(text: str) -> str:
@@ -2819,7 +2908,21 @@ def _strip_internal_ids(text: str) -> str:
             break
         out = step
     out = _TRACKER_LABEL_RE.sub("", out)
-    return _TRACKER_MODIFIER_RE.sub(r"\1 ", out)
+    out = _TRACKER_MODIFIER_RE.sub(r"\1 ", out)
+    for rule, repl in ((_TRACKER_SPLIT_RE, ""), (_TRACKER_COMMA_CONNECTOR_RE, ","),
+                       (_TRACKER_CONNECTOR_RE, ""), (_TRACKER_LIST_ITEM_RE, ""),
+                       (_TRACKER_DASH_LABEL_RE, ""), (_TRACKER_BEFORE_NOUN_RE, "")):
+        out = rule.sub(repl, out)
+    out = _TRACKER_LEADING_RE.sub("", out)               # "(C-135 re-pass, B-238: ..." in turn
+    out = _TRACKER_ONLY_GROUP_RE.sub("", out)
+    # Last resort: an id that is still here is part of a clause that cannot be read without
+    # it ("C-135 found and fixed ...", "B-708's ..."). The clause goes, never a fragment of it.
+    for _ in range(40):
+        m = _TRACKER_ID_ANY_RE.search(out)
+        if m is None:
+            break
+        out = _drop_clause_around(out, m.start(), m.end())
+    return out
 
 
 def render_explain(f, *, coverage_note: "str | None" = None,
