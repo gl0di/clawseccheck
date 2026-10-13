@@ -237,6 +237,7 @@ _NOT_DRIVEN = {
     "livetestproof.prove": "reads/produces EntryProof.status (corroboration outcome), not a Finding status",
     "livetestproof.contradicted_ids": "reads EntryProof.status (corroboration outcome), not a Finding status",
     "livetestproof.not_reached_lines": "reads EntryProof.status (corroboration outcome), not a Finding status",
+    "livetestproof._kept_forged_pairs": "reads EntryProof.status (corroboration outcome), not a Finding status",
     # F-187/B-811: the SAME C-520/F-193 shape once more — a different vocabulary wearing
     # the same attribute name. All four read/compare
     # trajectorystore.TrajectoryCorroboration.status (live/locator_stale/no_residue, an

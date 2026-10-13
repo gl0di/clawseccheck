@@ -182,7 +182,8 @@ def test_only_a_structurally_empty_own_audit_unknown_is_told_it_may_abstain(tmp_
     assert _VERDICT_SCHEMA_EMPTY_UNKNOWN["verdict"] == _VERDICT_SCHEMA["verdict"]
 
     def offered(f):
-        return _abstain_offered(_item_from_finding(f), f)
+        assert _abstain_offered(f) == _abstain_offered(f, _item_from_finding(f))
+        return _abstain_offered(f)
 
     assert offered(_finding(UNKNOWN)) is True                       # the one admitted shape
     assert offered(_finding(WARN)) is False                         # the engine saw a signal
@@ -231,7 +232,7 @@ def test_the_recovered_signals_about_installed_code_are_never_offered_abstain():
     src = inspect.getsource(_builder)
     assert src.count("_VERDICT_SCHEMA_EMPTY_UNKNOWN") == 2, "one definition, one assignment"
     assign = src.index('item["verdict_schema"] = _VERDICT_SCHEMA_EMPTY_UNKNOWN')
-    assert "if _abstain_offered(item, f):" in src[assign - 120:assign]
+    assert "if _abstain_offered(f, item):" in src[assign - 120:assign]
     for fn in (_builder._b62_items, _builder._recover_dropped_taint,
                _builder._env_auth_kwarg_items, _builder._keyword_gated_trigger_items,
                _builder._config_blind_collapsed_item):

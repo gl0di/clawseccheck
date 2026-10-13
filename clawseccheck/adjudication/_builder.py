@@ -902,12 +902,15 @@ def _item_from_finding(f) -> dict:
 # rather than ship an unanswerable question (2 real items beats 43 empty ones).
 # Scoped to findings that HAD evidence: a bare UNKNOWN with NO evidence at all keeps
 # its long-standing generic-question posture unchanged.
-def _abstain_offered(item: dict, f) -> bool:
+def _abstain_offered(f, item: "dict | None" = None) -> bool:
     """True for the one kind of item that is told it may be answered ABSTAIN (see the note
     above ``_ABSTAIN_VERDICT``): built from an audit finding the engine left UNKNOWN, that
     recorded no evidence at all, names no subject and carries no destination host. Every
     condition is read off the finding or off fields this module authored - never off
-    packet prose, and never off the disposition word alone."""
+    packet prose, and never off the disposition word alone. ``item`` is the packet item
+    already built from ``f``; it is rebuilt when not given."""
+    if item is None:
+        item = _item_from_finding(f)
     return (
         f.status == UNKNOWN
         and not (f.evidence or [])
@@ -1471,7 +1474,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
         if config_blind and _config_blind_only_cause(f):
             config_blind_candidates.append((f.id, item))
             continue
-        if _abstain_offered(item, f):
+        if _abstain_offered(f, item):
             item["verdict_schema"] = _VERDICT_SCHEMA_EMPTY_UNKNOWN
         items.append(item)
 
