@@ -6844,6 +6844,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         icon_char = "\u2715" if f.status in FAIL_WEIGHT_STATUSES else "\u26a0"
         card_cls = "finding is-fail" if f.status in FAIL_WEIGHT_STATUSES else "finding"
         f_title = esc(_sanitize(f.title))
+        # C-717: the catalog id (the string `--explain` takes and `.clawseccheckignore`
+        # names) beside the title. This page is the full report the text report sends the
+        # reader to, and it was the one full-report surface that named no finding.
+        f_id = esc(_sanitize(str(f.id)))
         # B-825: `detail_plain` (unredacted) stays the `already_shown` comparison key below
         # -- evidence de-dup has to match against the SAME text `_evidence_bullets` sees, or
         # an entry that is only a duplicate after redaction collapses two different-looking
@@ -6900,6 +6904,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                     <div class="finding-head">
                         <span class="finding-icon" aria-hidden="true">{esc(icon_char)}</span>
                         <span class="finding-title">{f_title}</span>
+                        <span class="finding-id">{f_id}</span>
                         {conf_html}
                         <span class="sev-pill">{esc(f.severity)}</span>
                     </div>
@@ -7132,6 +7137,11 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             f'<p class="meta">{esc(layers_definition_sentence())}</p></div>'
         )
 
+    # C-717: the build that wrote this page, once, in the footer (the PDF prints it as
+    # `v<version>` in its header band). Lazy import: `__version__` is assigned in the
+    # package `__init__` after the renderers are imported.
+    from . import __version__ as _tool_version  # noqa: PLC0415
+
     html_body = f'''<!doctype html>
 <html lang="en">
 <head>
@@ -7328,6 +7338,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .finding-head {{ display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap; }}
         .finding-icon {{ color: var(--sev); font-weight: 700; }}
         .finding-title {{ font-weight: 700; color: var(--ink); flex: 1 1 12rem; }}
+        .finding-id {{
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.78rem; color: var(--muted); user-select: all;
+        }}
         .finding.is-fail {{
             border-left-width: 7px; border-left-color: var(--sev);
             background: color-mix(in srgb, var(--sev) 12%, var(--card));
@@ -7432,7 +7446,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         {findings_html}
 
         <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine
-            <br>{esc(_EXPORT_FINDINGS_ONLY_NOTE)}</footer>
+            <br>{esc(_EXPORT_FINDINGS_ONLY_NOTE)}
+            <br>ClawSecCheck v{esc(_tool_version)}</footer>
     </main>
 </body>
 </html>'''
