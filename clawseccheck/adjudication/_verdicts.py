@@ -230,6 +230,7 @@ def _parse_verdicts_with_abstentions(raw: str) -> "tuple[dict, frozenset]":
 
     out: dict = {}
     abstain_keys: set = set()
+    rejected_keys: set = set()
     abstain_entries = 0
     for entry in entries:
         if not isinstance(entry, dict):
@@ -245,6 +246,8 @@ def _parse_verdicts_with_abstentions(raw: str) -> "tuple[dict, frozenset]":
         # a verdict that names no known value; C-664 found it by padding the field.
         if not (isinstance(fid, str) and isinstance(target, str)
                 and isinstance(verdict, str) and verdict in _VALID_VERDICTS):
+            if isinstance(fid, str) and isinstance(target, str):
+                rejected_keys.add((fid, target))
             continue
         key = (fid, target)
         existing = out.get(key)
@@ -259,19 +262,26 @@ def _parse_verdicts_with_abstentions(raw: str) -> "tuple[dict, frozenset]":
         out[key] = {"verdict": verdict, "votes": _unelided(votes) if isinstance(votes, dict) else None}
     # An explicitly empty "verdicts": [] IS "no verdicts submitted" -- say nothing.
     # Entries that were submitted and all rejected is the case worth shouting about.
-    abstained = frozenset(abstain_keys - set(out))
+    # An item that ALSO drew an unusable answer (a mis-cased DANGEROUS, say) is not shown as
+    # "the judge abstained": something else was said about it and lost, so it reads as not
+    # reviewed, the same as before ABSTAIN existed.
+    abstained = frozenset(abstain_keys - set(out) - rejected_keys)
     # An ABSTAIN entry is "no entry", so it is left out of BOTH sides of the count: one
     # ABSTAIN beside three mis-cased verdicts must still say that 0 of those 3 were usable.
     answered = len(entries) - abstain_entries
     if answered and not out:
         _note_nothing_applied(raw, f"0 of {answered} submitted entries were usable")
-    if abstained:
+    unanswered = abstain_keys - set(out)
+    if unanswered:
         # Counted per (finding_id, target) pair as SUBMITTED: this parser never sees the
         # packet, so it cannot say how many of them are real packet items (the --full
-        # adjudication phase can, and counts only those).
-        _note(f"{len(abstained)} {_ABSTAIN_VERDICT} answer(s) submitted - each is treated "
-              "exactly like no verdict submitted for that item; nothing was reviewed, raised "
-              "or lowered.")
+        # adjudication phase can, and counts only those). An ABSTAIN beside a usable
+        # verdict for the same item is moot and not counted. Worded per item: other
+        # entries in the same file may well have been applied.
+        _note(f"{len(unanswered)} {_ABSTAIN_VERDICT} answer(s) submitted for an item with no "
+              "verdict of its own - each is treated exactly like no entry for that item (it "
+              "is not reviewed, raised or lowered by it); every other entry in the file is "
+              "read as usual.")
     return out, abstained
 
 
@@ -287,9 +297,10 @@ def _vote_tally(verdict: str, votes) -> "tuple[int, int]":
     if not isinstance(votes, dict):
         return 0, 0
     try:
-        # C-712: an ABSTAIN is not a vote, so a panel of one DANGEROUS and two ABSTAIN is
-        # 1/1, not a 1/3 split against the verdict.
-        total = sum(int(v) for k, v in votes.items() if k != _ABSTAIN_VERDICT)
+        # Every key counts toward the total, an ABSTAIN one included: one DANGEROUS and
+        # two ABSTAIN is disclosed as 1/3, so the reader sees how few lenses stood behind
+        # the verdict instead of a split-free line that reads as unanimous.
+        total = sum(int(v) for v in votes.values())
         hit = int(votes.get(verdict, 0))
     except (TypeError, ValueError):
         return 0, 0

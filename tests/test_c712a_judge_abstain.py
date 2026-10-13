@@ -152,16 +152,53 @@ def test_abstain_value_shapes_that_are_not_the_string_stay_unusable():
 
 # ----------------------------------------------------- the packet advertises the option
 
-def test_every_packet_item_tells_the_judge_it_may_abstain():
-    from clawseccheck.adjudication import _VERDICT_SCHEMA, _VET_ATTEST_IDS  # noqa: F401
-    from clawseccheck.adjudication import _vet_attest_packet_items
+def test_only_an_own_audit_unknown_item_is_told_it_may_abstain(tmp_path):
+    """An invitation not to answer is a way to steer a judge off a finding, so it is made
+    only where the engine itself could not determine the item: an own-audit UNKNOWN. A WARN
+    item (the engine saw a signal) and every --vet item (untrusted third-party content, where
+    the panel's one power is to escalate) keep the three-verdict contract unchanged."""
+    from clawseccheck.adjudication import (
+        _VERDICT_SCHEMA, _VERDICT_SCHEMA_UNKNOWN_ITEM, _offer_abstain,
+        _vet_attest_packet_items, build_vet_judge_packet,
+    )
+    from clawseccheck.checks import vet_skill
 
-    assert "ABSTAIN" in _VERDICT_SCHEMA["abstain"]
+    assert "abstain" not in _VERDICT_SCHEMA
+    assert "ABSTAIN" in _VERDICT_SCHEMA_UNKNOWN_ITEM["abstain"]
     # The three severity values keep their severity-ascending order and stay the only
     # members of the list the structural tests derive the parser vocabulary from.
     assert _VERDICT_SCHEMA["verdict"] == ["SAFE", "SUSPICIOUS", "DANGEROUS"]
-    for item in _vet_attest_packet_items("skillx"):
+    assert _VERDICT_SCHEMA_UNKNOWN_ITEM["verdict"] == _VERDICT_SCHEMA["verdict"]
+
+    unknown = {"engine_disposition": "UNKNOWN", "verdict_schema": _VERDICT_SCHEMA}
+    warn = {"engine_disposition": "WARN", "verdict_schema": _VERDICT_SCHEMA}
+    offered = _offer_abstain([unknown, warn])
+    assert "abstain" in offered[0]["verdict_schema"]
+    assert offered[1] is warn and "abstain" not in offered[1]["verdict_schema"]
+
+    # The real audit packet: every item with the hint is an UNKNOWN, and the fixture has
+    # at least one of each so neither side of the split is vacuous.
+    packet = _packet(tmp_path)
+    by_disposition = {d: [i for i in packet if i["engine_disposition"] == d]
+                      for d in ("UNKNOWN", "WARN")}
+    assert by_disposition["UNKNOWN"], "the fixture no longer yields an UNKNOWN packet item"
+    for item in by_disposition["UNKNOWN"]:
         assert "ABSTAIN" in item["verdict_schema"]["abstain"]
+    for item in by_disposition["WARN"]:
+        assert "abstain" not in item["verdict_schema"], item["finding_id"]
+
+    # No --vet item is ever told it may abstain: the fixed prose-attestation questions and
+    # a real vet target's own borderline items alike.
+    for item in _vet_attest_packet_items("skillx"):
+        assert "abstain" not in item["verdict_schema"]
+    skill = tmp_path / "skillx"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: skillx\ndescription: notes helper\n---\nKeeps notes.\n", encoding="utf-8")
+    vet_items = build_vet_judge_packet(vet_skill(skill), str(skill))
+    assert vet_items
+    for item in vet_items:
+        assert "abstain" not in json.dumps(item["verdict_schema"]).lower(), item["finding_id"]
 
 
 def test_the_bundle_template_names_abstain_beside_the_other_verdicts():
@@ -333,18 +370,42 @@ def test_an_abstain_beside_a_usable_verdict_raises_no_warning(capsys):
     assert "usable" not in err, err
 
 
-def test_an_abstain_inside_votes_is_not_a_dissenting_vote():
-    """One DANGEROUS and two ABSTAIN is 1/1, not a 1/3 split against the verdict."""
+def test_an_abstain_inside_votes_still_counts_toward_the_total():
+    """One DANGEROUS and two ABSTAIN is disclosed as 1/3: the split line exists to show how
+    few lenses stood behind a verdict, and leaving the abstentions out would make it read
+    as unanimous."""
     from clawseccheck.adjudication import _annotate, _vote_tally
 
-    assert _vote_tally("DANGEROUS", {"DANGEROUS": 1, "ABSTAIN": 2}) == (1, 1)
+    assert _vote_tally("DANGEROUS", {"DANGEROUS": 1, "ABSTAIN": 2}) == (1, 3)
     assert _vote_tally("DANGEROUS", {"DANGEROUS": 1}) == (1, 1)
-    # A real dissent still counts, with or without abstentions beside it.
     assert _vote_tally("DANGEROUS", {"DANGEROUS": 1, "SAFE": 2}) == (1, 3)
-    assert _vote_tally("DANGEROUS", {"DANGEROUS": 1, "SAFE": 1, "ABSTAIN": 5}) == (1, 2)
-    # Nothing but abstentions is no tally at all.
-    assert _vote_tally("DANGEROUS", {"ABSTAIN": 3}) == (0, 0)
     with_abstain = _annotate("WARN", {"verdict": "DANGEROUS",
                                       "votes": {"DANGEROUS": 1, "ABSTAIN": 2}})
-    alone = _annotate("WARN", {"verdict": "DANGEROUS", "votes": {"DANGEROUS": 1}})
-    assert with_abstain == alone
+    assert "1/3 DANGEROUS" in with_abstain, with_abstain
+
+
+def test_an_item_that_also_drew_an_unusable_answer_is_not_shown_as_abstained():
+    """ABSTAIN plus a mis-cased DANGEROUS for the SAME item: something else was said about
+    it and lost, so the item reads as not reviewed rather than as a deliberate abstention."""
+    from clawseccheck.adjudication import _parse_verdicts_with_abstentions
+
+    entries = [{"finding_id": "B1", "target": "t", "verdict": "ABSTAIN"},
+               {"finding_id": "B1", "target": "t", "verdict": "dangerous"},
+               {"finding_id": "B2", "target": "t", "verdict": "ABSTAIN"}]
+    out, abstained = _parse_verdicts_with_abstentions(json.dumps({"verdicts": entries}))
+    assert out == {}
+    assert abstained == frozenset({("B2", "t")})
+
+
+def test_the_abstain_note_speaks_about_its_own_item_only(capsys):
+    """One ABSTAIN beside an applied DANGEROUS: the note must not read as 'nothing was
+    raised' for the whole file."""
+    from clawseccheck.adjudication import _parse_verdicts
+
+    entries = [{"finding_id": "B1", "target": "t", "verdict": "ABSTAIN"},
+               {"finding_id": "B2", "target": "t", "verdict": "DANGEROUS"}]
+    assert set(_parse_verdicts(json.dumps({"verdicts": entries}))) == {("B2", "t")}
+    err = capsys.readouterr().err
+    assert "1 ABSTAIN answer(s) submitted" in err, err
+    assert "nothing was reviewed" not in err
+    assert "every other entry in the file is read as usual" in err

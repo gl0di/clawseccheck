@@ -42,9 +42,10 @@ makes a successful injection against it worthless.
    item you answer, **including the three fixed `ATTEST-PROSE-*` questions** below -
    a disclosed panel split changes the escalated/attested finding's `detail`
    text (`docs/OUTPUT_SCHEMA.md` §15/§16), never its status or the vet grade.
-   A lens that answered `ABSTAIN` (JUDGE_PANEL.md steps 2-3) is not a vote: leave it out
-   of `votes`, or record it under an `ABSTAIN` key, which is not counted. An item whose
-   reduced answer is `ABSTAIN` escalates nothing, exactly like an item with no entry.
+   **`ABSTAIN` is not offered on a vet target.** The subject is untrusted third-party
+   content and this panel's one power is to escalate, so no item of a
+   `--vet-judge-packet` carries an `abstain` key and every lens answers one of the three;
+   the `ABSTAIN` rules in JUDGE_PANEL.md steps 2-3 apply to the audit panel only.
    **Never fabricate a `votes` breakdown.** When step 2's inline fallback ran
    instead of 3 subagents, omit `votes` entirely rather than inventing one - a
    missing `votes` field reads as "no breakdown submitted," never as a fabricated

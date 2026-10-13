@@ -101,18 +101,41 @@ from ..textnorm import normalize_for_scan
 # suspicion. ABSTAIN is the fourth, non-categorical answer: "I could not decide from the
 # packet". It is deliberately NOT a member of "verdict" above: that list is the
 # severity-ascending vocabulary the parser ranks, the questions quote, and the structural
-# tests derive from, and an abstention has no severity. It travels in its own key so a
-# judge reading only this field still learns it exists. The consumers treat it exactly
+# tests derive from, and an abstention has no severity. The consumers treat it exactly
 # like a missing entry for the item (_verdicts._parse_verdicts_with_abstentions).
+#
+# It is OFFERED narrowly, because an invitation not to answer is a way to steer a judge
+# off a finding: only on an own-audit packet item the engine itself left UNKNOWN (it could
+# not determine the item either), through _VERDICT_SCHEMA_UNKNOWN_ITEM below. A WARN item
+# carries a signal the engine did see, and a --vet packet is about untrusted third-party
+# content where the panel's one power is to escalate; neither is told it may abstain, so
+# both carry _VERDICT_SCHEMA exactly as before.
 _ABSTAIN_VERDICT = "ABSTAIN"
 _VERDICT_SCHEMA = {
     "verdict": list(_VERDICT_VALUES),
     "reason": "free text",
+}
+_VERDICT_SCHEMA_UNKNOWN_ITEM = {
+    **_VERDICT_SCHEMA,
     "abstain": (
-        f"if the packet gives you nothing to decide this item from, answer {_ABSTAIN_VERDICT} "
-        "instead of guessing; it is treated exactly like no verdict submitted for the item"
+        "the engine itself could not determine this item. If the packet gives you no fact "
+        f"at all to decide it from, answer {_ABSTAIN_VERDICT} instead of guessing; it is "
+        "treated exactly like no verdict submitted for the item. With any fact in hand "
+        "answer one of the three, and when unsure between two answer the worse one"
     ),
 }
+
+
+def _offer_abstain(items: list) -> list:
+    """The audit packet's last pass: an item the engine left UNKNOWN is told it may be
+    answered ABSTAIN (see the note above ``_ABSTAIN_VERDICT``); every other item is
+    returned as it came. Never called for a ``--vet`` packet."""
+    return [
+        {**item, "verdict_schema": _VERDICT_SCHEMA_UNKNOWN_ITEM}
+        if item.get("engine_disposition") == UNKNOWN else item
+        for item in items
+    ]
+
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
 # dual-use signal deliberately down-ranked from FAIL to WARN so a legitimate skill
@@ -1455,7 +1478,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
 
     items = _attach_corroboration(items, findings)
     items = _with_documented_shape(items)
-    items = _with_check_title(items)
+    items = _offer_abstain(_with_check_title(items))
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items
 

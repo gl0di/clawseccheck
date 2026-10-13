@@ -64,19 +64,23 @@ section.
    }
    ```
 
-   A judge that finds nothing in the item to decide from answers `"verdict": "ABSTAIN"`
-   instead of guessing (each item's own `verdict_schema.abstain` says so). `ABSTAIN` is not
-   a fourth severity: it means "I could not assess this", and it is never to be replaced
-   by `SAFE` to look finished.
+   Only an item whose own `verdict_schema` carries an `abstain` key (the engine left it
+   UNKNOWN) may be answered `"verdict": "ABSTAIN"`, and only when the item gives the judge
+   no fact at all to decide from. `ABSTAIN` is not a fourth severity: it means "I could
+   not assess this". It is never a way out of a `SUSPICIOUS` or `DANGEROUS` answer the
+   judge has grounds for, and it is never to be replaced by `SAFE` to look finished. An
+   item with no `abstain` key always gets one of the three.
 3. **Majority vote** per item across its 3 lens verdicts. A tie (no single verdict has
    at least 2 of the 3 votes - e.g. one SAFE, one SUSPICIOUS, one DANGEROUS) escalates
    to the **worst** of the three rather than picking arbitrarily - the same fail-safe
-   principle as the rest of this skill. An `ABSTAIN` lens is not a vote: decide among the
-   lenses that did answer. When only one lens answered, submit its answer if it is
-   `SUSPICIOUS` or `DANGEROUS` (a concern is never discarded) and submit `ABSTAIN` if it
-   is `SAFE` - one `SAFE` is not a majority. When no lens answered, submit `ABSTAIN`.
-   An `ABSTAIN` entry is treated exactly like no entry for that item: the card shows it
-   as abstained, not reviewed, and it never raises or lowers anything.
+   principle as the rest of this skill. An `ABSTAIN` lens does not decide the item:
+   decide among the lenses that did answer. When only one lens answered, submit its answer
+   if it is `SUSPICIOUS` or `DANGEROUS` (a concern is never discarded) and submit
+   `ABSTAIN` if it is `SAFE` - one `SAFE` is not a majority. When no lens answered, submit
+   `ABSTAIN`. If you submit a `votes` breakdown, record the abstaining lenses under an
+   `ABSTAIN` key so the split shows how many lenses stood behind the verdict. An
+   `ABSTAIN` entry is treated exactly like no entry for that item: the card shows it as
+   abstained, not reviewed, and it never raises or lowers anything.
 4. Spawn in the same locked-down form as the isolator subagent in
    [`docs/ISOLATION.md`](../ISOLATION.md) - **no tools**,
    `maxSpawnDepth: 1`, **ephemeral** - and bound concurrency the same way
