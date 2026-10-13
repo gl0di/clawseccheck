@@ -19,6 +19,7 @@ Offline, read-only, stdlib only; writes nothing outside ``tmp_path``.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 from pathlib import Path
 
@@ -184,6 +185,33 @@ def test_file_with_nothing_parseable_is_not_ok_and_says_how_many(tmp_path):
     assert msg == "no chain here — the file holds no readable entry (2 unparseable lines)"
 
 
+def _deny_reads_of(monkeypatch, match):
+    """Make every way of opening a path for which ``match(path)`` is true raise
+    ``PermissionError``: ``Path.open`` and the ``os.open`` the bounded reader uses.
+
+    Injected rather than chmod-ed so the assertions hold when the suite runs as root. Both
+    seams are covered on purpose: patching only ``Path.open`` became a silent no-op when the
+    journal reader moved to ``os.open``, and three tests went red for the wrong reason.
+    """
+    real_path_open, real_os_open = pathlib.Path.open, os.open
+
+    def fake_path_open(self, *a, **kw):
+        if match(str(self)):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_path_open(self, *a, **kw)
+
+    def fake_os_open(path, *a, **kw):
+        if not isinstance(path, int):
+            name = os.fspath(path)
+            name = name.decode("utf-8", "surrogateescape") if isinstance(name, bytes) else name
+            if match(name):
+                raise PermissionError(13, "Permission denied", name)
+        return real_os_open(path, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "open", fake_path_open)
+    monkeypatch.setattr(os, "open", fake_os_open)
+
+
 def test_unreadable_store_is_not_ok(tmp_path, monkeypatch):
     """A present-but-unreadable store used to return (True, "OK") from the bare
     ``except OSError``. Saying "OK" about a file that could not be opened is the same
@@ -192,14 +220,7 @@ def test_unreadable_store_is_not_ok(tmp_path, monkeypatch):
     Injected rather than chmod-ed so the assertion holds when the suite runs as root.
     """
     j = _populated_events(tmp_path)
-    real_open = pathlib.Path.open
-
-    def fake_open(self, *a, **kw):
-        if self == j:
-            raise PermissionError(13, "Permission denied", str(j))
-        return real_open(self, *a, **kw)
-
-    monkeypatch.setattr(pathlib.Path, "open", fake_open)
+    _deny_reads_of(monkeypatch, lambda path: path == str(j))
 
     ok, msg = verify_chain(j)
     assert ok is None, "the injection must actually have taken"
@@ -305,14 +326,7 @@ def test_an_unreadable_default_store_warns_against_overwriting_the_evidence(
     record_events([("INFO", "x")], path=journal, when="2026-01-01T00:00:00")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    real_open = pathlib.Path.open
-
-    def fake_open(self, *a, **kw):
-        if self.name == "events.jsonl":
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_open(self, *a, **kw)
-
-    monkeypatch.setattr(pathlib.Path, "open", fake_open)
+    _deny_reads_of(monkeypatch, lambda path: os.path.basename(path) == "events.jsonl")
 
     rc = main(["--verify-events"])
     out = capsys.readouterr().out
@@ -412,14 +426,7 @@ def test_an_intact_chain_reports_no_cause(tmp_path):
 
 def test_unreadable_reports_its_own_cause(tmp_path, monkeypatch):
     j = _populated_events(tmp_path)
-    real_open = pathlib.Path.open
-
-    def fake_open(self, *a, **kw):
-        if self == j:
-            raise PermissionError(13, "Permission denied", str(j))
-        return real_open(self, *a, **kw)
-
-    monkeypatch.setattr(pathlib.Path, "open", fake_open)
+    _deny_reads_of(monkeypatch, lambda path: path == str(j))
     cause: list = []
     ok, _msg = verify_chain(j, cause=cause)
     assert ok is None
