@@ -157,8 +157,14 @@ def loads_bounded(data, *, max_nesting: int = MAX_JSON_NESTING):
     return json.loads(data)
 
 
-def _json5_to_python_literal(text: str) -> str:
-    """Translate OpenClaw's JSON5 syntax into a safe Python literal."""
+def _json5_to_python_literal(text: str, feff_is_space: bool = False) -> str:
+    """Translate OpenClaw's JSON5 syntax into a safe Python literal.
+
+    *feff_is_space* (C-722, OpenClaw config files only): U+FEFF is JSON5 whitespace, as the
+    installed platform reads it (``openclaw config validate`` accepts it between any two
+    tokens and refuses it inside one). Outside a string it separates tokens; inside a
+    string it stays data. Off by default so every other reader of this lexer is unchanged.
+    """
     out: list[str] = []
     i = 0
     n = len(text)
@@ -211,6 +217,18 @@ def _json5_to_python_literal(text: str) -> str:
                 i = end + 2
                 continue
 
+        if feff_is_space and ch == "\ufeff":
+            # The platform refuses a mark between a sign and its number ("-<mark>1",
+            # "1e-<mark>5", "-<mark>Infinity"): a sign must be followed directly by what it
+            # signs. Turning the mark into a space here would let the number reader accept
+            # it. (An ORDINARY space after a sign - "- 1" - has always been accepted by this
+            # reader although the platform refuses it; that older difference is left alone.)
+            if i and text[i - 1] in "+-":
+                raise json.JSONDecodeError("U+FEFF directly after a sign", text, i)
+            out.append(" ")
+            i += 1
+            continue
+
         if ch.isalpha() or ch in "_$":
             start = i
             i += 1
@@ -218,7 +236,8 @@ def _json5_to_python_literal(text: str) -> str:
                 i += 1
             token = text[start:i]
             look = i
-            while look < n and text[look].isspace():
+            while look < n and (text[look].isspace()
+                                or (feff_is_space and text[look] == "\ufeff")):
                 look += 1
             if look < n and text[look] == ":":
                 out.append(json.dumps(token))
@@ -260,10 +279,11 @@ def _restore_special_numbers(value: object) -> object:
     return value
 
 
-def _loads_json5_lenient(text: str, strict_error: "Exception | None" = None):
+def _loads_json5_lenient(text: str, strict_error: "Exception | None" = None,
+                         feff_is_space: bool = False):
     """The JSON5 half of :func:`loads_json5`: *text* has already failed (or skipped) strict JSON."""
     try:
-        parsed = ast.literal_eval(_json5_to_python_literal(text).strip())
+        parsed = ast.literal_eval(_json5_to_python_literal(text, feff_is_space).strip())
     except (SyntaxError, ValueError, TypeError, MemoryError) as exc:
         pos = getattr(exc, "offset", None)
         raise json.JSONDecodeError(str(exc), text, max(0, int(pos or 1) - 1)) from strict_error
@@ -273,12 +293,12 @@ def _loads_json5_lenient(text: str, strict_error: "Exception | None" = None):
     return parsed
 
 
-def loads_json5(text: str):
+def loads_json5(text: str, *, feff_is_space: bool = False):
     """Parse strict JSON first, then the bounded JSON5-compatible lexical form."""
     try:
         return json.loads(text)
     except json.JSONDecodeError as strict_error:
-        return _loads_json5_lenient(text, strict_error)
+        return _loads_json5_lenient(text, strict_error, feff_is_space)
 
 
 # --- shallow reading of untrusted JSON (C-664) --------------------------------------------
@@ -569,12 +589,20 @@ def _read_fragment(path: Path, byte_limit: int,
     # that cannot be true of any single moment.
     if digest_out is not None:
         digest_out.append(hashlib.sha256(raw).hexdigest())
+    # C-722: an editor that saves a UTF-8 byte order mark (Windows Notepad) writes EF BB BF
+    # first, and OpenClaw reads that file. "utf-8-sig" skips the first mark here, after the
+    # size bound above counted its bytes, so the common one-mark file takes the same strict
+    # path as the same file without it. OpenClaw reads U+FEFF as JSON5 whitespace between any
+    # two tokens (measured with `openclaw config validate`: a second leading mark, one after
+    # whitespace, a comment or a key, one in the middle all pass; one inside a number, right
+    # after a sign, or inside a keyword fails; one inside a string is data), so the lexer is told to do the same for
+    # this file only. UTF-16 is not UTF-8 and stays refused, as on the platform.
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise ConfigLoadError(f"{path.name} is not valid UTF-8: {exc}") from exc
     try:
-        return loads_json5(text)
+        return loads_json5(text, feff_is_space=True)
     except (json.JSONDecodeError, RecursionError) as exc:
         raise ConfigLoadError(f"could not parse {path}: {exc}") from exc
 

@@ -737,10 +737,14 @@ def _writable_by_others(st) -> bool:
     return False
 
 
-def _writable_identity_files(ctx: Context) -> list[str]:
+def _writable_identity_files(ctx: Context, unreadable: "list | None" = None) -> list[str]:
     """Return relative paths of identity/skill targets writable by someone other than the
     owner (world-writable, or group-writable with a non-singleton owning group), OR whose
     parent dir is. Only called on POSIX. Returns paths relative to ctx.home.
+
+    C-722: a workspace directory this process cannot enter makes ``pathprobe.is_file`` on
+    its children raise on purpose; that one directory is skipped (its labels go into
+    *unreadable* when a list is passed) instead of ending the whole scan.
 
     B-189: the singleton down-rank applies to EVERY leg - SOUL.md, the workspace/skills dirs,
     and openclaw.json - so a user-private-group / umask-002 box never false-FAILs.
@@ -808,8 +812,13 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         # Individual identity files
         for fname in _IDENTITY_TARGETS:
             f = ws_dir / fname
-            if not pathprobe.is_file(f):
-                continue
+            try:
+                if not pathprobe.is_file(f):
+                    continue
+            except OSError:
+                if unreadable is not None:
+                    unreadable.append(ws)
+                break
             try:
                 st = f.stat()
                 if _writable_by_others(st) and _first_time(f):
@@ -843,7 +852,13 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     # Check the skills directories (writing here installs new skills)
     for rel in SKILL_DIRS:
         d = ctx.home / rel
-        if not pathprobe.is_dir(d):
+        try:
+            if not pathprobe.is_dir(d):
+                continue
+        except OSError:
+            # C-722: a skills dir under a directory this process cannot enter.
+            if unreadable is not None:
+                unreadable.append(rel)
             continue
         try:
             st = d.stat()
@@ -1185,10 +1200,50 @@ def _c3_git_covers(directory: Path, boundary: Path) -> bool:
     return False
 
 
+# The collector's notes for a bootstrap path it could not look at / open (collect()'s
+# bootstrap loop): "could not check '<path>' (<Error>) ..." / "could not read '<path>' (...) ...".
+_BOOTSTRAP_PATH_HIT_RE = re.compile(r"^could not (?:check|read) '(.*)' \(\w+\)")
+
+
+def _bootstrap_unreadable(ctx: Context, names: tuple) -> bool:
+    """C-722: could the workspace not be searched for one of *names*?
+
+    True when the collector recorded that a workspace DIRECTORY could not be checked (the
+    directory that would hold the file could not be listed), or that one of *names* itself
+    could not be checked/opened. An unreadable SIBLING file (USER.md beside a readable
+    directory) is not a reason to doubt that a memory file is absent: the directory listing
+    proves it. The size-cap hit in the same bucket is another fact again (that file WAS
+    read, in part), so only the collector's "could not ..." notes count.
+    """
+    wanted = {n.lower() for n in names}
+    for hit in limit_hits_for(ctx, LIMIT_DOMAIN_BOOTSTRAP):
+        text = str(hit)
+        if text.startswith("could not check workspace dir "):
+            return True
+        m = _BOOTSTRAP_PATH_HIT_RE.match(text)
+        if m and m.group(1).replace("\\", "/").rsplit("/", 1)[-1].lower() in wanted:
+            return True
+    return False
+
+
 def check_backups(ctx: Context) -> Finding:
     """Are the agent's identity/memory files backed up (recoverable after drift/poisoning)?"""
     has_bootstrap = any(n.endswith(("SOUL.md", "MEMORY.md", "AGENTS.md")) for n in ctx.bootstrap)
     if not has_bootstrap:
+        # C-722: "none found" and "could not look" are different facts (same split as B6's
+        # C-716). Status unchanged; only the unreadable case gets new wording, so the
+        # sentence below, which baseline.fingerprint() hashes, stays byte-identical for a
+        # truly absent workspace.
+        if _bootstrap_unreadable(ctx, ("SOUL.md", "MEMORY.md", "AGENTS.md")):
+            return _finding(
+                "C3",
+                UNKNOWN,
+                "No bootstrap/memory files could be inspected for backup coverage: the "
+                "workspace directory or an identity file (SOUL.md/AGENTS.md/MEMORY.md) "
+                "could not be read, so their absence is not established.",
+                "Make the workspace directory and its SOUL.md/AGENTS.md/MEMORY.md readable "
+                "by the user running this audit (check permissions), then re-run.",
+            )
         return _finding("C3", UNKNOWN, "No bootstrap/memory files found to back up.", "\u2014")
 
     # Which collected bootstrap files are the identity triple, and where they live - used
@@ -3860,6 +3915,16 @@ def check_memory_poisoning(ctx: Context) -> Finding:
                 "Agent has persistent memory; confirm it is not written from untrusted input.",
                 "Restrict memory writes to the owner; sanitize anything derived from external content.",
             )
+        # C-722: as B6/C3 - an unreadable workspace is not an absent memory file.
+        if _bootstrap_unreadable(ctx, ("MEMORY.md", "memory.md")):
+            return _finding(
+                "B7",
+                UNKNOWN,
+                "No memory file could be inspected: the workspace directory or the memory "
+                "file could not be read, so the absence of a memory file is not established.",
+                "Make the workspace directory and its MEMORY.md readable by the user "
+                "running this audit (check permissions), then re-run.",
+            )
         return _finding("B7", UNKNOWN, "No memory file found.", "\u2014")
 
     if has_vs_control:
@@ -4257,7 +4322,20 @@ def check_self_modification(ctx: Context) -> Finding:
         )
 
     # Condition (b): writable identity or skills target
-    writable = _writable_identity_files(ctx)
+    unreadable: list = []
+    writable = _writable_identity_files(ctx, unreadable)
+    if not writable and unreadable:
+        # C-722: a workspace directory that cannot be entered is not "no writable targets".
+        # Status is the same UNKNOWN; the sentence below stays for a truly absent directory.
+        return _finding(
+            "B22",
+            UNKNOWN,
+            "Dangerous tools present, but a workspace directory could not be read, so its "
+            "identity files (SOUL.md and the like) were not checked for group/world write "
+            "access and the self-modification risk could not be assessed there.",
+            "Make the workspace directory readable by the user running this audit (check "
+            "permissions), then re-run.",
+        )
     if not writable:
         return _finding(
             "B22",

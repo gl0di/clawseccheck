@@ -1645,6 +1645,14 @@ redaction `sarif.py` uses (CLAUDE.md §8) before it reaches this document - an i
 path routinely carries the operator's OS username, and a BOM is exactly the artifact
 people paste into a ticket.
 
+Escaping of text values: a skill, package or server name is chosen by whoever ships it, so
+in all three formats (this one and §25's) names, versions and the other text fields are
+written with one reversible escape. A backslash is doubled, and a control character or an
+invisible format character (Unicode categories Cc, Zl, Zp, and Cf other than the zero-width
+joiner and non-joiner, which ordinary emoji and Persian or Indic text need) is written as
+`\uXXXX` (`\UXXXXXXXX` above U+FFFF). Nothing is deleted and two different names never
+become one; a value with no backslash and none of those characters is unchanged.
+
 **`version` is this artifact's own schema version - independent of the package's
 `__version__`** (see `generated_by` below, which carries the package version). Current
 value: `3` (bumped from `2` by B-568 - see the Notes below for what changed).

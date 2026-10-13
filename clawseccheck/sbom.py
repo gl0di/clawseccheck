@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import unicodedata
 from pathlib import Path
 
 from .checks import _dep_names_in_skill, _unpinned_deps_in_skill
@@ -130,6 +131,58 @@ def _mcp_entry(name: str, detail: dict) -> dict:
 
 def _redact_path(value) -> "str | None":
     return _redact_home_paths(str(value)) if value else None
+
+
+# C-722: a skill directory, an MCP server key and a plugin id are chosen by whoever authored
+# them, and they (with the version, command and supplier read from the same place) end up as
+# values in a document people open in a terminal or paste into a ticket. An SBOM is data, so
+# nothing is deleted or folded: the text is ESCAPED, and the escape is injective, which is
+# what keeps two different names from rendering alike (and a CycloneDX bom-ref unique) and
+# lets a consumer recover the original.
+#
+# * a backslash is written as two backslashes (always, so an escape in the output can never
+#   be mistaken for text that was already there);
+# * a character of category Cc (C0, DEL, C1), Zl or Zp, or of category Cf other than the
+#   joiners U+200C / U+200D (bidi overrides, zero-width space, BOM, tag characters ...), is
+#   written \uXXXX, or \UXXXXXXXX above U+FFFF;
+# * every other character is kept: emoji sequences and Persian text keep their joiners, and
+#   a name with no backslash and none of those characters is byte-identical to before.
+#
+# Applied when the document is RENDERED: `build_sbom` keeps the raw inventory that
+# `--sbom-diff`, the run store and the incident export consume, and the full hashes are
+# looked up by the raw name. (A backslash in a path field - a Windows path - is doubled too.)
+_JOINERS = frozenset("\u200c\u200d")
+
+#: Fields that carry a digest computed by this module, never text from a component.
+_SBOM_DIGEST_KEYS = frozenset({"hash"})
+
+
+def _escape_char(ch: str) -> str:
+    if ch == "\\":
+        return "\\\\"
+    category = unicodedata.category(ch)
+    if category in ("Cc", "Zl", "Zp") or (category == "Cf" and ch not in _JOINERS):
+        code = ord(ch)
+        return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+    return ch
+
+
+def _clean(value):
+    """*value* with its backslashes doubled and its control-class characters escaped;
+    non-strings are returned as they are."""
+    if not isinstance(value, str):
+        return value
+    return "".join(_escape_char(ch) for ch in value)
+
+
+def _clean_tree(value, key=None):
+    if isinstance(value, str):
+        return value if key in _SBOM_DIGEST_KEYS else _clean(value)
+    if isinstance(value, list):
+        return [_clean_tree(item, key) for item in value]
+    if isinstance(value, dict):
+        return {k: _clean_tree(v, k) for k, v in value.items()}
+    return value
 
 
 def _plugin_entry(rec: dict) -> dict:
@@ -248,7 +301,7 @@ def build_sbom(ctx) -> dict:
 
 def render_sbom(ctx) -> str:
     """Return the BOM as a deterministic, stably-ordered JSON string."""
-    payload = build_sbom(ctx)
+    payload = _clean_tree(build_sbom(ctx))
     return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
 
 
@@ -304,34 +357,38 @@ def render_sbom_cyclonedx(ctx) -> str:
     hashes = _full_hashes_by_component(ctx)
 
     def _component(kind, comp_type, entry):
+        raw_name = entry["name"]
+        full = hashes.get((kind, raw_name), "")
+        name = _clean(raw_name)
         c = {
             "type": comp_type,
-            "bom-ref": f"{kind[:-1] if kind.endswith('s') else kind}:{entry['name']}",
-            "name": entry["name"],
-            "hashes": [{"alg": "SHA-256", "content": hashes.get((kind, entry["name"]), "")}],
+            "bom-ref": f"{kind[:-1] if kind.endswith('s') else kind}:{name}",
+            "name": name,
+            "hashes": [{"alg": "SHA-256", "content": full}],
         }
-        version = entry.get("version")
+        version = _clean(entry.get("version"))
         if version:
             c["version"] = version
         props = []
         if "supplier" in entry and entry["supplier"]:
-            props.append({"name": "clawseccheck:supplier", "value": entry["supplier"]})
+            props.append({"name": "clawseccheck:supplier", "value": _clean(entry["supplier"])})
         if entry.get("declared_deps"):
             props.append({"name": "clawseccheck:declaredDeps",
-                          "value": ",".join(entry["declared_deps"])})
+                          "value": _clean(",".join(entry["declared_deps"]))})
         if entry.get("unpinned_deps"):
             props.append({"name": "clawseccheck:unpinnedDeps",
-                          "value": ",".join(entry["unpinned_deps"])})
+                          "value": _clean(",".join(entry["unpinned_deps"]))})
         if kind == "mcp_servers":
-            props.append({"name": "clawseccheck:transport", "value": entry.get("transport", "")})
+            props.append({"name": "clawseccheck:transport",
+                          "value": _clean(entry.get("transport", ""))})
             props.append({"name": "clawseccheck:pinned",
                           "value": str(entry.get("pinned", False)).lower()})
         if kind == "plugins":
             if entry.get("origin"):
-                props.append({"name": "clawseccheck:origin", "value": entry["origin"]})
+                props.append({"name": "clawseccheck:origin", "value": _clean(entry["origin"])})
             if entry.get("contracts"):
                 props.append({"name": "clawseccheck:contracts",
-                              "value": ",".join(entry["contracts"])})
+                              "value": _clean(",".join(entry["contracts"]))})
         if props:
             c["properties"] = props
         return c
@@ -391,20 +448,20 @@ def render_sbom_spdx(ctx) -> str:
         spdx_id = f"{spdx_id}-{hashes.get((kind, entry['name']), '')[:8]}"
         comment_bits = []
         if entry.get("supplier"):
-            comment_bits.append(f"supplier={entry['supplier']}")
+            comment_bits.append(f"supplier={_clean(entry['supplier'])}")
         if entry.get("declared_deps"):
-            comment_bits.append(f"declaredDeps={','.join(entry['declared_deps'])}")
+            comment_bits.append(f"declaredDeps={_clean(','.join(entry['declared_deps']))}")
         if entry.get("unpinned_deps"):
-            comment_bits.append(f"unpinnedDeps={','.join(entry['unpinned_deps'])}")
+            comment_bits.append(f"unpinnedDeps={_clean(','.join(entry['unpinned_deps']))}")
         if kind == "mcp_servers":
-            comment_bits.append(f"transport={entry.get('transport', '')}")
+            comment_bits.append(f"transport={_clean(entry.get('transport', ''))}")
             comment_bits.append(f"pinned={entry.get('pinned', False)}")
         if kind == "plugins" and entry.get("origin"):
-            comment_bits.append(f"origin={entry['origin']}")
+            comment_bits.append(f"origin={_clean(entry['origin'])}")
         pkg = {
             "SPDXID": spdx_id,
-            "name": entry["name"],
-            "versionInfo": entry.get("version") or "NOASSERTION",
+            "name": _clean(entry["name"]),
+            "versionInfo": _clean(entry.get("version")) or "NOASSERTION",
             "downloadLocation": "NOASSERTION",
             "filesAnalyzed": False,
             "licenseConcluded": "NOASSERTION",
