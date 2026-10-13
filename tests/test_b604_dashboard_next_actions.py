@@ -223,5 +223,7 @@ def test_the_findings_are_unchanged_by_adding_the_block(tmp_path):
 def test_skill_md_lists_the_block_in_the_fixed_order():
     """C-125. SKILL.md states the card's section order (F-153) as exhaustive; a section the
     tool prints and the list omits makes the doc false for every reader after this."""
-    flat = " ".join((REPO_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    from _skillcorpus import skill_corpus
+
+    flat = " ".join(skill_corpus().split())
     assert "What you can do next" in flat

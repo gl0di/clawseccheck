@@ -42,6 +42,7 @@ REPO = Path(__file__).resolve().parents[1]
 SHIPPED_TEXT = (
     [REPO / "README.md", REPO / "SKILL.md"]
     + sorted((REPO / "docs").glob("*.md"))
+    + sorted((REPO / "docs" / "playbook").glob("*.md"))
     + sorted((REPO / "docs" / "assets").glob("stats-*.svg"))
     + [p for p in [REPO / "CONTRIBUTING.md"] if p.exists()]
 )

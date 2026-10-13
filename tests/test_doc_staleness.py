@@ -58,7 +58,7 @@ ALLOWLIST: dict = {
 
 def _public_docs():
     docs_dir = ROOT / "docs"
-    return PUBLIC_DOCS + sorted(p for p in docs_dir.glob("*.md"))
+    return PUBLIC_DOCS + sorted(p for p in docs_dir.glob("*.md")) + sorted(p for p in (docs_dir / "playbook").glob("*.md"))
 
 
 def test_public_docs_have_no_pre_current_major_version_refs():

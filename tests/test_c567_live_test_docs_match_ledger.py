@@ -44,6 +44,7 @@ OUTPUT_SCHEMA = REPO / "docs" / "OUTPUT_SCHEMA.md"
 SHIPPED_PROSE = (
     [REPO / "README.md", REPO / "SKILL.md"]
     + sorted((REPO / "docs").glob("*.md"))
+    + sorted((REPO / "docs" / "playbook").glob("*.md"))
     + [p for p in [REPO / "CONTRIBUTING.md"] if p.exists()]
 )
 

@@ -41,7 +41,10 @@ def _norm(text: str) -> str:
 
 
 def _skill_text() -> str:
-    return (ROOT / "SKILL.md").read_text(encoding="utf-8")
+    # C-709: SKILL.md plus the playbook files it points at (the protocol text moved there verbatim).
+    from _skillcorpus import skill_corpus
+
+    return skill_corpus()
 
 
 def _manifest() -> tuple[str, str]:
@@ -190,7 +193,7 @@ def test_the_compact_card_exception_is_stated_and_the_cut_marker_exists():
     src = Path(report.__file__).read_text(encoding="utf-8")
     assert "...(dropped:" in src and "truncated to fit budget" in src
     for rel in ("SKILL.md", "docs/USAGE.md"):
-        text = _norm((ROOT / rel).read_text(encoding="utf-8"))
+        text = _norm(_skill_text() if rel == "SKILL.md" else (ROOT / rel).read_text(encoding="utf-8"))
         assert "always shown once computed" not in text, rel
         assert re.search(r"--compact[^.]*4096[^.]*dropped", text), rel
 

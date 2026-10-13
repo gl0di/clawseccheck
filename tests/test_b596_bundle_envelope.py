@@ -169,7 +169,9 @@ def test_the_gate_names_the_umbrella_flag_too():
 def test_the_skill_doc_states_the_same_gate():
     """C-125. `SKILL.md` repeated the gate in the same four-flag form, so it carried the
     same defect."""
-    flat = " ".join((REPO_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    from _skillcorpus import skill_corpus
+
+    flat = " ".join(skill_corpus().split())
     assert "Omit the `liveTest` bucket entirely unless you ran" in flat
     assert "`--self-test`, which runs all four" in flat
 
@@ -187,7 +189,9 @@ def test_the_entry_example_names_every_required_key():
 def test_skill_md_states_the_two_level_shape():
     """The doc test the task asked for: an agent reading `SKILL.md` alone must be able to
     build an accepted bundle, and the example must not drift from the parser."""
-    flat = " ".join((REPO_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    from _skillcorpus import skill_corpus
+
+    flat = " ".join(skill_corpus().split())
     assert '"judged": { "verdicts": [' in flat or '"judged": {"verdicts": [' in flat, \
         "SKILL.md no longer shows the two-level shape"
     assert "bundleTemplate" in flat
@@ -206,7 +210,9 @@ def test_the_seed_caveat_travels_with_the_live_bucket():
     is not where an agent building a bundle is looking."""
     seed_text = build_bundle_template()["entryExample"]["liveTest"]["seed"]
     assert "--seed" in seed_text and "reproducible" in seed_text
-    flat = " ".join((REPO_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    from _skillcorpus import skill_corpus
+
+    flat = " ".join(skill_corpus().split())
     assert "unseeded VULNERABLE verdict" in flat
 
 

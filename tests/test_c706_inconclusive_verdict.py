@@ -486,7 +486,10 @@ class TestRenderedTextOffersTheThirdVerdict:
 class TestDocsDescribeTheThirdVerdict:
     @staticmethod
     def _doc(rel: str) -> str:
-        return " ".join((REPO_ROOT / rel).read_text(encoding="utf-8").split())
+        from _skillcorpus import skill_corpus
+
+        text = skill_corpus() if rel == "SKILL.md" else (REPO_ROOT / rel).read_text(encoding="utf-8")
+        return " ".join(text.split())
 
     @pytest.mark.parametrize("rel", [
         "docs/OUTPUT_SCHEMA.md", "docs/USAGE.md", "SKILL.md", "docs/FLOW_CHOICES.md"])

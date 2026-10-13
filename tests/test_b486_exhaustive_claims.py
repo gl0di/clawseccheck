@@ -62,9 +62,11 @@ _COMPLETENESS_PROMISES = (
 
 
 def _sources() -> dict:
+    from _skillcorpus import skill_corpus
+
     return {
         "docs/USAGE.md": _DOCS.read_text(encoding="utf-8"),
-        "SKILL.md": _SKILL_MD.read_text(encoding="utf-8"),
+        "SKILL.md": skill_corpus(),
         "checks/_egress.py": inspect.getsource(_egress),
     }
 

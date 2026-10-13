@@ -142,7 +142,9 @@ def test_stdout_is_byte_identical_with_and_without_the_note(tmp_path):
 def test_skill_md_and_the_note_agree_about_the_fallback():
     """The note was stricter than `SKILL.md` and dropped its fallback; that mismatch is the
     root cause, so it is asserted rather than left to the next reader to notice."""
-    skill = (REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    from _skillcorpus import skill_corpus
+
+    skill = skill_corpus()
     flat = " ".join(skill.split())          # the source is hard-wrapped
     assert "name the path so the user can open it themselves" in flat
     assert "any link you write will simply be broken" in flat
