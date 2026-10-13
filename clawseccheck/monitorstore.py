@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import json
 import re
 from pathlib import Path
@@ -37,7 +38,10 @@ from pathlib import Path
 from . import pathprobe
 from .configloader import ELIDED, loads_bounded, loads_shallow
 from .locking import journal_lock
-from .safeio import secure_append_text, secure_dir, secure_write_text
+from .safeio import (
+    NotARegularFile, open_user_file, read_user_text, secure_append_text, secure_dir,
+    secure_write_text,
+)
 
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
@@ -108,7 +112,8 @@ def _iter_jsonl_marked(p: Path, *, skipped: "list | None" = None):
     (``JSONDecodeError``: the truncated tail of an append that died) or is valid JSON that
     is not an object, and is not lossy, is skipped exactly as before.
     """
-    with p.open("r", encoding="utf-8", errors="replace") as fh:
+    # open_user_file: a FIFO named as the journal is an OSError, not a wait for a writer.
+    with io.TextIOWrapper(open_user_file(p), encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -557,9 +562,10 @@ def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]"
     if not pathprobe.exists(p) and not pathprobe.is_symlink(p):
         return BASELINE_ABSENT, None
     try:
-        raw = p.read_text(encoding="utf-8")
-    except OSError:
-        # Unreadable (perms), a directory, a dangling symlink: present but unusable.
+        raw = read_user_text(p)
+    except (OSError, UnicodeDecodeError):
+        # Unreadable (perms), a directory, a dangling symlink, a FIFO, bytes that are not
+        # UTF-8: present but unusable.
         return BASELINE_CORRUPT, None
     try:
         payload = loads_bounded(raw)
@@ -665,7 +671,7 @@ def baseline_reference(path: str | Path = DEFAULT_STATE) -> "tuple[str, str]":
     """
     p = Path(path).expanduser()
     try:
-        raw = p.read_text(encoding="utf-8", errors="replace")
+        raw = read_user_text(p, errors="replace")
     except FileNotFoundError:
         return "", "absent"
     except OSError:
@@ -819,6 +825,12 @@ def _last_chain_hash(p: Path) -> str:
     only the running "last chain_hash seen so far" is retained.
     """
     if not pathprobe.is_file(p):
+        # Absent is a first write. Present but not a regular file (a FIFO, a socket, a
+        # device) is not: the append that follows would wait forever for a reader, so
+        # every writer's own `except OSError` reports it instead. A directory keeps the
+        # error the append itself raises.
+        if pathprobe.exists(p) and not pathprobe.is_dir(p):
+            raise NotARegularFile(errno.EINVAL, "not a regular file", str(p))
         return ""
     last = ""
     try:

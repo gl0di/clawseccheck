@@ -266,7 +266,8 @@ def explicit_path_problem(explicit_path: str | None) -> str | None:
     # raise for the same reason.
     if pathprobe.is_dir(p):
         return f"{explicit_path}: is a directory, not a trajectory file"
-    return None
+    # C-720: a FIFO/socket/device is never opened, and is not "no trajectory here" either.
+    return None if pathprobe.is_file(p) else f"{explicit_path}: not a regular file"
 
 
 def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":

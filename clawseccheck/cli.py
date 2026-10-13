@@ -153,6 +153,7 @@ from .runstore import render_diff_json as _render_diff_json
 from .runstore import save_run as _save_run_snapshot
 from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
+from .safeio import read_user_text
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
@@ -2250,7 +2251,7 @@ def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     if raw_path == "-":
         return sys.stdin.read(), None
     try:
-        return Path(raw_path).expanduser().read_text(encoding="utf-8"), None
+        return read_user_text(Path(raw_path).expanduser()), None
     except OSError as exc:
         return "", _path_problem_text(raw_path, exc, what="verdicts file")
     except UnicodeDecodeError:
@@ -2915,7 +2916,11 @@ def _run_apply_ignore_proposals(args) -> int:
     still flagged by --monitor) is untouched by this being the write's origin.
     """
     try:
-        raw = Path(args.apply_ignore_proposals).expanduser().read_text(encoding="utf-8")
+        raw = read_user_text(Path(args.apply_ignore_proposals).expanduser())
+    except UnicodeDecodeError:
+        _emit(f"clawseccheck: could not read the proposals file "
+              f"{_sanitize(str(args.apply_ignore_proposals))}: not valid UTF-8 text.")
+        return 1
     except OSError as exc:
         # B-562: this always reported and exited 1, so it was never the silent failure
         # its two siblings were - but it printed only the exception CLASS
@@ -4802,7 +4807,7 @@ def _main(argv=None) -> int:
             if pathprobe.is_file(_state_path):
                 _mtime = datetime.fromtimestamp(
                     _state_path.stat().st_mtime).isoformat(timespec="seconds")
-                _state = loads_bounded(_state_path.read_text(encoding="utf-8"))
+                _state = loads_bounded(read_user_text(_state_path))
         except (OSError, ValueError):
             _state = None
         try:

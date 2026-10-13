@@ -88,6 +88,7 @@ from .layers import (
 # immediately above (only consumed inside to_ledger()).
 from .layers import COVERAGE_COMPLETE, COVERAGE_PARTIAL, COVERAGE_UNKNOWN
 from .report import _sanitize
+from .safeio import read_user_text
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
 )
@@ -1194,7 +1195,7 @@ def read_judged_bundle_with_problem(path: str) -> "tuple[dict, OSError | None]":
             raw = ""
     else:
         try:
-            raw = Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
+            raw = read_user_text(Path(path).expanduser(), errors="replace")
         except OSError as exc:
             raw = ""
             problem = exc

@@ -27,6 +27,7 @@ import unicodedata
 from pathlib import Path
 
 from .configloader import MAX_JSON_NESTING, loads_bounded
+from .safeio import read_user_file
 
 SCHEMA_ID = "clawseccheck-attest/1"
 
@@ -237,7 +238,8 @@ def load_attestation(path) -> dict:
     non-UTF-8 file is a malformed attestation ("no attestation"), not a crash.
     """
     try:
-        return parse_attestation(Path(path).read_bytes())
+        # A FIFO / socket / device / oversized file is an OSError here, not a hang.
+        return parse_attestation(read_user_file(Path(path)))
     except (OSError, ValueError):
         return {}
 
