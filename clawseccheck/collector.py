@@ -251,6 +251,12 @@ _EXEC_APPROVALS_SQLITE_KEY = "current"
 # never truncates a real machine while still bounding a hostile/corrupt store.
 _MAX_UPDATE_RUNS = 50
 
+# C-701: the supervisor restart handoff (`gateway_restart_handoff` in the state DB). The
+# vendor keeps ONE row (handoff_key = 'current'); the cap only bounds a hostile or padded
+# store. Rows are read oldest-expiry first, so a cut-off can never hide a stale row: if the
+# oldest `_MAX_RESTART_HANDOFF_ROWS` have not expired, no later row has either.
+_MAX_RESTART_HANDOFF_ROWS = 16
+
 # B-725: the shared skill-library surface in the state DB (skill_library_entries,
 # skill_uploads) -- bounded the same way as the row-scanning readers above. A hostile
 # or padded DB must not turn this into an unbounded scan; the consuming check needs
@@ -915,6 +921,16 @@ class Context:
     update_runs_read: bool = False        # the table was present and queried at all
     update_runs_parse_error: bool = False  # table present but the read genuinely failed
     update_runs_truncated: bool = False   # the _MAX_UPDATE_RUNS row cap was hit
+    # C-701: the supervisor restart handoff, which OpenClaw 2026.9.x+ keeps in the state DB
+    # (`gateway_restart_handoff`) instead of `gateway-supervisor-restart-handoff.json`.
+    # `restart_handoff_read` is "the table is a real table and was queried" (False for no DB,
+    # a capped listing, or an absent table: the layout is then NOT shown to be in use here);
+    # `restart_handoff_parse_error` is "it exists but the read failed or it is not a real
+    # table" (UNKNOWN downstream, never a clean answer). `restart_handoff_expires_at_ms`
+    # holds the expires_at value of each row, oldest first -- no other column is read.
+    restart_handoff_expires_at_ms: list = field(default_factory=list)
+    restart_handoff_read: bool = False
+    restart_handoff_parse_error: bool = False
     # C-687: OpenClaw's config-health record (`config_health_entries` in the state DB, which
     # replaced `logs/config-health.json`), normalised to the legacy file's `entries` shape.
     # `config_health_status` is "" when nothing collected it (a bare Context), otherwise one
@@ -7349,6 +7365,106 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
         })
 
 
+def _collect_restart_handoff(home: Path, ctx: Context) -> None:
+    """C-701: read-only collection of the supervisor restart handoff, which OpenClaw moved
+    from ``gateway-supervisor-restart-handoff.json`` into the shared state database.
+
+    Grounded against the installed 2026.10.2 dist (``restart-handoff-*.mjs`` and the
+    ``OPENCLAW_STATE_SCHEMA_SQL`` literal, verbatim):
+
+        CREATE TABLE IF NOT EXISTS gateway_restart_handoff (
+          handoff_key TEXT NOT NULL PRIMARY KEY, kind TEXT NOT NULL, version INTEGER NOT NULL,
+          intent_id TEXT NOT NULL, pid INTEGER NOT NULL, process_instance_id TEXT,
+          created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, reason TEXT, ...
+          source TEXT NOT NULL, restart_kind TEXT NOT NULL, supervisor_mode TEXT NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        ) STRICT;
+
+    The vendor writes one row (``handoff_key = 'current'``) and removes it when a supervisor
+    restart consumes it; an expired or malformed row is removed by the next consume. A row
+    whose ``expires_at`` (epoch milliseconds) has passed is therefore the real "a restart
+    did not complete" signal. It never reads or deletes the old JSON file.
+
+    FIELD-SELECT: only ``expires_at`` is bound into the query -- never ``SELECT *``, no pid,
+    reason or id column. The table is checked to be a REAL table (``_table_kind``) inside a
+    ``BEGIN`` held across the read, as ``_collect_agent_auth_profile_store_presence`` does,
+    so a crafted view of that name cannot feed this reader.
+
+    Three outcomes, kept apart (collapsing them would let an unreadable table read as "no
+    restart pending"): no DB / capped listing / absent table leaves ``restart_handoff_read``
+    False; a table that is present but unreadable (locked, corrupt, a view, a FIFO at the
+    database path) sets ``restart_handoff_parse_error``; a successful read sets
+    ``restart_handoff_read`` and fills ``restart_handoff_expires_at_ms``.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), like every other
+    reader on this database.
+    """
+    state_dir = home / "state"
+    # Same preamble as `_collect_pending_pairings_sqlite`: an EXISTING database path that is not
+    # an ordinary file (a symlink to a relocated database, a directory, a FIFO) is
+    # present-but-unreadable, never "no state database" -- the walk below skips all of them,
+    # which would hand the caller back the old JSON-file answer. A symlinked `state` that is not
+    # a directory is the same fact one level up.
+    odd = _non_regular_kind(state_dir / "openclaw.sqlite")
+    where = "state/openclaw.sqlite"
+    if not odd and not _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'"):
+        kind = _non_regular_kind(state_dir) or ("a file" if pathprobe.exists(state_dir) else "")
+        if kind and kind != "a directory":  # a directory _safe_is_dir could not enter reports itself
+            odd, where = kind, "state"
+    if odd:
+        ctx.errors.append(
+            f"{where} exists but is {odd}, not an ordinary "
+            f"{'directory' if where == 'state' else 'file'}; the restart handoff was not read"
+        )
+        ctx.restart_handoff_parse_error = True
+        return
+    capped: list = []
+    candidates = (
+        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the restart handoff was not read"
+            )
+        return
+
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "gateway_restart_handoff")
+            if kind == "absent":
+                return  # no such table in THIS db: the state-DB layout is not shown here
+            if kind != "table":
+                ctx.errors.append(
+                    f"'gateway_restart_handoff' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object instead); "
+                    "the restart handoff was not read"
+                )
+                ctx.restart_handoff_parse_error = True
+                return
+            rows = conn.execute(
+                "SELECT expires_at FROM gateway_restart_handoff "
+                "ORDER BY expires_at ASC LIMIT ?",
+                (_MAX_RESTART_HANDOFF_ROWS,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        ctx.errors.append(f"could not read gateway_restart_handoff from {db_path}: {exc}")
+        ctx.restart_handoff_parse_error = True
+        return
+
+    ctx.restart_handoff_read = True
+    ctx.restart_handoff_expires_at_ms = [row[0] for row in rows]
+
+
 def _collect_capture_state(home: Path, ctx: Context) -> None:
     """B-295 (DISK-4): read-only METADATA about OpenClaw's debug-proxy traffic capture,
     stored in the shared state database (~/.openclaw/state/openclaw.sqlite).
@@ -10331,6 +10447,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
     _collect_update_runs(home, ctx)    # F-192: OpenClaw's own self-update ledger
+    _collect_restart_handoff(home, ctx)  # C-701: supervisor restart handoff, state-DB era
     _collect_config_health(home, ctx)  # C-687: config-health record, state-DB era
     _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18

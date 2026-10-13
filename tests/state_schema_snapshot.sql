@@ -2,8 +2,8 @@
 --
 -- openclaw-version: 2026.10.2
 -- state-schema-version: 20
--- generated: 2026-10-12
--- tables: 14
+-- generated: 2026-10-13
+-- tables: 15
 --
 -- What this is
 -- ------------
@@ -187,6 +187,24 @@ CREATE TABLE IF NOT EXISTS exec_approvals_config (
   auto_allow_skills INTEGER,
   agent_count INTEGER NOT NULL,
   allowlist_count INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS gateway_restart_handoff (
+  handoff_key TEXT NOT NULL PRIMARY KEY,
+  kind TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  intent_id TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  process_instance_id TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  reason TEXT,
+  restart_trace_started_at INTEGER,
+  restart_trace_last_at INTEGER,
+  source TEXT NOT NULL,
+  restart_kind TEXT NOT NULL,
+  supervisor_mode TEXT NOT NULL,
   updated_at_ms INTEGER NOT NULL
 ) STRICT;
 

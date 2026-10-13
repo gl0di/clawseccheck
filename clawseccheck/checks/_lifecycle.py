@@ -7975,8 +7975,152 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     )
 
 
+# C-701: from OpenClaw 2026.10.2 the supervisor restart handoff is a row of the state database
+# (`gateway_restart_handoff`) and the dist never touches `gateway-supervisor-restart-
+# handoff.json`. 2026.10.2 is the ONE build whose dist was read for this (`restart-handoff-*.mjs`:
+# the table is read through `readGatewayRestartHandoffSync`, written and removed through the
+# state-DB transaction path, and no code names the JSON file). The table is known to be declared
+# by 2026.9.1 (this repo's `tests/vendor_state_tables.txt`), but that its readers had already
+# replaced the file then was not read, so no earlier build is claimed. Keyed on the INSTALLED
+# build only -- a config stamp survives a downgrade and travels with a copied config. An older,
+# pre-release or unseen build keeps today's JSON-file answer.
+_RESTART_HANDOFF_IN_STATE_DB_MIN = (2026, 10, 2)
+_RESTART_HANDOFF_SERIES_YEAR = 2026
+_RESTART_HANDOFF_FILE = "gateway-supervisor-restart-handoff.json"
+# OpenClaw writes a handoff that expires within 60 s of creation and rejects a longer one
+# (GATEWAY_RESTART_HANDOFF_TTL_MS); a row expiring more than this far ahead of now was not
+# written by it, whatever the clock skew.
+_RESTART_HANDOFF_MAX_AHEAD_MS = 10 * 60 * 1000
+
+
+def _restart_handoff_lives_in_state_db(ctx: Context) -> bool:
+    """True only for a calendar release (three or more numeric parts) at or after
+    ``_RESTART_HANDOFF_IN_STATE_DB_MIN``. No installed version, a pre-release string
+    (``_numeric_version`` orders it as None) or a two-part version is False."""
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return bool(
+        installed is not None
+        and len(installed) >= 3
+        and installed[0] >= _RESTART_HANDOFF_SERIES_YEAR
+        and tuple(installed[:3]) >= _RESTART_HANDOFF_IN_STATE_DB_MIN
+    )
+
+
+def _restart_handoff_state_db_finding(ctx: Context, leftover_file: bool) -> "Finding | None":
+    """B357 on a build that keeps the handoff in the state DB: answer from the table.
+
+    Returns None when the collector did not find the table (no state DB, a capped listing,
+    or a DB that has no ``gateway_restart_handoff``) -- the layout is then not shown to be in
+    use under this home, so the caller keeps today's JSON-file answer. A state DB that exists
+    but could not be read (corrupt, locked, a symlink, a directory, a view posing as the
+    table) is UNKNOWN, never that fallback. The leftover file is never opened here: this
+    build does not read it, so its content cannot decide anything.
+
+    What the 2026.10.2 dist proves about an EXPIRED row, and all this text claims: the read
+    path (`readGatewayRestartHandoffSync`, used by startup, doctor and status) returns nothing
+    once ``now >= expires_at``, so OpenClaw does not act on it; the row is deleted only by
+    `consumeGatewayRestartHandoffSync` (the hidden `gateway restart-handoff consume` command)
+    and by the one-time legacy state-migration repair. Nothing there clears it on an ordinary
+    restart, so a stale row is a leftover that may or may not reflect an interrupted restart.
+    """
+    import time as _time
+    from datetime import datetime
+
+    retired = (
+        f"{_RESTART_HANDOFF_FILE} is a retired state file left over from an older OpenClaw "
+        "build. This build keeps the handoff in its state database and no longer reads that "
+        "file, so it is not a crash marker."
+    )
+    if getattr(ctx, "restart_handoff_parse_error", False):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw keeps the supervisor restart handoff in its state database, and that "
+            "table could not be read \u2014 cannot determine whether a restart is stuck.",
+            "Make state/openclaw.sqlite owner-readable and not locked (or a regular file), "
+            "then re-run.",
+        )
+    if not getattr(ctx, "restart_handoff_read", False):
+        return None
+
+    expiries = list(getattr(ctx, "restart_handoff_expires_at_ms", None) or [])
+    if any(isinstance(e, bool) or not isinstance(e, (int, float)) for e in expiries):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw's state database holds a supervisor restart handoff whose expiry is not "
+            "a readable timestamp \u2014 cannot determine whether a restart is stuck.",
+            "Review the gateway_restart_handoff table manually.",
+        )
+    fix_tail = f" Separately, {retired}" if leftover_file else ""
+    if not expiries:
+        return _finding(
+            "B357",
+            PASS,
+            "No restart handoff is recorded in OpenClaw's state database."
+            + (f" {retired}" if leftover_file else ""),
+            "No action needed." + (" The leftover file can be deleted." if leftover_file else ""),
+        )
+    first = min(expiries)
+    try:
+        label = datetime.fromtimestamp(first / 1000.0).isoformat(timespec="seconds")
+    except (ValueError, OSError, OverflowError):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw's state database holds a supervisor restart handoff whose expiry "
+            f"({first!r}) is not a parseable timestamp \u2014 cannot determine whether a "
+            "restart is stuck.",
+            "Review the gateway_restart_handoff table manually.",
+        )
+    # OpenClaw itself treats a handoff as expired once now >= expires_at and then ignores it;
+    # the row stays until the consume command or the migration removes it, so an expired row
+    # is a leftover, not proof of a failed restart. `time.time()`, never `datetime.now()`: see
+    # the B357 docstring on the clock-frozen fingerprint test.
+    now_ms = _time.time() * 1000.0
+    if first - now_ms > _RESTART_HANDOFF_MAX_AHEAD_MS:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw's state database holds a supervisor restart handoff record whose expiry "
+            f"({label}) is more than 10 minutes ahead \u2014 OpenClaw itself only writes records "
+            "that expire within 60 seconds, so this one is not what it writes and cannot be "
+            "read as a live handoff.",
+            "Review the gateway_restart_handoff table manually.",
+        )
+    if now_ms >= first:
+        return _finding(
+            "B357",
+            WARN,
+            "OpenClaw's state database still stores a supervisor restart handoff record whose "
+            f"expiry ({label}) has already passed. OpenClaw ignores a handoff record once it "
+            "has expired and does not act on it; it may be left over from an interrupted "
+            "restart or simply be a record nothing has removed, and the record alone cannot "
+            "tell which.",
+            "An expired record is removed only by OpenClaw's own `gateway restart-handoff "
+            "consume` command or by a one-time legacy state migration, so on a host that does "
+            "not use either it can remain indefinitely - then it is a leftover, not proof of "
+            "a crash. If you suspect a restart failed around that time, check the gateway "
+            "service's own logs." + fix_tail,
+        )
+    return _finding(
+        "B357",
+        PASS,
+        "OpenClaw's state database holds a supervisor restart handoff record that has not yet "
+        f"expired (expiry {label})." + (f" {retired}" if leftover_file else ""),
+        "No action needed." + (" The leftover file can be deleted." if leftover_file else ""),
+    )
+
+
 def check_restart_handoff_stale(ctx: Context) -> Finding:
     """B357 (C-409) - a supervisor restart-handoff blob that outlived its own expiry.
+
+    C-701: on an installed build at or after ``_RESTART_HANDOFF_IN_STATE_DB_MIN`` the
+    handoff is a row of ``gateway_restart_handoff`` in the state database, not the JSON file
+    described below, and the answer comes from that row (``_restart_handoff_state_db_finding``).
+    A leftover JSON file there is reported as a retired file, never as a crashed supervisor.
+    Everything below describes the older layout and is unchanged for an older, unknown or
+    pre-release build, and for a home whose state DB does not hold the table.
 
     `~/.openclaw/gateway-supervisor-restart-handoff.json` is a short-lived IPC blob a
     restarting/crashed gateway supervisor writes - confirmed shape on a real install:
@@ -8016,6 +8160,10 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
     from datetime import datetime
 
     path = ctx.home / "gateway-supervisor-restart-handoff.json"
+    if _restart_handoff_lives_in_state_db(ctx):
+        in_db = _restart_handoff_state_db_finding(ctx, pathprobe.is_file(path))
+        if in_db is not None:
+            return in_db
     if not pathprobe.is_file(path):
         return _finding(
             "B357",
