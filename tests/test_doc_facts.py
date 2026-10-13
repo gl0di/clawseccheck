@@ -747,8 +747,8 @@ def test_the_only_programs_this_package_spawns_are_named_and_understood():
 
     - `clawseccheck/native.py`: `openclaw security audit --json` -- the user's own
       already-installed CLI, reading their own machine.
-    - `clawseccheck/watch.py` (C-517): `sys.executable -m clawseccheck --monitor ...` -- the
-      package invoking ITSELF (its own installed entry point) to re-run the identical local,
+    - `clawseccheck/watch.py` (C-517): `sys.executable <-m clawseccheck | audit.py> --monitor
+      ...` -- the package invoking ITSELF (its own entry point) to re-run the identical local,
       offline `--monitor` check in a fresh process when `--watch` sees a relevant file
       change. Not a third-party program and not a network call -- see watch.py's own comment
       at the call site.
@@ -761,9 +761,12 @@ def test_the_only_programs_this_package_spawns_are_named_and_understood():
     by_file = {where: argv for where, _ln, argv in sites}
     assert set(by_file) == {"clawseccheck/native.py", "clawseccheck/watch.py"}, sites
     assert by_file["clawseccheck/native.py"] == ["security", "audit", "--json"]
+    # The interpreter, the entry (`-m clawseccheck` or the bundled audit.py shim, chosen by
+    # watch._child_launch) and the operator's forwarded flags are not string literals here,
+    # so only the fixed `--monitor` tail is visible; tests/test_c725_watch_rescan.py pins
+    # the entry forms.
     assert by_file["clawseccheck/watch.py"] == [
-        "-m", "clawseccheck", "--monitor", "--verbose",
-        "--home", "--state", "--events", "--history",
+        "--monitor", "--verbose", "--home", "--state", "--events", "--history",
     ]
 
 

@@ -2799,6 +2799,11 @@ def _run_watch_cli(args) -> int:
         print(f"{cmd('--watch')}: '{home}' is not a directory \u2014 nothing to watch.",
               file=sys.stderr)
         return 1
+    # C-725: one watcher per store - refuse before announcing a watch that will not happen.
+    may_start, refusal = _watch.can_start(_watch_heartbeat_path(args))
+    if not may_start:
+        print(refusal, file=sys.stderr)
+        return 1
     _emit(f"Watching {home} for changes (Ctrl-C to stop) \u2014 a change triggers "
           f"`--monitor --verbose` after a {args.watch_debounce:g}s debounce window.\n"
           f"Heartbeat: {_watch_heartbeat_path(args)}")
@@ -2817,8 +2822,8 @@ def _run_watch_cli(args) -> int:
 def _run_watch_status(args) -> int:
     """--watch-status: read the heartbeat --watch writes and say whether it is
     still alive - read-only, writes nothing (same contract as --brief)."""
-    hb = _watch.read_heartbeat(_watch_heartbeat_path(args))
-    word, sentence = _watch.describe_liveness(hb)
+    hb, problem = _watch.read_heartbeat_ex(_watch_heartbeat_path(args))
+    word, sentence = _watch.describe_liveness(hb, problem)
     _emit(f"{word}: {sentence}")
     return 0 if word == "ALIVE" else 1
 

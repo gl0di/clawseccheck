@@ -155,6 +155,12 @@ def test_write_then_read_heartbeat_round_trips(tmp_path):
 
 
 class TestDescribeLiveness:
+    @pytest.fixture(autouse=True)
+    def _pid_is_a_watcher(self, monkeypatch):
+        # These cases record THIS pytest process as the watcher; the identity rule
+        # (C-725, /proc/<pid>/cmdline) is exercised in tests/test_c725_watch_rescan.py.
+        monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: True)
+
     def test_none_is_not_running(self):
         word, _sentence = watch.describe_liveness(None)
         assert word == "NOT RUNNING"

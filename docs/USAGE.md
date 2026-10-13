@@ -754,7 +754,13 @@ It never returns until stopped (`Ctrl-C`, or `SIGTERM` from a process supervisor
 each triggered check in the exact same format as `clawseccheck --monitor --verbose` - because
 that is literally what it runs, as a subprocess, on every relevant change. Nothing about
 detection is reimplemented: the alert text, severity mapping, and the tamper-evident event
-journal `--monitor` already writes to are all untouched.
+journal `--monitor` already writes to are all untouched. The subprocess is started so that it
+imports the same copy of ClawSecCheck the watcher itself runs, from whatever directory the watcher
+was started in: when you start it as `python3 <skill-dir>/audit.py --watch`, the re-scan runs
+through that same `audit.py`, so it keeps its refusal to run beside stray importable files. If a
+re-scan cannot complete (it exits with anything other than `0` or `3`), the watcher prints a
+`RE-SCAN FAILED` block with the re-scan's own output and says that change has not been checked;
+it then keeps watching, and `--watch-status` shows the failed code.
 
 A burst of writes collapses to **one** re-scan, not one per file touched: `--watch` waits for a
 quiet window (`--watch-debounce`, default 2s) after the last detected change before running the
@@ -773,8 +779,18 @@ clawseccheck --watch-status --home ~/.openclaw --data-dir ~/.clawseccheck
 ```
 
 which reports `ALIVE`, `STALE` (no heartbeat update in a while - it may have hung), `STOPPED`
-(a clean shutdown was recorded, or the process is confirmed gone), or `NOT RUNNING` (never
-started, or pointed at the wrong `--data-dir`). Read-only - it never starts a watch itself.
+(a clean shutdown was recorded, or the process is confirmed gone), `STALE RECORD` (the recorded
+pid cannot be a watcher, or is now some other program's process, so no watcher is running),
+`UNREADABLE` (the heartbeat file is corrupt or cannot be read - not the same as never having
+run), or `NOT RUNNING` (never started, or pointed at the wrong `--data-dir`). Whether a live pid
+is a watcher is read from `/proc/<pid>/cmdline`; where that does not exist, a live pid is
+reported `ALIVE` with a note that its identity could not be confirmed. Read-only - it never
+starts a watch itself.
+
+One watcher per store: starting a second `--watch` on a `--data-dir` whose recorded watcher is
+still alive is refused with a non-zero exit, so it cannot overwrite the first one's heartbeat. A
+record whose process is gone is replaced, and the start says so. The check reads the heartbeat
+and then writes it; it is not a lock, so two starts in the same instant can both pass.
 
 Like `--monitor`, `--watch` only ever writes under its own store directory - never under the
 audited `--home`.

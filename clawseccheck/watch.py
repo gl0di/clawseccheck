@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 from . import pathprobe
-from .invocation import cmd
+from .invocation import _shim_beside_the_package, cmd
 from .monitorstore import _now_iso
 from .safeio import secure_dir, secure_write_text
 
@@ -370,15 +370,127 @@ def _write_heartbeat(path: Path, **fields) -> None:
         pass
 
 
-def read_heartbeat(path: "str | Path") -> "dict | None":
-    """Read back a heartbeat file for a liveness check. None if absent, unreadable,
-    or not valid JSON - never raises."""
+def read_heartbeat_ex(path: "str | Path") -> "tuple[dict | None, str | None]":
+    """``(heartbeat, problem)``. *problem* is None when the file parsed, else one of
+    ``"absent"`` (no such file: --watch has not run against this store),
+    ``"unreadable"`` (it exists but cannot be read) or ``"corrupt"`` (it was read but is
+    not a heartbeat object). Three different facts, so a caller can name the right one
+    instead of collapsing a damaged record into "never ran". Never raises."""
     try:
         text = Path(path).expanduser().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "absent"
+    except OSError:
+        return None, "unreadable"
+    except ValueError:  # UnicodeDecodeError: bytes that are not UTF-8
+        return None, "corrupt"
+    try:
         data = json.loads(text)
-    except (OSError, ValueError):
+    except (ValueError, RecursionError):
+        return None, "corrupt"
+    return (data, None) if isinstance(data, dict) else (None, "corrupt")
+
+
+def read_heartbeat(path: "str | Path") -> "dict | None":
+    """Read back a heartbeat file for a liveness check. None if absent, unreadable,
+    or not valid JSON - never raises. Use `read_heartbeat_ex` to tell those apart."""
+    return read_heartbeat_ex(path)[0]
+
+
+# ------------------------------------------------- who owns the heartbeat (C-725)
+
+def _plausible_pid(pid) -> bool:
+    """A real process id a watcher could have: an int (not a bool) above 1. `os.kill(0, 0)`
+    and `os.kill(-1, 0)` address a whole process group / every process and succeed, so a
+    record naming them must never be read as a live watcher."""
+    return isinstance(pid, int) and not isinstance(pid, bool) and pid > 1
+
+
+def _pid_alive(pid: int) -> "bool | None":
+    """True/False from a signal-0 probe; None when the platform cannot tell (a process
+    owned by someone else, or no such probe)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (OSError, PermissionError):
         return None
-    return data if isinstance(data, dict) else None
+
+
+def _cmdline_is_watcher(argv: "list[str]") -> bool:
+    """True when a process's argv is a ``--watch`` invocation of THIS tool: the exact
+    ``--watch`` token (never ``--watch-status``/``--watch-log``) plus one of the three
+    ways the tool is started - ``-m clawseccheck``, the bundled ``audit.py`` shim, or the
+    ``clawseccheck`` console script."""
+    if "--watch" not in argv:
+        return False
+    for tok in argv:
+        base = os.path.basename(tok)
+        if base in ("clawseccheck", "clawseccheck.exe", "audit.py"):
+            return True
+        if base == "__main__.py" and os.path.basename(os.path.dirname(tok)) == "clawseccheck":
+            return True
+    return False
+
+
+def _pid_is_watcher(pid: int) -> "bool | None":
+    """Is *pid* a clawseccheck ``--watch`` process? Read from ``/proc/<pid>/cmdline`` (no
+    subprocess). True / False, or None when that cannot be determined here (no procfs, or
+    the file is not readable) - the caller then falls back to liveness alone and says the
+    identity was not confirmed."""
+    if not pathprobe.is_dir(Path("/proc/self")):
+        return None
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        return None
+    argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    return _cmdline_is_watcher(argv)
+
+
+def recorded_watcher(heartbeat_path: "str | Path") -> "tuple[str, str]":
+    """What the store's heartbeat says about an EARLIER watcher: ``("none", "")`` (nothing
+    recorded, or a clean stop), ``("live", why)`` (that pid is alive and is - or could not
+    be ruled out as - a clawseccheck watcher) or ``("stale", why)`` (a record that no live
+    watcher stands behind, or one that cannot be read)."""
+    hb, problem = read_heartbeat_ex(heartbeat_path)
+    if hb is None:
+        if problem in ("unreadable", "corrupt"):
+            return "stale", f"its heartbeat file is {problem} and will be replaced"
+        return "none", ""
+    if hb.get("status") == "stopped":
+        return "none", ""
+    pid = hb.get("pid")
+    if not _plausible_pid(pid):
+        return "stale", f"it names pid {pid!r}, which cannot be a watcher"
+    if _pid_alive(pid) is False:
+        return "stale", f"pid {pid} is gone"
+    ident = _pid_is_watcher(pid)
+    if ident is False:
+        return "stale", f"pid {pid} is running but is not a clawseccheck --watch process"
+    return "live", f"pid {pid}" + ("" if ident else ", identity not confirmed")
+
+
+def can_start(heartbeat_path: "str | Path") -> "tuple[bool, str]":
+    """Single-watcher guard for one store. ``(False, refusal)`` when a watcher recorded
+    here is still alive: a second one would overwrite its heartbeat, and after it stopped
+    `--watch-status` would report a clean stop while the first is still running.
+    ``(True, note)`` otherwise - *note* names a stale record that the new watcher replaces
+    (empty when there was nothing). Check-then-write, not a lock: two starts within the
+    same instant can both pass."""
+    state, why = recorded_watcher(heartbeat_path)
+    if state == "live":
+        return False, (f"{cmd('--watch')}: refusing to start - a watcher is already running "
+                       f"for this store ({why}). A second one would overwrite its heartbeat "
+                       f"and make --watch-status report the wrong thing. Stop that one first, "
+                       f"use a different --data-dir, or - if that process is not a "
+                       f"clawseccheck watcher - delete {heartbeat_path}.")
+    if state == "stale":
+        return True, (f"{cmd('--watch')}: replacing a stale watcher record ({why}).")
+    return True, ""
 
 
 # ------------------------------------------------------------------------ the loop
@@ -392,35 +504,119 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 STALE_HEARTBEAT_MULTIPLE = 3
 
 
+#: What identifies the bundled entry shim, as opposed to some other project's `audit.py`
+#: that happens to sit beside a pip-installed package in site-packages.
+_SHIM_MARKER = "from clawseccheck.cli import main"
+
+#: `--monitor` exit codes that mean the scan RAN: 0 nothing to report, 3 drift found.
+#: Anything else (1 = monitoring not established, 2 = refused/usage, a crash, a signal) is
+#: a re-scan that did not complete.
+_RESCAN_RAN_RC = (0, 3)
+
+#: How much of a failed re-scan's own output the watcher repeats back.
+_FAILED_RESCAN_TAIL_LINES = 20
+
+
+def _bundled_shim() -> "str | None":
+    """Absolute path of this tool's own ``audit.py`` beside the package, or None."""
+    shim = _shim_beside_the_package()
+    if shim is None:
+        return None
+    try:
+        with open(shim, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError:
+        return None
+    return shim if _SHIM_MARKER in head else None
+
+
+def _started_as_the_shim() -> bool:
+    argv0 = sys.argv[0] if getattr(sys, "argv", None) and isinstance(sys.argv[0], str) else ""
+    if os.path.basename(argv0) != "audit.py":
+        return False
+    shim = _bundled_shim()
+    return shim is not None and os.path.realpath(argv0) == os.path.realpath(shim)
+
+
+def _child_launch() -> "tuple[list, dict]":
+    """``(entry argv, environment)`` that starts THIS package in a fresh interpreter,
+    wherever the child's working directory is and however the parent was started (C-725).
+
+    The old child was a bare ``python -m clawseccheck``: it found the package only if its
+    cwd happened to hold it (or it was pip-installed), so a watcher started as
+    ``python3 <skill-dir>/audit.py --watch`` from any other directory detected a change and
+    then failed to re-scan. Two forms, chosen by how the parent itself was started:
+
+    * the parent is the bundled ``audit.py`` shim -> the child is that same shim by absolute
+      path. The shim finds its package beside itself, never consults the cwd, and runs its
+      refusal of stray importable files (C-637/C-680) again, so the child is protected
+      exactly like the parent.
+    * anything else (``-m``, the console script) -> ``-m clawseccheck`` with this
+      package's own parent directory first on ``PYTHONPATH`` (so an installed copy or a
+      checkout elsewhere on the path cannot win) and ``PYTHONSAFEPATH=1`` (Python 3.11+
+      then keeps the cwd off ``sys.path`` for ``-m``; on 3.10 the variable is ignored and a
+      cwd that holds its own ``clawseccheck`` can still shadow the console-script case).
+
+    The working directory is never changed, so a relative ``--home``/``--state``/... or
+    ``--judged-bundle`` path means to the child what it meant to the parent.
+    """
+    env = dict(os.environ)
+    if _started_as_the_shim():
+        return [_bundled_shim()], env
+    root = str(Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONSAFEPATH"] = "1"
+    return ["-m", "clawseccheck"], env
+
+
 def _run_monitor_once(home: Path, state_path, events_path, history_path,
                       extra_args: "tuple[str, ...]" = ()) -> "tuple[int, str]":
     """Shell out to the EXISTING `--monitor` command. See this module's own docstring
-    for why detection is never reimplemented here: `sys.executable -m clawseccheck` is
-    the identical invocation `scripts/monitor_detection_gate.py` already drives this
-    tool with from outside the library, so the alert format is guaranteed identical.
+    for why detection is never reimplemented here: the child is this package's own
+    `--monitor`, the identical invocation `scripts/monitor_detection_gate.py` already
+    drives this tool with from outside the library, so the alert format is guaranteed
+    identical. How the child is started so that it imports THIS package is
+    `_child_launch`.
 
     The literal argv list is inlined directly into the `subprocess.run` call (rather
     than built up in a local first) so it stays statically visible to
     `tests/test_doc_facts.py::test_the_only_program_this_package_spawns_...` - the
     same shape `native.py`'s own spawn site already uses, and the reason that test can
     name this one's argv too instead of only knowing a second spawn site exists. This
-    is the package invoking ITSELF (`-m clawseccheck`, its own installed entry point)
-    to re-run the identical local, offline `--monitor` check in a fresh process - not a
-    third-party program and not a network call, so it does not touch either badge
-    figure the tests above pin; it is still a distinct spawn site, which is exactly
-    what that test exists to make visible rather than let accumulate unnoticed.
+    is the package invoking ITSELF (the interpreter running this process, plus either the
+    bundled shim or `-m clawseccheck`) to re-run the identical local, offline `--monitor`
+    check in a fresh process - not a third-party program and not a network call, so it
+    does not touch either badge figure the tests above pin; it is still a distinct spawn
+    site, which is exactly what that test exists to make visible rather than let
+    accumulate unnoticed.
     """
+    entry, env = _child_launch()
     try:
         r = subprocess.run(
-            [sys.executable, "-m", "clawseccheck", "--monitor", "--verbose",
+            [sys.executable, *entry, "--monitor", "--verbose",
              "--home", str(home), "--state", str(state_path),
              "--events", str(events_path), "--history", str(history_path),
              *extra_args],
-            capture_output=True, text=True,
+            capture_output=True, text=True, errors="replace", env=env,
         )
-    except OSError as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return 1, f"{cmd('--watch')}: could not run the re-scan: {exc}\n"
     return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def _failed_rescan_report(rc: int, output: str, when: str) -> str:
+    """The loud, self-contained block printed when the re-scan itself did not complete:
+    never worded as "re-scanned" and never as "no change"."""
+    lines = (output or "").strip().splitlines()
+    shown = lines[-_FAILED_RESCAN_TAIL_LINES:]
+    hidden = len(lines) - len(shown)
+    reason = "\n".join(shown) if shown else "(the re-scan printed nothing)"
+    if hidden > 0:
+        reason = f"({hidden} earlier line(s) not shown)\n" + reason
+    return (f"\n=== {cmd('--watch')}: RE-SCAN FAILED at {when} (rc={rc}) ===\n"
+            f"A change was detected, but it has NOT been checked: the --monitor re-scan "
+            f"did not complete.\nReason (the re-scan's own output):\n{reason}\n"
+            f"This watcher is still watching and will try again on the next change.\n")
 
 
 def run_watch(
@@ -457,6 +653,15 @@ def run_watch(
     out = stream if stream is not None else sys.stdout
     home = Path(home).expanduser()
     heartbeat_path = Path(heartbeat_path)
+
+    # C-725: one watcher per store. Refuse BEFORE anything is created or written, so the
+    # running watcher's heartbeat is left exactly as it wrote it.
+    may_start, start_note = can_start(heartbeat_path)
+    if not may_start:
+        sys.stderr.write(start_note + "\n")
+        return 1
+    if start_note:
+        out.write(start_note + "\n")
 
     watcher = make_watcher(home, poll_interval_s=poll_interval_s)
     started_at = _now_iso()
@@ -528,9 +733,12 @@ def run_watch(
             cycles += 1
             last_scan_at = _now_iso()
             last_scan_rc = rc
-            out.write(f"\n=== {cmd('--watch')}: change detected, re-scanned at "
-                      f"{last_scan_at} (rc={rc}) ===\n")
-            out.write(output)
+            if rc in _RESCAN_RAN_RC:
+                out.write(f"\n=== {cmd('--watch')}: change detected, re-scanned at "
+                          f"{last_scan_at} (rc={rc}) ===\n")
+                out.write(output)
+            else:
+                out.write(_failed_rescan_report(rc, output, last_scan_at))
             if hasattr(out, "flush"):
                 out.flush()
             _heartbeat("running", cycles, last_scan_at, last_scan_rc)
@@ -545,15 +753,22 @@ def run_watch(
     return 0
 
 
-def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
+def describe_liveness(heartbeat: "dict | None", problem: "str | None" = None
+                      ) -> "tuple[str, str]":
     """(status_word, sentence) for a heartbeat dict - the `--watch-status` surface.
 
-    Three outcomes, not two, for the same reason `--verify-baseline` refuses to
+    Not two outcomes but several, for the same reason `--verify-baseline` refuses to
     collapse "no baseline" into "tampered": a watcher that never ran, one that shut
-    down cleanly, and one that is either running or has silently hung are different
-    facts calling for different reactions.
+    down cleanly, one whose heartbeat cannot be read, a record no live watcher stands
+    behind (a pid that cannot be a watcher, or one that is now somebody else's process),
+    and one that is either running or has silently hung are different facts calling for
+    different reactions. *problem* is `read_heartbeat_ex`'s second value.
     """
     if heartbeat is None:
+        if problem in ("unreadable", "corrupt"):
+            return ("UNREADABLE", "The watch heartbeat file exists but is unreadable or "
+                    "corrupt, so nothing can be said about a watcher \u2014 this is not the "
+                    "same as --watch never having run. Delete it to start clean.")
         return "NOT RUNNING", "No watch heartbeat found \u2014 --watch has not run yet."
     status = heartbeat.get("status")
     pid = heartbeat.get("pid")
@@ -561,22 +776,32 @@ def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
     interval = heartbeat.get("heartbeat_interval_s")
     interval = interval if isinstance(interval, (int, float)) and interval > 0 \
         else DEFAULT_HEARTBEAT_INTERVAL_S
-    pid_alive = None
-    if isinstance(pid, int):
-        try:
-            os.kill(pid, 0)
-            pid_alive = True
-        except ProcessLookupError:
-            pid_alive = False
-        except (OSError, PermissionError):
-            # Exists, owned by someone else, or platform can't tell - not evidence
-            # either way; treated as "cannot determine" rather than "gone".
-            pid_alive = None
     if status == "stopped":
         return "STOPPED", f"The watcher (pid {pid}) shut down cleanly at {updated_at}."
+    if not _plausible_pid(pid):
+        return ("STALE RECORD", f"The heartbeat names pid {pid!r}, which cannot be a watcher "
+                f"process, so no watcher is running for this store. Last update: {updated_at}.")
+    # Exists, owned by someone else, or platform can't tell is not evidence either way;
+    # it stays "cannot determine" rather than "gone".
+    pid_alive = _pid_alive(pid)
     if pid_alive is False:
         return ("STOPPED", f"The watcher process (pid {pid}) is gone but never recorded a "
                            f"clean shutdown \u2014 it may have crashed. Last update: {updated_at}.")
+    identity = _pid_is_watcher(pid)
+    if identity is False:
+        return ("STALE RECORD", f"The heartbeat names pid {pid}, which is running but is not "
+                f"a clawseccheck --watch process (the pid was probably reused after the "
+                f"watcher died), so no watcher is running for this store. "
+                f"Last update: {updated_at}.")
+    tail = ""
+    if identity is None:
+        tail += (" The pid is alive, but its identity as a clawseccheck watcher could not "
+                 "be confirmed on this platform.")
+    last_rc = heartbeat.get("last_scan_rc")
+    if isinstance(last_rc, int) and not isinstance(last_rc, bool) \
+            and last_rc not in _RESCAN_RAN_RC:
+        tail += (f" The last re-scan FAILED (rc={last_rc}): changes since then have not "
+                 f"been checked.")
     age_s = None
     try:
         from datetime import datetime  # noqa: PLC0415 - only needed here
@@ -592,6 +817,8 @@ def describe_liveness(heartbeat: "dict | None") -> "tuple[str, str]":
         age_s = None
     if age_s is not None and age_s > interval * STALE_HEARTBEAT_MULTIPLE:
         return ("STALE", f"The watcher (pid {pid}) has not updated its heartbeat in "
-                         f"{int(age_s)}s (expected every {int(interval)}s) \u2014 it may have hung.")
-    return "ALIVE", f"The watcher (pid {pid}) is running, mode={heartbeat.get('mode')}, " \
-                   f"{heartbeat.get('cycles', 0)} re-scan(s) so far. Last update: {updated_at}."
+                         f"{int(age_s)}s (expected every {int(interval)}s) \u2014 it may have hung."
+                         + tail)
+    return "ALIVE", (f"The watcher (pid {pid}) is running, mode={heartbeat.get('mode')}, "
+                     f"{heartbeat.get('cycles', 0)} re-scan(s) so far. Last update: "
+                     f"{updated_at}." + tail)
