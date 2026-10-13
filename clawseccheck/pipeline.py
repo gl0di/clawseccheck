@@ -814,7 +814,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     there would be nothing to opt out of.
     """
     from .adjudication import (  # noqa: PLC0415 - see the module note on layering
-        _parse_verdicts, _second_opinion, build_judge_packet, run_state,
+        _parse_verdicts_with_abstentions, _second_opinion, build_judge_packet, run_state,
     )
     started = time.monotonic()
     try:
@@ -872,14 +872,23 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     # own "top-level value is not a JSON object" diagnostic -- silently dropping that
     # feedback was never the intent, only the vacuous `{}` case was. `!= {}` narrows
     # the exemption back to exactly that one shape.
-    verdicts_map = (
-        _parse_verdicts(json.dumps(bundle["judged"]))
+    #
+    # C-712: an ABSTAIN is not a verdict, so it is absent from `verdicts_map` and an
+    # all-ABSTAIN bucket takes the "no verdicts submitted" branch below, exactly like an
+    # empty list. `abstained` only feeds the disclosure: how many packet items the judge
+    # declined to decide, which is NOT the same as nobody having looked.
+    verdicts_map, abstained = (
+        _parse_verdicts_with_abstentions(json.dumps(bundle["judged"]))
         if bundle and bundle.get("judged") is not None and bundle.get("judged") != {}
-        else {}
+        else ({}, frozenset())
     )
+    packet_keys = {(i.get("finding_id"), i.get("target")) for i in packet}
+    abstained_n = len(abstained & packet_keys)
+    abstain_note = (f" {abstained_n} item(s) abstained (no verdict; nothing was reviewed for them)."
+                    if abstained_n else "")
     if verdicts_map:
         try:
-            second_opinion = _second_opinion(ctx, findings, verdicts_map)
+            second_opinion = _second_opinion(ctx, findings, verdicts_map, abstained)
         except Exception:  # noqa: BLE001 - an advisory panel must never break the run
             second_opinion = []
         data["secondOpinion"] = second_opinion
@@ -888,6 +897,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         lines.append(
             f"{reviewed} of {len(second_opinion)} borderline item(s) carry a submitted "
             "verdict. Advisory only: the grade and the findings above are unchanged."
+            + abstain_note
         )
         for row in second_opinion[:12]:
             lines.append(
@@ -898,7 +908,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         if len(second_opinion) > 12:
             lines.append(f"  - (+{len(second_opinion) - 12} more)")
         quiet_line = (f"{reviewed} of {len(second_opinion)} borderline item(s) judged "
-                      "(advisory; grade unchanged).")
+                      "(advisory; grade unchanged)." + abstain_note)
         detail = quiet_line
     else:
         lines.append(
@@ -906,8 +916,10 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
             "the packet with: --full --json; return the answers with: "
             "--full --judged-bundle <file>."
         )
+        if abstain_note:
+            lines.append(abstain_note.strip())
         detail = (f"{len(packet) + vet_item_total} item(s) awaiting adjudication \u2014 no "
-                  "verdicts submitted.")
+                  "verdicts submitted." + abstain_note)
         quiet_line = detail + " Produce the packet with: --full --json."
 
     # F-152: vetJudged - the SECOND, structurally separate authority bucket. `judged`

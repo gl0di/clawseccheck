@@ -136,10 +136,13 @@ def test_wiring_the_fix_actually_gates_on_the_parsed_map(monkeypatch):
     ctx = collect(FIXTURES / "home_vuln")
     from clawseccheck.checks import run_all
     findings = run_all(ctx)
-    # run_adjudication imports _parse_verdicts lazily FROM adjudication at call time
+    # run_adjudication imports the parse funnel lazily FROM adjudication at call time
     # (see the module note on layering), so the patch target is the defining module.
+    # C-712: that funnel is _parse_verdicts_with_abstentions (the map plus the abstained
+    # keys); _parse_verdicts is now a thin wrapper over it.
     import clawseccheck.adjudication as adjudication_mod
-    monkeypatch.setattr(adjudication_mod, "_parse_verdicts", lambda raw: {})
+    monkeypatch.setattr(adjudication_mod, "_parse_verdicts_with_abstentions",
+                        lambda raw: ({}, frozenset()))
     p = pl.run_adjudication(
         ctx, findings,
         bundle={"judged": {"verdicts": [{"finding_id": "x", "target": "y", "verdict": "SAFE"}]}},

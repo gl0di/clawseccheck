@@ -194,10 +194,12 @@ def test_item_has_verdict_schema_and_question():
     # This previously pinned {"answer": ["yes", "no"], ...} — a schema the parser
     # rejects outright, so a judge that followed the packet had 100% of its verdicts
     # silently dropped. See the round-trip tests below for the structural guard.
-    assert item["verdict_schema"] == {
+    # C-712: plus the separate, non-severity "abstain" key; the verdict list is untouched.
+    assert {k: v for k, v in item["verdict_schema"].items() if k != "abstain"} == {
         "verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"],
         "reason": "free text",
     }
+    assert "ABSTAIN" in item["verdict_schema"]["abstain"]
     assert isinstance(item["question"], str) and len(item["question"]) > 0
 
 

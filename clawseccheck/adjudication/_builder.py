@@ -95,7 +95,24 @@ from ..textnorm import normalize_for_scan
 # The schema every packet item's "verdict_schema" field carries - a fixed
 # contract the host agent's answer must conform to, and exactly the shape
 # _parse_verdicts accepts.
-_VERDICT_SCHEMA = {"verdict": list(_VERDICT_VALUES), "reason": "free text"}
+#
+# C-712: a judge handed an item with no evidence to decide from had only categorical
+# answers, so any verdict would have measured the missing information rather than the
+# suspicion. ABSTAIN is the fourth, non-categorical answer: "I could not decide from the
+# packet". It is deliberately NOT a member of "verdict" above: that list is the
+# severity-ascending vocabulary the parser ranks, the questions quote, and the structural
+# tests derive from, and an abstention has no severity. It travels in its own key so a
+# judge reading only this field still learns it exists. The consumers treat it exactly
+# like a missing entry for the item (_verdicts._parse_verdicts_with_abstentions).
+_ABSTAIN_VERDICT = "ABSTAIN"
+_VERDICT_SCHEMA = {
+    "verdict": list(_VERDICT_VALUES),
+    "reason": "free text",
+    "abstain": (
+        f"if the packet gives you nothing to decide this item from, answer {_ABSTAIN_VERDICT} "
+        "instead of guessing; it is treated exactly like no verdict submitted for the item"
+    ),
+}
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
 # dual-use signal deliberately down-ranked from FAIL to WARN so a legitimate skill
@@ -1500,7 +1517,7 @@ def build_bundle_template() -> dict:
             "judged": {
                 "finding_id": "copy the packet item's finding_id",
                 "target": "copy the packet item's target",
-                "verdict": " | ".join(_VERDICT_VALUES),
+                "verdict": " | ".join((*_VERDICT_VALUES, _ABSTAIN_VERDICT)),
                 "reason": "free text",
             },
             "liveTest": {
