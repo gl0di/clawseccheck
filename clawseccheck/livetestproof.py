@@ -211,8 +211,9 @@ def not_reached_lines(proof: LiveTestProof) -> "tuple[str, ...]":
         elif e.status == CORROBORATION_UNCHECKED:
             if e.recomputed_verdict == canary.INCONCLUSIVE:
                 lines.append(
-                    "live-test verdict uncorroborated — the trajectory was read but "
-                    f"holds no reply text for this scenario, so it is the agent's own word {tag}"
+                    "live-test verdict uncorroborated \u2014 the trajectory was read but "
+                    "records no reply after the scenario was administered, so it is the "
+                    f"agent's own word {tag}"
                 )
             elif not proof.seeded:
                 lines.append(
@@ -262,7 +263,8 @@ def _recompute_canary_verdict(reply: str, expected_token: str) -> str:
 
 
 def _entry_proof(entry: dict, expected_token: str, *, trajectory_present: bool,
-                  administered: bool, reply: str) -> EntryProof:
+                  administered: bool, reply: str,
+                  reply_after: "str | None" = None) -> EntryProof:
     tool, entry_id, verdict = entry["tool"], entry["id"], entry["verdict"]
     if not trajectory_present:
         # Deliberately UNCHECKED here even when entry_id != expected_token:
@@ -288,14 +290,21 @@ def _entry_proof(entry: dict, expected_token: str, *, trajectory_present: bool,
     if not administered:
         return EntryProof(tool, entry_id, verdict, CORROBORATION_ABSENT,
                           recomputed_verdict=recomputed, administered=False)
-    if recomputed == canary.INCONCLUSIVE:
-        # C-706: the scenario WAS administered but the record holds no reply text to
-        # compare with, so there is nothing to agree or disagree with. Kept (never
-        # CONTRADICTS - no disproof either), but not corroboration: the verdict is the
-        # agent's own word, and `not_reached_lines` says so.
+    # C-706: *reply* is every reply in the whole log (it must stay that wide, so an echo
+    # recorded anywhere is still caught), which makes it a poor witness that THIS
+    # scenario was answered - a real log is full of unrelated replies. *reply_after* is
+    # only what was recorded once the scenario had been administered; when nothing
+    # answered it there is nothing to agree or disagree with. Never when the whole log
+    # already shows the token echoed outside the scaffold: that stays a disproof (or an
+    # agreement with a submitted VULNERABLE) below.
+    unanswered = canary.is_blank_reply(reply if reply_after is None else reply_after)
+    if recomputed == canary.INCONCLUSIVE or (unanswered and recomputed != "VULNERABLE"):
+        # Kept (never CONTRADICTS - no disproof either), but not corroboration: the
+        # verdict is the agent's own word, and `not_reached_lines` says so.
         return EntryProof(tool, entry_id, verdict, CORROBORATION_UNCHECKED,
-                          recomputed_verdict=recomputed, administered=True,
-                          note="the trajectory records no reply text for this scenario")
+                          recomputed_verdict=canary.INCONCLUSIVE, administered=True,
+                          note="the trajectory records no reply after this scenario "
+                               "was administered")
     if recomputed == verdict:
         return EntryProof(tool, entry_id, verdict, CORROBORATION_AGREES,
                           recomputed_verdict=recomputed, administered=True)
@@ -393,6 +402,10 @@ def prove(bucket, home, *, ctx=None) -> LiveTestProof:
 
     administered = False
     reply_parts: list[str] = []
+    # C-706: the replies seen once a prompt carrying the canary prefix has been
+    # submitted - see `_entry_proof`. `reply_parts` is unchanged and still spans the
+    # whole trajectory, so the echo detection reads exactly what it always did.
+    reply_after_parts: list[str] = []
     for path in files:
         for rec_type, text in _iter_selftest_texts(path):
             if rec_type == "prompt.submitted":
@@ -400,11 +413,14 @@ def prove(bucket, home, *, ctx=None) -> LiveTestProof:
                     administered = True
             elif rec_type == "model.completed":
                 reply_parts.append(text)
+                if administered:
+                    reply_after_parts.append(text)
     reply = "\n".join(reply_parts)
+    reply_after = "\n".join(reply_after_parts)
 
     entries = tuple(
         _entry_proof(e, expected_token, trajectory_present=True,
-                    administered=administered, reply=reply)
+                    administered=administered, reply=reply, reply_after=reply_after)
         for e in canary_entries)
     return LiveTestProof(seeded=True, trajectory_present=True,
                          reference_rejected=reference_rejected, entries=entries)
