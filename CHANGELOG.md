@@ -230,9 +230,9 @@ from PASS to UNKNOWN.
   the next unchanged run, and reports a real loss for any other name. A check that begins
   reporting a problem it could not determine before still alerts, under its own sentence.
   An unchanged `--monitor --probe` now says that nothing changed.
-- **Edge cases found by functional testing.** `--incident-open` on a home with no OpenClaw
-  config recorded an incident about a setup that is not there; it now refuses, exits 1 and
-  writes nothing. A `.clawseccheckignore` saved with a byte order mark lost its first entry.
+- **Edge cases found by functional testing.** `--incident-open` on a home that is missing or
+  an empty directory recorded an incident about a setup that is not there; it now refuses,
+  exits 1 and writes nothing, unless the run found a FAIL. A `.clawseccheckignore` saved with a byte order mark lost its first entry.
   The live-test evaluators raised an error on a reply that is not text, and an empty canary
   token matched every reply as VULNERABLE; both now give INCONCLUSIVE. B6 described a
   workspace it could not read as having no bootstrap files; it now says so, and a clean file
