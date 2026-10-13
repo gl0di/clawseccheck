@@ -119,7 +119,7 @@ class Journal:
 
 
 def journal_path(home) -> Path:
-    return Path(home).expanduser() / JOURNAL_RELPATH
+    return pathprobe.expand_user(home) / JOURNAL_RELPATH
 
 
 def _basename(argv) -> str:

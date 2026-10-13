@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
 
 from . import pathprobe
 from .locking import journal_lock
@@ -56,7 +55,7 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
     id ('ts') on success, or None on write failure - never raises, same contract as
     runstore.save_run."""
     ts = when if when is not None else datetime.now().isoformat(timespec="seconds")
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     base = {
         "ts": ts,
         "version": str(version) if version else None,
@@ -77,7 +76,7 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
 
 def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
     """Return the stored run whose 'ts' == run_id, last-write-wins on collision."""
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return None
     match = None
@@ -91,7 +90,7 @@ def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
 
 
 def list_sbom_run_ids(path: str = DEFAULT_SBOM_RUNS) -> "list[str]":
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return []
     try:

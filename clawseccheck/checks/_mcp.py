@@ -948,7 +948,7 @@ def vet_plugin(
     from ..shippedexec import ShippedArtifact as _ShippedArtifact  # noqa: PLC0415
     from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
 
-    p = Path(str(path)).expanduser()
+    p = pathprobe.expand_user(str(path))
     if not pathprobe.exists(p):
         return _plugin_finding(
             HIGH,
@@ -3499,7 +3499,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
     spec_elided = 0  # C-664: subtrees of a --vet-mcp spec file the shallow reader dropped
 
     if target is not None:
-        p = Path(str(target)).expanduser()
+        p = pathprobe.expand_user(str(target))
         # B-683: `Path.is_file()` does NOT swallow EACCES, so a target under a directory
         # this process cannot stat used to raise straight past every branch below and out
         # to the top-level handler, which printed "unexpected internal error
@@ -3552,7 +3552,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         else:
             # Treat target as a server name - load from config.
             name = str(target)
-            home_path = Path(str(home)).expanduser()
+            home_path = pathprobe.expand_user(str(home))
             cfg_file = home_path / "openclaw.json"
 
             # B-681: whether the config could be READ decides what we are entitled to
@@ -3631,7 +3631,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 ]
     else:
         # Vet all servers from config at home.
-        home_path = Path(str(home)).expanduser()
+        home_path = pathprobe.expand_user(str(home))
         cfg_file = home_path / "openclaw.json"
         _vet_mcp_config_found = pathprobe.is_file(cfg_file)
         try:

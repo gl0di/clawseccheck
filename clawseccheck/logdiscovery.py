@@ -125,7 +125,7 @@ def _config_path_sink(ctx: Context, dotted_path: str, kind: str,
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        p = Path(value).expanduser()
+        p = pathprobe.expand_user(value)
     except (TypeError, ValueError):
         return None
     if not p.is_absolute():

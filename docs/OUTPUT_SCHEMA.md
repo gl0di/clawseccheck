@@ -1093,9 +1093,10 @@ are unchanged** - the run still continues exactly as if no verdicts had been sub
 Only the silence is gone.
 
 That note covers the `OSError` family and no more. Two path shapes still fail loudly
-instead, exiting non-zero with no artifact and without naming the path: a `~user` prefix
-naming no such user (`RuntimeError`), and an existing file holding invalid UTF-8
-(`UnicodeDecodeError`). A path that is a blocking FIFO still blocks. These are stated
+instead, exiting non-zero with no artifact; the one-line message on stderr names the path
+and the reason: a `~user` prefix naming no account on this machine (refused up front for
+every path option, before anything is read or written), and an existing file holding
+invalid UTF-8. A path that is a blocking FIFO still blocks. These are stated
 rather than folded into the note on purpose - converting a loud failure into a quiet
 `rc 0` report would be the opposite of what B-561 is for.
 

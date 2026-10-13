@@ -432,7 +432,7 @@ def _store_dir(args) -> Path:
     one helper is what makes the promise structural instead of a list someone has to
     remember to extend.
     """
-    return Path(args.history).expanduser().parent
+    return pathprobe.expand_user(args.history).parent
 
 
 def _coverage_path(args) -> str:
@@ -1885,7 +1885,7 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
     if args.sarif:
         try:
             secure_write_text(
-                Path(args.sarif).expanduser(),
+                pathprobe.expand_user(args.sarif),
                 render_sarif(findings, tool_version=__version__, profile=profile),
             )
             _emit(f"(SARIF written to {args.sarif})")
@@ -2225,6 +2225,42 @@ def _unusable_path_text(raw_path, reason: str) -> str:
     return _redact_home_paths(f"{_sanitize(str(raw_path))}: {reason}")
 
 
+# C-729: the options whose value is a filesystem path the tool expands with `~`. A value
+# naming a `~user` that does not exist is refused up front (`_refuse_unexpandable_paths`),
+# because `pathprobe.expand_user` would otherwise read it as a relative path and an output
+# flag would create a directory literally named `~user`. Keyed by argparse `dest`.
+# `tests/test_c729_unknown_tilde_user.py` walks the real parser and fails for any option
+# that takes a value and is in neither this table nor that test's "not a path" table.
+_PATH_OPTION_DESTS = (
+    "home", "save", "state", "events", "history", "data_dir", "vet", "vet_skill", "vet_plugin",
+    "vet_mcp", "advise", "analyze_trajectory", "behavioral", "vet_judged", "judged_bundle",
+    "attest", "badge", "html", "sarif", "pdf", "apply_ignore_proposals", "judged",
+    "propose_ignore", "log",
+)
+
+
+def _refuse_unexpandable_paths(args) -> None:
+    """Raise ``UnusableInputPath`` for the first path option whose ``~`` cannot be expanded.
+
+    C-729. Runs right after argument parsing, before anything is read or written, so a
+    mistyped account name ends the run with one named line instead of "unexpected internal
+    error" (or, for an output flag, a quietly created ``~name`` directory).
+    """
+    for dest in _PATH_OPTION_DESTS:
+        value = getattr(args, dest, None)
+        if not isinstance(value, str) or not value.startswith("~"):
+            continue
+        try:
+            Path(value).expanduser()
+        except RuntimeError:
+            if value == "~" or value.startswith("~/") or value.startswith("~\\"):
+                reason = ("the '~' in it cannot be expanded: this machine has no home "
+                          "directory for the current user")
+            else:
+                reason = "the '~user' in it names no account on this machine"
+            raise UnusableInputPath(value, reason) from None
+
+
 def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     """``(payload, problem)`` for a judge-verdicts path. *problem* is None when it was read.
 
@@ -2345,7 +2381,7 @@ def _unassessable_target(typed) -> "str | None":
     top-level handler and printed "unexpected internal error (PermissionError) ... open an
     issue" - the tool asking to be bug-reported for the user's own directory mode.
     """
-    target_path = Path(str(typed)).expanduser()
+    target_path = pathprobe.expand_user(str(typed))
     try:
         os.stat(target_path)  # follows symlinks: "is there something here to read?"
     except (FileNotFoundError, NotADirectoryError):
@@ -2796,7 +2832,7 @@ def _run_watch_cli(args) -> int:
     loop does (SIGTERM/SIGINT), which is the one deliberate way this command differs
     from every other mode in this file.
     """
-    home = Path(args.home).expanduser()
+    home = pathprobe.expand_user(args.home)
     if not pathprobe.is_dir(home):
         print(f"{cmd('--watch')}: '{home}' is not a directory \u2014 nothing to watch.",
               file=sys.stderr)
@@ -2927,7 +2963,7 @@ def _run_apply_ignore_proposals(args) -> int:
     still flagged by --monitor) is untouched by this being the write's origin.
     """
     try:
-        raw = read_user_text(Path(args.apply_ignore_proposals).expanduser())
+        raw = read_user_text(pathprobe.expand_user(args.apply_ignore_proposals))
     except UnicodeDecodeError:
         _emit(f"clawseccheck: could not read the proposals file "
               f"{_sanitize(str(args.apply_ignore_proposals))}: not valid UTF-8 text.")
@@ -2978,7 +3014,7 @@ def _run_apply_ignore_proposals(args) -> int:
         _emit("Nothing to apply \u2014 no proposed entries in that file.")
         return 0
 
-    ignore_path = Path(args.home).expanduser() / ".clawseccheckignore"
+    ignore_path = pathprobe.expand_user(args.home) / ".clawseccheckignore"
     # B-478: `append_entries` skips entries the file already holds, so a second apply of
     # the same proposals printed the full list under "will be appended to ..." and then
     # "Applied 0" - which reads as a failed write, not as the idempotency it actually is.
@@ -3679,7 +3715,7 @@ def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[st
     directory) can reach it. ``None`` means the default store and keeps the home-relative
     ``~/.clawseccheck/report.pdf`` spelling, which is what the attach note prints.
     """
-    managed = Path(home).expanduser() / "media" / "outbound"
+    managed = pathprobe.expand_user(home) / "media" / "outbound"
     try:
         if pathprobe.is_dir(managed) and os.access(managed, os.W_OK):
             return str(managed / "clawseccheck-report.pdf"), True
@@ -4207,6 +4243,7 @@ def _main(argv=None) -> int:
             "withhold entirely). See CHANGELOG.md."
         )
     args = p.parse_args(argv)
+    _refuse_unexpandable_paths(args)
     # C-419: --monitor writes THREE files and --history defaulted independently of the
     # other two, so redirecting only --state/--events silently kept writing into the real
     # history. That is not hypothetical: a test campaign did exactly this and put ~51
@@ -4236,7 +4273,7 @@ def _main(argv=None) -> int:
         if not str(args.data_dir).strip():
             p.error("--data-dir needs a directory; an empty value would silently target "
                     "the current working directory, which --purge would then empty")
-        _store = Path(args.data_dir).expanduser()
+        _store = pathprobe.expand_user(args.data_dir)
         for _attr, _name in (("state", "state.json"), ("events", "events.jsonl"),
                              ("history", "history.jsonl")):
             if getattr(args, _attr) is None:
@@ -4825,7 +4862,7 @@ def _main(argv=None) -> int:
         # have the agent run this at session start with no consent prompt; the consent rule
         # covers --monitor, which writes.
         from .report import render_brief  # noqa: PLC0415
-        _state_path = Path(args.state).expanduser()
+        _state_path = pathprobe.expand_user(args.state)
         _state, _mtime = None, None
         try:
             if pathprobe.is_file(_state_path):
@@ -4971,7 +5008,7 @@ def _main(argv=None) -> int:
         if args.sarif:
             try:
                 secure_write_text(
-                    Path(args.sarif).expanduser(),
+                    pathprobe.expand_user(args.sarif),
                     render_sarif([f, *getattr(f, "ring_findings", [])],
                                  tool_version=__version__, ctx=getattr(f, "ctx", None),
                                  profile=profile),
@@ -5010,7 +5047,7 @@ def _main(argv=None) -> int:
         return _run_vet_mcp(_vet_route[1], args, ascii_only)
 
     if _mode == "vet_all":
-        home_dir = Path(args.home).expanduser()
+        home_dir = pathprobe.expand_user(args.home)
         return vet_all(home_dir, ascii_only=ascii_only, json_output=bool(args.json))
 
     if _mode == "vet_mcp":
@@ -5120,7 +5157,7 @@ def _main(argv=None) -> int:
         # holding only already-expired entries must still be reported on (which ones,
         # and that they no longer apply), not folded into "No entries found" just
         # because the ACTIVE set (`ignore` below) happens to be empty.
-        _ignore_entries = load_ignore_entries(Path(args.home).expanduser())
+        _ignore_entries = load_ignore_entries(pathprobe.expand_user(args.home))
         ignore = {e.entry for e in _ignore_entries if not e.expired}
         if not _ignore_entries:
             _emit("No .clawseccheckignore entries found.")
@@ -5280,7 +5317,7 @@ def _main(argv=None) -> int:
                 getattr(sys.stdin, "buffer", sys.stdin).read())
             src = "stdin"
         else:
-            attestation = _attest.load_attestation(Path(args.attest).expanduser())
+            attestation = _attest.load_attestation(pathprobe.expand_user(args.attest))
             src = args.attest
         if not attestation:
             # Diagnostic, not report content: keep machine-readable stdout (--json/--sarif)
@@ -5341,7 +5378,7 @@ def _main(argv=None) -> int:
         and not args.exit_code and not args.attest
     )
     if _bare_run:
-        first_run = _onboarding_reason(Path(args.home).expanduser())
+        first_run = _onboarding_reason(pathprobe.expand_user(args.home))
         if first_run:
             from .checks import CHECKS  # noqa: PLC0415
             # B-776: "nothing at --home" already holds by construction here (that's what
@@ -5425,7 +5462,7 @@ def _main(argv=None) -> int:
     # B-154: RISK-* chains must honor .clawseccheckignore too - pass the same
     # ignore set findings were suppressed with, then drop suppressed chains
     # before they reach any render/JSON path.
-    _risk_ignore = load_ignore(Path(args.home).expanduser())
+    _risk_ignore = load_ignore(pathprobe.expand_user(args.home))
     paths = [p for p in _risk.risk_paths(ctx, findings, ignore=_risk_ignore)
              if not p.suppressed]
 
@@ -5456,7 +5493,7 @@ def _main(argv=None) -> int:
         ``/tmp`` (``--pdf /tmp/report.pdf``) would be a destructive surprise well outside
         what this tool is allowed to do to the user's machine.
         """
-        p = Path(raw).expanduser()
+        p = pathprobe.expand_user(raw)
         parent = p.parent
         if not pathprobe.exists(parent):
             parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -5988,7 +6025,7 @@ def _main(argv=None) -> int:
         # second time, once the sweeps this branch runs have actually finished, so the
         # same reasoning puts the write after that too. Writing here would put a grade
         # in the badge that the run had not yet earned.
-        sweep_home = Path(args.home).expanduser()
+        sweep_home = pathprobe.expand_user(args.home)
         plugin_sweep = None
         # B-405: also swept for adjudication's own-target corpus (below) - NOT for a
         # separate SKILL SWEEP section (the Skills section above already came from
@@ -6221,7 +6258,7 @@ def _main(argv=None) -> int:
         # there still opens an incident - see open_incident_from_audit.
         _inc_record, _inc_err = open_incident_from_audit(
             ctx, findings, path=_incidents_path(args), events=args.events,
-            nothing_to_audit=_onboarding_reason(Path(args.home).expanduser()) is not None)
+            nothing_to_audit=_onboarding_reason(pathprobe.expand_user(args.home)) is not None)
         if _inc_err == "no_actionable_findings":
             print("--incident-open: no actionable (WARN/FAIL-weight) findings this run \u2014 "
                   "nothing to open an incident about.", file=sys.stderr)
@@ -6494,7 +6531,7 @@ def _main(argv=None) -> int:
         # content, and a crash in it must not take down the watch that found the change.
         _revet_names = _changed_skills(prev, snap)
         if _revet_names:
-            _revet_roots = _workspace_roots(Path(args.home).expanduser(), ctx.config)
+            _revet_roots = _workspace_roots(pathprobe.expand_user(args.home), ctx.config)
             for _name in _revet_names[:_REVET_CAP]:
                 _target = next((r / "skills" / _name for r in _revet_roots
                                 if pathprobe.is_dir(r / "skills" / _name)), None)
@@ -6933,7 +6970,7 @@ def _main(argv=None) -> int:
         full_sweep_json = None
         full_pipeline = None
         if args.full:
-            sweep_home = Path(args.home).expanduser()
+            sweep_home = pathprobe.expand_user(args.home)
             sweep = None
             if not args.fast:
                 # B-404: reuse the SAME ctx the audit above already collected
@@ -7087,7 +7124,7 @@ def _main(argv=None) -> int:
         _hoisted_sweep = None
         _hoisted_sweep_lines: list[str] = []
         if args.full and not args.json and not args.card:
-            sweep_home = Path(args.home).expanduser()
+            sweep_home = pathprobe.expand_user(args.home)
             sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
             if not args.fast:
                 _record_run("self_test", args)
@@ -7163,7 +7200,7 @@ def _main(argv=None) -> int:
             # clamp is cooperative arithmetic on a monotonic float, never a nested
             # check_deadline block; the deadline is consulted BETWEEN targets, inside the
             # sweep, so a target already underway always finishes.
-            sweep_home = Path(args.home).expanduser()
+            sweep_home = pathprobe.expand_user(args.home)
             sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
             sweep = None
             if args.quiet:

@@ -556,7 +556,7 @@ def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]"
     What it does close is the *corruption* half: a baseline that is present but unusable can
     no longer masquerade as either a healthy first run or a clean comparison.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     # `exists()` follows symlinks, so a broken symlink reports False - check the link
     # itself too, or a planted dangling symlink at the state path reads as "first run".
     if not pathprobe.exists(p) and not pathprobe.is_symlink(p):
@@ -588,7 +588,7 @@ def load_state(path: str | Path = DEFAULT_STATE) -> dict | None:
     """
     return read_baseline(path)[1]
 def save_state(path: str | Path, snap: dict) -> None:
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     # Symlink-safe: create the dir 0700 and refuse to follow a symlinked target,
     # so a planted symlink can never turn this write into an arbitrary-file clobber.
     # state.json itself is unauthenticated -- no hash chain, unlike history.jsonl/
@@ -669,7 +669,7 @@ def baseline_reference(path: str | Path = DEFAULT_STATE) -> "tuple[str, str]":
     file a later `--verify-baseline` will re-read, and a short write that left it truncated
     fails to parse here instead of matching.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     try:
         raw = read_user_text(p, errors="replace")
     except FileNotFoundError:
@@ -703,7 +703,7 @@ def _state_path_digest(path: "str | Path") -> str:
     """
     import os  # noqa: PLC0415
     # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
-    resolved = os.path.realpath(Path(path).expanduser())
+    resolved = os.path.realpath(pathprobe.expand_user(path))
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
 
 
@@ -779,7 +779,7 @@ def witnessed_reference_for_state(state_path: "str | Path" = DEFAULT_STATE,
     Entries are append-only and therefore already in file order; the LAST matching
     line encountered is the most recent witness, which is what this returns.
     """
-    p = Path(events_path).expanduser()
+    p = pathprobe.expand_user(events_path)
     if not pathprobe.is_file(p):
         return None, "no_witness"
     marker = f"(state {_state_path_digest(state_path)[:_STATE_DIGEST_CHARS]})"
@@ -886,7 +886,7 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
         return None
     if when is None:
         when = _now_iso()
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     try:  # symlink-safe append; never RAISE from the event journal - report instead
         secure_dir(p.parent)
         with journal_lock(p):
@@ -969,7 +969,7 @@ def load_events_with_problem(
     3.12 for a stat-inaccessible path) and why classifying "did this fail" is split
     from "should this be shown" (the latter is cli.py's ``_explicit_paths`` call).
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     out: list[dict] = []
     try:
         # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())

@@ -518,12 +518,12 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
         if isinstance(agents, dict):
             defaults = agents.get("defaults")
             if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
-                extra.append(Path(defaults["workspace"]).expanduser())
+                extra.append(pathprobe.expand_user(defaults["workspace"]))
             for entry in _agent_entries(config):  # B-699: both roster shapes
                 if isinstance(entry.get("workspace"), str):
-                    extra.append(Path(entry["workspace"]).expanduser())
+                    extra.append(pathprobe.expand_user(entry["workspace"]))
         # B-610: the two rules OpenClaw applies to an agent with no explicit workspace.
-        extra.extend(Path(w).expanduser() for w in _derived_agent_workspaces(config))
+        extra.extend(pathprobe.expand_user(w) for w in _derived_agent_workspaces(config))
     # A RELATIVE workspace string is resolved against *home*, never against the process's
     # working directory - matching `collector._config_workspace_dirs` (B-161), which is the
     # established precedent for exactly this key and says so in its own docstring. The first
@@ -565,7 +565,7 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
 def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = None, *,
                     max_skills: int = MAX_SKILLS) -> ProvenanceScan:
     """Every installed skill's install record, corroborated where a second source exists."""
-    home = Path(home).expanduser()
+    home = pathprobe.expand_user(home)
     notes: list[str] = []
     skills: dict = {}
     # name -> the ordered root identities that held a record under it, winner first.

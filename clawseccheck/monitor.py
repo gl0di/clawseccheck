@@ -21,6 +21,7 @@ from pathlib import Path
 # PASS/WARN/FAIL are re-exports, not uses: they were importable as
 # `clawseccheck.monitor.FAIL` before C-433 moved the checks arm into
 # `monitordims/_checks.py`, and tests/monitor_public_api.txt pins that they stay.
+from . import pathprobe
 from .catalog import BY_ID, FAIL, PASS, UNKNOWN, WARN  # noqa: F401
 # Re-exports whose only readers moved into monitordims/. Kept importable from here
 # because they were before the split - see tests/monitor_public_api.txt.
@@ -267,7 +268,7 @@ def _home_identity(home: "Path | str") -> "tuple[str, str]":
     from .report import _sanitize  # noqa: PLC0415 (Layer 3 cluster; see history._sanitize_home)
     import os  # noqa: PLC0415
     # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
-    resolved = os.path.realpath(Path(home).expanduser())
+    resolved = os.path.realpath(pathprobe.expand_user(home))
     digest = hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
     return digest, _sanitize(str(home))
 

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
 
 from . import pathprobe
 from .locking import journal_lock
@@ -60,7 +59,7 @@ def save_run(findings, path: str = DEFAULT_RUNS, when: "str | None" = None, *,
     from .report import _finding_to_dict, _sanitize  # noqa: PLC0415 (layer-3 sibling; same idiom history.py's _sanitize_home uses)
 
     ts = when if when is not None else datetime.now().isoformat(timespec="seconds")
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     base = {
         "ts": ts,
         "home": _sanitize(home) if home else home,
@@ -89,7 +88,7 @@ def load_run(run_id: str, path: str = DEFAULT_RUNS) -> "dict | None":
     row wins: "the most recent write is authoritative", the same reading
     baseline.load_ignore() and history.load() already give a duplicate key.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return None
     match = None
@@ -105,7 +104,7 @@ def load_run(run_id: str, path: str = DEFAULT_RUNS) -> "dict | None":
 def list_run_ids(path: str = DEFAULT_RUNS) -> "list[str]":
     """Every stored run id (its 'ts'), oldest first. Empty list when absent/unreadable
     or the file holds no real run row (only a retention marker, say)."""
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return []
     try:

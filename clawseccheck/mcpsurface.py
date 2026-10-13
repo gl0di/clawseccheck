@@ -35,6 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import pathprobe
 from . import trajectory as _trajectory
 from .configloader import loads_shallow  # C-664: a dump is third-party content; no depth limit
 
@@ -195,7 +196,7 @@ def from_manifest(path: "str | Path") -> "ToolSurface | None":
     Returns ``None`` if the file cannot be read, parsed, or matched to one of
     these shapes - never a guess.
     """
-    p = Path(str(path)).expanduser()
+    p = pathprobe.expand_user(str(path))
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -274,7 +275,7 @@ def from_trajectory(home: "str | Path", *, max_files: int | None = None,
     if max_bytes_per_file is not None:
         kwargs["max_bytes_per_file"] = max_bytes_per_file
     tool_dicts, meta = _trajectory.read_compiled_tool_descriptions(
-        Path(str(home)).expanduser(), **kwargs)
+        pathprobe.expand_user(str(home)), **kwargs)
     truncated = bool(meta.get("truncated"))
     by_server: dict = {}
     for entry in tool_dicts:
@@ -330,7 +331,7 @@ def from_probe_json(path: "str | Path") -> list:
     for the content ring to scan, by design; ``render_for_ring`` reflects that
     with an empty render rather than guessing from names alone.
     """
-    p = Path(str(path)).expanduser()
+    p = pathprobe.expand_user(str(path))
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:

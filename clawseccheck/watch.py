@@ -495,7 +495,7 @@ def read_heartbeat_ex(path: "str | Path") -> "tuple[dict | None, str | None]":
     field of the wrong type or range). Different facts, so a caller can name the right
     one instead of collapsing a damaged record into "never ran". Never blocks, never
     raises."""
-    expanded = Path(path).expanduser()
+    expanded = pathprobe.expand_user(path)
     try:
         raw = _read_bounded(expanded, _HEARTBEAT_MAX_BYTES)
     except _NotRegularFile:
@@ -543,7 +543,7 @@ _LOCK_RETRY_S = 0.05
 
 
 def lock_path_for(heartbeat_path: "str | Path") -> Path:
-    return Path(heartbeat_path).expanduser().with_name(_LOCK_NAME)
+    return pathprobe.expand_user(heartbeat_path).with_name(_LOCK_NAME)
 
 
 def _open_failure_reason(exc: OSError) -> str:
@@ -944,7 +944,7 @@ def run_watch(
     tests/test_watch.py).
     """
     out = stream if stream is not None else sys.stdout
-    home = Path(home).expanduser()
+    home = pathprobe.expand_user(home)
     heartbeat_path = Path(heartbeat_path)
 
     # C-725: one watcher per store, decided by a LOCK (see the block above), never by what the

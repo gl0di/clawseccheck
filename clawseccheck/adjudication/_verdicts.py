@@ -47,6 +47,7 @@ import sys
 from dataclasses import replace as dc_replace
 from pathlib import Path
 
+from .. import pathprobe
 from ..baseline import fingerprint
 from ..catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
 from ..configloader import ELIDED, loads_shallow
@@ -659,7 +660,7 @@ def _vet_run_fingerprint(target: str) -> str:
     import os  # noqa: PLC0415
     try:
         # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
-        resolved = os.path.realpath(Path(target).expanduser())
+        resolved = os.path.realpath(pathprobe.expand_user(target))
     except OSError:
         resolved = str(target)
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()[:16]

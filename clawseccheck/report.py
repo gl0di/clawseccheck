@@ -6259,7 +6259,7 @@ def _looks_like_quarantine(target: str) -> bool:
     import os  # noqa: PLC0415
     try:
         # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
-        resolved = Path(os.path.realpath(Path(target).expanduser()))
+        resolved = Path(os.path.realpath(pathprobe.expand_user(target)))
         tmp = Path(os.path.realpath(tempfile.gettempdir()))
         return resolved == tmp or tmp in resolved.parents
     except OSError:
@@ -6537,7 +6537,7 @@ def render_permission_manifest(ctx, target: str) -> str:
     printed `shell.exec: false`. Presence covers `os.system`/`os.popen`/`subprocess.*`
     through the same `_is_exec_sink_call` predicate the engine's own TT5 rule uses.
     """
-    skill_key = Path(target).expanduser().name or str(target)
+    skill_key = pathprobe.expand_user(target).name or str(target)
     name = _sanitize(skill_key)
     header = [
         f"# proposed-permission-manifest for: {name}",

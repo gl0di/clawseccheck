@@ -31,8 +31,8 @@ import ast
 
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
-from pathlib import Path
 
+from . import pathprobe
 from .catalog import (
     BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN, ast_for,
 )
@@ -912,7 +912,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     self_source = bool(
         ctx is not None
         and target_type in ("skill", "plugin")
-        and Path(target).expanduser().name in (getattr(ctx, "self_excluded_skills", None) or [])
+        and pathprobe.expand_user(target).name in (getattr(ctx, "self_excluded_skills", None) or [])
     )
 
     axes: list[AxisResult] = []

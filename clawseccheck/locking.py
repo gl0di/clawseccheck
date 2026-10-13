@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - exercised on POSIX CI; real gap on Win
     fcntl = None  # type: ignore[assignment]
     _HAS_FCNTL = False
 
+from . import pathprobe
 from .safeio import _open_owner_only, secure_dir
 
 
@@ -67,7 +68,7 @@ def journal_lock(target: "str | Path"):
         yield
         return
 
-    lock_path = Path(str(target)).expanduser()
+    lock_path = pathprobe.expand_user(str(target))
     lock_path = Path(str(lock_path) + ".lock")
     fd = None
     locked = False

@@ -213,3 +213,25 @@ def walk_segments(root: "str | os.PathLike[str]", segments: "list[str] | tuple[s
     if not segs:
         return iter(())
     return _walk(Path(root), segs, errors)
+
+
+def expand_user(path: "str | os.PathLike[str]") -> Path:
+    """``Path(path).expanduser()``, except that an unresolvable ``~`` is left as written (C-729).
+
+    ``Path.expanduser`` raises ``RuntimeError`` - not ``OSError`` - when ``~name`` names no
+    account on this machine, and for ``~`` / ``~/x`` when neither ``HOME`` nor a passwd
+    entry exists. Nothing on the audit path catches that, so one config value such as
+    ``agents.defaults.workspace: "~nosuchuser/x"`` ended the whole run with "unexpected
+    internal error". The platform itself expands only ``~``, ``~/`` and ``~\\`` and reads
+    ``~name/x`` as an ordinary relative path (see ``collector._expand_user_path``), so the
+    unexpanded path is both what OpenClaw would use and a path that is simply not there.
+
+    Identical to ``Path(path).expanduser()`` for every input that does not raise today.
+    A path the USER typed on the command line must not take this fallback (an output flag
+    would create a directory literally named ``~name``); ``cli`` refuses those up front.
+    """
+    p = Path(path)
+    try:
+        return p.expanduser()
+    except RuntimeError:
+        return p

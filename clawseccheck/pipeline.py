@@ -72,6 +72,7 @@ from .configloader import ELIDED, loads_shallow
 # leaves (textnorm/brand only), so this cannot cycle.
 from .dryrun import make_scenarios as _make_dryrun_scenarios
 from . import livetestproof as _livetestproof
+from . import pathprobe
 from .multiturn import make_multiturn as _make_multiturn_scenarios
 from .redteam import make_suite as _make_redteam_suite
 from .layers import (            # noqa: F401 - re-exported for existing importers
@@ -1196,7 +1197,7 @@ def read_judged_bundle_with_problem(path: str) -> "tuple[dict, OSError | None]":
             raw = ""
     else:
         try:
-            raw = read_user_text(Path(path).expanduser(), errors="replace")
+            raw = read_user_text(pathprobe.expand_user(path), errors="replace")
         except OSError as exc:
             raw = ""
             problem = exc

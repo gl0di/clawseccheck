@@ -145,7 +145,7 @@ def test_the_store_dir_has_exactly_one_definition():
     lives" and one of them did not exist at all. If a third appears, it will drift the same
     way — and the next artifact added to the store will be the one that leaks."""
     src = (REPO_ROOT / "clawseccheck" / "cli.py").read_text(encoding="utf-8")
-    assert src.count('Path(args.history).expanduser().parent') == 1, \
+    assert src.count('pathprobe.expand_user(args.history).parent') == 1, \
         "the store dir is computed somewhere other than _store_dir()"
     assert "def _store_dir(args)" in src
 

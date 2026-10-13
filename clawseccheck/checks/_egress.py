@@ -5089,7 +5089,7 @@ def check_browser_executable_path(ctx: Context) -> Finding:
 
     fail_ev: list[str] = []
     for label, raw_path in candidates:
-        p = Path(raw_path).expanduser()
+        p = pathprobe.expand_user(raw_path)
         try:
             found = pathprobe.exists(p)
         except OSError:

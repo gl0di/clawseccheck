@@ -148,7 +148,7 @@ def _fold_incident_rows(rows: "list[dict]") -> "Incident | None":
 
 
 def load_incident(incident_id: str, path: "str | Path" = DEFAULT_INCIDENTS) -> "Incident | None":
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return None
     try:
@@ -162,7 +162,7 @@ def list_incident_ids(path: "str | Path" = DEFAULT_INCIDENTS) -> "list[str]":
     """Every id that has a live "created" row, in first-seen (creation) order. An id
     whose "created" row was rotated away is not listed -- same fail-safe rule
     load_incident applies."""
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return []
     seen: "dict[str, None]" = {}
@@ -178,7 +178,7 @@ def list_incident_ids(path: "str | Path" = DEFAULT_INCIDENTS) -> "list[str]":
 
 
 def _append_row(row: dict, path: "str | Path") -> bool:
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     try:
         secure_dir(p.parent)
         with journal_lock(p):
@@ -253,7 +253,7 @@ def mark_incident(
     """
     if new_status not in INCIDENT_STATUSES:
         return None, "invalid_status"
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     ts = when if when is not None else datetime.now().isoformat(timespec="seconds")
     try:
         secure_dir(p.parent)

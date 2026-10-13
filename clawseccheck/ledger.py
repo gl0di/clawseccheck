@@ -23,6 +23,7 @@ import json
 from datetime import date
 from pathlib import Path
 
+from . import pathprobe
 from .configloader import loads_bounded
 
 DEFAULT_COVERAGE = "~/.clawseccheck/coverage.json"
@@ -59,10 +60,10 @@ def _ledger_path(home: str | None = None, path: str | None = None) -> Path:
     coverage that did not happen.
     """
     if path is not None:
-        return Path(path).expanduser()
+        return pathprobe.expand_user(path)
     if home is not None:
         return Path(home) / ".clawseccheck" / "coverage.json"
-    return Path(DEFAULT_COVERAGE).expanduser()
+    return pathprobe.expand_user(DEFAULT_COVERAGE)
 
 
 def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str, str]:

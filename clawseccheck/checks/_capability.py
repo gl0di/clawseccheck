@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 from typing import NamedTuple
 from .. import attest as _attest
+from .. import pathprobe
 from .. import toolpolicy as _toolpolicy
 from .. import toolgrant as _toolgrant
 from .. import trajectory as _trajectory
@@ -3089,7 +3090,7 @@ def check_path_safety(ctx: Context) -> Finding:
     # Discovery-assisted: the agent may point at an install dir that `which` can't
     # resolve (non-PATH install). The engine still stat()s it itself.
     if attested_install:
-        inst = Path(attested_install).expanduser()
+        inst = pathprobe.expand_user(attested_install)
         _flag(inst, "openclaw install dir", after=" [attested]")
         _walk_ancestors(inst.parent, "openclaw install ancestor dir [attested]")
 

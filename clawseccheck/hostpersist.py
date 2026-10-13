@@ -248,7 +248,7 @@ def scan(home: "str | Path | None" = None,
     The remaining parameters exist so tests can point the system-wide halves at a
     ``tmp_path`` instead of the real ``/etc``; production callers pass none of them.
     """
-    home_path = Path(home).expanduser() if home else Path(os.path.expanduser("~"))
+    home_path = pathprobe.expand_user(home) if home else Path(os.path.expanduser("~"))
     crons = SYSTEM_CRON_PATHS if system_cron_paths is None else system_cron_paths
     spools = USER_CRON_SPOOLS if user_cron_spools is None else user_cron_spools
 

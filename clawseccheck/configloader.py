@@ -734,7 +734,7 @@ def _allowed_roots(config_dir: Path) -> tuple[Path, ...]:
     for raw in os.environ.get("OPENCLAW_INCLUDE_ROOTS", "").split(os.pathsep):
         if not raw.strip():
             continue
-        candidate = Path(raw).expanduser()
+        candidate = pathprobe.expand_user(raw)
         if not candidate.is_absolute():
             continue
         try:
@@ -784,7 +784,7 @@ def _resolve(
     for raw_name in names:
         if "\x00" in raw_name or not (0 < len(raw_name) < _MAX_INCLUDE_PATH_CHARS):
             raise ConfigLoadError("$include path has an invalid length or null byte")
-        candidate = Path(raw_name).expanduser()
+        candidate = pathprobe.expand_user(raw_name)
         if not candidate.is_absolute():
             candidate = current_file.parent / candidate
         try:

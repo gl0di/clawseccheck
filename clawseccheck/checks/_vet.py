@@ -9401,7 +9401,7 @@ def resolve_skill_target(path: str | Path) -> Path:
     Shared by ``vet_skill`` and the CLI's dossier label so the two cannot drift: the report
     must name what was actually scanned, not what was typed.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     if (
         pathprobe.is_file(p)
         and p.name.lower() == "skill.md"
@@ -9536,7 +9536,7 @@ def vet_skill(path: str | Path) -> Finding:
     containing folder, or deliberately held to the manifest alone - directly on the
     returned Finding, so the reader can see what was actually scanned either way.
     """
-    original = Path(path).expanduser()
+    original = pathprobe.expand_user(path)
     is_loose_manifest = pathprobe.is_file(original) and original.name.lower() == "skill.md"
     p = resolve_skill_target(path)
     finding = _vet_resolved_skill(p)
@@ -10146,7 +10146,7 @@ def detect_vet_type_with_reason(
     not have to re-derive which file was unreadable.
     """
 
-    p = Path(str(target)).expanduser()
+    p = pathprobe.expand_user(str(target))
     try:
         _on_disk = pathprobe.exists(p)
     except OSError:
@@ -10198,7 +10198,7 @@ def detect_vet_type_with_reason(
             return "skill", None
         return "unknown", None
     # Not a path on disk: maybe a configured MCP server name.
-    cfg_file = Path(str(home)).expanduser() / "openclaw.json"
+    cfg_file = pathprobe.expand_user(str(home)) / "openclaw.json"
     cfg_elided = 0
     try:
         # C-680 (C-664): read to 64 levels like json.loads, a deeper subtree is counted, not

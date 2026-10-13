@@ -139,7 +139,7 @@ def load_ignore_entries(home: Path | str) -> "list[IgnoreEntry]":
     empty list when the file is absent or unreadable, same fail-open-to-nothing shape
     ``load_ignore()`` always had.
     """
-    p = Path(home).expanduser() / ".clawseccheckignore"
+    p = pathprobe.expand_user(home) / ".clawseccheckignore"
     if not pathprobe.is_file(p):
         return []
     try:
@@ -219,7 +219,7 @@ def append_entries(home: Path | str, entries, *, comment: str | None = None) -> 
     any change to this file is still visible to ``--monitor`` (``ignore_hash``).
     Returns the number of entries actually written (0 if none were new).
     """
-    p = Path(home).expanduser() / ".clawseccheckignore"
+    p = pathprobe.expand_user(home) / ".clawseccheckignore"
     existing = load_ignore(home)
     new_entries = [e for e in entries if e and e not in existing]
     if not new_entries:

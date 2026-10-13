@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import pathprobe
 from .configloader import loads_bounded
 from .safeio import secure_dir, secure_write_text
 
@@ -43,7 +44,7 @@ def _path(home: str | None = None) -> Path:
     """
     if home is not None:
         return Path(home) / ".clawseccheck" / "prescan.json"
-    return Path(DEFAULT_PRESCAN).expanduser()
+    return pathprobe.expand_user(DEFAULT_PRESCAN)
 
 
 def read_last_mode(home: str | None = None) -> str:

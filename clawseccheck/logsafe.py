@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import pathprobe
 from .checks import SECRET_KEY_RE, SECRET_PATTERNS
 from .safeio import secure_append_text
 
@@ -255,7 +256,7 @@ class _SecureFileHandler(logging.Handler):
             return
         try:
             msg = self.format(record)
-            secure_append_text(self.path.expanduser(), msg + self.terminator)
+            secure_append_text(pathprobe.expand_user(self.path), msg + self.terminator)
         except OSError as exc:
             # C-721: a path that cannot be opened (missing directory, no permission, a
             # symlink target) is the user's input, not a logging bug. One plain line, then

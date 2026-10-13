@@ -91,7 +91,7 @@ def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
     for value in values:
         if not isinstance(value, str) or not value.strip() or "\x00" in value:
             continue
-        path = Path(value).expanduser()
+        path = pathprobe.expand_user(value)
         if not path.is_absolute():
             path = home / path
         resolved = _declared_root_key(path)
@@ -115,7 +115,7 @@ def config_plugin_load_paths(home: Path, cfg: dict) -> list[Path]:
     for value in values:
         if not isinstance(value, str) or not value.strip() or "\x00" in value:
             continue
-        path = Path(value).expanduser()
+        path = pathprobe.expand_user(value)
         if not path.is_absolute():
             path = home / path
         resolved = _declared_root_key(path)

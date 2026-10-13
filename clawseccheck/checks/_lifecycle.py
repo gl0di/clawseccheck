@@ -835,7 +835,7 @@ def _writable_identity_files(ctx: Context, unreadable: "list | None" = None) -> 
     # not the absolute path the attestation supplied: this string is rendered, and an
     # absolute path carries the user's login name (§8).
     for raw in _attest.attested_paths(ctx.attestation)["bootstrap"]:
-        f = Path(raw).expanduser()
+        f = pathprobe.expand_user(raw)
         if f.name not in _IDENTITY_TARGETS:
             continue
         try:
@@ -1606,7 +1606,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
     # live (any path, any name). The agent supplies WHERE; the engine still stat()s the
     # file itself, so this stays an authoritative permission check, not a weak self-report.
     for raw in _attest.attested_paths(ctx.attestation)["bootstrap"]:
-        p = Path(raw).expanduser()
+        p = pathprobe.expand_user(raw)
         # Classify by filename: a known identity file gets the critical (FAIL-on-world)
         # rule; anything else is treated as soft (memory) -> WARN only.
         soft = p.name not in _CRITICAL_BOOTSTRAP

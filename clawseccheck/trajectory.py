@@ -247,7 +247,7 @@ def explicit_path_problem(explicit_path: str | None) -> str | None:
     """
     if not explicit_path:
         return None
-    p = Path(explicit_path).expanduser()
+    p = pathprobe.expand_user(explicit_path)
     # B-683: `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP and NOT EACCES, so a
     # path under a directory this process cannot stat made it RAISE - and the one
     # function whose entire job is to name a path problem answered one of them with
@@ -290,7 +290,7 @@ def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
     One implementation rather than four, because the four had already drifted in what
     they recorded and a fifth copy is the obvious next step otherwise.
     """
-    p = Path(explicit_path).expanduser()
+    p = pathprobe.expand_user(explicit_path)
     try:
         return ([p], False) if pathprobe.is_file(p) else ([], False)
     except OSError:

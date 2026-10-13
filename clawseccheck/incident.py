@@ -27,6 +27,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from . import pathprobe
 from . import trajectory as _trajectory
 from . import trajectorystore as _trajectorystore
 from .catalog import ACTIONABLE_STATUSES, FAIL_WEIGHT_STATUSES
@@ -111,7 +112,7 @@ def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
     finding_ids = [f.id for f in actionable]
     pid, process_name = _pid_from_findings(actionable)
     events_path = DEFAULT_EVENTS if events is None else events
-    monitor_watermark = _last_chain_hash(Path(events_path).expanduser()) or None
+    monitor_watermark = _last_chain_hash(pathprobe.expand_user(events_path)) or None
     store_path = DEFAULT_INCIDENTS if path is None else path
 
     inc = create_incident(finding_ids, pid=pid, process_name=process_name,

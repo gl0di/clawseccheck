@@ -4150,7 +4150,7 @@ def _config_workspace_dirs(
     out: list[Path] = []
     seen: set[Path] = set()
     for r in raw:
-        p = Path(r).expanduser()
+        p = pathprobe.expand_user(r)
         if not p.is_absolute():
             p = home / p
         try:
@@ -6109,7 +6109,7 @@ def read_config_audit_rows(home, max_bytes: int, max_rows: int = CONFIG_AUDIT_MA
     inside the one transaction that also runs the SELECTs. Takes *home*, not a ``Context``:
     ``configjournal`` is a leaf the monitor calls with a home alone. Never raises.
     """
-    db_path = Path(home).expanduser() / "state" / "openclaw.sqlite"
+    db_path = pathprobe.expand_user(home) / "state" / "openclaw.sqlite"
     try:
         if not pathprobe.exists(db_path):
             return CONFIG_AUDIT_NO_DB, [], False, 0, 0
@@ -6244,7 +6244,7 @@ def read_config_health_entries(
     because the only question asked of it is "is it set"; the config PATH is kept (a caller
     reports it by basename). A cell the bound drops is counted in *unread*, never skipped.
     """
-    db_path = Path(home).expanduser() / "state" / "openclaw.sqlite"
+    db_path = pathprobe.expand_user(home) / "state" / "openclaw.sqlite"
     try:
         if not pathprobe.exists(db_path):
             return ConfigHealthRead(CONFIG_HEALTH_NO_DB)
@@ -6488,7 +6488,7 @@ def read_credential_store_rows(home) -> dict:
     out = {"stores": {}, "incomplete": False, "reason": ""}
     reasons: list = []
     try:
-        home = Path(home).expanduser()
+        home = pathprobe.expand_user(home)
         db_path = home / "state" / "openclaw.sqlite"
         if pathprobe.exists(db_path):
             conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
@@ -10443,7 +10443,7 @@ def _bootstrap_identity(f: Path) -> object:
 
 
 def collect(home: Path | str = "~/.openclaw") -> Context:
-    home = Path(home).expanduser()
+    home = pathprobe.expand_user(home)
     ctx = Context(home=home)
 
     cfg_path, cfg_found = resolve_config_in_home(home)
