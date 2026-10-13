@@ -212,7 +212,7 @@ _MAX_OWN_SOURCE_BYTES = 2_000_000
 # NO ceiling is claimed -- see the C-616 RESIDUAL in `_is_own_source`'s docstring before
 # relying on any figure quoted here.
 #   * _MAX_OWN_SOURCE_FILES: the real engine has 11 files, so 32 is ~2.9x headroom.
-#   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.4 MB in all,
+#   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.6 MB in all,
 #     largest about 0.95 MB, so 8 MB is ~1.8x headroom, in line with the ~2x the per-file
 #     cap keeps over the largest real file. Only files under the per-file cap count
 #     toward it. (The engine figures are rounded; a test fails if they drift over 3%.)
@@ -4405,7 +4405,7 @@ def _is_own_source(p: Path) -> bool:
     is 0) each answer False -- "not our source, scan the tree", the safe direction -- and
     nothing is read once a bound has tripped. A file over `_MAX_OWN_SOURCE_BYTES` is still
     skipped whole and is NOT counted toward the total, so the total bounds the admitted
-    bytes only. The real engine is 11 files, about 4.4 MB in all, largest about 0.95 MB
+    bytes only. The real engine is 11 files, about 4.6 MB in all, largest about 0.95 MB
     (rounded; measured 2026-10-05); `tests/test_c616_own_source_directory_bounds.py` pins
     that headroom and goes red if these quoted figures drift over 3%.
 
@@ -4518,7 +4518,7 @@ def _is_own_source(p: Path) -> bool:
     # source that lexes differently from how it parses) can forge one.
     #
     # PERFORMANCE: `ast.parse` is real parsing, not a cheap scan, and the real engine
-    # is 11 files, about 4.4 MB in all, largest about 0.95 MB. The short-circuit below skips
+    # is 11 files, about 4.6 MB in all, largest about 0.95 MB. The short-circuit below skips
     # parsing a file outright when none of the still-missing markers' bare IDENTIFIERS appear
     # anywhere in that file's raw text - sound, not a heuristic: an `ast.FunctionDef`
     # or `ast.Name` node's identifier is always spelled EXACTLY as it appears in the
