@@ -143,6 +143,9 @@ def test_b19_loose_memory_dir_warns(tmp_path):
     m = tmp_path / "workspace" / "memory"
     m.mkdir(parents=True)
     m.chmod(0o777)
+    # C-703: a loose dir only warns when other users can reach it; pytest's tmp_path is 0700,
+    # which would seal everything beneath it, so open the home up first.
+    tmp_path.chmod(0o755)
     assert check_data_atrest(_ctx({}, home=str(tmp_path))).status == "WARN"
 
 

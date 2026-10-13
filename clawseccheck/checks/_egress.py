@@ -8,6 +8,7 @@ import ipaddress
 import os
 import re
 import socket
+import stat
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -2988,6 +2989,48 @@ def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
     return sorted(out)
 
 
+def _sealed_below_home(home: Path, target: Path) -> bool:
+    """True only when PROVEN: *target* lies under *home* and some directory on the way down
+    (the home itself included, nothing above it) has NEITHER the group nor the other execute
+    bit, so no user but the owner can traverse to it (C-703). Group membership is not
+    consulted - a g+x or o+x ancestor counts as reachable, the conservative reading. The
+    leaf's own mode never seals it.
+
+    Every element of the path, *target* included, must be a real (non-symlink) entry that
+    ``lstat`` can read: a symlink points at a location whose own parents were never judged,
+    and an unreadable one is a mode this check cannot determine - both return False, so the
+    caller keeps today's WARN (never a PASS from an unknown). A non-directory *target* with
+    more than one hard link is likewise not sealed. The whole chain is walked even
+    after a blocker is seen, because a symlink BELOW the blocker still escapes it.
+    POSIX stat-only; never reads content; never raises."""
+    try:
+        rel = target.relative_to(home)
+    except ValueError:
+        return False
+    chain: list[Path] = [home]
+    cur = home
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        chain.append(cur)
+    blocked = False
+    for d in chain + [target]:
+        try:
+            st = os.lstat(d)
+        except OSError:
+            return False
+        m = st.st_mode
+        if stat.S_ISLNK(m):
+            return False
+        if d is target:
+            # A file with a second name can be reached through that other path, which this
+            # walk never judged. (A directory's link count is not a second name.)
+            if not stat.S_ISDIR(m) and st.st_nlink > 1:
+                return False
+        elif not (m & 0o011):
+            blocked = True
+    return blocked
+
+
 # ---------- B19: data at-rest protection (POSIX only) ----------
 def check_data_atrest(ctx: Context) -> Finding:
     """Memory/log directories and log files are not group/world-readable."""
@@ -3003,6 +3046,12 @@ def check_data_atrest(ctx: Context) -> Finding:
         )
 
     loose: list[str] = []
+    # C-703: loose-mode entries that no other user can reach (a directory at or above them
+    # has no g+x/o+x). `loose` = the reachable ones (they decide WARN); `sealed` = the rest;
+    # `loose_all` = both, in discovery order - the WARN's detail and evidence keep listing it
+    # so a mixed home's text (and fingerprint) is what it was before the reachability rule.
+    sealed: list[str] = []
+    loose_all: list[str] = []
 
     # Candidate directories: workspace*/memory, workspace*/logs, <home>/logs
     candidates_dirs: list[Path] = []
@@ -3023,7 +3072,9 @@ def check_data_atrest(ctx: Context) -> Finding:
         try:
             mode = d.stat().st_mode & 0o777
             if mode & 0o077:
-                loose.append(f"{d.relative_to(ctx.home)} (mode {oct(mode)[-3:]})")
+                entry = f"{d.relative_to(ctx.home)} (mode {oct(mode)[-3:]})"
+                loose_all.append(entry)
+                (sealed if _sealed_below_home(ctx.home, d) else loose).append(entry)
         except OSError:
             pass
 
@@ -3034,7 +3085,9 @@ def check_data_atrest(ctx: Context) -> Finding:
                 try:
                     mode = f.stat().st_mode & 0o777
                     if mode & 0o077:
-                        loose.append(f"{f.name} (mode {oct(mode)[-3:]})")
+                        entry = f"{f.name} (mode {oct(mode)[-3:]})"
+                        loose_all.append(entry)
+                        (sealed if _sealed_below_home(ctx.home, f) else loose).append(entry)
                 except OSError:
                     pass
     except OSError:
@@ -3055,6 +3108,7 @@ def check_data_atrest(ctx: Context) -> Finding:
             except OSError:
                 continue
             loose.append(f"{rel} (mode {oct(mode)[-3:]})")
+            loose_all.append(loose[-1])
 
     # C-699: on current OpenClaw the live transcripts are rows of the per-agent SQLite
     # database, not files this check can stat. Said only when such rows exist (a home with
@@ -3067,13 +3121,20 @@ def check_data_atrest(ctx: Context) -> Finding:
             "SQLite database(s) (agents/*/agent/openclaw-agent.sqlite, transcript_events); "
             "this check does not judge those files' permissions."
         )
-    if not loose and not candidates_dirs and not transcripts:
+    if not loose and not sealed and not candidates_dirs and not transcripts:
         return _finding(
             "B19", UNKNOWN, "No memory/log/transcript stores found to inspect." + sqlite_note,
             "\u2014")
     if loose:
-        joined = "; ".join(loose[:8])
-        extra = f" (+{len(loose) - 8} more)" if len(loose) > 8 else ""
+        joined = "; ".join(loose_all[:8])
+        extra = f" (+{len(loose_all) - 8} more)" if len(loose_all) > 8 else ""
+        sealed_note = ""
+        if sealed:
+            sealed_note = (
+                f" Entries {'; '.join(sealed)} are not reachable by other users (no "
+                "group/other execute bit on a directory at or above them); the exposed "
+                f"one(s): {'; '.join(loose)}."
+            )
         return _finding(
             "B19",
             WARN,
@@ -3081,8 +3142,22 @@ def check_data_atrest(ctx: Context) -> Finding:
             f"transcripts, or install backups): {joined}{extra}",
             "Run `chmod 700` on the memory/log/session directories and `chmod 600` on the "
             "files (or `chmod 700 ~/.openclaw`) to restrict access to the owner only."
-            + sqlite_note,
-            evidence=loose,
+            + sealed_note + sqlite_note,
+            evidence=loose_all,
+        )
+    if sealed:
+        joined = "; ".join(sealed[:8])
+        extra = f" (+{len(sealed) - 8} more)" if len(sealed) > 8 else ""
+        return _finding(
+            "B19",
+            PASS,
+            f"{joined}{extra}: group/world-accessible by mode, but no other user can "
+            "traverse to them (no group or other execute bit on a directory at or above "
+            "them). Nothing else this check inspects is both reachable and readable by "
+            "other users." + sqlite_note,
+            "Keep memory/log/session directories at chmod 700 and their files at 600. The "
+            "listed modes are harmless only while there is no group/other execute bit on a "
+            "directory at or above them; tightening them as well removes the dependence.",
         )
     return _finding(
         "B19",
