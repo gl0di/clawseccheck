@@ -222,7 +222,7 @@ _EXEMPT = {
                           "own change with its own verification (byte-identical audit "
                           "output at every step, as I-022-R2 did); this entry's job is to "
                           "stop recording a non-reason as a decision.",
-    "checks/_vet.py": "~10,236 lines (restated 2026-09-26 on integration/4.3.0 after "
+    "checks/_vet.py": "~10,751 lines (restated 2026-10-13 after the empty-pool coverage note, ~16 lines; was ~10,236, restated 2026-09-26 on integration/4.3.0 after "
                       "merging three fleet-FP fixes — was ~9,185: the vet-example-prohibition "
                       "round 2 scoping of the scanner-finding-line recognizer into a caller-"
                       "opt-in `scanner_finding_line_ok` parameter plus its WARN-not-PASS "

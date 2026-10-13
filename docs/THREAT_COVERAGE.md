@@ -224,6 +224,16 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   Covered today only indirectly via B95/B157 (dependency-confusion / non-registry-source
   heuristics - a different surface, skill deps rather than MCP server packages); a real
   fix needs a live package-registry reputation lookup, out of scope by design `[CEILING]`
+- **OpenClaw's own bundled skills directory** - the skills that ship inside the OpenClaw
+  package load alongside the ones you installed, but they are not an installed or chosen
+  skill and sit outside every root under your home, so the installed-skill scan (B13 and the
+  content ring behind it) never reads them. A full audit says so in a "Worth knowing about
+  this run" note (with the count when the package can be located); it does not scan them and
+  it does not change any verdict. A relocation of that directory (a persistent
+  `OPENCLAW_BUNDLED_SKILLS_DIR`) replaces the default tier and IS scanned, and B186 reports
+  it. A skill folder inside a dot-directory (an installer backup, say) is read but noted as
+  not loaded by OpenClaw, whose skill loaders skip any folder whose name starts with "."
+  `[CEILING]`
 - **Cross-skill capability-union without an untrusted-input leg** (C-219, arXiv 2606.00448
   "When Safe Skills Collide") - two individually-safe installed skills whose capabilities
   union into a dangerous combination (e.g. skill A can read credentials, skill B has

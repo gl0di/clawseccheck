@@ -372,6 +372,23 @@ def freshness_notice(*, today: date | None = None) -> list:
 _WILDCARD_SOURCE_TYPE = "any"
 
 
+def empty_pool_notice(ecosystem: str, *, host_list_applies: bool = False) -> str:
+    """The one-line statement `--vet-source` makes when the queried ecosystem's pool is empty.
+
+    An exact-match gate over an empty pool never matches, so without this sentence a source
+    nothing was checked against reads exactly like one that was checked and came back clean.
+    Pure text, deterministic (no clock), and it names the ECOSYSTEM only - never the queried
+    source - so it can ride a `coverage: ` evidence line without touching a fingerprint.
+    `host_list_applies` is for a git source: it has no name pool here, but its host is still
+    checked against the (non-empty) known-bad host list, and saying "no signal" without that
+    would be the opposite overstatement.
+    """
+    text = (f"no identity signal for this ecosystem (the dataset holds no {ecosystem} entries)")
+    if host_list_applies:
+        text += "; only the known-bad host list applies to it"
+    return text
+
+
 def coverage_notice() -> list:
     """Advisory-only notice naming the ecosystems this dataset carries NO indicators for.
 

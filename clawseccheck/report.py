@@ -2545,14 +2545,93 @@ def _hard_truncate_compact(out: str, budget: int = _COMPACT_CHAR_BUDGET) -> str:
     """
     if len(out) <= budget:
         return out
-    marker = "\n...(truncated to fit budget)\n"
-    room = max(budget - len(marker), 0)
-    cut = out[:room]
+    base_marker = "\n...(truncated to fit budget)\n"
+
+    # The positional cut used to name nothing, so a section pushed out of the card (the
+    # Skills "not graded" note, on a real home) vanished without a trace. Name what the cut
+    # removed. The names make the marker longer, so the cut has to be chosen WITH the marker
+    # it implies: walk candidate cut points (line ends) from the latest one backwards and take
+    # the first whose cut plus its own marker fits. That is the largest cut that fits - a
+    # ratchet that only ever moved the cut earlier would also throw away a line the longer
+    # marker never actually displaced. The walk is short: any candidate more than one marker
+    # length before the budget fits, so it ends within a few lines.
+    first = min(len(out), budget) - len(base_marker)
+    nl = out.rfind("\n", 0, first + 1) if first > 0 else -1
+    while nl > 0:
+        cut = out[:nl]
+        names = _dropped_section_names(cut, out[nl:])
+        shown = names[:_TRUNC_MAX_NAMES]
+        if shown:
+            more = len(names) - len(shown)
+            listing = ", ".join(shown) + (f" +{more} more" if more else "")
+            marker = f"\n...(dropped: {listing}; truncated to fit budget)\n"
+        else:
+            marker = base_marker
+        if len(cut) + len(marker) <= budget:
+            return cut + marker
+        nl = out.rfind("\n", 0, nl)
+    # No line end leaves room for a named marker (a tiny budget, or one enormous first line):
+    # the original behaviour, which is plain-marker and never over budget.
+    cut = out[:max(budget - len(base_marker), 0)]
     nl = cut.rfind("\n")
-    if nl > 0:
-        cut = cut[:nl]
-    result = cut + marker
+    result = (cut[:nl] if nl > 0 else cut) + base_marker
     return result[:budget] if len(result) > budget else result
+
+
+# The dashboard card's own section titles. `render_dashboard` frames every section with
+# these constants (`{sep} <title> {sep}`), and `_dropped_section_names` recognises a heading
+# ONLY by membership here: a line of scanned content shaped like a frame is not a section and
+# is never named in the truncation marker.
+_SEC_FINDINGS = "Findings"
+_SEC_SKILLS = "Skills"
+_SEC_INVENTORY = "Inventory by subject"
+_SEC_URGENT = "Most urgent"
+_SEC_PLUGINS = "Plugins"
+_SEC_MCP = "MCP"
+_SEC_RISK = "RISK Chains"
+_SEC_BEHAVIOURAL = "Behavioural"
+_SEC_SECOND_OPINION = "Second opinion (advisory)"
+_SEC_COVERAGE_PAGE = "Coverage page"
+_SEC_GLANCE = "Worth a glance"
+_CARD_SECTION_TITLES = frozenset({
+    _SEC_FINDINGS, _SEC_SKILLS, _SEC_INVENTORY, _SEC_URGENT, _SEC_PLUGINS, _SEC_MCP,
+    _SEC_RISK, _SEC_BEHAVIOURAL, _SEC_SECOND_OPINION, _SEC_COVERAGE_PAGE, _SEC_GLANCE,
+})
+# Shape of a frame line: `{sep} Name {sep}` with `brand.SEPARATOR` (middle dot) or its ASCII
+# fallback (hyphen). The shape alone is not enough - see `_CARD_SECTION_TITLES`.
+_SECTION_FRAME_RE = re.compile(r"^(?:\u00b7|-) (.{1,60}?) (?:\u00b7|-)$")
+_TRUNC_MAX_NAMES = 6
+
+
+def _dropped_section_names(kept: str, dropped: str) -> "list[str]":
+    """Names of the card sections that a truncation removed, in card order.
+
+    A section whose heading sits in the dropped tail is named outright; the section the cut
+    landed inside is named "<Name> (partly)". Names are forced to ASCII (a heading may carry
+    an emoji) because the marker is appended after the card's own ascii step."""
+    def _heading(line: str) -> "str | None":
+        m = _SECTION_FRAME_RE.match(line.strip())
+        if not m:
+            return None
+        # An emoji marker may precede the title (the glance heading); strip it first.
+        name = m.group(1).encode("ascii", "ignore").decode("ascii").strip()
+        return name if name in _CARD_SECTION_TITLES else None
+
+    names: list[str] = []
+    tail = dropped.lstrip("\n")
+    first_line = tail.split("\n", 1)[0]
+    if tail and _heading(first_line) is None:
+        # The cut fell inside a section: name the one it interrupted, if there is one.
+        for line in reversed(kept.split("\n")):
+            h = _heading(line)
+            if h:
+                names.append(f"{h} (partly)")
+                break
+    for line in dropped.split("\n"):
+        h = _heading(line)
+        if h and h not in names:
+            names.append(h)
+    return names
 
 
 def _compact_detail(text: str, limit: int) -> str:
@@ -4752,7 +4831,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label
     # immediately below); the C-373 default card opens with the grade lines only and
     # labels its own sections as it goes.
-    header_block = "\n".join([*grade_lines, "", f"{sep} Findings {sep}"]) + "\n"
+    header_block = "\n".join([*grade_lines, "", f"{sep} {_SEC_FINDINGS} {sep}"]) + "\n"
     card_header_block = "\n".join(grade_lines) + "\n"
 
     # Skills is a fixed block (unaffected by why_drop_severities): computed once.
@@ -4763,13 +4842,13 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
-            skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
+            skills_block = "\n" + f"{sep} {_SEC_SKILLS} {sep}" + "\n" + "\n".join(skill_lines) + "\n"
             # C-373: the card caps the clean roster (the one unbounded part - see
             # _skills_inventory_lines); flagged skills are always named in full, since
             # those are the ones the reader has to act on.
             card_skill_lines = _skills_inventory_lines(
                 inv, ctx, ascii_only=ascii_only, clean_roster_limit=_CARD_CLEAN_SKILLS)
-            card_skills_block = ("\n" + f"{sep} Skills {sep}" + "\n"
+            card_skills_block = ("\n" + f"{sep} {_SEC_SKILLS} {sep}" + "\n"
                                  + "\n".join(card_skill_lines) + "\n")
 
     # C-374: `--dashboard --full --pdf <path>` ALSO renders the overview card. Under
@@ -4802,10 +4881,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                 findings, limit=limit, ascii_only=ascii_only)
             out = card_header_block
             if summary_lines:
-                out += ("\n" + f"{sep} Inventory by subject {sep}" + "\n"
+                out += ("\n" + f"{sep} {_SEC_INVENTORY} {sep}" + "\n"
                         + "\n".join(summary_lines) + "\n")
             if top_lines:
-                out += ("\n" + f"{sep} Most urgent {sep}" + "\n"
+                out += ("\n" + f"{sep} {_SEC_URGENT} {sep}" + "\n"
                         + "\n".join(top_lines) + "\n")
             elif n_issues == 0:
                 out += f"\nNo known attack pattern matched. Keep it that way. {ok}\n"
@@ -4835,26 +4914,26 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     tail_block = ""
     plugin_lines = _plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only, compact=compact)
     if plugin_lines:
-        tail_block += ("\n" + f"{sep} Plugins {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_PLUGINS} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in plugin_lines) + "\n")
 
     if inv is not None and inv["mcp"]:
         mcp_lines = _mcp_inventory_lines(inv, ascii_only=ascii_only, compact=compact)
-        tail_block += ("\n" + f"{sep} MCP {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_MCP} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in mcp_lines) + "\n")
 
     risk_lines = _risk_chain_lines(risk or [], ascii_only=ascii_only, compact=compact)
     if risk_lines:
-        tail_block += "\n" + f"{sep} RISK Chains {sep}" + "\n" + "\n".join(risk_lines) + "\n"
+        tail_block += "\n" + f"{sep} {_SEC_RISK} {sep}" + "\n" + "\n".join(risk_lines) + "\n"
 
     behavioral_lines = _behavioral_block_lines(behavioral, ascii_only=ascii_only)
     if behavioral_lines:
-        tail_block += ("\n" + f"{sep} Behavioural {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_BEHAVIOURAL} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in behavioral_lines) + "\n")
 
     second_opinion_lines = _second_opinion_lines(adjudication, ascii_only=ascii_only)
     if second_opinion_lines:
-        tail_block += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_SECOND_OPINION} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in second_opinion_lines) + "\n")
 
     coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
@@ -4877,7 +4956,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only,
                                               show_reasons=not compact)
         if cov_page_lines:
-            tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
+            tail_block += ("\n" + f"{sep} {_SEC_COVERAGE_PAGE} {sep}" + "\n"
                           + "\n".join(cov_page_lines) + "\n")
 
     glance_marker = "" if ascii_only else "\U0001f440 "
@@ -4898,7 +4977,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             findings, ascii_only=ascii_only, limit=6 if compact else 12, compact=compact,
             why_drop_severities=why_drop_severities)
         if glance_lines:
-            out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
+            out += ("\n" + f"{sep} {glance_marker}{_SEC_GLANCE} {sep}" + "\n"
                    + "\n".join(glance_lines) + "\n")
 
         # C-373: `--dashboard --full --pdf <path>` wrote an attachable report this run -

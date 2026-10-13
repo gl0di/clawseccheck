@@ -70,6 +70,7 @@ from ..textnorm import (
     normalize_for_scan,
 )
 from ..iocdb import (
+    empty_pool_notice as _iocdb_empty_pool_notice,
     is_known_bad_host as _iocdb_is_known_bad_host,
     known_bad_sources as _iocdb_known_bad_sources,
 )
@@ -10588,6 +10589,22 @@ def vet_source(
             "the package name or version starts with '-'; a package manager would "
             "read it as a command-line option, not a package",
         )
+
+    # C-707: an exact-match gate over an EMPTY pool never matches, so "no known-bad record"
+    # below read the same as "checked against this ecosystem and clean". Say which it was.
+    # A `coverage: ` evidence line is the renderer-only, verdict-neutral channel (B-526); the
+    # `detail` of the UNKNOWN finding is untouched. Judged against the pool the checks above
+    # actually used: a URL is matched on its HOST (the "url" pool is the host list), a git
+    # source on its name pool plus the host list, a bare name on every pool there is.
+    if eco == "registry":
+        _pool_empty = not any(bad.values())
+    elif eco == "url":
+        _pool_empty = not (bad.get("url") or bad.get("any"))
+    else:
+        _pool_empty = not (bad.get(eco) or bad.get("any"))
+    if _pool_empty:
+        _host_pool = eco == "git" and bool(bad.get("url") or bad.get("any"))
+        notes.append("coverage: " + _iocdb_empty_pool_notice(eco, host_list_applies=_host_pool))
 
     evidence = reasons_bad + reasons_susp + notes
     if reasons_bad:

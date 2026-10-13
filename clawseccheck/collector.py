@@ -4618,6 +4618,54 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
         _note_unreadable_manifest(ctx, name)
 
 
+def _find_openclaw_package_root() -> "Path | None":
+    """The installed OpenClaw package root, or None. A seam so tests stay off the real PATH."""
+    from .deptree import find_package_root  # noqa: PLC0415 - leaf; kept local, no import-time edge
+
+    try:
+        return find_package_root("openclaw")
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _note_bundled_tier_not_inspected(ctx: Context) -> None:
+    """Disclose OpenClaw's own bundled skills directory: loaded by OpenClaw, never scanned here.
+
+    It ships with the OpenClaw package, is not an installed or user-chosen skill, and is
+    outside every home-rooted root above - so it is not in `ctx.installed_skills` and `SKILL_TIER_ORDER`
+    omits it. In the dist (bundled-dir-*.mjs) resolveBundledSkillsDir tries, in order, the
+    OPENCLAW_BUNDLED_SKILLS_DIR override, a `skills` directory beside the running executable,
+    then `<package root>/skills`. The count below reads `<package root>/skills` only, so the
+    wording claims "the installed package's bundled skills directory" and never which of the
+    fallbacks OpenClaw actually used. The decision is to DISCLOSE, not scan: the scan
+    population and every verdict are unchanged, and this is an inert `Disclosure`.
+    Subject/detail name the tier, never a path.
+    """
+    n = None
+    root = _find_openclaw_package_root()
+    if root is not None:
+        try:
+            n = sum(1 for _ in _iter_discovered_skill_dirs(
+                root / "skills", allow_symlink_entries=False, limit_hits=[]))
+        except (OSError, ValueError, RuntimeError):
+            n = None
+    if n:
+        detail = (
+            f"{n} {'skill ships' if n == 1 else 'skills ship'} in the bundled skills "
+            f"directory of the installed OpenClaw package and "
+            f"{'loads' if n == 1 else 'load'} alongside yours. This audit does not inspect "
+            "them: they are part of OpenClaw, not installed content, so a clean result here "
+            "says nothing about them."
+        )
+    else:
+        detail = (
+            "OpenClaw also loads the skills in the bundled skills directory of the installed "
+            "OpenClaw package. This audit does not inspect them, and could not locate that "
+            "directory on this machine to count them."
+        )
+    note_disclosure(ctx.disclosures, "bundled_skills_not_inspected", "skills", detail)
+
+
 def _read_installed_skills(home: Path, ctx: Context) -> None:
     seen: set[str] = set()
     # (base_dir, allow_symlink_entries). The hardcoded roots refuse symlinked skill dirs -
@@ -4711,10 +4759,13 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # evidenced by a persistent artifact is followed - the auditing shell's environment is
     # not the agent's (see persistent_env_evidence). Note this ADDS a load root: the
     # default bundled-dist tier is still not scanned (SKILL_TIER_ORDER omits it), so this
-    # is an unenumerated-root fix, not a stale-snapshot one.
+    # is an unenumerated-root fix, not a stale-snapshot one. That default tier is DISCLOSED
+    # (not scanned) by `_note_bundled_tier_not_inspected` below; a relocation replaces it.
+    _skills_relocated = False
     for _var, _kind, _value, _src in bundled_root_overrides(ctx):
         if _kind != "skills":
             continue  # a hooks root holds hook modules, not SKILL.md dirs - B186 discloses it
+        _skills_relocated = True  # resolveBundledSkillsDir returns the override unconditionally
         try:
             _override = Path(_value).expanduser()
         except (OSError, ValueError, RuntimeError):
@@ -4726,6 +4777,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     if _safe_is_dir(plugin_skills, ctx, what=f"'{plugin_skills}'", domain=LIMIT_DOMAIN_SKILL):
         roots.append((plugin_skills, True))
     seen_roots: set[Path] = set()
+    # Skill folders inside a dot-directory under a root (an installer's backup folder). The
+    # loaders in the OpenClaw dist skip every entry whose name starts with "." (the skill-root
+    # discovery, the workspace refresh and the resource loader), so these are on disk but not
+    # loaded. They are still read below: a hostile copy missed is the worse error.
+    dot_dir_skills: set[str] = set()
     for base, allow_symlink in roots:
         # B-303: a load root that exists but is not traversable (most commonly the whole
         # home, e.g. chmod 000) must be skipped like a root that does not exist at all -
@@ -4749,6 +4805,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         # discovery engine confirm and walk" - see the field's docstring on Context.
         ctx.installed_skill_roots.append(base)
         for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
+            if base != plugin_skills:
+                try:
+                    if any(part.startswith(".") for part in sd.relative_to(base).parts):
+                        dot_dir_skills.add(str(target))
+                except ValueError:
+                    pass
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 # B-268: this used to `return` - the collection stopped dead, leaving
                 # ctx.installed_skills a silently truncated view with no trace that more
@@ -4819,6 +4881,28 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skill_dirs[key] = target
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
+
+    if dot_dir_skills:
+        n_dot = len(dot_dir_skills)
+        note_disclosure(
+            ctx.disclosures,
+            "skills_in_dot_directories",
+            "skills",
+            f"{n_dot} skill {'folder sits' if n_dot == 1 else 'folders sit'} inside a "
+            "dot-directory (a folder whose name starts with '.', such as an installer backup) "
+            "under a skills root. They are present on disk but not loaded by OpenClaw, whose "
+            "skill loader skips such folders; this audit still reads them.",
+        )
+    # The default bundled tier, gated like the personal ~/.agents/skills root so a fixture or
+    # custom --home stays hermetic; a persistent relocation replaces that tier.
+    if (
+        not _skills_relocated
+        and user_home is not None
+        and audited_home is not None
+        and audited_home.parent == user_home
+        and audited_home.name.startswith(".openclaw")
+    ):
+        _note_bundled_tier_not_inspected(ctx)
 
     # B-268: record the cap hit, mirroring what skilldiscovery.py already does for its
     # sibling _MAX_DIRS cap. This is what makes check_installed_skills (B13) degrade to
