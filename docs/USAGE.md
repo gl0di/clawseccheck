@@ -72,8 +72,8 @@ of the *audit* actually happened:
 | 4 | Agent self-report | **no** - the agent must answer | `--ask` -> fill it in -> `--attest <file>` |
 | 5 | Live behaviour test | **no** - pokes the running agent | run `--canary` / `--dryrun` / `--redteam` / `--multiturn`, then submit the agent's verdict with `--judged-bundle <file>` - the self-test flags are standalone modes and do **not** combine with an audit run |
 
-**A letter grade is issued only when all five ran.** Short of that there is no number at
-all: the report leads with the most urgent finding, in words, plus a mandatory line
+**A letter grade is issued only when all five ran.** Short of that no security score or
+grade is printed: the report leads with the most urgent finding, in words, plus a mandatory line
 naming which layers did not run - e.g. a bare `clawseccheck` run (missing 3 of 5 -
 no installed-skill sweep, no self-report, no live test) prints:
 
@@ -162,7 +162,7 @@ When you run the skill inside OpenClaw, the agent executes `audit.py`, captures 
 and shows it to you **right there in the chat** - no terminal, no setup. You see:
 
 1. your **Score / Grade** - but only once all five audit layers have run (see
-   [The three modes](#the-three-modes)); short of that there is no number, and this slot
+   [The three modes](#the-three-modes)); short of that no score or grade is printed, and this slot
    instead carries the most urgent finding in words plus a line naming which layers
    didn't run,
 2. an **Inventory by subject** summary (OpenClaw core, host, agents, skills, MCP, channels,
@@ -1790,8 +1790,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   (vet) -> Plugins (vet) -> MCP -> RISK chains -> Behavioural -> "Second opinion (advisory)"
   -> Coverage -> "Worth a glance"**. Each block is independently omitted when there is
   genuinely nothing to show (no skills/plugins/MCP servers installed, no RISK chain
-  detected) - Behavioural and Second opinion are always shown once computed, even to say
+  detected) - Behavioural and Second opinion are shown once computed, even to say
   "nothing fired", per the same never-guess-a-PASS rule the rest of the audit follows.
+  The one exception is the compact card (`--compact`): if it has to be cut to its
+  4096-character budget a section can be dropped, and the cut is marked with a
+  `...(dropped: ...; truncated to fit budget)` line naming the sections it removed where it can.
   Plain `--dashboard` (no `--full`) is a **different, chat-sized card** since C-373 - see
   the entry below. `--fast` and `--judged-bundle PATH` are honored the
   same way they are under plain `--full` (drop the deep phases; feed back a judge's
@@ -2171,8 +2174,10 @@ B12:1a2b3c4d   # author=dave date=2026-09-10 expires=2026-12-10 accept one speci
 
 **A letter grade is issued only when all five audit layers ran** - static config, the
 installed-skill/plugin sweep, the log/trajectory scan, the agent's own self-report, and a
-live behaviour test (see [The three modes](#the-three-modes) above). Short of that there
-is no number at all: the report leads with the most urgent finding, in words, followed by
+live behaviour test (see [The three modes](#the-three-modes) above). Short of that no
+security score or grade is printed (the text report may still print a `Tamper posture: N/100`
+line - the sub-score of one defence, labelled as not the run's verdict): the report leads with
+the most urgent finding, in words, followed by
 a mandatory line naming which layers did not run, e.g. `No grade yet - 3 of 5 layers did
 not run: installed skills and plugins (not reached), agent self-report (not
 submitted), live behaviour test (not submitted).` A bare `clawseccheck` run is always in

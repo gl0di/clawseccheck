@@ -194,8 +194,8 @@ is submitted back:
 | 4 | Agent self-report | **no** - the agent has to answer | `--ask` -> fill it in -> `--attest <file>` |
 | 5 | Live behaviour test | **no** - pokes the running agent | run `--canary` / `--dryrun` / `--redteam` / `--multiturn`, have your agent judge the result, then feed the verdict back with `--judged-bundle <file>` |
 
-**A grade is issued only when all five ran.** Short of that there is no number
-at all - you get findings, led by the most urgent one in words, plus a line
+**A grade is issued only when all five ran.** Short of that no security score or
+grade is printed - you get findings, led by the most urgent one in words, plus a line
 naming which layers didn't run. Concretely: a bare run leaves 3 of 5 untouched
 (the installed sweep, the self-report, the live test); `--full` closes one of
 those - the installed sweep - and leaves 2 of 5 (self-report, live test);
@@ -246,7 +246,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   of credential-stealing skills, "check before install" matters: ask it to vet
   any skill, plugin, or MCP server **before** you enable it.
 - **Honest by design.** A grade is issued only when all five audit layers ran -
-  short of that, no number at all, just findings and a line naming what
+  short of that, no security score or grade is printed, just findings and a line naming what
   didn't run. What it can't determine is reported as `UNKNOWN`, never quietly
   counted as safe, and every mode ends by naming what it did not check: no
   mode ever prints "clear" about a subject it never looked at. An open
