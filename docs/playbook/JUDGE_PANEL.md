@@ -64,12 +64,13 @@ section.
    }
    ```
 
-   Only an item whose own `verdict_schema` carries an `abstain` key (the engine left it
-   UNKNOWN) may be answered `"verdict": "ABSTAIN"`, and only when the item gives the judge
-   no fact at all to decide from. `ABSTAIN` is not a fourth severity: it means "I could
-   not assess this". It is never a way out of a `SUSPICIOUS` or `DANGEROUS` answer the
-   judge has grounds for, and it is never to be replaced by `SAFE` to look finished. An
-   item with no `abstain` key always gets one of the three.
+   Only an item whose own `verdict_schema` carries an `abstain` key may be answered
+   `"verdict": "ABSTAIN"`, and only when nothing in the packet lets the judge decide it.
+   The tool puts that key only on an item of the audit's own that names no skill, plugin
+   or server and for which the engine recorded no evidence. `ABSTAIN` is not a fourth
+   severity: it means "I could not assess this". It is never a way out of a `SUSPICIOUS`
+   or `DANGEROUS` answer the judge has grounds for, and it is never to be replaced by
+   `SAFE` to look finished. An item with no `abstain` key always gets one of the three.
 3. **Majority vote** per item across its 3 lens verdicts. A tie (no single verdict has
    at least 2 of the 3 votes - e.g. one SAFE, one SUSPICIOUS, one DANGEROUS) escalates
    to the **worst** of the three rather than picking arbitrarily - the same fail-safe

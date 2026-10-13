@@ -105,36 +105,30 @@ from ..textnorm import normalize_for_scan
 # like a missing entry for the item (_verdicts._parse_verdicts_with_abstentions).
 #
 # It is OFFERED narrowly, because an invitation not to answer is a way to steer a judge
-# off a finding: only on an own-audit packet item the engine itself left UNKNOWN (it could
-# not determine the item either), through _VERDICT_SCHEMA_UNKNOWN_ITEM below. A WARN item
-# carries a signal the engine did see, and a --vet packet is about untrusted third-party
-# content where the panel's one power is to escalate; neither is told it may abstain, so
-# both carry _VERDICT_SCHEMA exactly as before.
+# off a finding. The offer is keyed on what the item IS, not on its disposition word: the
+# audit packet also surfaces real signals about installed third-party code as "UNKNOWN"
+# on purpose (the recovered-taint, B62, env-auth and keyword-trigger items, and any
+# UNKNOWN that names a skill or carries evidence), and those must be judged, never
+# waved through. `_abstain_offered` below admits only an item built from one of the
+# audit's own findings that the engine left UNKNOWN, that recorded no evidence at all,
+# names no subject (its target is its own id) and carries no destination host - an item
+# that is structurally empty. Everything else, and every --vet packet item, carries
+# _VERDICT_SCHEMA exactly as before ABSTAIN existed.
 _ABSTAIN_VERDICT = "ABSTAIN"
 _VERDICT_SCHEMA = {
     "verdict": list(_VERDICT_VALUES),
     "reason": "free text",
 }
-_VERDICT_SCHEMA_UNKNOWN_ITEM = {
+_VERDICT_SCHEMA_EMPTY_UNKNOWN = {
     **_VERDICT_SCHEMA,
     "abstain": (
-        "the engine itself could not determine this item. If the packet gives you no fact "
-        f"at all to decide it from, answer {_ABSTAIN_VERDICT} instead of guessing; it is "
-        "treated exactly like no verdict submitted for the item. With any fact in hand "
-        "answer one of the three, and when unsure between two answer the worse one"
+        "this item names no skill, plugin or server and the engine recorded no evidence "
+        "for it: it could not determine it from what it read. If nothing in the packet "
+        f"lets you decide it, answer {_ABSTAIN_VERDICT} instead of guessing; it is treated "
+        "exactly like no verdict submitted for the item. If anything in the packet does "
+        "bear on it, answer one of the three, and when unsure between two answer the worse"
     ),
 }
-
-
-def _offer_abstain(items: list) -> list:
-    """The audit packet's last pass: an item the engine left UNKNOWN is told it may be
-    answered ABSTAIN (see the note above ``_ABSTAIN_VERDICT``); every other item is
-    returned as it came. Never called for a ``--vet`` packet."""
-    return [
-        {**item, "verdict_schema": _VERDICT_SCHEMA_UNKNOWN_ITEM}
-        if item.get("engine_disposition") == UNKNOWN else item
-        for item in items
-    ]
 
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
@@ -908,6 +902,20 @@ def _item_from_finding(f) -> dict:
 # rather than ship an unanswerable question (2 real items beats 43 empty ones).
 # Scoped to findings that HAD evidence: a bare UNKNOWN with NO evidence at all keeps
 # its long-standing generic-question posture unchanged.
+def _abstain_offered(item: dict, f) -> bool:
+    """True for the one kind of item that is told it may be answered ABSTAIN (see the note
+    above ``_ABSTAIN_VERDICT``): built from an audit finding the engine left UNKNOWN, that
+    recorded no evidence at all, names no subject and carries no destination host. Every
+    condition is read off the finding or off fields this module authored - never off
+    packet prose, and never off the disposition word alone."""
+    return (
+        f.status == UNKNOWN
+        and not (f.evidence or [])
+        and item["target"] == f.id
+        and "destination_host" not in item["safe_facts"]
+    )
+
+
 def _is_judgeable(item: dict, f) -> bool:
     if not (f.evidence or []):
         return True
@@ -1463,6 +1471,8 @@ def build_judge_packet(ctx, findings) -> list[dict]:
         if config_blind and _config_blind_only_cause(f):
             config_blind_candidates.append((f.id, item))
             continue
+        if _abstain_offered(item, f):
+            item["verdict_schema"] = _VERDICT_SCHEMA_EMPTY_UNKNOWN
         items.append(item)
 
     items.extend(_b62_items(ctx))
@@ -1478,7 +1488,7 @@ def build_judge_packet(ctx, findings) -> list[dict]:
 
     items = _attach_corroboration(items, findings)
     items = _with_documented_shape(items)
-    items = _offer_abstain(_with_check_title(items))
+    items = _with_check_title(items)
     items.sort(key=lambda d: (d["finding_id"], d["target"], d["redacted_evidence"]))
     return items
 

@@ -152,40 +152,58 @@ def test_abstain_value_shapes_that_are_not_the_string_stay_unusable():
 
 # ----------------------------------------------------- the packet advertises the option
 
-def test_only_an_own_audit_unknown_item_is_told_it_may_abstain(tmp_path):
-    """An invitation not to answer is a way to steer a judge off a finding, so it is made
-    only where the engine itself could not determine the item: an own-audit UNKNOWN. A WARN
-    item (the engine saw a signal) and every --vet item (untrusted third-party content, where
-    the panel's one power is to escalate) keep the three-verdict contract unchanged."""
+def _finding(status, evidence=None, fid="C99"):
+    from clawseccheck.catalog import MEDIUM, Finding
+
+    f = Finding(fid, "t", MEDIUM, status, "detail", "fix", "fw")
+    if evidence is not None:
+        f.evidence = evidence
+    return f
+
+
+def test_only_a_structurally_empty_own_audit_unknown_is_told_it_may_abstain(tmp_path):
+    """An invitation not to answer is a way to steer a judge off a finding, so the offer
+    is keyed on what the item IS, never on its disposition word: an audit finding the
+    engine left UNKNOWN, with no evidence, no named subject and no destination host. The
+    audit packet also carries real signals about installed third-party code labelled
+    UNKNOWN on purpose, and those must be judged."""
     from clawseccheck.adjudication import (
-        _VERDICT_SCHEMA, _VERDICT_SCHEMA_UNKNOWN_ITEM, _offer_abstain,
-        _vet_attest_packet_items, build_vet_judge_packet,
+        _VERDICT_SCHEMA, _VERDICT_SCHEMA_EMPTY_UNKNOWN, _abstain_offered,
+        _item_from_finding, _vet_attest_packet_items, build_vet_judge_packet,
     )
+    from clawseccheck.catalog import UNKNOWN, WARN
     from clawseccheck.checks import vet_skill
 
     assert "abstain" not in _VERDICT_SCHEMA
-    assert "ABSTAIN" in _VERDICT_SCHEMA_UNKNOWN_ITEM["abstain"]
+    assert "ABSTAIN" in _VERDICT_SCHEMA_EMPTY_UNKNOWN["abstain"]
     # The three severity values keep their severity-ascending order and stay the only
     # members of the list the structural tests derive the parser vocabulary from.
     assert _VERDICT_SCHEMA["verdict"] == ["SAFE", "SUSPICIOUS", "DANGEROUS"]
-    assert _VERDICT_SCHEMA_UNKNOWN_ITEM["verdict"] == _VERDICT_SCHEMA["verdict"]
+    assert _VERDICT_SCHEMA_EMPTY_UNKNOWN["verdict"] == _VERDICT_SCHEMA["verdict"]
 
-    unknown = {"engine_disposition": "UNKNOWN", "verdict_schema": _VERDICT_SCHEMA}
-    warn = {"engine_disposition": "WARN", "verdict_schema": _VERDICT_SCHEMA}
-    offered = _offer_abstain([unknown, warn])
-    assert "abstain" in offered[0]["verdict_schema"]
-    assert offered[1] is warn and "abstain" not in offered[1]["verdict_schema"]
+    def offered(f):
+        return _abstain_offered(_item_from_finding(f), f)
 
-    # The real audit packet: every item with the hint is an UNKNOWN, and the fixture has
-    # at least one of each so neither side of the split is vacuous.
+    assert offered(_finding(UNKNOWN)) is True                       # the one admitted shape
+    assert offered(_finding(WARN)) is False                         # the engine saw a signal
+    # An UNKNOWN that names a subject is about third-party content: never offered.
+    assert offered(_finding(UNKNOWN, ["evil-skill: reads a file then posts it (a.py:8)"])) is False
+    # An UNKNOWN with any evidence at all, subject or not, is not empty.
+    assert offered(_finding(UNKNOWN, ["gateway.bind: value could not be resolved"])) is False
+
+    # The real audit packet. Both sides of the split must be populated, or it is vacuous.
     packet = _packet(tmp_path)
-    by_disposition = {d: [i for i in packet if i["engine_disposition"] == d]
-                      for d in ("UNKNOWN", "WARN")}
-    assert by_disposition["UNKNOWN"], "the fixture no longer yields an UNKNOWN packet item"
-    for item in by_disposition["UNKNOWN"]:
-        assert "ABSTAIN" in item["verdict_schema"]["abstain"]
-    for item in by_disposition["WARN"]:
-        assert "abstain" not in item["verdict_schema"], item["finding_id"]
+    with_hint = [i for i in packet if "abstain" in i["verdict_schema"]]
+    plain = [i for i in packet if "abstain" not in i["verdict_schema"]]
+    assert with_hint and plain, (len(with_hint), len(plain))
+    for item in with_hint:
+        assert item["engine_disposition"] == "UNKNOWN"
+        assert item["target"] == item["finding_id"], item["finding_id"]
+        assert "destination_host" not in item["safe_facts"]
+        assert item["redacted_evidence"].startswith("no evidence entries"), item["finding_id"]
+    for item in plain:
+        assert (item["engine_disposition"] != "UNKNOWN" or item["target"] != item["finding_id"]
+                or not item["redacted_evidence"].startswith("no evidence entries")), item
 
     # No --vet item is ever told it may abstain: the fixed prose-attestation questions and
     # a real vet target's own borderline items alike.
@@ -199,6 +217,27 @@ def test_only_an_own_audit_unknown_item_is_told_it_may_abstain(tmp_path):
     assert vet_items
     for item in vet_items:
         assert "abstain" not in json.dumps(item["verdict_schema"]).lower(), item["finding_id"]
+
+
+def test_the_recovered_signals_about_installed_code_are_never_offered_abstain():
+    """The synthetic sources (recovered taint, B62, env-auth kwarg, keyword trigger) are
+    real signals the packet labels UNKNOWN. Read from the source: each of them, and the
+    config-blind roll-up, is built with the plain schema, and the abstain schema is
+    assigned at exactly one place, behind `_abstain_offered`."""
+    import inspect
+
+    from clawseccheck.adjudication import _builder
+
+    src = inspect.getsource(_builder)
+    assert src.count("_VERDICT_SCHEMA_EMPTY_UNKNOWN") == 2, "one definition, one assignment"
+    assign = src.index('item["verdict_schema"] = _VERDICT_SCHEMA_EMPTY_UNKNOWN')
+    assert "if _abstain_offered(item, f):" in src[assign - 120:assign]
+    for fn in (_builder._b62_items, _builder._recover_dropped_taint,
+               _builder._env_auth_kwarg_items, _builder._keyword_gated_trigger_items,
+               _builder._config_blind_collapsed_item):
+        body = inspect.getsource(fn)
+        assert "_VERDICT_SCHEMA_EMPTY_UNKNOWN" not in body, fn.__name__
+        assert '"verdict_schema": _VERDICT_SCHEMA' in body, fn.__name__
 
 
 def test_the_bundle_template_names_abstain_beside_the_other_verdicts():
