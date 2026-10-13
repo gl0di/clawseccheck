@@ -18,7 +18,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="229 security checks · 26 attack-chain detectors · 37,718 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.10.2 verified" width="900">
+    <img src="docs/assets/stats-light.svg" alt="229 security checks · 26 attack-chain detectors · 38,235 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.10.2 verified" width="900">
   </picture>
 </p>
 
@@ -260,7 +260,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities - plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 37,718 automated tests run on every change, a
+- **Built like it matters.** 38,235 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
