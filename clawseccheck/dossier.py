@@ -916,6 +916,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     )
 
     axes: list[AxisResult] = []
+    plugin_danger_partial = False  # C-715: see the relabel after _grade_profile below
     for axis in AXES:
         applicable = applicability.get(axis, True)
         bucket = buckets[axis]
@@ -950,6 +951,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
                 # a completed scan over bytes the scan never really looked at. PASS
                 # branch only: a real Danger WARN/FAIL keeps its own detail.
                 reason, fix = _plugin_partial_read_danger_reason(), ""
+                plugin_danger_partial = True
             else:
                 reason, fix = _clean_reason(axis, families), ""
         elif status == UNKNOWN and not bucket:
@@ -988,6 +990,18 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     # `_danger_coverage_gap`'s own B-635 docstring note on leg 2.
     danger_coverage_gap = _danger_coverage_gap(buckets["danger"], _pool_contexts(pool))
     overall_status, score, grade = _grade_profile(axes, danger_coverage_gap=danger_coverage_gap)
+    if plugin_danger_partial:
+        # C-715: the reason above says the pipe-to-shell, credential-read and outbound-POST
+        # shapes in the unread code "were not checked", so the axis cannot be labelled PASS:
+        # an unchecked surface is UNKNOWN. Done AFTER grading on purpose - this relabels one
+        # axis and changes no verdict word, score or exit code; the missing JS analysis is a
+        # declared ceiling (docs/THREAT_COVERAGE.md), not something this label convicts.
+        axes = [
+            AxisResult(axis=a.axis, status=UNKNOWN, reason=a.reason, fix=a.fix,
+                       findings=list(a.findings))
+            if a.axis == "danger" and a.status == PASS else a
+            for a in axes
+        ]
     return VetProfile(
         target=target,
         target_type=target_type,

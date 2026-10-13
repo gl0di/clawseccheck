@@ -186,27 +186,13 @@ def test_unreadable_root_via_cli_renders_a_dossier_not_a_crash_banner(tmp_path, 
     stdout empty -- no dossier, no JSON, nothing a downstream consumer (human or SARIF/
     JSON parser) can read at all.
 
-    rc == 0 here, NOT != 0: `vet_plugin()`'s early-return UNKNOWNs (this one and its two
-    pre-existing siblings, "no plugin found at {p}" / "not an OpenClaw plugin: no
-    manifest found") carry no ring_findings/axis_reasons, so build_profile() drops the
-    bare PLUGIN-VET container from every axis bucket (dossier.py's `_normalize_pool`
-    docstring: "the container id itself maps to None and is dropped from axes") --
-    `_danger_coverage_gap` never sees this finding's `engine_degraded` flag, so
-    `overall_status` stays UNKNOWN rather than the WARN B-092 would floor a
-    ring-findings-bearing engine-degraded UNKNOWN to (the B-902 tree-sweep shape).
-    cli.py's own documented mapping then reads "UNKNOWN + target exists" as rc=0 --
-    "valid target, inconclusive assessment". This is IDENTICAL to what the sibling
-    "not an OpenClaw plugin" branch already returns for a readable-but-manifest-less
-    directory (verified directly against `vet_plugin()` on this branch before writing
-    this test) -- this fix does not introduce a new, more lenient rc for this shape; it
-    replaces a crash (no output at all) with the SAME rc the nearest existing precedent
-    already produces, plus an honest CAUTION dossier and a properly `engine_degraded`
-    Finding (verified in the raw JSON: `--json` renders `"verdict": "CAUTION"`,
-    `"engine_degraded": true`) where there used to be nothing. Whether early-return
-    PLUGIN-VET containers SHOULD also feed the axis-bucket mechanism (so
-    engine_degraded escalates rc for this whole family of early exits, not just the
-    sub-finding-bearing ones) is a pre-existing question this fix does not attempt to
-    resolve — see the task's final report for the flagged follow-up."""
+    rc == 1: the dossier's verdict is CAUTION, and every CAUTION exits 1 (the one rule
+    `cli._vet_exit_code` applies to --vet / --vet-skill / --vet-plugin / --advise). This
+    test used to pin rc == 0, the old "UNKNOWN + target exists" mapping it shared with the
+    readable-but-manifest-less directory: a plugin root nothing could read passed an
+    `--vet-plugin ... || fail` install gate with a CAUTION header on screen. What this
+    test guards is unchanged: a dossier and an honest CAUTION, not a crash banner and not
+    the usage-error code 2."""
     root = _mk_plugin(tmp_path / "plug")
     root.chmod(0o000)
     try:
@@ -214,7 +200,7 @@ def test_unreadable_root_via_cli_renders_a_dossier_not_a_crash_banner(tmp_path, 
     finally:
         root.chmod(0o755)
     out = capsys.readouterr()
-    assert rc == 0
+    assert rc == 1
     assert "unexpected internal error" not in out.err
     assert "RISK DOSSIER" in out.out
     assert "CAUTION" in out.out
@@ -236,7 +222,7 @@ def test_unreadable_root_via_cli_json_discloses_engine_degraded_and_reason(tmp_p
         root.chmod(0o755)
 
     out = capsys.readouterr()
-    assert rc == 0
+    assert rc == 1  # CAUTION exits 1, see the test above
     payload = _json.loads(out.out)
     assert payload["verdict"] == "CAUTION"
     findings = payload["findings"]

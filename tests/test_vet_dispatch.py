@@ -153,7 +153,7 @@ def test_cli_vet_html_page_routes_identically_to_skill(tmp_path, capsys):
 
     rc = main(["--vet", str(page)])
     auto = capsys.readouterr()
-    assert rc == 0
+    assert rc == 1  # C-715: CAUTION (UNKNOWN) exits 1; it pinned 0 before
     assert "detected type: unknown" in auto.err
     assert "detected type: skill" not in auto.err
 
@@ -205,7 +205,7 @@ def test_cli_explicit_vet_plugin_on_non_plugin_unknown(tmp_path, capsys):
     _write(d / "README.md", "nothing here")
     rc = main(["--vet-plugin", str(d)])
     captured = capsys.readouterr()
-    assert rc == 0                                       # UNKNOWN + target exists → 0
+    assert rc == 1                                       # C-715: UNKNOWN reads CAUTION -> 1 (was 0)
     assert "RISK DOSSIER" in captured.out and "UNKNOWN" in captured.out
 
 

@@ -45,7 +45,7 @@ kept here so the always-loaded playbook stays lean.
   partially-scanned target: an incomplete sweep is disclosed in its printed section, never
   by reddening the gate. The adjudication phase (judge packet / second opinion) never trips
   this - advisory-only by design.
-  `--vet`'s exit code is a separate contract (1 on SUSPICIOUS *or* DANGEROUS; 2 when the
+  `--vet`'s exit code is a separate contract (1 on a `CAUTION` or `DO-NOT-INSTALL` verdict; 2 when the
   target cannot be assessed at all - a path that is absent, a link to nothing, or
   unreadable, or a `--vet-mcp` name that is neither a configured server nor a readable
   spec file - which is a usage error, not a verdict, and prints no dossier). `--advise`

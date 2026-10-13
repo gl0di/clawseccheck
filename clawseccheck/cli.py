@@ -1860,7 +1860,12 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
     _record_run("vet_mcp", args)
-    _vet_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
+    # C-715: the exit code follows the verdict word here as in every other vet mode, for
+    # a named target and for the no-target "every configured server" form alike. The
+    # no-target form used to keep "1 on a FAIL/WARN server, otherwise 0", which left a
+    # host whose openclaw.json could not be read at CAUTION with exit 0. A readable
+    # config with no MCP servers is N/A (nothing to vet) and still exits 0.
+    _vet_rc = _vet_exit_code(profile)
     if args.json:
         _emit(render_vet_json(profile, mode="vet-mcp", version=__version__))
     else:
@@ -2264,6 +2269,26 @@ def _verdicts_with_note(raw_path: str, flag: str) -> str:
         print(f"note: {flag}: {problem}. Nothing was judged; continuing as if no verdicts "
               "had been submitted.", file=sys.stderr)
     return payload
+
+
+def _vet_exit_code(profile) -> int:
+    """C-715: the ONE exit-code rule for --vet/--vet-skill/--vet-plugin/--vet-mcp/--advise.
+
+    The exit code follows the VERDICT WORD the dossier prints, never the finding list:
+    ``INSTALL`` -> 0, ``CAUTION`` and ``DO-NOT-INSTALL`` -> 1. Each mode used to keep its
+    own copy of "FAIL/WARN -> 1", which left a CAUTION that came from an UNKNOWN (an empty
+    directory, a self-referencing symlink, an unparseable spec) at 0 - the code a clean
+    vet returns - while the header said CAUTION, and let ``--advise`` and ``--vet-skill``
+    disagree about the same path. ``N/A`` (nothing to assess: a bare --vet-mcp over a
+    readable config with no MCP servers) is not a CAUTION and stays 0. A path that is not
+    there never gets here: that is the usage-error code 2, returned before anything is
+    assessed.
+
+    ``--vet-source`` deliberately does NOT use this: it judges an identity only, and
+    "no known-bad record" is a CAUTION whose next step is to fetch the source and vet it,
+    so it keeps exit 0 (see its branch in _main).
+    """
+    return 0 if profile.verdict in ("INSTALL", "N/A") else 1
 
 
 def _unassessable_target(typed) -> "str | None":
@@ -4766,7 +4791,6 @@ def _main(argv=None) -> int:
         # actually scanned rather than what was typed (it read "skill 'SKILL.md'" before).
         if vet_kind == "skill":
             vet_path = str(resolve_skill_target(vet_path))
-        vet_target = Path(vet_path).expanduser()
         f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
         # C-254: use with --vet/--vet-skill/--vet-plugin only (checked above) - a
         # distinct stdout artifact, same pattern as --emit-manifest below.
@@ -4781,24 +4805,13 @@ def _main(argv=None) -> int:
             # it re-derives overall_status/score/grade from this pool the normal way.
             f = escalate_vet_output(f, verdicts_raw, target=vet_path)
         profile = build_profile(f, vet_path, vet_kind)
-        # rc: overall FAIL/WARN -> 1 (dangerous/suspicious target);
-        # UNKNOWN + target unusable -> 1;
-        # UNKNOWN + target exists (valid target, inconclusive assessment) -> 0;
-        # PASS -> 0.
+        # rc follows the verdict word (C-715, _vet_exit_code): INSTALL -> 0, CAUTION and
+        # DO-NOT-INSTALL -> 1. An UNKNOWN assessment of a target that exists is a CAUTION
+        # and exits 1 like every other CAUTION; it used to exit 0 here.
         #
         # B-680: "absent" no longer reaches this line - a path that simply is not there
-        # returned 2 above, before anything was assessed. What still lands here is the
-        # narrower case the guard deliberately declines to claim is absent: a path we
-        # could not stat at all (an unreadable parent). The unreadable-target guard above
-        # normally returns for it first; if it does get here the probe below raises
-        # rather than answering False, so it still cannot exit 0. The arm itself covers
-        # a target that vanished mid-run.
-        if profile.overall_status in ("FAIL", "WARN"):
-            _vet_rc = 1
-        elif profile.overall_status == "UNKNOWN" and not pathprobe.exists(vet_target):
-            _vet_rc = 1
-        else:
-            _vet_rc = 0
+        # returned 2 above, before anything was assessed.
+        _vet_rc = _vet_exit_code(profile)
         # --emit-manifest: a stdout side output, single-skill vet only (B98/F-083).
         # Never runs the normal dossier/JSON render below - this is a distinct artifact.
         if args.emit_manifest and vet_kind == "skill":
@@ -4877,6 +4890,12 @@ def _main(argv=None) -> int:
             _emit(render_vet_json(profile, mode="vet-source", version=__version__))
             return _src_rc
         _emit(render_vet_dossier(profile, ascii_only=ascii_only))
+        if profile.overall_status == "UNKNOWN":
+            # C-715: this CAUTION exits 0 on purpose (most sources are simply unknown, and
+            # the next step is to fetch one and vet it), so say so where it is printed
+            # instead of leaving a CAUTION header beside a success code unexplained.
+            _emit("")
+            _emit("identity only: nothing was inspected; fetch it and run --vet")
         return _src_rc
 
     if _mode == "advise":
@@ -4904,7 +4923,7 @@ def _main(argv=None) -> int:
         advise_kind = detected if detected in ("plugin",) else "skill"
         f = vet_skill(advise_target) if advise_kind == "skill" else vet_plugin(advise_target)
         profile = build_profile(f, advise_target, advise_kind)
-        _advise_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
+        _advise_rc = _vet_exit_code(profile)  # C-715: same rule as --vet
         _record_run("vet" if advise_kind == "skill" else "vet_plugin", args)
         if args.json:
             _emit(render_advise_json(profile, version=__version__))

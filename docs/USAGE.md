@@ -1367,7 +1367,7 @@ The derived-view modes - `--next`, `--sbom`, `--risk-paths`, `--incident`, `--in
 `--judge-packet`, `--dashboard-findings`, `--show-suppressed`, `--trend`, `--percentile` - do
 **not** gate, and
 say so on stderr when you pass one of the flags. The `--vet` family has a separate exit-code
-contract of its own (1 on DO-NOT-INSTALL, 2 on a target that cannot be assessed at all),
+contract of its own (1 on `CAUTION` or `DO-NOT-INSTALL`, 2 on a target that is not there),
 described in its own section.
 
 Note that `rc 1` from an artifact mode has two possible causes: the gate tripped, or the
@@ -1466,7 +1466,9 @@ on, `2` fix the command line - where before a mistyped target was indistinguisha
 risky one.
 
 - `--vet`, `--vet-skill`, `--vet-plugin`, `--advise` return it when the **path** you named
-  is not there, is a symlink to something that is not there, or cannot be read. `--advise`
+  is not there, is a symlink to something that is not there, or cannot be reached (a parent
+  directory that cannot be read). A directory that is there but cannot be listed is not
+  this case: it gets a `CAUTION` dossier and exits `1`. `--advise`
   is the surface whose whole job is the install decision, so rendering one about a subject
   that was never examined - which it used to do, at `0` - was the worst instance of this.
 - `--vet-mcp` returns it when the **name** you gave is not a configured MCP server and is
@@ -1478,14 +1480,35 @@ risky one.
   file" alone would state one fact and imply another.
 
 A target that **exists** but yields nothing analysable is a different case and keeps its
-dossier at its usual code: there really is something there, and "I looked and could not
-tell" is an honest UNKNOWN. So an unparseable spec file, an empty directory, and a
-configured server the vet cannot judge all stay where they were. `--vet-mcp` with no value
-at all is its documented "every configured server" form and is likewise untouched.
+dossier: there really is something there, and "I looked and could not tell" is an honest
+UNKNOWN. The dossier words it `CAUTION`, and it exits `1` like every other `CAUTION` (it
+exited `0` before). So an unparseable spec file, an empty directory, a self-referencing
+symlink and a configured server the vet cannot judge are all `CAUTION`, exit `1`.
+`--vet-mcp NAME` with an `openclaw.json` that is missing or unreadable cannot tell a typo
+from a configured server, so it is the same `CAUTION`, exit `1`, not `2`. `--vet-mcp` with no
+value at all is its "every configured server" form and follows the same rule: `CAUTION`
+(a server the vet cannot judge, or an `openclaw.json` that is missing or cannot be read)
+exits `1` - it exited `0` before - and a readable config with no MCP servers is `N/A`,
+exit `0`.
 
 `--vet-source` judges an identity - a slug, a URL, a package spec - with no filesystem or
 config lookup behind it, so there is no "not found" state for `2` to describe and it never
 returns it.
+
+### Vet verdicts and exit codes
+
+The exit code follows the verdict word the dossier prints, never the finding list, and the
+modes agree for the same target.
+
+| Mode | `INSTALL` | `CAUTION` | `DO-NOT-INSTALL` | target not there |
+| --- | --- | --- | --- | --- |
+| `--vet`, `--vet-skill`, `--vet-plugin`, `--vet-mcp [NAME]`, `--advise` | `0` | `1` | `1` | `2` |
+| `--vet-source` (identity only) | not used | `0` when there is no known-bad record, `1` for a suspicious shape | `1` | never `2` |
+
+Nothing that prints `CAUTION` exits `0` in the first row, so `--vet ... || fail` is a safe
+install gate. `--vet-source` is a reputation gate on an identity, not an inspection: "no
+known-bad record" is a `CAUTION` by design (it cannot prove unseen code safe) that exits `0`
+so a pipeline can go on to fetch the source and run `--vet` on it.
 
 ### Pipeline recipes
 
@@ -1724,9 +1747,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   A target that is **not a skill package at all** - no `SKILL.md`, no executable files, and
   contents that read as an HTML document (the shape you get by saving a ClawHub *web page*
   instead of the skill) - is refused with `CAUTION` and **no INSTALL recommendation**: the tool
-  will not recommend for or against installing something it never saw (this specific refusal
-  case exits `0` - the target itself was read fine, there is simply nothing in it to assess;
-  see the exit-code rule above for the general FAIL/WARN/CAUTION-on-a-missing-target cases).
+  will not recommend for or against installing something it never saw (it exits `1`, like
+  every other `CAUTION`; see "Vet verdicts and exit codes" above).
   Anything executable, or any manifest, is scanned regardless, so deleting `SKILL.md` is not a
   way to switch the scanner off.
   If the scan hits its own per-target budget, or a collector size/file cap, or a file that
@@ -1959,9 +1981,12 @@ python3 audit.py --log audit.log            # also write log to a local file
   catalog -> `DO-NOT-INSTALL` (do not fetch, exit 1); typosquat of a well-known name / raw paste
   or bare-IP host / plaintext http / unpinned git ref / an npm or pypi name or version starting
   with `-` (a package manager would read it as an option) -> `CAUTION` (fetch only into an isolated
-  quarantine, exit 1); otherwise the honest answer is *no known-bad record* -> `INSTALL` (exit 0) - an
-  identity check can never prove unseen code safe, so proceed via quarantine and run `--vet`
-  on the fetched copy before installing.
+  quarantine, exit 1); otherwise the honest answer is *no known-bad record*, which prints as
+  `CAUTION` with Danger `UNKNOWN` and **exits 0** - an identity check can never prove unseen
+  code safe, and most sources are simply unknown, so the next step is to fetch it into a
+  quarantine and run `--vet` on the fetched copy before installing. The dossier says so on its
+  last line (`identity only: nothing was inspected; fetch it and run --vet`). This is the one
+  vet mode where `CAUTION` can exit 0; see "Vet verdicts and exit codes" above.
 - **`--vet-mcp`** vets every MCP server listed under `mcp.servers.*` for supply-chain risk
   *before* you trust it. Flags unpinned installs (`npx @latest`, unversioned packages), `curl|sh`
   bootstrap, plaintext-HTTP remote transports, env-variable secret passthrough, and overly broad
