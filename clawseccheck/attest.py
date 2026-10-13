@@ -23,6 +23,7 @@ network, no subprocess, no execution. Pure stdlib.
 """
 from __future__ import annotations
 
+import unicodedata
 from pathlib import Path
 
 from .configloader import MAX_JSON_NESTING, loads_bounded
@@ -155,16 +156,37 @@ def classify_verb(name: str) -> str:
 HIGH_BLAST_CLASSES = ("EXEC", "MAILBOX_CONFIG", "DESTRUCTIVE", "COMMERCE", "EGRESS")
 
 
+# What "blank" means for a name in an attestation (C-714): nothing is left once whitespace and
+# the control / format / separator categories are removed. A name made only of U+200B, U+FEFF,
+# a NUL or a control byte is as empty as "", but is not "falsy" and survives .strip().
+_BLANK_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+
+
+def is_blank_text(text) -> bool:
+    """True when *text* has no visible character (see ``_BLANK_CATEGORIES``)."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    return all(ch.isspace() or unicodedata.category(ch) in _BLANK_CATEGORIES
+               for ch in str(text))
+
+
+def _is_name(value) -> bool:
+    """A usable attestation name: a string (or bytes) with a visible character."""
+    return isinstance(value, (str, bytes)) and not is_blank_text(value)
+
+
 def classify_tools(tools) -> dict:
     """Group an iterable of verb names by blast-radius class.
 
-    Returns ``{class: [names...]}`` preserving input order, skipping non-strings.
+    Returns ``{class: [names...]}`` preserving input order, skipping non-strings and
+    blank names (a blank name is not a verb the agent holds; counted as an UNKNOWN verb it
+    would let a list of blanks read as a classified toolset, C-714).
     """
     held: dict[str, list] = {}
     if not isinstance(tools, list):
         return held
     for t in tools:
-        if not isinstance(t, (str, bytes)):
+        if not _is_name(t):
             continue
         held.setdefault(classify_verb(t), []).append(str(t))
     return held
@@ -344,7 +366,7 @@ def attested_proven(att: dict) -> set:
     proven = att.get("proven_tools")
     if not isinstance(proven, list):
         return set()
-    return {normalize_verb(t) for t in proven if isinstance(t, (str, bytes)) and str(t).strip()}
+    return {normalize_verb(t) for t in proven if _is_name(t)}
 
 
 def attested_agents(att: dict) -> list[dict]:
@@ -355,9 +377,15 @@ def attested_agents(att: dict) -> list[dict]:
     self-graded "this agent is safe"). Like the other attestation fields this is a
     DECLARATION the static config cannot express - OpenClaw config has no per-agent
     tool allowlist, only per-agent *deny* lists - so findings built from it carry
-    ATTESTED confidence, not HIGH. Tolerant of junk - returns a list of
-    ``{"name": str, "tools": [str, ...]}``; non-dict entries are dropped, a missing
-    name falls back to a positional label, non-string tools are skipped.
+    ATTESTED confidence, not HIGH. Returns a list of ``{"name": str, "tools": [str, ...]}``.
+
+    C-714: the roster is used only when EVERY entry validates (``_agent_entry_problem``);
+    one unusable entry and this returns ``[]``, the same as no roster. Entries used to be
+    repaired (a blank name became a positional label, a non-list ``tools`` became ``[]``),
+    and the repaired entry was an agent that holds nothing - so "no agent holds all three
+    legs" (B45) and "no agent shows MCP bleed" (B75/B76) PASSed on a roster that declared
+    nothing. Dropping only the bad entries is no better: the entry that fails to validate
+    can be the one that declared the risk, and the checks would then PASS on the rest.
     """
     out: list[dict] = []
     if not isinstance(att, dict):
@@ -365,21 +393,92 @@ def attested_agents(att: dict) -> list[dict]:
     agents = att.get("agents")
     if not isinstance(agents, list):
         return out
-    for i, a in enumerate(agents):
-        if not isinstance(a, dict):
-            continue
-        name = a.get("name")
-        if isinstance(name, (str, bytes)) and str(name).strip():
-            name = str(name).strip()
-        else:
-            name = f"agent[{i}]"
-        tools = a.get("tools")
-        tool_list = (
-            [str(t) for t in tools if isinstance(t, (str, bytes)) and str(t).strip()]
-            if isinstance(tools, list) else []
-        )
-        out.append({"name": name, "tools": tool_list})
+    if any(_agent_entry_problem(a) is not None for a in agents):
+        return out
+    for a in agents:
+        out.append({"name": str(a["name"]).strip(), "tools": [str(t) for t in a["tools"]]})
     return out
+
+
+def _agent_entry_problem(a) -> str | None:
+    """Why one ``agents`` entry is unusable, as a fixed phrase (never its content), or None.
+
+    Usable = an object with a non-blank ``name`` and a ``tools`` list whose members are all
+    non-blank strings (``"tools": []`` is valid: an agent that declares no tools). A
+    ``tools`` list with a non-string or blank member is rejected whole, not trimmed: the
+    entry's inventory is then not what the agent declared, and the trimmed remainder would
+    read as a complete (and possibly empty) toolset.
+    """
+    if not isinstance(a, dict):
+        return "not an object"
+    if not _is_name(a.get("name")):
+        return "without a usable name"
+    tools = a.get("tools")
+    if not (isinstance(tools, list) and all(_is_name(t) for t in tools)):
+        return "without a tools list of non-blank strings"
+    return None
+
+
+# Attestation lists whose members are names. A list with ANY member that is not a non-blank
+# string is removed whole (it then reads exactly as if the key were absent): the member
+# that fails to validate can be the one that mattered, so the rest is not a complete list.
+_NAME_LISTS = ("tools", "proven_tools", "host_monitors")
+
+
+def vet_attestation(att) -> tuple:
+    """Remove unusable parts of an attestation; return ``(attestation, notes)``.
+
+    C-714. Each part is vetted on its own, a bad part never touches another, and a part
+    is all or nothing - it is used as written or it is removed and reads exactly as if
+    its key had not been written:
+
+    * ``agents``: removed when it is not a list, or when any entry fails
+      ``_agent_entry_problem``.
+    * ``tools`` / ``proven_tools`` / ``host_monitors``: removed when any member is not a
+      non-blank string.
+
+    Nothing is trimmed or repaired. A part with one bad member is not a smaller, valid
+    part: the member that failed can be the one that declared the risk (an agent entry
+    holding all three trifecta legs plus one stray value), and a check that then PASSes on
+    the remainder reports a clean result nobody declared.
+
+    ``notes`` holds one fixed-phrase string per removed part (a count, a key name and a
+    reason - never an entry's content, because the attestation is user-supplied but may be
+    attacker-influenced and the caller prints these). An attestation with nothing to
+    remove comes back as the SAME object with no notes.
+    """
+    if not isinstance(att, dict) or not att:
+        return att, []
+    out = dict(att)
+    notes: list[str] = []
+    agents = att.get("agents")
+    if isinstance(agents, list):
+        reasons: dict[str, int] = {}
+        for a in agents:
+            why = _agent_entry_problem(a)
+            if why is not None:
+                reasons[why] = reasons.get(why, 0) + 1
+        if reasons:
+            bad = sum(reasons.values())
+            detail = "; ".join(f"{n} {r}" for r, n in sorted(reasons.items()))
+            out.pop("agents")
+            notes.append(f"the agent roster ({bad} of {len(agents)} "
+                         f"{'entry is' if bad == 1 else 'entries are'} unusable: {detail})")
+    elif agents is not None:
+        out.pop("agents")
+        notes.append(f"the agent roster ('agents' is a {type(agents).__name__}, "
+                     "not a list)")
+    for key in _NAME_LISTS:
+        raw = att.get(key)
+        if not isinstance(raw, list) or not raw:
+            continue
+        bad = sum(1 for m in raw if not _is_name(m))
+        if not bad:
+            continue
+        out.pop(key)
+        notes.append(f"the '{key}' list ({bad} of {len(raw)} "
+                     f"{'member is' if bad == 1 else 'members are'} not a non-blank string)")
+    return (out, notes) if notes else (att, notes)
 
 
 def attested_delegation(att: dict) -> list[dict]:

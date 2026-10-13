@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from .. import attest as _attest
 from .. import pathprobe
 from .. import hostpersist as _hostpersist
 from .. import trajectory as _trajectory
@@ -454,7 +455,7 @@ def _attested_monitors_any(ctx: Context) -> list:
     declared = att.get("host_monitors")
     if not isinstance(declared, list):
         return []
-    return [d for d in declared if isinstance(d, str) and d.strip()]
+    return [d for d in declared if isinstance(d, str) and not _attest.is_blank_text(d)]
 
 
 def check_monitoring(ctx: Context) -> Finding:

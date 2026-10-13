@@ -27,10 +27,19 @@ attestation five checks produce real verdicts:
 | B47 - cross-agent trifecta reassembly | `agents`, `delegation` | UNKNOWN |
 | B84 - declared vs. effective vs. proven tool use | `proven_tools` (prefers a trajectory-log source when available) | UNKNOWN |
 
-Two more checks are assisted (not blocked) by attestation:
+More checks are assisted (not blocked) by attestation:
 
-- **B50-B54** (host monitors): declaring a monitor the host scan cannot see
-  upgrades UNKNOWN to PASS (ATTESTED confidence).
+- **B50-B54** (host monitors): a `host_monitors` name that matches the check's
+  category makes that check report PASS (ATTESTED confidence) in place of
+  whatever it would have said without it - UNKNOWN, or WARN where the agent is
+  high-privilege - unless the host scan itself already found such a monitor.
+- **B16** (threat monitoring): any named entry under `host_monitors` turns
+  B16 from WARN to PASS (ATTESTED confidence), whatever the monitor is called -
+  unlike B50-B54 it does not match the name against a category.
+- **B75** and **B76** (MCP tools reaching agents past their per-agent filters):
+  they read the `agents` roster, and stay UNKNOWN without one.  The roster is
+  also read by B3 and A1 (a declared roster lets an unseen capability leg count
+  as answered) and shows up in the report's capability graph.
 - **B20** (bootstrap write protection) and **C5** (OpenClaw binary safety):
   `paths` fields point the engine at non-standard locations it then stat()s
   itself - the verdict stays MEDIUM confidence, not ATTESTED.
@@ -157,8 +166,9 @@ tool result), can a side-effect fire without human approval?
 Defensive monitors running on the agent's host that the read-only file scan
 cannot detect.  Use plain descriptive names; the engine keyword-matches them
 to the five host-watch categories (network IDS, host audit, file integrity,
-EDR/AV, firewall) and upgrades the matching B50-B54 result from UNKNOWN to
-PASS with ATTESTED confidence.  Leave as `[]` if unsure.
+EDR/AV, firewall) and turns the matching B50-B54 result into PASS with
+ATTESTED confidence (see the list above).  B16 counts any named entry.  Leave
+as `[]` if unsure.
 
 ### paths
 
@@ -198,6 +208,34 @@ checks whether any single agent holds all three legs (untrusted input +
 sensitive data + outbound/exec).
 
 Leave as `[]` for a single-agent setup.
+
+An entry must be an object with a non-blank `name` and a `tools` list whose
+members are all non-blank strings.  `"tools": []` is valid: an agent that
+declares it holds no tools is a legitimate self-report.
+
+The roster is all or nothing.  If `agents` is not a list, or any one entry
+fails the rule above, the whole roster is ignored - exactly as if the key
+were missing - and B45, B47, B75, B76, B3 and A1 read it that way.  Nothing
+is repaired or trimmed: a nameless agent, or one whose `tools` is not a list
+of names, would read as an agent that holds nothing, and dropping only the bad
+entry could drop the one that declared the risk.  The rest of the attestation
+is read as written.  The run prints one warning on stderr with the count and
+the reason (never the entry itself).
+
+A name is blank when nothing is left after removing whitespace and the Unicode
+control, format and separator characters (categories Cc, Cf, Zs, Zl, Zp), so a
+name made only of a zero-width space, a byte-order mark or a control byte is
+blank too.
+
+The same all-or-nothing rule applies to the name lists `tools`, `proven_tools`
+and `host_monitors`: a list with any member that is not a non-blank string is
+ignored whole, with the same kind of warning, as if the key were absent.  A
+valid list means what it always did - for example any named `host_monitors`
+entry still counts for B16.
+
+An attestation that cannot be parsed at all (not JSON, not an object, an
+unknown `schema`, or nested deeper than 200 levels) is ignored whole, with its
+own warning.
 
 ### delegation
 

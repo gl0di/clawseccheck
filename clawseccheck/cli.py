@@ -3280,6 +3280,25 @@ def main(argv=None) -> int:
         return 1
 
 
+def _vet_attestation(attestation: dict, src: str) -> dict:
+    """C-714: remove the unusable parts of an attestation and say so on stderr.
+
+    Each part is vetted on its own (``attest.vet_attestation``): an agent roster or a
+    ``tools`` / ``proven_tools`` / ``host_monitors`` list with anything unusable in it is
+    removed whole and then reads as if that key had not been written, and the rest of the
+    attestation is used as written. The warning is one line with counts and fixed reasons -
+    never an entry's content, because the attestation may be attacker-influenced. Returns
+    the attestation to use.
+    """
+    from . import attest as _attest  # noqa: PLC0415
+    vetted, notes = _attest.vet_attestation(attestation)
+    if notes:
+        print(f"\u26a0 ignored in the attestation from {src}: {'; '.join(notes)}. "
+              "Each is ignored whole, as if its key were absent; the rest of the "
+              "attestation was read as written.", file=sys.stderr)
+    return vetted
+
+
 _JUDGED_BUNDLE_CACHE: dict = {}
 
 
@@ -5097,6 +5116,8 @@ def _main(argv=None) -> int:
             print(f"\u26a0 could not read a valid attestation from {src} "
                   f"(ignored; B43/B44 stay UNKNOWN). See '{command_prefix()} --ask'.",
                   file=sys.stderr)
+        else:
+            attestation = _vet_attestation(attestation, src)
     elif args.full and args.judged_bundle is not None:
         # B-476: --judged-bundle's own --help promises four buckets, and
         # `split_judged_bundle` has always parsed all four - but nothing in the codebase
@@ -5120,6 +5141,9 @@ def _main(argv=None) -> int:
                 print("\u26a0 the --judged-bundle 'attestation' object is not a valid "
                       "attestation (ignored; B43/B44 stay UNKNOWN). "
                       f"See '{command_prefix()} --ask'.", file=sys.stderr)
+            else:
+                attestation = _vet_attestation(
+                    attestation, "the --judged-bundle 'attestation' object")
     if args.attest and _bundle_att is not None:
         print("note: --attest was given, so the --judged-bundle 'attestation' object "
               "was not used.", file=sys.stderr)

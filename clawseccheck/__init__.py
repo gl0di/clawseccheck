@@ -121,7 +121,11 @@ def build_context(home: Path | str = "~/.openclaw",
     if include_dist:
         ctx.installed_dist_version = _installed_dist_version()
     if attestation:
-        ctx.attestation = attestation
+        # C-714: a library caller gets the same vetting the CLI applies (an unusable
+        # roster or name list reads as absent). The CLI has already vetted and warned;
+        # a vetted attestation comes back unchanged.
+        from .attest import vet_attestation  # noqa: PLC0415
+        ctx.attestation = vet_attestation(attestation)[0]
     ctx.exhaustive = exhaustive
     return ctx
 
