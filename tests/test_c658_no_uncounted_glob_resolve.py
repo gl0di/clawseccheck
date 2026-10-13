@@ -503,10 +503,6 @@ _ALLOWED: dict = {
         (1, _C_SAME + _R_OWN_FILE),
     ("clawseccheck/invocation.py", "_shim_beside_the_package", "resolve"):
         (1, _C_SAME + _R_OWN_FILE),
-    ("clawseccheck/logdiscovery.py", "_generic_log_sinks", "glob"):
-        (1, _C_GUARDED + "except OSError"),
-    ("clawseccheck/logdiscovery.py", "_transcript_sinks", "glob"):
-        (1, _C_GUARDED + "except OSError"),
     ("clawseccheck/monitordims/_memory.py", "_snapshot_memory_files", "rglob"):
         (1, _C_SAME + _R_ROOT_PROBED),
     ("clawseccheck/report.py", "_credential_surface_map", "rglob"):
@@ -599,17 +595,17 @@ def test_the_real_allowlist_size_is_pinned_by_reason_class():
         entries[cls] += 1
         sites[cls] += count
     assert {c: (entries[c], sites[c]) for c in _CLASSES} == {
-        _C_GUARDED: (31, 48),
+        _C_GUARDED: (29, 46),
         _C_SAME: (27, 40),
         _C_SURVEY: (0, 0),
         _C_UNCLASSIFIED: (0, 0),
     }
-    assert (len(_ALLOWED), sum(c for c, _ in _ALLOWED.values())) == (58, 88)
+    assert (len(_ALLOWED), sum(c for c, _ in _ALLOWED.values())) == (56, 86)
     assert (len(_NON_PATHLIB), sum(c for c, _ in _NON_PATHLIB.values())) == (4, 9)
     by_name: Counter = Counter()
     for (_rel, _fn, spelling), (count, _reason) in _ALLOWED.items():
         by_name[spelling] += count
-    assert dict(by_name) == {"glob": 9, "rglob": 5, "resolve": 70, "resolve(strict)": 4}, by_name
+    assert dict(by_name) == {"glob": 7, "rglob": 5, "resolve": 70, "resolve(strict)": 4}, by_name
     assert not [k for k in _ALLOWED if k[2].startswith("glob.")], "the glob module is unused today"
 
 

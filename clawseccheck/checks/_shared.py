@@ -2841,6 +2841,76 @@ def _skill_corpus_complete(ctx: Context) -> bool:
     return not ctx.skills_frontier_partial and ctx.skills_capped_count == 0
 
 
+# ---------- C-727: a directory under the home that cannot be read ----------
+# The ``pathprobe`` predicates RAISE on a path they cannot stat (an unreadable parent), on
+# purpose: "could not look" is a different fact from "absent". A check that lets that escape
+# is reported by the runner as ``ERR:<function>`` ("the check crashed"). These helpers let a
+# check keep going with what it CAN read, remember what it could not, and say so at the end.
+def _probe_noting(pred, path, home, unreadable: list) -> bool:
+    """``pred(path)`` (a ``pathprobe`` predicate); False plus a note in *unreadable* on OSError.
+
+    The note is the home-relative path (``_detail_path``), never an absolute one.
+    """
+    try:
+        return pred(path)
+    except OSError:
+        unreadable.append(_detail_path(path, home))
+        return False
+
+
+def _agent_dirs_noting(home, unreadable: list) -> list:
+    """The ``agents/<id>`` directories under *home* (symlinks skipped), sorted.
+
+    An ``agents`` directory that cannot be listed is noted in *unreadable* and yields no
+    agents; the caller must not read that as "no agents".
+    """
+    agents_root = home / "agents"
+    try:
+        if not pathprobe.is_dir(agents_root):
+            return []
+        return sorted(
+            p for p in agents_root.iterdir()
+            if pathprobe.is_dir(p) and not pathprobe.is_symlink(p)
+        )
+    except OSError:
+        unreadable.append(_detail_path(agents_root, home))
+        return []
+
+
+def _sink_unreadable(path) -> bool:
+    """True when a log/memory sink that has bytes in it could not be read (C-727).
+
+    ``scan_log_file`` never raises: an unreadable file just yields ``bytes_scanned == 0``,
+    the same as an empty one. A scan loop that ``continue``s on that count must not treat the
+    first as the second.
+    """
+    try:
+        return os.stat(path).st_size > 0 and not os.access(path, os.R_OK)
+    except OSError:
+        return True
+
+
+def _unreadable_dirs_finding(cid: str, what: str, unreadable: list) -> "Finding":
+    """UNKNOWN for a check that could not read part of the home (C-727).
+
+    *what* names the role of the thing that was not examined ("the Codex session logs");
+    the paths come from *unreadable*: home-relative, or a bare name marked as outside the
+    home. ``engine_degraded`` is set as for the
+    other present-but-unread findings: the engine could not do its job here.
+    """
+    seen = sorted(set(unreadable))
+    shown = ", ".join(seen[:6]) + (f" (+{len(seen) - 6} more)" if len(seen) > 6 else "")
+    return _finding(
+        cid,
+        UNKNOWN,
+        f"Could not read {shown} (paths are relative to the audited home), so {what} could "
+        "not be fully checked and no clean result is claimed for it.",
+        "Make the listed path(s) readable by the user running this audit (check their permissions, "
+        "or run the audit as the account that owns them), then re-run.",
+        engine_degraded=True,
+    )
+
+
 def _finding(
     cid,
     status,

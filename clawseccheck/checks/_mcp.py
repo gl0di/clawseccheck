@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 from .. import pathprobe
+from . import _shared
 from .. import attest as _attest
 from .. import harnessruntime as _harnessruntime
 from .. import mcpsurface as _mcpsurface
@@ -8523,21 +8524,19 @@ def _walk_hook_shell_refs(node, event_name: str | None, out: list[tuple[str, str
             out.append((event_name or "<unknown event>", node))
 
 
-def _codex_plugin_doc_cache_dirs(ctx: Context) -> list[Path]:
-    """agents/<agent>/agent/codex-home/.tmp/plugins/plugins/ dirs under ctx.home, if any."""
-    agents_root = ctx.home / "agents"
+def _codex_plugin_doc_cache_dirs(ctx: Context, unreadable: "list | None" = None) -> list[Path]:
+    """agents/<agent>/agent/codex-home/.tmp/plugins/plugins/ dirs under ctx.home, if any.
+
+    C-727: a directory on the way that cannot be read is appended to *unreadable* (when given)
+    as a home-relative path, instead of raising; the caller must not read it as "no cache".
+    """
+    note: list = unreadable if unreadable is not None else []
     out: list[Path] = []
-    if not pathprobe.is_dir(agents_root):
-        return out
-    try:
-        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
-    except OSError:
-        return out
-    for agent_dir in agent_dirs:
+    for agent_dir in _shared._agent_dirs_noting(ctx.home, note):
         cache_dir = agent_dir
         for part in _C015_CODEX_PLUGIN_MARKER:
             cache_dir = cache_dir / part
-        if pathprobe.is_dir(cache_dir):
+        if _shared._probe_noting(pathprobe.is_dir, cache_dir, ctx.home, note):
             out.append(cache_dir)
     return out
 
@@ -8560,8 +8559,12 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
     WARN    - at least one hooks.json wires a shell script to an event.
     UNKNOWN - no codex-home doc-cache directory found, or no hooks.json within it.
     """
-    cache_dirs = _codex_plugin_doc_cache_dirs(ctx)
+    unreadable: list[str] = []
+    cache_dirs = _codex_plugin_doc_cache_dirs(ctx, unreadable)
     if not cache_dirs:
+        if unreadable:
+            return _shared._unreadable_dirs_finding(
+                "B151", "the Codex CLI plugin doc-cache", unreadable)
         return _finding(
             "B151",
             UNKNOWN,
@@ -8581,15 +8584,20 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
         try:
             connector_dirs = sorted(p for p in cache_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
         except OSError:
+            unreadable.append(_detail_path(cache_dir, ctx.home))
             continue
         for connector_dir in connector_dirs:
             hooks_path = connector_dir / "hooks.json"
-            if not pathprobe.is_file(hooks_path) or pathprobe.is_symlink(hooks_path):
+            if (not _shared._probe_noting(pathprobe.is_file, hooks_path, ctx.home, unreadable)
+                    or pathprobe.is_symlink(hooks_path)):
                 continue
             any_hooks_file = True
             try:
                 shallow = loads_shallow(hooks_path.read_text(encoding="utf-8", errors="replace"))
-            except (OSError, ValueError):
+            except OSError:
+                unreadable.append(_detail_path(hooks_path, ctx.home))  # C-727: not a clean skip
+                continue
+            except ValueError:
                 continue
             if shallow.elided:
                 too_deep.append(connector_dir.name)  # C-664: partly read - never "clean"
@@ -8602,6 +8610,12 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
                     )
             elif not shallow.elided:
                 clean_connectors.append(connector_dir.name)
+
+    # C-727: a WARN found in a readable connector stands; otherwise an unreadable part of the
+    # cache means neither "clean" nor "no hooks.json" can be said.
+    if unreadable and not shell_ev:
+        return _shared._unreadable_dirs_finding(
+            "B151", "the Codex CLI plugin doc-cache", unreadable)
 
     if not any_hooks_file:
         return _finding(
@@ -8713,7 +8727,8 @@ def _wrapper_unread_manifest_kind(wrapper_dir: Path) -> str | None:
 
 
 def _npm_projects_plugin_ids(
-    ctx: Context, unread: "list[tuple[str, str]] | None" = None
+    ctx: Context, unread: "list[tuple[str, str]] | None" = None,
+    unreadable: "list | None" = None,
 ) -> dict[str, Path]:
     """{plugin-id: wrapper-dir} for each ~/.openclaw/npm/projects/<wrapper>/ whose
     manifest (found via the shared _locate_plugin_root helper) declares an id.
@@ -8726,14 +8741,16 @@ def _npm_projects_plugin_ids(
     id.
     """
     out: dict[str, Path] = {}
+    note: list = unreadable if unreadable is not None else []  # C-727
     npm_projects = ctx.home
     for part in _NPM_PROJECTS_REL:
         npm_projects = npm_projects / part
-    if not pathprobe.is_dir(npm_projects):
+    if not _shared._probe_noting(pathprobe.is_dir, npm_projects, ctx.home, note):
         return out
     try:
         wrapper_dirs = sorted(p for p in npm_projects.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
+        note.append(_detail_path(npm_projects, ctx.home))
         return out
 
     for wrapper_dir in wrapper_dirs:
@@ -8764,25 +8781,23 @@ def _npm_projects_plugin_ids(
     return out
 
 
-def _agent_plugins_ids(ctx: Context) -> dict[str, Path]:
-    """{plugin-id: plugin-dir} for each agents/<agent>/agent/plugins/<name>/ directory."""
+def _agent_plugins_ids(ctx: Context, unreadable: "list | None" = None) -> dict[str, Path]:
+    """{plugin-id: plugin-dir} for each agents/<agent>/agent/plugins/<name>/ directory.
+
+    C-727: a directory that cannot be read is appended to *unreadable* (when given).
+    """
     out: dict[str, Path] = {}
-    agents_root = ctx.home / "agents"
-    if not pathprobe.is_dir(agents_root):
-        return out
-    try:
-        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
-    except OSError:
-        return out
-    for agent_dir in agent_dirs:
+    note: list = unreadable if unreadable is not None else []
+    for agent_dir in _shared._agent_dirs_noting(ctx.home, note):
         plugins_dir = agent_dir
         for part in _AGENT_PLUGINS_REL:
             plugins_dir = plugins_dir / part
-        if not pathprobe.is_dir(plugins_dir):
+        if not _shared._probe_noting(pathprobe.is_dir, plugins_dir, ctx.home, note):
             continue
         try:
             plugin_dirs = sorted(p for p in plugins_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
         except OSError:
+            note.append(_detail_path(plugins_dir, ctx.home))
             continue
         for plugin_dir in plugin_dirs:
             out.setdefault(plugin_dir.name, plugin_dir)
@@ -8808,10 +8823,14 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
               id (a WARN in the same situation says so in its ``fix``).
     """
     unread: list[tuple[str, str]] = []
-    npm_ids = _npm_projects_plugin_ids(ctx, unread)
-    agent_ids = _agent_plugins_ids(ctx)
+    unreadable: list[str] = []
+    npm_ids = _npm_projects_plugin_ids(ctx, unread, unreadable)
+    agent_ids = _agent_plugins_ids(ctx, unreadable)
 
     if not npm_ids and not agent_ids:
+        if unreadable:
+            return _shared._unreadable_dirs_finding(
+                "B152", "the on-disk plugin caches", unreadable)
         return _finding(
             "B152",
             UNKNOWN,
@@ -8858,6 +8877,13 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
             "is covered by plugin-permission and supply-chain checks." + unread_fix,
             evidence=ev,
         )
+
+    # C-727: an orphaned cache found in what was readable WARNed above; past this point an
+    # unreadable plugin-cache directory means neither "all declared" nor a pipe-only UNKNOWN
+    # can be the whole story.
+    if unreadable:
+        return _shared._unreadable_dirs_finding(
+            "B152", "the on-disk plugin caches", unreadable)
 
     if unread:
         return _finding(

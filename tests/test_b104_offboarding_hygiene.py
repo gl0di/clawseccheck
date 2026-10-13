@@ -133,4 +133,7 @@ def test_unreadable_skill_dir_does_not_crash(tmp_path):
         f = check_offboarding_hygiene(_ctx(tmp_path))
     finally:
         locked.chmod(0o700)
-    assert f.status == PASS, f.detail
+    # C-727: skipped, not crashed -- and not a clean PASS either: a skill directory this check
+    # could not look into was not compared, so "no duplicate installs" is not established.
+    assert f.id == "B104" and f.status == UNKNOWN, f.detail
+    assert "skills/locked" in f.detail

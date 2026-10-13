@@ -2862,13 +2862,24 @@ def check_config_health_integrity(ctx: Context) -> Finding:
     # database that is present but unreadable is a container that could not be judged (UNKNOWN),
     # not an absent one; a database without the table is simply a legacy install.
     judged: list[tuple] = []
-    if pathprobe.is_file(health_path):
+    logs_unreadable: list[str] = []
+    try:
+        health_file = pathprobe.is_file(health_path)
+    except OSError:
+        # C-727: logs/ cannot be entered, so the legacy file was not looked for. The state
+        # database below is still read, and a WARN from it stands.
+        logs_unreadable.append(_detail_path(health_path.parent, ctx.home))
+        health_file = False
+    if health_file:
         judged.append(("legacy file logs/config-health.json", "legacy file",
                        _b78_judge_file(health_path)))
     if db.status in (CONFIG_HEALTH_OK, CONFIG_HEALTH_EMPTY, CONFIG_HEALTH_UNREADABLE):
         judged.append(("state database", "state database",
                        _b78_judge_db(db.status, db.entries, db.unread, db.truncated)))
 
+    if logs_unreadable and not any(item[2][0] == WARN for item in judged):
+        return _shared._unreadable_dirs_finding(
+            "B78", "the config-health record (logs/config-health.json)", logs_unreadable)
     if not judged:
         return _finding(
             "B78",
@@ -3496,12 +3507,14 @@ def check_state_db_atrest(ctx: Context) -> Finding:
 
     state_dir = ctx.home / "state"
     present: list[Path] = []
+    db_unlooked = False  # C-727: the database could not be looked for (state/ not searchable)
     for name in _B188_DB_NAMES:
         p = state_dir / name
         try:
             if pathprobe.is_file(p) and not pathprobe.is_symlink(p):
                 present.append(p)
         except OSError:
+            db_unlooked = True
             continue
 
     # Reachability of the chain above ~/.openclaw. Proven, not assumed: `_other_can_reach_read`
@@ -3541,6 +3554,17 @@ def check_state_db_atrest(ctx: Context) -> Finding:
         if exposed_extra and ancestors_open:
             # Capped at WARN: with no live DB the only reachable evidence is a retained copy.
             return _b188_retained_copy_warn(exposed_extra)
+        if db_unlooked:
+            return _finding(
+                "B188",
+                UNKNOWN,
+                "The state database at ~/.openclaw/state/openclaw.sqlite could not be looked "
+                "for \u2014 the state directory could not be read \u2014 so its at-rest "
+                "permissions were not assessed.",
+                "Make ~/.openclaw/state readable and searchable by the user running this "
+                "audit (check its permissions, or run the audit as the account that owns it), "
+                "then re-run.",
+            )
         return _finding(
             "B188",
             UNKNOWN,
@@ -4592,7 +4616,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     unreadable_sinks: list = []
-    sinks = discover_log_sinks(ctx, unreadable_sinks)
+    unreadable_transcripts: list = []  # C-727
+    sinks = discover_log_sinks(ctx, unreadable_sinks, unreadable_transcripts)
 
     # B-817: this discovery has no notion of the SQLite-backed trajectory store
     # (trajectorystore.py) - a `kind="trajectory"` sink here is a JSONL sidecar only.
@@ -4620,6 +4645,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     sqlite_trajectory_disclosure += _sqlite_transcript_disclosure(getattr(ctx, "home", None))
 
     if not sinks:
+        unreadable_sinks = unreadable_sinks + unreadable_transcripts
         # B-913: an unreadable source dir (e.g. a `chmod 000` workspace's memory/) is a
         # distinct fact from "nothing configured" - name it rather than letting the
         # reader assume there is genuinely no log corpus.
@@ -4654,6 +4680,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     corroborated: dict[str, set] = {}
     all_samples: list[str] = []
     all_results: list = []
+    unread_sinks: list[str] = []  # C-727: has bytes, could not be read
     any_scanned = False
     isolated_hits = 0
     skipped_for_time = 0
@@ -4696,6 +4723,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         result = scan_log_file(sink, deadline, skill_iocs, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
+            if _shared._sink_unreadable(sink.path):
+                unread_sinks.append(_detail_path(sink.path, ctx.home))  # C-727
             continue
         any_scanned = True
 
@@ -4828,6 +4857,13 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             f" {isolated_hits} low-confidence signal(s) suppressed (isolated, not corroborated)."
         )
     detail += note
+    # C-727: a transcript directory that could not be read was not scanned, so the sinks that
+    # WERE scanned cannot stand for a clean result (a WARN above is unaffected).
+    if unreadable_transcripts or unreadable_sinks or unread_sinks:
+        return _shared._unreadable_dirs_finding(
+            "B164", "the agent logs, session transcripts, install backups and memory files",
+            unreadable_transcripts + [_detail_path(u, ctx.home) for u in unreadable_sinks]
+            + unread_sinks)
     return _finding(
         "B164",
         PASS,

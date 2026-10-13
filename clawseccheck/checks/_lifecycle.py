@@ -4037,11 +4037,14 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     # F-164: --exhaustive widens the per-sink budget and full-line coverage via
     # limits_for(ctx); DEFAULT_LIMITS reproduces _B180_PER_FILE_BUDGET_S exactly.
     lim = limits_for(ctx)
+    unread_sinks: list[str] = []  # C-727: has bytes, could not be read
     for sink in memory_sinks:
         deadline = audit_deadline(lim.log_per_file_budget_s)
         result = scan_log_file(sink, deadline, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
+            if _shared._sink_unreadable(sink.path):
+                unread_sinks.append(_detail_path(sink.path, ctx.home))
             continue
         any_scanned = True
 
@@ -4098,6 +4101,11 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
             "signal in the same file \u2014 e.g. a security note merely quoting an attack phrase)."
         )
     detail += note
+    # C-727: a memory directory that could not be listed was not scanned (a WARN above stands).
+    if unreadable_sinks or unread_sinks:
+        return _shared._unreadable_dirs_finding(
+            "B180", "the agent memory files",
+            [_detail_path(u, ctx.home) for u in unreadable_sinks] + unread_sinks)
     return _finding(
         "B180",
         PASS,
@@ -4165,15 +4173,25 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     # into one name-keyed map, last-merged wins, no warning) - is surfaced, not just same-tier
     # stale copies. name -> [(tier, rel_dir), ...].
     name_hits: dict[str, list[tuple[str, str]]] = {}
+    skills_unreadable: list[str] = []  # C-727
     for base, tier in skill_load_roots(home, ctx.config, user_home=_b104_user_home(home)):
+        errs_before = len(ctx.errors)
         if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
+            if len(ctx.errors) > errs_before:  # C-727: could not be looked at, not absent
+                skills_unreadable.append(_detail_path(base, home))
             continue
         try:
             entries = sorted(base.iterdir())
         except OSError:
+            skills_unreadable.append(_detail_path(base, home))  # C-727
             continue
         for sd in entries:
-            if pathprobe.is_symlink(sd) or not pathprobe.is_dir(sd):
+            try:
+                if pathprobe.is_symlink(sd) or not pathprobe.is_dir(sd):
+                    continue
+            except OSError:
+                # C-727: `base` can be listed but not searched, so its entries cannot be classified.
+                skills_unreadable.append(_detail_path(sd, home))
                 continue
             skill_md = sd / "SKILL.md"
             # B-767: stat'ing an entry INSIDE `sd` needs traverse permission on `sd`
@@ -4181,11 +4199,15 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             # stat `sd` from its already-traversable parent) denies -- and
             # Path.is_file() does NOT swallow EACCES. _safe_is_file degrades this one
             # directory to "skip it" and records the gap instead of crashing the check.
+            errs_before = len(ctx.errors)
             if not _safe_is_file(skill_md, ctx, what=f"'{skill_md.name}' in a skill dir"):
+                if len(ctx.errors) > errs_before:  # C-727: could not be looked at, not absent
+                    skills_unreadable.append(_detail_path(skill_md, home))
                 continue
             try:
                 blob = skill_md.read_text(encoding="utf-8", errors="replace")
             except OSError:
+                skills_unreadable.append(_detail_path(skill_md, home))  # C-727
                 continue
             # A raw on-disk SKILL.md starts with `---` (the collector injects the
             # `# file: SKILL.md` header that _frontmatter_name needs, but we read raw), so
@@ -4246,6 +4268,11 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             "missing command path there before removing it.",
             warns,
         )
+    # C-727: a skill directory that could not be read was not compared, so "no duplicates" is
+    # not established (a duplicate found in what WAS read WARNed above).
+    if skills_unreadable:
+        return _shared._unreadable_dirs_finding(
+            "B104", "the installed skill directories (duplicate installs)", skills_unreadable)
     # B-661: unlike the duplicate-skill scan above (which walks disk load roots
     # directly), the "no dead MCP command paths" half is read ENTIRELY from
     # `ctx.config` (`_mcp_servers(ctx.config or {})`), and `skill_load_roots` also
@@ -5105,10 +5132,9 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # Evaluate EACH agent independently (N=5 most-recent files per agent).
     # Worst-case posture wins: a single fully-auto-approving agent triggers WARN
     # regardless of how safe other agents are - safe agents cannot dilute a dangerous one.
-    agents_root = ctx.home / "agents"
-    agent_dirs: list[Path] = []
-    if pathprobe.is_dir(agents_root):
-        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
+    # C-727: an unreadable agents/<id> tree is noted and skipped, never a crash.
+    unreadable: list[str] = []
+    agent_dirs = _shared._agent_dirs_noting(ctx.home, unreadable)
 
     any_sessions = False  # at least one .jsonl file found anywhere
     any_turns = False  # at least one turn_context event parsed
@@ -5140,9 +5166,17 @@ def check_session_approval_policy(ctx: Context) -> Finding:
 
     for agent_dir in agent_dirs:
         sessions_dir = agent_dir / "agent" / "codex-home" / "sessions"
-        if not pathprobe.is_dir(sessions_dir):
+        if not _shared._probe_noting(pathprobe.is_dir, sessions_dir, ctx.home, unreadable):
             continue
-        agent_files = [p for p in walk_dir_safely(sessions_dir) if p.name.endswith(".jsonl")]
+        # C-727: opt in to the unreadable-entry channel (a re-raise would crash this check).
+        walk_gaps: list = []
+        try:
+            agent_files = [p for p in walk_dir_safely(sessions_dir, unreadable_dirs=walk_gaps)
+                           if p.name.endswith(".jsonl")]
+        except OSError:
+            unreadable.append(_detail_path(sessions_dir, ctx.home))
+            continue
+        unreadable.extend(_detail_path(Path(g[0]), ctx.home) for g in walk_gaps)
         if not agent_files:
             continue
         any_sessions = True
@@ -5156,6 +5190,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
             try:
                 raw, fp_truncated = _read_jsonl_tail(fp)
             except OSError:
+                unreadable.append(_detail_path(fp, ctx.home))  # C-727: not a clean skip
                 continue
             any_truncated = any_truncated or fp_truncated
             for ln in raw.splitlines():
@@ -5188,6 +5223,11 @@ def check_session_approval_policy(ctx: Context) -> Finding:
                 worst_total = a_total
                 worst_never = a_never
                 worst_files = len(recent)
+
+    # C-727: part of the session-log tree could not be read. A WARN found in what WAS read
+    # stands (worst_agent); anything else cannot be reported as clean or as "no sessions".
+    if unreadable and worst_agent is None:
+        return _shared._unreadable_dirs_finding("B79", "the Codex session logs", unreadable)
 
     if not any_sessions:
         return no_sessions
@@ -5292,22 +5332,22 @@ def check_codex_project_trust(ctx: Context) -> Finding:
     UNKNOWN - no agents/<id>/agent/codex-home/config.toml found anywhere (Codex CLI
               is not in use).
     """
-    agents_root = ctx.home / "agents"
-    agent_dirs: list[Path] = []
-    if pathprobe.is_dir(agents_root):
-        agent_dirs = sorted(p for p in agents_root.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
+    # C-727: an unreadable agents/<id> tree is noted and skipped, never a crash.
+    unreadable: list[str] = []
+    agent_dirs = _shared._agent_dirs_noting(ctx.home, unreadable)
 
     any_config = False
     trusted_ev: list[str] = []
 
     for agent_dir in agent_dirs:
         config_path = agent_dir / "agent" / "codex-home" / "config.toml"
-        if not pathprobe.is_file(config_path):
+        if not _shared._probe_noting(pathprobe.is_file, config_path, ctx.home, unreadable):
             continue
         any_config = True
         try:
             text = config_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            unreadable.append(_detail_path(config_path, ctx.home))  # C-727: not a clean skip
             continue
         for project_path in _codex_trusted_projects(text):
             # B-757: the codex-home config stores the project's absolute path;
@@ -5316,6 +5356,11 @@ def check_codex_project_trust(ctx: Context) -> Finding:
                 f"agent {agent_dir.name}: project "
                 f"{_shared._username_safe_path(project_path)!r}"
             )
+
+    # C-727: a trusted project found in a readable config still WARNs; otherwise an
+    # unreadable codex-home cannot be reported as clean or as "Codex not in use".
+    if unreadable and not trusted_ev:
+        return _shared._unreadable_dirs_finding("B136", "the Codex project trust settings", unreadable)
 
     if not any_config:
         return _finding(
@@ -5640,7 +5685,9 @@ def _b138_merge(legacy: Finding, table: Finding, table_items: list) -> Finding:
         return _finding("B138", WARN, table.detail, fix, evidence=table.evidence)
     if legacy.status == UNKNOWN:
         fix = legacy.fix + (gap(_B138_TABLE, table) if table.status == UNKNOWN else "")
-        return _finding("B138", UNKNOWN, legacy.detail, fix)
+        # C-727: keep the flag of the unreadable-directory finding (False for every earlier
+        # legacy UNKNOWN, so nothing else changes).
+        return _finding("B138", UNKNOWN, legacy.detail, fix, engine_degraded=legacy.engine_degraded)
     if table.status == UNKNOWN:
         return table
     return _finding(
@@ -5690,7 +5737,16 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
     config not found and no store anywhere it is UNKNOWN, not PASS.
     """
     pending_path = ctx.home / "devices" / "pending.json"
-    legacy = _b138_judge_legacy_file(pending_path) if pathprobe.is_file(pending_path) else None
+    try:
+        has_legacy = pathprobe.is_file(pending_path)
+        legacy = _b138_judge_legacy_file(pending_path) if has_legacy else None
+    except OSError:
+        # C-727: devices/ cannot be entered, so the legacy file was not looked for. Judged as
+        # an unreadable container: a WARN from the state-database table still stands in
+        # _b138_merge below, and nothing else can turn this into "no pending requests".
+        legacy = _shared._unreadable_dirs_finding(
+            "B138", "pending device pairing requests (devices/pending.json)",
+            [_detail_path(pending_path.parent, ctx.home)])
     table, items = None, []
     if ctx.pending_pairings_sqlite_found or ctx.pending_pairings_sqlite_parse_error:
         table, items = _b138_judge_pending_table(ctx)
@@ -5829,7 +5885,16 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
 
     using_sqlite_fallback = False
     paired_path = ctx.home / "devices" / "paired.json"
-    if pathprobe.is_file(paired_path):
+    paired_unreadable: list[str] = []
+    try:
+        paired_file = pathprobe.is_file(paired_path)
+    except OSError:
+        # C-727: devices/ cannot be entered, so the legacy file was not looked for. The state
+        # database is still read below (a WARN from it stands); no PASS may rest on the file
+        # being "absent".
+        paired_unreadable.append(_detail_path(paired_path.parent, ctx.home))
+        paired_file = False
+    if paired_file:
         try:
             # C-648: nesting deeper than MAX_JSON_NESTING raises JSONNestingError here, before
             # the parser runs, so every interpreter answers alike. Before, a document past the
@@ -5923,6 +5988,10 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                     "more rows than the collector's cap, then re-run the audit.",
                     engine_degraded=True,
                 )
+            if paired_unreadable:
+                return _shared._unreadable_dirs_finding(
+                    "B176", "paired device operator authority (devices/paired.json)",
+                    paired_unreadable)
             return _finding(
                 "B176",
                 PASS,
@@ -6016,6 +6085,10 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 "more rows than the collector's cap, then re-run the audit." + unread_note,
                 engine_degraded=True,
             )
+        if paired_unreadable:
+            return _shared._unreadable_dirs_finding(
+                "B176", "paired device operator authority (devices/paired.json)",
+                paired_unreadable)
         if unread:
             return _finding(
                 "B176",
@@ -8112,7 +8185,15 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
             unreadable.append("credentials/ is present but could not be listed")
             entries = []
         for entry in entries:
-            if entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and pathprobe.is_file(entry):
+            try:
+                legacy_entry = entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and pathprobe.is_file(entry)
+            except OSError:
+                # C-727: credentials/ can be listed but not searched, so an entry cannot be stat'ed.
+                note = "credentials/ is present but its entries could not be examined"
+                if note not in unreadable:
+                    unreadable.append(note)
+                continue
+            if legacy_entry:
                 channel = entry.name[: -len(_LEGACY_ALLOWFROM_SUFFIX)]
                 found.append(
                     f"credentials/{channel}{_LEGACY_ALLOWFROM_SUFFIX} "
@@ -8120,8 +8201,12 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
                 )
 
     device_auth = ctx.home / "identity" / "device-auth.json"
-    if pathprobe.is_file(device_auth):
-        found.append("identity/device-auth.json (legacy device-auth store)")
+    try:
+        if pathprobe.is_file(device_auth):
+            found.append("identity/device-auth.json (legacy device-auth store)")
+    except OSError:
+        # C-727: identity/ cannot be entered; a legacy file found elsewhere still WARNs.
+        unreadable.append("identity/ is present but could not be read")
 
     if found:
         found.sort()

@@ -5584,12 +5584,14 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
         )
 
     hits = []
+    unread_files: list[str] = []  # C-727: in scope, present, and not readable
     for path in candidates:
         try:
             if path.stat().st_size > _C015_MAX_BYTES:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            unread_files.append(_detail_path(path, ctx.home))
             continue
         if _c015_is_generated_plugin_model_catalog(path.parts, text):
             continue
@@ -5694,6 +5696,26 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             "permissions, then re-run.",
         )
 
+    # C-727: a file the scan was meant to read and could not is a coverage gap of the same
+    # kind (cf. B176 "present but unreadable - cannot evaluate"); a WARN above stands. The
+    # `detail` of every other outcome is unchanged; this one only exists for such a home.
+    unread_fix = ""
+    if unread_files:
+        shown = ", ".join(unread_files[:6]) + (
+            f" (+{len(unread_files) - 6} more)" if len(unread_files) > 6 else "")
+        unread_fix = (f" {len(unread_files)} file(s) in scope could not be read ({shown}); "
+                      "make them readable by the user running this audit and re-run.")
+        if not (scan_capped or gap_count):
+            return _finding(
+                "C015",
+                UNKNOWN,
+                f"Scanned {len(candidates) - len(unread_files)} home file(s), but "
+                f"{len(unread_files)} file(s) in scope could not be read ({shown}) \u2014 no "
+                "plaintext secret-shaped values in what was scanned, but coverage is incomplete.",
+                "Make the listed file(s) readable by the user running this audit (check their "
+                "permissions, or run the audit as the account that owns them), then re-run.",
+            )
+
     if scan_capped or gap_count:
         # GR#4/B-228 family: a coverage gap must never roll up to a confident "scanned
         # the home, all clean" headline - UNKNOWN, not PASS, until the rest is covered.
@@ -5735,7 +5757,7 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
                 " searchable mode and re-run to cover it."
                 if gap_count
                 else ""
-            ),
+            ) + unread_fix,
         )
     return _finding(
         "C015",

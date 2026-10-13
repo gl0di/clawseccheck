@@ -5166,12 +5166,16 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     _collect_cron_run_logs(home, ctx)
     cron_dir = home / "cron"
     json_candidates = (
-        walk_dir_safely(cron_dir, max_files=50)
+        _walk_named(cron_dir, "jobs.json", max_files=50)
         if _safe_is_dir(cron_dir, ctx, what=f"'{cron_dir}'") else []
     )
     jobs_json = next((p for p in json_candidates if p.name == "jobs.json"), None)
     if jobs_json is not None:
         try:
+            if os.path.islink(jobs_json):
+                # C-727: the lookup hands a link to the caller (it would read as "absent"); a link
+                # is never followed, so this is a store that could not be read.
+                raise OSError("the cron job store is a symbolic link; this audit does not follow links")
             with open(jobs_json, "rb") as fp:
                 raw, truncated = _read_with_limit(fp, _MAX_CRON_BYTES)
             if truncated:
@@ -5248,7 +5252,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     # No legacy JSON store -- fall back to the SQLite-backed cron_jobs table.
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -5257,7 +5261,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # B-709: PROBE the real column shape before picking a SELECT -- do NOT try the
@@ -5582,7 +5586,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     """
     state_dir = home / "state"
     candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -5592,7 +5596,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     placeholders = ",".join("?" * len(keys))
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             try:
@@ -5619,6 +5623,68 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
             f"cron_jobs table in '{db_path}' holds {row[0]} row(s) for that same store "
             f"path which were NOT read",
         )
+
+
+def _connect_state_db(db_path: Path):
+    """Open the state database read-only - never through a symbolic link (C-727).
+
+    A symbolic link AT the database path is not followed, on purpose: the walk skips link
+    entries, and the non-regular-path refusal runs before a connect.
+    ``sqlite3.connect("file:...?mode=ro")`` WOULD follow one, so the link path is refused here
+    too, with the same error type every caller already turns into its own "could not open"
+    outcome (never "no database"). This is about the file only: a ``state`` DIRECTORY that is
+    itself a link is entered, as it always was.
+    """
+    if os.path.islink(db_path):
+        raise sqlite3.OperationalError(
+            "the state database path is a symbolic link; this audit does not follow links")
+    return sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+
+
+def _walk_named(directory: Path, name: str, max_files: int, capped: "list | None" = None) -> "list[Path]":
+    """``walk_dir_safely(directory)`` for a lookup of the file called *name* (C-727).
+
+    ``walk_dir_safely`` re-raises for a caller that did not opt in to its unreadable-entry
+    channel, so a directory that can be listed but not searched (mode 0o400) crashed the whole
+    collector; one that can be searched but not listed (0o100) yielded nothing, which every
+    caller reads as "the file is not there". Neither is true. When the walk raised, or the
+    directory is not fully accessible, *name* is also asked for directly: through the
+    directory's listing (0o400) or by name (0o100). The caller then opens that path and its
+    own present-but-unreadable handling (the one a chmod-000 file already reaches) takes over.
+    A fully accessible directory is answered by the walk alone, exactly as before; one that
+    can neither be listed nor searched is reported as holding *name*, unread, because "not
+    found" would be a claim about a directory nobody could look into.
+    """
+    failed = False
+    try:
+        found = walk_dir_safely(directory, max_files=max_files, capped=capped)
+    except OSError:
+        found, failed = [], True
+    # Only <directory>/<name> is the store. A file of the same name further down (a backup
+    # copy, a decoy) is not, and every caller takes the first entry with that name: with the
+    # real one missing or a link, a nested namesake used to be read as if it were the store.
+    found = [p for p in found if p.name != name or p.parent == directory]
+    # A symbolic link is never followed and the walk skips it, so it would read as "absent":
+    # hand it to the caller, whose own could-not-open handling (the refusal of a non-regular
+    # path, or `_connect_state_db`) then answers.
+    if not any(p.name == name for p in found) and os.path.islink(directory / name):
+        found = found + [directory / name]
+    if not failed and os.access(directory, os.R_OK | os.X_OK):
+        return found
+    if any(p.name == name for p in found):
+        return found
+    try:
+        listed = name in os.listdir(directory)
+        list_failed = False
+    except OSError:
+        listed, list_failed = False, True
+    if listed or os.path.lexists(directory / name):
+        return found + [directory / name]
+    if list_failed and not os.access(directory, os.X_OK):
+        # Neither listable nor searchable (0o000): "not found by name" proves nothing, so the
+        # caller is handed the path and its own present-but-unreadable handling answers.
+        return found + [directory / name]
+    return found
 
 
 def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
@@ -5698,7 +5764,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -5707,7 +5773,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # B-709: PROBE which of the two tables exist before picking a SELECT -- do NOT
@@ -5929,7 +5995,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -5945,7 +6011,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             # BEGIN before the schema check, held open across it AND the read below --
             # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
@@ -6667,7 +6733,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -6692,7 +6758,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
@@ -7057,7 +7123,7 @@ def _collect_pending_pairings_sqlite(home: Path, ctx: Context) -> None:
         return
     capped: list = []
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -7076,7 +7142,7 @@ def _collect_pending_pairings_sqlite(home: Path, ctx: Context) -> None:
     cap_params = (json_cap, json_cap, json_cap, text_cap, text_cap, text_cap, text_cap)
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
@@ -7239,7 +7305,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -7259,7 +7325,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     placeholders = ",".join("?" for _ in CONFIG_MACHINE_STATE_KEYS)
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             # BEGIN before the schema check, held open across it AND the read below --
             # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
@@ -7383,7 +7449,7 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -7400,7 +7466,7 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # Presence-by-metadata, not exception-driven fallback: `PRAGMA table_info` on a
@@ -7504,7 +7570,7 @@ def _collect_restart_handoff(home: Path, ctx: Context) -> None:
         return
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -7518,7 +7584,7 @@ def _collect_restart_handoff(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
@@ -7576,7 +7642,7 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -7585,7 +7651,7 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             events = conn.execute("SELECT COUNT(*) FROM capture_events").fetchone()[0]
@@ -7642,7 +7708,7 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -7659,7 +7725,7 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
     except sqlite3.Error as exc:
         ctx.errors.append(f"could not open '{db_path}': {exc}")
         return
@@ -7882,7 +7948,7 @@ def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -7906,7 +7972,7 @@ def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
     row = None
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             # BEGIN before the schema check, held open across it AND the read below --
             # the same TOCTOU closure as _collect_config_machine_state (B-977).
@@ -8391,7 +8457,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -8400,7 +8466,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
     except sqlite3.Error as exc:
         # Cannot even open the file as a database -- a shared root cause (not sqlite,
         # unreadable, etc.), so both columns genuinely are unreadable together here.
@@ -9080,7 +9146,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -9089,7 +9155,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # B-709: probe the real column shape before picking a SELECT -- see the
@@ -9303,7 +9369,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -9312,7 +9378,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             agg_row = conn.execute(
