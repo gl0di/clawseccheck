@@ -236,6 +236,27 @@ _C015_MAX_EVIDENCE = 12
 
 _C015_MAX_SCAN_FILES = 500
 
+# C-700: the walk is alphabetical, so a bulk tree that sorts early (agents/, then npm/,
+# sandboxes/, logs/) used to spend the whole _C015_MAX_SCAN_FILES budget before the walk
+# ever reached workspace/ - measured on a real home: 500 files scanned, none under
+# workspace/, which held a plaintext password note. The scan now runs in two passes over
+# the SAME total bound: first the high-value roots (the home's own root-level files and
+# these top-level dirs) under their own sub-budget, then every other top-level dir with
+# what is left. The sub-budget is smaller than the total, so the first pass can never take
+# the bulk trees' whole share either - but it is a protection for the bulk trees, not a
+# smaller bound for the priority roots: whatever the bulk trees leave unspent is handed
+# back to the priority roots (a top-up walk), so the home is never scanned less than a
+# single 500-file walk would have.
+_C015_PRIORITY_MAX_FILES = 300
+_C015_PRIORITY_DIRS = frozenset(
+    {"workspace", "credentials", "identity", "devices", "backups", ".config-backups"}
+)
+_C015_PRIORITY_DIR_PREFIX = "workspace-"  # per-agent workspaces: workspace-<agentId>
+
+
+def _c015_is_priority_dir(name: str) -> bool:
+    return name in _C015_PRIORITY_DIRS or name.startswith(_C015_PRIORITY_DIR_PREFIX)
+
 
 _C015_TEXT_EXTS = {
     ".env",
@@ -651,6 +672,7 @@ def _c015_candidate_files(
     capped: list | None = None,
     unreadable: list | None = None,
     unreadable_dirs: list | None = None,
+    unreached: list | None = None,
 ) -> list[Path]:
     """*unreadable*, when given, collects the SKILL_DIRS skip-root(s) whose existence
     could not be confirmed (B-913: a `chmod 000` ancestor - e.g. the workspace dir or
@@ -658,6 +680,17 @@ def _c015_candidate_files(
     uncaught). Computed ONCE up front (skip_roots is a handful of fixed candidates)
     rather than per candidate file, both for cost and so a single unreadable root is
     recorded once, not once per file examined.
+
+    C-700: two passes over one total budget (_C015_MAX_SCAN_FILES) - the priority roots
+    first (see _C015_PRIORITY_DIRS) under a sub-budget, then every other top-level dir with
+    what is left; if the priority sub-budget tripped while the bulk trees left budget
+    unspent, the priority roots are walked again with the unspent budget added, so the total
+    never exceeds _C015_MAX_SCAN_FILES and a file the single 500-file walk reached is never
+    dropped. *capped* gets one sentinel when a pass stopped early (always with the whole
+    budget spent); *unreached*, when given, collects the top-level directories the walk
+    really left files behind in or never reached (``"agents/"`` for one it stopped inside,
+    ``"npm/"`` for one it never reached, ``"(home root files)"`` if the root-level files
+    themselves were cut short). A pass that filled its cap exactly names nothing.
     """
     # C-658: `Path.resolve()` raises RuntimeError for a symlink loop on 3.9-3.12 (an unhandled
     # crash that capped the whole audit) and returns the path on 3.14. `os.path.realpath` does
@@ -674,10 +707,20 @@ def _c015_candidate_files(
         elif unreadable is not None and len(ctx.errors) > errs_before:
             unreadable.append(str(root))
 
-    def _prune(rel_parts: tuple) -> bool:
+    def _excluded(rel_parts: tuple) -> bool:
         if _c015_is_codex_plugin_doc_cache(rel_parts):
             return True
         return any(rel_parts[: len(root)] == root for root in skill_dir_parts)
+
+    def _prune_priority(rel_parts: tuple) -> bool:
+        if len(rel_parts) == 1 and not _c015_is_priority_dir(rel_parts[0]):
+            return True
+        return _excluded(rel_parts)
+
+    def _prune_bulk(rel_parts: tuple) -> bool:
+        if len(rel_parts) == 1 and _c015_is_priority_dir(rel_parts[0]):
+            return True
+        return _excluded(rel_parts)
 
     def _keep_file(path: Path) -> bool:
         if not _safe_is_file(path, ctx, what=f"'{path}'"):
@@ -700,15 +743,81 @@ def _c015_candidate_files(
             or name in BOOTSTRAP_FILES
         )
 
-    return walk_dir_safely(
-        ctx.home,
-        max_files=_C015_MAX_SCAN_FILES,
-        exclude_pycache=True,
-        prune_dir=_prune,
-        keep_file=_keep_file,
-        capped=capped,
-        unreadable_dirs=unreadable_dirs,
+    def _keep_bulk_file(path: Path) -> bool:
+        # the home's own root-level files belong to the priority pass; the bulk pass
+        # walks the root again only to reach its other top-level dirs
+        return path.parent != Path(ctx.home) and _keep_file(path)
+
+    def _walk(prune, keep, cap: int, gaps: list):
+        """Up to *cap* files, plus the first file the walk found beyond them (or None).
+
+        One file of lookahead: a pass that filled its cap EXACTLY lost nothing, and only the
+        file left behind says which top-level dir really lost files."""
+        got = walk_dir_safely(
+            ctx.home,
+            max_files=cap + 1,
+            exclude_pycache=True,
+            prune_dir=prune,
+            keep_file=keep,
+            unreadable_dirs=gaps,
+        )
+        if len(got) > cap:
+            return got[:cap], got[cap]
+        return got, None
+
+    def _is_listed_dir(p: Path) -> bool:
+        try:
+            return not pathprobe.is_symlink(p) and pathprobe.is_dir(p)
+        except OSError:
+            return True  # cannot classify it: name it rather than drop it
+
+    def _left_behind(first_left: Path, pruned) -> list[str]:
+        """Top-level dirs a pass that left *first_left* behind did not finish: the dir that
+        file sits in (only part of it was read) and every later dir (never reached)."""
+        try:
+            parts = first_left.relative_to(ctx.home).parts
+        except ValueError:
+            return []
+        try:
+            names = sorted(os.listdir(ctx.home))
+        except OSError:
+            names = []
+        todo = [n for n in names if not pruned((n,)) and _is_listed_dir(ctx.home / n)]
+        if len(parts) == 1:  # a root-level file: every dir of this pass is still ahead
+            return ["(home root files)"] + [f"{n}/" for n in todo]
+        return [f"{parts[0]}/"] + [f"{n}/" for n in todo if n > parts[0]]
+
+    gaps: list = []
+    priority, priority_left = _walk(
+        _prune_priority, _keep_file, min(_C015_PRIORITY_MAX_FILES, _C015_MAX_SCAN_FILES), gaps
     )
+    bulk, bulk_left = _walk(
+        _prune_bulk, _keep_bulk_file, max(_C015_MAX_SCAN_FILES - len(priority), 0), gaps
+    )
+    if priority_left is not None and len(priority) + len(bulk) < _C015_MAX_SCAN_FILES:
+        # The priority sub-budget tripped while the total budget was still unspent (the bulk
+        # trees did not use their share): the sub-budget exists to protect the bulk trees, not
+        # to drop a file the 500-file bound had room for. The walk is deterministic, so the
+        # first pass is a prefix of this one.
+        priority, priority_left = _walk(
+            _prune_priority, _keep_file, _C015_MAX_SCAN_FILES - len(bulk), gaps
+        )
+    # A pass that stopped early did so with the whole budget spent: the priority pass either
+    # filled the topped-up cap or the bulk pass used what the priority pass left, so a
+    # report of "capped" below always means len(result) == _C015_MAX_SCAN_FILES.
+    if capped is not None and (priority_left is not None or bulk_left is not None):
+        capped.append(True)
+    if unreached is not None:
+        if priority_left is not None:
+            unreached.extend(_left_behind(priority_left, _prune_priority))
+        if bulk_left is not None:
+            unreached.extend(_left_behind(bulk_left, _prune_bulk))
+    if unreadable_dirs is not None:
+        # the passes all list the home root, so a root-level failure is reported by each
+        for gap in gaps:
+            if gap not in unreadable_dirs:
+                unreadable_dirs.append(gap)
+    return priority + bulk
 
 
 def _capabilities_attested(ctx: Context) -> bool:
@@ -5431,8 +5540,18 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     capped: list = []
     unreadable_skip_roots: list = []
     unreadable_dirs: list = []
-    candidates = _c015_candidate_files(ctx, capped, unreadable_skip_roots, unreadable_dirs)
+    unreached: list = []
+    candidates = _c015_candidate_files(
+        ctx, capped, unreadable_skip_roots, unreadable_dirs, unreached
+    )
     scan_capped = bool(capped)
+    # C-700: which top-level dirs the stopped pass did not finish. Goes in `fix`, never in
+    # `detail` - baseline.fingerprint() hashes `detail`, and the cap sentence there is unchanged.
+    unreached_note = (
+        " Not fully covered by this scan: " + ", ".join(dict.fromkeys(unreached)) + "."
+        if scan_capped and unreached
+        else ""
+    )
     gap_count = len(unreadable_dirs)
     if not candidates:
         return _finding(
@@ -5524,7 +5643,8 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             "C015",
             WARN,
             detail,
-            "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
+            "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens."
+            f"{unreached_note}",
             evidence=shown,
         )
 
@@ -5579,8 +5699,13 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             f"Scanned {len(candidates)} home file(s); the scan " + " and ".join(reasons)
             + " before the home was fully covered \u2014 no plaintext secret-shaped values in"
             " what was scanned, but coverage is incomplete.",
-            "Re-run against a narrower home, or manually review any credentials/, "
-            "identity/, devices/, and workspace/ content not covered by this scan."
+            "Re-run against a narrower home, or manually review "
+            + (
+                f"the part of the home this scan did not reach.{unreached_note}"
+                if unreached_note
+                else "any credentials/, identity/, devices/, and workspace/ content not "
+                "covered by this scan."
+            )
             + (
                 " A skipped subdirectory is normally owned by you \u2014 chmod it back to a"
                 " searchable mode and re-run to cover it."
