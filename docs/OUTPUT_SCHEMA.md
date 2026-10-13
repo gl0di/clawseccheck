@@ -2120,9 +2120,10 @@ still returned, but some of them may predate the incident, and a reader must not
 ### Notes
 
 **`--incident-open` refuses, rather than fabricates, when there is nothing to link.** It
-refuses (exit 1, no record written) when no OpenClaw configuration was found under
-`--home` - the WARN/FAIL findings such a run still emits describe the missing setup, not
-a setup in trouble - and otherwise filters this run's findings to
+refuses (exit 1, no record written) when `--home` is missing or an empty directory and
+the run found no FAIL - the few WARN findings such a run still emits describe the missing
+setup, not a setup in trouble, while a home that holds anything (a skill, a workspace) is
+audited and can open an incident with or without an `openclaw.json` - and otherwise filters this run's findings to
 `catalog.ACTIONABLE_STATUSES` (the same shared FAIL-weight/WARN vocabulary every other
 consumer of that split uses), exiting 1 with no record written when none are actionable -
 an incident record needs a real basis.
@@ -2134,7 +2135,7 @@ there it is free text inside a Finding's `evidence`, never a structured field. B
 independently re-scanned PID, which could name a different, now-stale process than the
 one the triggering finding actually observed.
 
-**The status lifecycle mirrors Pulse's own discipline.** `open -> investigating ->
+**The status lifecycle is strict forward and free backward.** `open -> investigating ->
 mitigated -> closed`; a forward move is only ever the single next step, a backward move to
 any earlier status is always allowed, and staying at the same status is rejected. `--incident-mark <id> <status>` reports which of three reasons a rejected transition
 failed for: `invalid_status` (not one of the four), `not_found` (no such id), or

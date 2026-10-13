@@ -3721,8 +3721,8 @@ def _main(argv=None) -> int:
                         "this run's actionable findings, a best-effort PID when one of them "
                         "names one, and the current --events journal position \u2014 stored under "
                         "--data-dir, never in the audited home. Refuses (non-zero exit, nothing "
-                        "written) if no OpenClaw configuration was found under --home, or if "
-                        "nothing actionable (a FAIL or WARN) was found this run")
+                        "written) if --home is missing or an empty directory and no FAIL was "
+                        "found, or if nothing actionable (a FAIL or WARN) was found this run")
     p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
                    help="INCIDENT-LIFECYCLE: transition a --incident-open record's status. STATUS is one "
                         "of open/investigating/mitigated/closed \u2014 forward moves one step at "
@@ -6056,15 +6056,19 @@ def _main(argv=None) -> int:
         # this run's own findings - it's what the new record gets linked to - so it
         # dispatches here, alongside --incident, rather than in the pure-local-store
         # section before audit() ran.
+        # C-716: the first-run predicate, not "no openclaw.json": a home that holds
+        # anything (a skill, a workspace) is not "nothing to audit", and a FAIL found
+        # there still opens an incident - see open_incident_from_audit.
         _inc_record, _inc_err = open_incident_from_audit(
-            ctx, findings, path=_incidents_path(args), events=args.events)
+            ctx, findings, path=_incidents_path(args), events=args.events,
+            nothing_to_audit=_onboarding_reason(Path(args.home).expanduser()) is not None)
         if _inc_err == "no_actionable_findings":
             print("--incident-open: no actionable (WARN/FAIL-weight) findings this run \u2014 "
                   "nothing to open an incident about.", file=sys.stderr)
             return 1
-        if _inc_err == "no_config_found":
-            print("--incident-open: no OpenClaw configuration was found under --home, so "
-                  "there is no setup to open an incident about; nothing was recorded.",
+        if _inc_err == "nothing_to_audit":
+            print("--incident-open: --home is missing or an empty directory, so there is "
+                  "no setup to open an incident about; nothing was recorded.",
                   file=sys.stderr)
             return 1
         if _inc_err == "write_failed":

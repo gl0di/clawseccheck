@@ -29,7 +29,7 @@ from pathlib import Path
 
 from . import trajectory as _trajectory
 from . import trajectorystore as _trajectorystore
-from .catalog import ACTIONABLE_STATUSES
+from .catalog import ACTIONABLE_STATUSES, FAIL_WEIGHT_STATUSES
 from .checks import SECRET_PATTERNS, _is_secret_reference, _pattern_hits_real_secret, _secret_paths
 from .collector import dig
 from .incidentstore import DEFAULT_INCIDENTS, _incident_to_dict, create_incident
@@ -80,7 +80,8 @@ def _pid_from_findings(findings) -> "tuple[str | None, str | None]":
 
 def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
                              events: "str | Path | None" = None,
-                             when: "str | None" = None) -> "tuple[dict | None, str | None]":
+                             when: "str | None" = None,
+                             nothing_to_audit: bool = False) -> "tuple[dict | None, str | None]":
     """--incident-open's entry point: derive a new persisted Incident from findings this
     audit run actually produced. Filters to catalog.ACTIONABLE_STATUSES -- the same
     shared FAIL-weight/WARN vocabulary B-751/B-755 exist to keep every consumer using,
@@ -90,15 +91,20 @@ def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
 
     Returns (record_dict, None) on success, or (None, reason) where reason is
     "no_actionable_findings" (refused -- an incident needs a real basis, never a
-    fabricated one), "no_config_found" (refused -- C-716: no OpenClaw configuration was
-    found, so the audit ran over nothing; the WARN/FAIL findings such a run still emits,
-    e.g. A1/B16, describe the absence of a setup, not a setup in trouble) or "write_failed".
-    A duck-typed *ctx* without ``config_found`` is treated as a found setup (the same
-    default the CLI's blind-run gate uses), so only a real collector Context can refuse.
+    fabricated one), "nothing_to_audit" (refused -- C-716, see below) or "write_failed".
+
+    *nothing_to_audit* is the caller's statement that the audited home is missing or an
+    empty directory (the CLI passes its own first-run predicate, ``_onboarding_reason``).
+    Such a run still emits a few WARNs (A1, B16, C5) that describe the absence of a setup,
+    and an incident recorded from those is an incident about nothing. It refuses ONLY when
+    no finding is FAIL-weight: a FAIL is never dropped on the strength of this flag. The
+    first version of this gate refused whenever no openclaw.json was found, which also
+    refused a home with no config and a malicious skill in it - two CRITICAL FAILs and no
+    incident. A home that holds anything is not "nothing to audit".
     """
-    if not getattr(ctx, "config_found", True):
-        return None, "no_config_found"
     actionable = [f for f in findings if f.status in ACTIONABLE_STATUSES]
+    if nothing_to_audit and not any(f.status in FAIL_WEIGHT_STATUSES for f in actionable):
+        return None, "nothing_to_audit"
     if not actionable:
         return None, "no_actionable_findings"
 
