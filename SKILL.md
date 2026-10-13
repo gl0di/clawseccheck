@@ -99,7 +99,7 @@ in Step 2's `judgePacket` BEFORE presenting Step 3 - never skip it, never wait t
 **Read [`docs/playbook/JUDGE_PANEL.md`](docs/playbook/JUDGE_PANEL.md) before you spawn a
 judge or build a verdicts file. It is the protocol; do not reconstruct it from memory.**
 Always in force: judges see only the packet's redacted fields, never raw skill source; each
-returns only a typed verdict (`SAFE` / `SUSPICIOUS` / `DANGEROUS`); the panel is advisory
+returns only a typed verdict (`SAFE` / `SUSPICIOUS` / `DANGEROUS`, or `ABSTAIN`); the panel is advisory
 and can never raise or lower the A-F grade; never claim a panel ran when it did not, and
 never claim 3 distinct subagents ran when you reasoned through it inline instead.
 

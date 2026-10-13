@@ -63,10 +63,20 @@ section.
      "risk_ids": ["B65"]
    }
    ```
+
+   A judge that finds nothing in the item to decide from answers `"verdict": "ABSTAIN"`
+   instead of guessing (each item's own `verdict_schema.abstain` says so). `ABSTAIN` is not
+   a fourth severity: it means "I could not assess this", and it is never to be replaced
+   by `SAFE` to look finished.
 3. **Majority vote** per item across its 3 lens verdicts. A tie (no single verdict has
    at least 2 of the 3 votes - e.g. one SAFE, one SUSPICIOUS, one DANGEROUS) escalates
    to the **worst** of the three rather than picking arbitrarily - the same fail-safe
-   principle as the rest of this skill.
+   principle as the rest of this skill. An `ABSTAIN` lens is not a vote: decide among the
+   lenses that did answer. When only one lens answered, submit its answer if it is
+   `SUSPICIOUS` or `DANGEROUS` (a concern is never discarded) and submit `ABSTAIN` if it
+   is `SAFE` - one `SAFE` is not a majority. When no lens answered, submit `ABSTAIN`.
+   An `ABSTAIN` entry is treated exactly like no entry for that item: the card shows it
+   as abstained, not reviewed, and it never raises or lowers anything.
 4. Spawn in the same locked-down form as the isolator subagent in
    [`docs/ISOLATION.md`](../ISOLATION.md) - **no tools**,
    `maxSpawnDepth: 1`, **ephemeral** - and bound concurrency the same way
