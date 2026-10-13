@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import html as _html
 import json
+import os
 import re
 from pathlib import Path
 
 import pytest
+from _realhome import REAL_HOME
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 HOMES = ("home_safe", "home_vuln")
@@ -150,7 +152,10 @@ def test_the_page_still_carries_no_home_path_and_no_secret_shaped_value(
         tmp_path, capsys, home_name):
     page, _payload = _cli_pair(tmp_path, capsys, home_name)
     text = _visible_text(page)
-    for needle in (str(Path.home()), str(FIXTURES), "/home/", "/Users/"):
+    # Both homes: the one this machine really has, and the one the suite redirects $HOME to
+    # (which is the home the code under test sees).
+    for needle in (str(REAL_HOME), os.environ.get("HOME") or str(REAL_HOME), str(FIXTURES),
+                   "/home/", "/Users/"):
         assert needle not in page and needle not in text, needle
     # Credential-shaped values the fixture itself holds must not have reached the page.
     cfg = json.loads((FIXTURES / home_name / "openclaw.json").read_text(encoding="utf-8"))

@@ -89,6 +89,8 @@ from ._coverage import (  # noqa: F401
     _COVERAGE_EVENT_RE,
     _COVERAGE_GAIN_RE,
     _COVERAGE_MAX_ENTRIES,
+    _COVERAGE_MAX_MEMBERS,
+    _COVERAGE_MEMBER_PREFIX,
     _COVERAGE_MEMBERS_MARK,
     _COVERAGE_NAME_CAP,
     _coverage_key,
