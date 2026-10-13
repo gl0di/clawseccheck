@@ -118,6 +118,11 @@ nothing visible resolves), which moves from PASS to UNKNOWN.
   (`ghp_` plus 32 hex under `tools.github`), and B323 no longer treats `${NAME:-default}` in a
   PATH value as a literal override on OpenClaw 2026.9.7 and later, where the vendor drops any
   value that contains an environment reference (WARN to PASS there).
+- **B55 no longer advises a value OpenClaw rejects.** Its fix told users to lock a channel to
+  `owner`, which neither `dmPolicy` nor `groupPolicy` accepts (`openclaw config validate` exits 1 and
+  Doctor refuses the file). It now says `allowlist` with only your own ids in `allowFrom` (and
+  `groupAllowFrom` on the channels that have it), or `disabled`, and only where the channel has the
+  field. Verdicts and `detail` text are unchanged.
 - **Wording and citations match the installed build.** B321/B322, B391, B172, B381 and B9
   explanations were corrected against the vendor code (for example B172 notes that grants stored
   in the pre-2026.10.1 shape are persisted but not in force until repair), and moved vendor

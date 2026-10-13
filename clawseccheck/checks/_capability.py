@@ -2172,8 +2172,15 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"channel carrying untrusted content ({', '.join(ext_ch)}) that is not "
                 f"proven open, and the only scoping is a non-write-specific approval "
                 f"gate (tools.exec.mode) \u2014 it doesn't scope write-capable tools.",
-                "Lock the channel(s) to 'owner' (or 'disabled'); tools.exec.mode='ask' "
-                "alone does not clear this \u2014 it doesn't scope write-capable tools.",
+                # C-702: 'owner' is not a dmPolicy/groupPolicy value (OpenClaw 2026.10.2
+                # rejects it at `config validate`); every value named here is one the
+                # installed schema accepts, pinned by tests/test_c702_b55_advice_values.py.
+                "Narrow the channel(s) to your own account: where the channel has a dmPolicy, "
+                "set it to 'allowlist' with only your own channel-native id(s) in allowFrom; "
+                "where it has a groupPolicy, set it to 'allowlist' (and list your ids in "
+                "groupAllowFrom on channels that have that field) or to 'disabled'; or set "
+                "the policy to 'disabled' to remove the reach. tools.exec.mode='ask' alone "
+                "does not clear this \u2014 it doesn't scope write-capable tools.",
                 evidence=evidence,
             )
     else:
