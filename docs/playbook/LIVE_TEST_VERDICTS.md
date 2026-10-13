@@ -56,7 +56,10 @@ readable, so a RESISTANT claim the log shows was actually complied with is caugh
 than accepted at face value (F-193). Nothing to add for this - the audited home's own
 sidecars are scanned automatically; an optional `liveTest.trajectory` field exists only
 for a non-default session (`sessionId`) or an explicit `.trajectory.jsonl` (`path`, must
-sit inside `--home`).
+sit inside `--home`). The `--canary` id is also compared with the `seed` you submit beside
+it: copy the exact token `--canary --seed <value>` printed and echo that same `<value>`,
+because a RESISTANT entry whose id is not that seed's own token is dropped and the
+live-behaviour layer stays incomplete (a VULNERABLE entry is kept and still caps).
 
 The verdict now reaches the grade, cap-only (F-155): feed it back via `--dashboard --full
 --judged-bundle <file>`'s `liveTest` bucket (exact JSON shape:
