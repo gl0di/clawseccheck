@@ -298,36 +298,20 @@ def test_a_live_pid_that_is_not_a_watcher_does_not_block_a_start(tmp_path, monke
 
 @pytest.mark.parametrize("bad_pid", [0, -1, 1])
 def test_a_pid_that_cannot_be_a_watcher_is_a_stale_record_not_alive(bad_pid):
-    word, sentence = watch.describe_liveness({
-        "status": "running", "pid": bad_pid, "mode": "inotify",
-        "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
+    hb = {"status": "running", "pid": bad_pid, "mode": "inotify",
+          "updated_at": watch._now_iso(), "heartbeat_interval_s": 30}
+    word, sentence = watch.describe_liveness(hb, None, "free")
     assert word == "STALE RECORD", (word, sentence)
+    word, sentence = watch.describe_liveness(hb, None, "held")
+    assert word == "LOCK HELD", "a held lock whose heartbeat names a non-process is no bare ALIVE"
 
 
 @pytest.mark.parametrize("bad_pid", [True, "12", None, 10 ** 30, 1.5])
 def test_a_pid_of_the_wrong_type_or_range_is_a_corrupt_record(bad_pid):
     word, sentence = watch.describe_liveness({
         "status": "running", "pid": bad_pid, "mode": "inotify",
-        "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
+        "updated_at": watch._now_iso(), "heartbeat_interval_s": 30}, None, "free")
     assert word == "UNREADABLE" and "corrupt" in sentence, (word, sentence)
-
-
-def test_a_live_pid_that_is_not_a_watcher_is_a_stale_record(monkeypatch):
-    monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: False)
-    word, sentence = watch.describe_liveness({
-        "status": "running", "pid": os.getpid(), "mode": "inotify",
-        "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
-    assert word == "STALE RECORD"
-    assert "not a clawseccheck" in sentence
-
-
-def test_an_unconfirmable_identity_is_alive_but_says_so(monkeypatch):
-    monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: None)
-    word, sentence = watch.describe_liveness({
-        "status": "running", "pid": os.getpid(), "mode": "inotify", "cycles": 1,
-        "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
-    assert word == "ALIVE"
-    assert "could not be confirmed" in sentence
 
 
 @pytest.mark.parametrize("argv,expected", [
@@ -370,11 +354,11 @@ def test_an_absent_heartbeat_still_reads_as_never_run(tmp_path, capsys):
     assert rc == 1 and "NOT RUNNING" in out and "has not run yet" in out
 
 
-def test_a_failed_last_rescan_is_visible_in_the_status_sentence(monkeypatch):
-    monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: True)
+def test_a_failed_last_rescan_is_visible_in_the_status_sentence():
     word, sentence = watch.describe_liveness({
         "status": "running", "pid": os.getpid(), "mode": "inotify", "cycles": 1,
-        "last_scan_rc": 2, "updated_at": watch._now_iso(), "heartbeat_interval_s": 30})
+        "last_scan_rc": 2, "updated_at": watch._now_iso(), "heartbeat_interval_s": 30},
+        None, "held")
     assert word == "ALIVE" and "FAILED" in sentence
 
 
@@ -414,28 +398,91 @@ def _status(store: Path, capsys) -> "tuple[int, str]":
     return rc, capsys.readouterr().out
 
 
-def test_status_lock_held_is_alive_whatever_the_heartbeat_says(tmp_path, capsys):
+def test_status_lock_held_with_a_fresh_agreeing_heartbeat_is_alive(tmp_path, capsys):
     store = tmp_path / "store"
     fd = _hold_lock(store)
     try:
-        _plant(store, status="stopped", pid=1)
+        _plant(store)  # pid = this process, which is also the lock holder
         rc, out = _status(store, capsys)
         assert rc == 0 and out.startswith("ALIVE"), out
-        assert "information" in out or "contradict" in out, out
     finally:
         os.close(fd)
     assert _lock_is_free(store), "the status probe must not leave the lock held"
 
 
-def test_status_lock_held_and_heartbeat_missing_or_corrupt_is_still_alive(tmp_path, capsys):
+def test_status_lock_held_but_heartbeat_stopped_is_not_a_bare_alive(tmp_path, capsys):
+    store = tmp_path / "store"
+    fd = _hold_lock(store)
+    try:
+        _plant(store, status="stopped", pid=1)
+        rc, out = _status(store, capsys)
+    finally:
+        os.close(fd)
+    assert rc == 1 and out.startswith("LOCK HELD"), out
+    assert "does not back it" in out and "stopped" in out, out
+
+
+def test_status_lock_held_and_heartbeat_stale_names_both_facts(tmp_path, capsys):
+    from datetime import datetime, timedelta
+    store = tmp_path / "store"
+    fd = _hold_lock(store)
+    try:
+        old = (datetime.now() - timedelta(seconds=600)).isoformat(timespec="seconds")
+        _plant(store, updated_at=old)
+        rc, out = _status(store, capsys)
+    finally:
+        os.close(fd)
+    assert rc == 1 and out.startswith("STALE"), out
+    assert "holds this store's lock" in out and "may be hung" in out, out
+    assert "another process holds the lock" in out, out
+
+
+def test_status_lock_held_and_heartbeat_names_a_dead_pid_is_not_alive(tmp_path, capsys):
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+    store = tmp_path / "store"
+    fd = _hold_lock(store)
+    try:
+        _plant(store, pid=dead.pid)
+        rc, out = _status(store, capsys)
+    finally:
+        os.close(fd)
+    assert rc == 1 and out.startswith("LOCK HELD"), out
+    assert "not running" in out, out
+
+
+def test_status_names_the_lock_holder_and_notices_a_different_heartbeat_pid(tmp_path, capsys):
+    if sys.platform != "linux":  # /proc/locks is Linux-only; elsewhere the holder is unknown
+        assert watch.lock_holder_pid(tmp_path / "x.lock") is None
+        return
+    store = tmp_path / "store"
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    fd = _hold_lock(store)
+    try:
+        assert watch.lock_holder_pid(store / "watch.lock") == os.getpid()
+        _plant(store, pid=other.pid)  # alive, but it is not what holds the lock
+        rc, out = _status(store, capsys)
+    finally:
+        os.close(fd)
+        other.kill()
+        other.wait(timeout=10)
+    assert rc == 1 and out.startswith("LOCK HELD"), out
+    assert f"lock held by pid {os.getpid()}" in out and "not the lock holder" in out, out
+
+
+def test_lock_holder_pid_tolerates_a_missing_file(tmp_path):
+    assert watch.lock_holder_pid(tmp_path / "nope.lock") is None
+
+
+def test_status_lock_held_and_heartbeat_missing_or_corrupt_is_not_a_bare_alive(tmp_path, capsys):
     store = tmp_path / "store"
     fd = _hold_lock(store)
     try:
         rc, out = _status(store, capsys)
-        assert rc == 0 and out.startswith("ALIVE") and "missing" in out, out
+        assert rc == 1 and out.startswith("LOCK HELD") and "no heartbeat file" in out, out
         (store / "watch_heartbeat.json").write_text("{nope", encoding="utf-8")
         rc, out = _status(store, capsys)
-        assert rc == 0 and out.startswith("ALIVE") and "corrupt" in out, out
+        assert rc == 1 and out.startswith("LOCK HELD") and "corrupt" in out, out
     finally:
         os.close(fd)
 
@@ -615,7 +662,8 @@ _HOSTILE = {
 }
 _FIELDS = ("status", "pid", "updated_at", "heartbeat_interval_s", "mode", "cycles",
            "last_scan_rc", "last_scan_at")
-_STATUS_WORDS = ("ALIVE", "STALE RECORD", "STALE", "STOPPED", "UNREADABLE", "NOT RUNNING")
+_STATUS_WORDS = ("ALIVE", "STALE RECORD", "STALE", "STOPPED", "UNREADABLE", "NOT RUNNING",
+                 "UNKNOWN", "LOCK HELD")
 
 
 @pytest.mark.parametrize("label", sorted(_HOSTILE))
@@ -634,7 +682,7 @@ def test_a_hostile_heartbeat_value_never_raises_in_status_or_start(
           "last_scan_rc": 0, "last_scan_at": watch._now_iso()}
     hb[field] = _HOSTILE[label]
     for lock in (None, "free", "held"):
-        word, sentence = watch.describe_liveness(hb, None, lock)
+        word, sentence = watch.describe_liveness(hb, None, lock, "not_regular", 4242)
         assert word in _STATUS_WORDS and len(sentence) < 3000, (lock, word, sentence[:200])
     # the start path replaces the record without raising
     rc = watch.run_watch(_copy_home(tmp_path), state_path=store / "s.json",
@@ -665,3 +713,141 @@ def test_a_failed_rescan_prints_every_line_of_the_childs_output(tmp_path, monkey
     for i in range(60):
         assert ("ALERT new skill mal-12" if i == 12 else f"line {i}\n") in text, i
     assert "NOT been checked" not in text
+
+
+# ===================================================== round 3: special files, unknown, limits
+
+def _plant_special(path: Path, kind: str, tmp_path: Path) -> None:
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        os.symlink(tmp_path / "nowhere", path)  # dangling
+
+
+_KINDS = ("fifo", "directory", "dangling_symlink")
+_TARGETS = ("watch.lock", "watch_heartbeat.json")
+
+
+def _status_in_a_process(store: Path) -> str:
+    """`--watch-status` as a real process under a hard timeout: the timeout IS the
+    assertion that a planted special file cannot make it hang."""
+    r = subprocess.run(
+        [sys.executable, "-m", "clawseccheck", "--watch-status", "--home", str(HOME_SAFE),
+         "--data-dir", str(store)], cwd=str(REPO_ROOT), capture_output=True, text=True,
+        timeout=30)
+    assert "Traceback" not in r.stderr, r.stderr
+    return r.stdout
+
+
+@pytest.mark.parametrize("target", _TARGETS)
+@pytest.mark.parametrize("kind", _KINDS)
+def test_a_special_file_in_the_store_hangs_neither_status_nor_start(
+        tmp_path, capsys, kind, target):
+    store = tmp_path / "store"
+    store.mkdir()
+    _plant_special(store / target, kind, tmp_path)
+
+    out = _status_in_a_process(store)
+    if target == "watch.lock":
+        assert out.startswith("UNKNOWN"), out
+        assert "cannot be determined" in out and "never creates" in out or "symbolic link" in out
+        assert "unverified" in out, out
+    else:
+        assert out.startswith("UNREADABLE"), out
+
+    result: dict = {}
+    buf = io.StringIO()
+
+    def _start():
+        result["rc"] = watch.run_watch(
+            _copy_home(tmp_path), state_path=store / "s.json", events_path=store / "e.jsonl",
+            history_path=store / "h.jsonl", heartbeat_path=store / "watch_heartbeat.json",
+            max_cycles=0, install_signal_handlers=False, stream=buf)
+
+    capsys.readouterr()
+    t = threading.Thread(target=_start, daemon=True)
+    t.start()
+    t.join(timeout=30)
+    assert not t.is_alive(), "run_watch hung on a planted special file"
+    assert result["rc"] == 0
+    err = capsys.readouterr().err
+    if target == "watch.lock":
+        assert "WITHOUT single-watcher protection" in err, err
+        assert ("not a regular file" in err) or ("symbolic link" in err), err
+
+
+def test_a_real_watch_starts_and_says_so_when_its_lock_file_is_a_fifo(tmp_path):
+    home = _copy_home(tmp_path)
+    store = tmp_path / "store"
+    _seed_baseline(home, store)
+    os.mkfifo(store / "watch.lock")
+    proc, out_path, f = _start_cli_watch(tmp_path, home, store, "w1")
+    try:
+        hb = _wait_for(lambda: watch.read_heartbeat(store / "watch_heartbeat.json"), 20,
+                       "a watcher with an unusable lock file to start")
+        assert hb["pid"] == proc.pid
+        text = out_path.read_text(encoding="utf-8")
+        assert "not a regular file" in text and "WITHOUT single-watcher protection" in text, text
+        status = _status_in_a_process(store)
+        assert status.startswith("UNKNOWN"), status
+        assert "ALIVE" not in status
+    finally:
+        _stop(proc)
+        f.close()
+
+
+def test_a_real_watch_replaces_a_fifo_planted_at_the_heartbeat_path(tmp_path):
+    home = _copy_home(tmp_path)
+    store = tmp_path / "store"
+    _seed_baseline(home, store)
+    os.mkfifo(store / "watch_heartbeat.json")
+    proc, out_path, f = _start_cli_watch(tmp_path, home, store, "w1")
+    try:
+        hb = _wait_for(lambda: watch.read_heartbeat(store / "watch_heartbeat.json"), 20,
+                       "the watcher to replace the planted pipe with a heartbeat")
+        assert hb["pid"] == proc.pid
+        assert "not a regular file" in out_path.read_text(encoding="utf-8")
+    finally:
+        _stop(proc)
+        f.close()
+
+
+def test_the_unknown_answer_never_trusts_a_fresh_heartbeat_naming_a_live_pid(tmp_path):
+    """The pre-round-3 fallback printed ALIVE here on the strength of a planted file."""
+    store = tmp_path / "store"
+    store.mkdir()
+    os.mkfifo(store / "watch.lock")
+    _plant(store, pid=os.getpid())
+    out = _status_in_a_process(store)
+    assert out.startswith("UNKNOWN") and "ALIVE" not in out.split(":", 1)[0], out
+    assert "status 'running'" in out, "the heartbeat must be shown as a claim"
+
+
+def test_a_symlinked_lock_file_reads_unknown_not_alive(tmp_path, capsys):
+    store = tmp_path / "store"
+    store.mkdir()
+    target = tmp_path / "real.lock"
+    target.write_text("", encoding="utf-8")
+    os.symlink(target, store / "watch.lock")
+    _plant(store, pid=os.getpid())
+    rc, out = _status(store, capsys)
+    assert rc == 1 and out.startswith("UNKNOWN") and "symbolic link" in out, out
+
+
+def test_without_fcntl_status_says_it_cannot_tell_and_never_prints_alive(tmp_path, capsys,
+                                                                       monkeypatch):
+    monkeypatch.setattr(watch, "fcntl", None)
+    monkeypatch.setattr(watch, "_HAS_FCNTL", False)
+    store = tmp_path / "store"
+    _plant(store, pid=os.getpid())
+    rc, out = _status(store, capsys)
+    assert rc == 1 and out.startswith("UNKNOWN"), out
+    assert "no file locks" in out and "unverified" in out, out
+
+
+def test_the_trust_limit_is_stated_in_the_usage_doc():
+    text = (REPO_ROOT / "docs" / "USAGE.md").read_text(encoding="utf-8")
+    assert "convenience, not proof" in text
+    assert "imitate its files" in text

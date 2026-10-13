@@ -2826,8 +2826,10 @@ def _run_watch_status(args) -> int:
     still alive - read-only, writes nothing (same contract as --brief)."""
     hb_path = _watch_heartbeat_path(args)
     hb, problem = _watch.read_heartbeat_ex(hb_path)
-    word, sentence = _watch.describe_liveness(
-        hb, problem, _watch.probe_watch_lock(_watch.lock_path_for(hb_path)))
+    lock_path = _watch.lock_path_for(hb_path)
+    lock, lock_why = _watch.probe_watch_lock_ex(lock_path)
+    holder = _watch.lock_holder_pid(lock_path) if lock == "held" else None
+    word, sentence = _watch.describe_liveness(hb, problem, lock, lock_why, holder)
     _emit(f"{word}: {sentence}")
     return 0 if word == "ALIVE" else 1
 
@@ -3805,9 +3807,11 @@ def _main(argv=None) -> int:
                         f"before the re-scan runs, so one burst of writes triggers one "
                         f"re-scan, not several (default: {_watch.DEFAULT_DEBOUNCE_S:g})")
     p.add_argument("--watch-status", action="store_true",
-                   help="is a --watch process still alive? Reads its heartbeat file "
-                        "under --data-dir and reports ALIVE / STALE / STOPPED / NOT "
-                        "RUNNING \u2014 read-only, writes nothing, does not start a watch")
+                   help="is a --watch process running? Probes the store's lock under "
+                        "--data-dir and reads its heartbeat; reports ALIVE, LOCK HELD, "
+                        "STALE, STOPPED, STALE RECORD, UNREADABLE, UNKNOWN or NOT RUNNING "
+                        "(exit 0 only for ALIVE) \u2014 read-only, writes nothing, does "
+                        "not start a watch")
     p.add_argument("--vet", metavar="TARGET",
                    help="vet a skill / plugin / MCP target BEFORE installing it \u2014 the type is "
                         "autodetected by content (explicit flags below force an engine)")

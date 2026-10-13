@@ -779,12 +779,18 @@ every re-scan, and periodically while idle. Check on it from anywhere with:
 clawseccheck --watch-status --home ~/.openclaw --data-dir ~/.clawseccheck
 ```
 
-which reports `ALIVE`, `STALE` (the watcher holds its lock but has not updated its heartbeat in
-a while - it may have hung), `STOPPED` (a clean shutdown was recorded and no watcher holds the
-lock), `STALE RECORD` (the heartbeat says a watcher was running, but nothing holds the lock, so
-none is - it exited or was killed without a clean stop), `UNREADABLE` (the heartbeat file is
-corrupt or cannot be read - not the same as never having run), or `NOT RUNNING` (never started,
-or pointed at the wrong `--data-dir`). Read-only - it never starts a watch itself.
+which reports `ALIVE` (the lock is held and the heartbeat agrees), `LOCK HELD` (the lock is held but
+the heartbeat does not back it: it says `stopped`, names a pid that is not running, or names a
+different pid from the one `/proc/locks` shows holding the lock, or is missing or corrupt),
+`STALE` (the lock is held but the heartbeat has not been updated in a while - the watcher may be
+hung, or another process holds the lock), `STOPPED` (a clean shutdown was recorded and no watcher
+holds the lock), `STALE RECORD` (the heartbeat says a watcher was running, but nothing holds the
+lock, so none is - it exited or was killed without a clean stop), `UNREADABLE` (the heartbeat
+path is corrupt, is not a regular file, or cannot be read - not the same as never having run),
+`UNKNOWN` (the lock itself cannot be probed - the lock file is not a regular file or is a symbolic
+link, or the platform has no file locks - so whether a watcher is running cannot be determined;
+the heartbeat is then printed only as an unverified claim) or `NOT RUNNING` (never started, or
+pointed at the wrong `--data-dir`). Read-only - it never starts a watch itself.
 
 **What decides "a watcher is running" is a lock, not the heartbeat.** A running `--watch` holds an
 exclusive advisory lock on `<data-dir>/watch.lock` for as long as it lives, and the operating
@@ -800,8 +806,16 @@ the first one's heartbeat. If the lock is free, the start goes ahead whatever th
 and replaces a record of a watcher that is gone with a line saying so. On a platform with no
 file locks the check falls back to the recorded pid and refuses only for a process it can
 confirm is a clawseccheck watcher; an unconfirmed one produces a warning and the start goes
-ahead. If the lock file itself cannot be used (for example it is a symlink), the watcher warns
-and starts without the single-watcher protection.
+ahead. If the lock file itself cannot be used (a symbolic link, or a pipe, socket, device or
+directory that something put there), the watcher warns loudly and starts without the
+single-watcher protection - a monitor that runs unprotected beats one that does not run. Every open
+of a file in the store is non-blocking and accepts only a regular file, so a planted pipe cannot
+make `--watch` or `--watch-status` hang.
+
+**What this does and does not protect against.** The watcher runs with your own account's rights,
+so a process running as you - including the agent being watched, if it can run commands - can stop
+it, hold its lock or imitate its files. The lock and the heartbeat protect against accidents and
+against tampering by file write alone; `--watch-status` is a convenience, not proof.
 
 Like `--monitor`, `--watch` only ever writes under its own store directory - never under the
 audited `--home`.

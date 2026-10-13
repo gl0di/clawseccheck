@@ -313,8 +313,6 @@ _RAW_DECODE_ALLOWLIST: dict = {
             "fallback; JSONDecodeError-only handler"),
     ("clawseccheck/report.py", "render_advise_json", "json.loads"):
         (1, _R_OWN_OUTPUT),
-    ("clawseccheck/watch.py", "read_heartbeat", "json.loads"):
-        (1, "own data: the watcher's own heartbeat file, written by this tool with json.dumps"),
 }
 
 
@@ -530,8 +528,8 @@ def test_the_real_allowlist_is_small_and_only_names_json_loads():
     """Keep the accepted set small and named: a long allowlist is how a guard becomes a
     rubber stamp. Raising these numbers needs a reason written next to the new entry, and a
     conversion to loads_bounded / loads_shallow lowers them."""
-    assert len(_RAW_DECODE_ALLOWLIST) == 7
-    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 8
+    assert len(_RAW_DECODE_ALLOWLIST) == 6
+    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 7
     assert {spelling for (_rel, _fn, spelling) in _RAW_DECODE_ALLOWLIST} == {"json.loads"}
 
 

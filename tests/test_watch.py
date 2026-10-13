@@ -162,14 +162,14 @@ class TestDescribeLiveness:
         monkeypatch.setattr(watch, "_pid_is_watcher", lambda pid: True)
 
     def test_none_is_not_running(self):
-        word, _sentence = watch.describe_liveness(None)
+        word, _sentence = watch.describe_liveness(None, None, "free")
         assert word == "NOT RUNNING"
 
     def test_recorded_clean_stop_is_stopped(self):
         word, _s = watch.describe_liveness({
             "status": "stopped", "pid": os.getpid(),
             "updated_at": watch._now_iso(), "heartbeat_interval_s": 30,
-        })
+        }, None, "free")
         assert word == "STOPPED"
 
     def test_a_gone_pid_is_stopped_even_without_a_clean_shutdown_record(self):
@@ -180,8 +180,9 @@ class TestDescribeLiveness:
         word, _s = watch.describe_liveness({
             "status": "running", "pid": dead_pid,
             "updated_at": watch._now_iso(), "heartbeat_interval_s": 30,
-        })
-        assert word == "STOPPED"
+        }, None, "free")
+        # C-725: nothing holds the store's lock, so the "running" record is stale.
+        assert word == "STALE RECORD"
 
     def test_an_old_heartbeat_is_stale(self):
         from datetime import datetime, timedelta
@@ -191,14 +192,14 @@ class TestDescribeLiveness:
         word, _s = watch.describe_liveness({
             "status": "running", "pid": os.getpid(),
             "updated_at": old, "heartbeat_interval_s": 1,
-        })
+        }, None, "held")
         assert word == "STALE"
 
     def test_a_fresh_heartbeat_from_a_live_pid_is_alive(self):
         word, sentence = watch.describe_liveness({
             "status": "running", "pid": os.getpid(), "mode": "inotify", "cycles": 2,
             "updated_at": watch._now_iso(), "heartbeat_interval_s": 30,
-        })
+        }, None, "held")
         assert word == "ALIVE"
         assert "inotify" in sentence
 
