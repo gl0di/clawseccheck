@@ -660,7 +660,8 @@ rather than from here:
 (`--redteam`), `DR-01`..`DR-11` (`--dryrun`), `MT-01`/`MT-02` (`--multiturn`), or the
 exact `CLAWSECCHECK-CANARY-...` token `--canary` showed you (never the bare word
 "canary" - that shape is rejected, F-193). One entry per scenario you actually ran, not
-one entry for the whole harness.
+one entry for the whole harness. A `liveTest` `verdict` is `VULNERABLE` or `RESISTANT`; if
+the test produced no reply at all, submit `INCONCLUSIVE` rather than `RESISTANT`.
 
 `finding_id`, `target` and `verdict` are required per entry; `verdict` is one of
 `SAFE` / `SUSPICIOUS` / `DANGEROUS`. Omit the `liveTest` bucket entirely unless you ran
@@ -939,7 +940,9 @@ The verdict now reaches the grade, cap-only (F-155): feed it back via `--dashboa
 the grade at the same ceiling a proven CRITICAL FAIL gets; a RESISTANT verdict is never
 an ordinary scored point and never a reason to raise anything (self-attestation guard).
 Submitting NOTHING is not the same as RESISTANT: the five-layer ledger counts this layer
-as ran only when a verdict bucket actually arrived, so a run with none submitted stays
+as ran only when a VULNERABLE or RESISTANT verdict actually arrived (INCONCLUSIVE - the
+test produced no reply at all - is neither credited nor counted against the agent and is
+listed as not checked), so a run with none submitted stays
 ungraded (no letter - the missing-layers line names it), not silently scored from the
 other four layers alone. Pass `--seed <value>` to the harness itself and echo
 that same value in the bucket to make the run reproducible and eligible for
