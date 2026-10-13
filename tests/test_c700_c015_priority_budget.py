@@ -407,3 +407,73 @@ def test_an_entry_that_cannot_be_classified_is_named_not_dropped_and_does_not_cr
 
     assert capped and len(files) == 20
     assert unreached == ["npm/", "zbad/"]
+
+
+# ------------------- round 4: the priority roots have an explicit importance order of their own
+
+
+def test_a_big_backups_tree_does_not_starve_credentials_and_workspace(tmp_path):
+    """Reviewer repro: inside the priority pass the roots were walked alphabetically
+    (.config-backups, backups, credentials, ..., workspace), so 600 small backup files used the
+    whole priority share and the two secrets below were never read. Importance order is: root
+    files, credentials, identity, devices, workspace[-*]; then backups; then the bulk trees."""
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    _bulk(tmp_path / "backups", 600, ext=".json")
+    _note_with_secret(tmp_path / "credentials" / "token.json")
+    _note_with_secret(tmp_path / "workspace" / "PASSWORDS.md")
+
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+
+    assert f.status == WARN
+    joined = "\n".join(f.evidence)
+    assert "credentials/token.json" in joined and "workspace/PASSWORDS.md" in joined
+    assert f"{_C015_MAX_SCAN_FILES}-file walk cap" in f.detail
+    assert "backups/" in f.fix
+    assert "credentials/" not in f.fix and "workspace/" not in f.fix
+
+
+def test_a_small_backups_tree_changes_nothing(tmp_path):
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    _bulk(tmp_path / "backups", 30, ext=".json")
+    _note_with_secret(tmp_path / "credentials" / "token.json")
+    _note_with_secret(tmp_path / "workspace" / "PASSWORDS.md")
+
+    files, capped, unreached = _walk(tmp_path)
+    f = check_secrets_at_rest_home(_ctx(tmp_path))
+
+    assert len(files) == 33 and not capped and not unreached
+    assert f.status == WARN and len(f.evidence) == 2
+    assert "walk cap" not in f.detail and "Not fully covered" not in f.fix
+
+
+def test_a_big_backups_tree_cannot_take_the_bulk_trees_share_either(tmp_path):
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    _bulk(tmp_path / "backups", 600, ext=".json")
+    _bulk(tmp_path / "agents" / "main", 400)
+
+    files, capped, unreached = _walk(tmp_path)
+
+    tops = [p.relative_to(tmp_path).parts[0] for p in files]
+    assert capped and len(files) == _C015_MAX_SCAN_FILES
+    assert tops.count("agents") == 400  # the bulk trees were read in full
+    assert unreached == ["backups/"]
+
+
+def test_unreached_dirs_are_named_in_importance_order(tmp_path, small_caps, monkeypatch):
+    """Total budget 20, first group 5, backups group 3. Walk order would put .config-backups and
+    backups before workspace; the disclosure lists the groups most important first."""
+    monkeypatch.setattr(_config, "_C015_BACKUP_MAX_FILES", 3, raising=False)
+    (tmp_path / "openclaw.json").write_text("{}\n", encoding="utf-8")
+    _bulk(tmp_path / "workspace", 30)
+    _bulk(tmp_path / ".config-backups", 10)
+    _bulk(tmp_path / "backups", 2)
+    _bulk(tmp_path / "agents", 3)
+
+    files, capped, unreached = _walk(tmp_path)
+
+    tops = [p.relative_to(tmp_path).parts[0] for p in files]
+    assert capped and len(files) == 20
+    assert tops.count("agents") == 3
+    # the spare budget went to the most important capped group first
+    assert tops.count("workspace") == 13 and tops.count(".config-backups") == 3
+    assert unreached == ["workspace/", ".config-backups/", "backups/"]

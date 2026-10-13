@@ -239,23 +239,29 @@ _C015_MAX_SCAN_FILES = 500
 # C-700: the walk is alphabetical, so a bulk tree that sorts early (agents/, then npm/,
 # sandboxes/, logs/) used to spend the whole _C015_MAX_SCAN_FILES budget before the walk
 # ever reached workspace/ - measured on a real home: 500 files scanned, none under
-# workspace/, which held a plaintext password note. The scan now runs in two passes over
-# the SAME total bound: first the high-value roots (the home's own root-level files and
-# these top-level dirs) under their own sub-budget, then every other top-level dir with
-# what is left. The sub-budget is smaller than the total, so the first pass can never take
-# the bulk trees' whole share either - but it is a protection for the bulk trees, not a
-# smaller bound for the priority roots: whatever the bulk trees leave unspent is handed
-# back to the priority roots (a top-up walk), so the home is never scanned less than a
-# single 500-file walk would have.
+# workspace/, which held a plaintext password note. The scan now runs in passes over the
+# SAME total bound, most important first, each under its own sub-budget:
+#   1. the home's own root-level files and the dirs that hold credentials and agent work
+#      (credentials, identity, devices, workspace, workspace-<agentId>);
+#   2. the config/state backups (backups, .config-backups) - listed apart from pass 1 so a
+#      big backups/ cannot starve credentials/ or workspace/ just by sorting before them;
+#   3. every other top-level dir, with what is left.
+# The sub-budgets are smaller than the total, so an earlier pass can never take the later
+# passes' whole share - but a sub-budget is a protection, not a smaller bound: whatever the
+# passes leave unspent is handed back to the capped passes in the same importance order (a
+# top-up walk), so the home is never scanned less than a single 500-file walk would have.
 _C015_PRIORITY_MAX_FILES = 300
-_C015_PRIORITY_DIRS = frozenset(
-    {"workspace", "credentials", "identity", "devices", "backups", ".config-backups"}
-)
+_C015_BACKUP_MAX_FILES = 50
+_C015_PRIORITY_DIRS = frozenset({"credentials", "identity", "devices", "workspace"})
 _C015_PRIORITY_DIR_PREFIX = "workspace-"  # per-agent workspaces: workspace-<agentId>
+_C015_BACKUP_DIRS = frozenset({"backups", ".config-backups"})
 
 
-def _c015_is_priority_dir(name: str) -> bool:
-    return name in _C015_PRIORITY_DIRS or name.startswith(_C015_PRIORITY_DIR_PREFIX)
+def _c015_dir_tier(name: str) -> int:
+    """Which pass reads the top-level dir *name*: 0 = priority roots, 1 = backups, 2 = the rest."""
+    if name in _C015_PRIORITY_DIRS or name.startswith(_C015_PRIORITY_DIR_PREFIX):
+        return 0
+    return 1 if name in _C015_BACKUP_DIRS else 2
 
 
 _C015_TEXT_EXTS = {
@@ -681,16 +687,18 @@ def _c015_candidate_files(
     rather than per candidate file, both for cost and so a single unreadable root is
     recorded once, not once per file examined.
 
-    C-700: two passes over one total budget (_C015_MAX_SCAN_FILES) - the priority roots
-    first (see _C015_PRIORITY_DIRS) under a sub-budget, then every other top-level dir with
-    what is left; if the priority sub-budget tripped while the bulk trees left budget
-    unspent, the priority roots are walked again with the unspent budget added, so the total
-    never exceeds _C015_MAX_SCAN_FILES and a file the single 500-file walk reached is never
-    dropped. *capped* gets one sentinel when a pass stopped early (always with the whole
-    budget spent); *unreached*, when given, collects the top-level directories the walk
-    really left files behind in or never reached (``"agents/"`` for one it stopped inside,
-    ``"npm/"`` for one it never reached, ``"(home root files)"`` if the root-level files
-    themselves were cut short). A pass that filled its cap exactly names nothing.
+    C-700: passes over one total budget (_C015_MAX_SCAN_FILES), most important first, each
+    under its own sub-budget: the home's root files and the credential/workspace dirs
+    (tier 0, _C015_PRIORITY_MAX_FILES), then the backups (tier 1, _C015_BACKUP_MAX_FILES), then
+    every other top-level dir with what is left. If a pass stopped at its sub-budget while the
+    others left budget unspent, the capped passes are walked again in the same order with the
+    unspent budget added, so the total never exceeds _C015_MAX_SCAN_FILES and a file the
+    single 500-file walk reached is never dropped. *capped* gets one sentinel when a pass
+    stopped early (always with the whole budget spent); *unreached*, when given, collects the
+    top-level directories the walk really left files behind in or never reached, most
+    important pass first (``"agents/"`` for one it stopped inside, ``"npm/"`` for one it never
+    reached, ``"(home root files)"`` if the root-level files themselves were cut short). A
+    pass that filled its cap exactly names nothing.
     """
     # C-658: `Path.resolve()` raises RuntimeError for a symlink loop on 3.9-3.12 (an unhandled
     # crash that capped the whole audit) and returns the path on 3.14. `os.path.realpath` does
@@ -712,15 +720,15 @@ def _c015_candidate_files(
             return True
         return any(rel_parts[: len(root)] == root for root in skill_dir_parts)
 
-    def _prune_priority(rel_parts: tuple) -> bool:
-        if len(rel_parts) == 1 and not _c015_is_priority_dir(rel_parts[0]):
-            return True
-        return _excluded(rel_parts)
+    def _prune_for(tier: int):
+        """prune_dir for the pass that reads the top-level dirs of *tier* (and no others)."""
 
-    def _prune_bulk(rel_parts: tuple) -> bool:
-        if len(rel_parts) == 1 and _c015_is_priority_dir(rel_parts[0]):
-            return True
-        return _excluded(rel_parts)
+        def _prune(rel_parts: tuple) -> bool:
+            if len(rel_parts) == 1 and _c015_dir_tier(rel_parts[0]) != tier:
+                return True
+            return _excluded(rel_parts)
+
+        return _prune
 
     def _keep_file(path: Path) -> bool:
         if not _safe_is_file(path, ctx, what=f"'{path}'"):
@@ -743,9 +751,9 @@ def _c015_candidate_files(
             or name in BOOTSTRAP_FILES
         )
 
-    def _keep_bulk_file(path: Path) -> bool:
-        # the home's own root-level files belong to the priority pass; the bulk pass
-        # walks the root again only to reach its other top-level dirs
+    def _keep_below_root(path: Path) -> bool:
+        # the home's own root-level files belong to the first pass; the later passes
+        # walk the root again only to reach their own top-level dirs
         return path.parent != Path(ctx.home) and _keep_file(path)
 
     def _walk(prune, keep, cap: int, gaps: list):
@@ -788,36 +796,43 @@ def _c015_candidate_files(
         return [f"{parts[0]}/"] + [f"{n}/" for n in todo if n > parts[0]]
 
     gaps: list = []
-    priority, priority_left = _walk(
-        _prune_priority, _keep_file, min(_C015_PRIORITY_MAX_FILES, _C015_MAX_SCAN_FILES), gaps
-    )
-    bulk, bulk_left = _walk(
-        _prune_bulk, _keep_bulk_file, max(_C015_MAX_SCAN_FILES - len(priority), 0), gaps
-    )
-    if priority_left is not None and len(priority) + len(bulk) < _C015_MAX_SCAN_FILES:
-        # The priority sub-budget tripped while the total budget was still unspent (the bulk
-        # trees did not use their share): the sub-budget exists to protect the bulk trees, not
-        # to drop a file the 500-file bound had room for. The walk is deterministic, so the
-        # first pass is a prefix of this one.
-        priority, priority_left = _walk(
-            _prune_priority, _keep_file, _C015_MAX_SCAN_FILES - len(bulk), gaps
-        )
-    # A pass that stopped early did so with the whole budget spent: the priority pass either
-    # filled the topped-up cap or the bulk pass used what the priority pass left, so a
-    # report of "capped" below always means len(result) == _C015_MAX_SCAN_FILES.
-    if capped is not None and (priority_left is not None or bulk_left is not None):
+    prunes = [_prune_for(tier) for tier in range(3)]
+    keeps = [_keep_file, _keep_below_root, _keep_below_root]
+    # sub-budget per pass; the last one is simply whatever is left of the total
+    sub_budgets = [_C015_PRIORITY_MAX_FILES, _C015_BACKUP_MAX_FILES, _C015_MAX_SCAN_FILES]
+    got: list = []  # per pass: [files, first file left behind or None]
+    used = 0
+    for tier, sub in enumerate(sub_budgets):
+        files, left = _walk(prunes[tier], keeps[tier], max(min(sub, _C015_MAX_SCAN_FILES - used), 0), gaps)
+        got.append([files, left])
+        used += len(files)
+    # Top-up: a sub-budget that tripped while the total budget was still unspent (the other
+    # passes did not use their share) must not drop a file the 500-file bound had room for.
+    # The capped passes get the spare budget in importance order; the walk is deterministic,
+    # so each pass's first result is a prefix of its topped-up one.
+    spare = _C015_MAX_SCAN_FILES - used
+    for tier, (files, left) in enumerate(got):
+        if spare <= 0:
+            break
+        if left is None:
+            continue
+        more, more_left = _walk(prunes[tier], keeps[tier], len(files) + spare, gaps)
+        spare -= len(more) - len(files)
+        got[tier] = [more, more_left]
+    # A pass that is still capped here used up the spare budget, so a report of "capped"
+    # below always means len(result) == _C015_MAX_SCAN_FILES.
+    if capped is not None and any(left is not None for _, left in got):
         capped.append(True)
     if unreached is not None:
-        if priority_left is not None:
-            unreached.extend(_left_behind(priority_left, _prune_priority))
-        if bulk_left is not None:
-            unreached.extend(_left_behind(bulk_left, _prune_bulk))
+        for tier, (_, left) in enumerate(got):
+            if left is not None:
+                unreached.extend(_left_behind(left, prunes[tier]))
     if unreadable_dirs is not None:
         # the passes all list the home root, so a root-level failure is reported by each
         for gap in gaps:
             if gap not in unreadable_dirs:
                 unreadable_dirs.append(gap)
-    return priority + bulk
+    return [path for files, _ in got for path in files]
 
 
 def _capabilities_attested(ctx: Context) -> bool:
