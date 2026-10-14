@@ -183,7 +183,10 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~9,258 lines (restated 2026-10-08, C-648 — was ~8,208; B176's "
+    "checks/_lifecycle.py": "~9,828 lines (restated 2026-10-14, C-727/C-731 — was ~9,258; "
+                            "unreadable and not-understood files answer UNKNOWN in B79/B136/"
+                            "B176/B356/B104, and B136 reads every valid spelling of a "
+                            "trusted project. Restated 2026-10-08, C-648 — was ~8,208; B176's "
                             "bounded-JSON nesting handling for devices/paired.json and the "
                             "unread-device disclosure added ~60 lines. Restated 2026-09-26, "
                             "B396 — was ~7,329; "
@@ -193,7 +196,10 @@ _EXEMPT = {
                             "self-modification / supply-chain topic (18 checks + "
                             "helpers); topic-faithful and over budget by design. A finer "
                             "split is a later cycle.",
-    "checks/_content.py": "~17,155 lines (restated 2026-09-26 on integration/4.3.0 after the "
+    "checks/_content.py": "~17,895 lines (restated 2026-10-14, C-730 — was ~17,155; the "
+                          "one-pass scanners that replaced five quadratic patterns, each kept "
+                          "beside its scanner as the definition it is tested against. "
+                          "Restated 2026-09-26 on integration/4.3.0 after the "
                           "fleet-FP fixes — B63 post-compound anchor, B63 tell-directive "
                           "residual disclosure, B58 occurrence count; was ~16,589, and "
                           "~16,459 before B-886's fence leg) — the "
@@ -727,7 +733,7 @@ _EXEMPT = {
     # means — the table needs one restate-and-reconsider pass, not an entry bumped each
     # time the next commit trips it — and this bump is exactly the pattern it warned about.
     # Recorded rather than quietly corrected: the split below is now owed twice over.
-    "report.py": "~7,215 lines (restated 2026-09-30, C-618 — was ~6,699; the shared suppressed-notice helper and its five surface call sites) — the output renderers; grew further with F-131's "
+    "report.py": "~7,716 lines (restated 2026-10-14 — was ~7,215; C-717's HTML ids and version footer, C-718's coverage wording and C-726's probe and tracker-id sweep) — earlier restated 2026-09-30, C-618 — was ~6,699; the shared suppressed-notice helper and its five surface call sites — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
                  "and the B-547 scope-note rewiring, then with B-758's three report "

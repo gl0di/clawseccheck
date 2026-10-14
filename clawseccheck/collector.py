@@ -213,7 +213,7 @@ _MAX_OWN_SOURCE_BYTES = 2_000_000
 # relying on any figure quoted here.
 #   * _MAX_OWN_SOURCE_FILES: the real engine has 11 files, so 32 is ~2.9x headroom.
 #   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.6 MB in all,
-#     largest about 0.95 MB, so 8 MB is ~1.8x headroom, in line with the ~2x the per-file
+#     largest about 0.95 MB, so 8 MB is ~1.7x headroom, in line with the ~2x the per-file
 #     cap keeps over the largest real file. Only files under the per-file cap count
 #     toward it. (The engine figures are rounded; a test fails if they drift over 3%.)
 # Do NOT lower any of the three without re-measuring: a cap the real install exceeds loses
