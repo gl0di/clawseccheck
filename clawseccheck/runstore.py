@@ -30,6 +30,7 @@ from .monitorstore import (
     _last_chain_hash,
     _rotate_journal,
     _schema_ok,
+    _unused_run_id,
 )
 from .safeio import secure_append_text, secure_dir
 
@@ -71,6 +72,7 @@ def save_run(findings, path: str = DEFAULT_RUNS, when: "str | None" = None, *,
         secure_dir(p.parent)
         with journal_lock(p):
             prev_hash = _last_chain_hash(p)
+            ts = base["ts"] = _unused_run_id(p, ts, "findings")
             row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
             secure_append_text(p, json.dumps(row) + "\n")
             _rotate_journal(p, max_lines=_RUNS_MAX_LINES, keep=_RUNS_KEEP)
@@ -83,10 +85,11 @@ def load_run(run_id: str, path: str = DEFAULT_RUNS) -> "dict | None":
     """Return the stored run whose 'ts' == *run_id*, or None if absent/unreadable/
     not found.
 
-    If *run_id* collides (two runs saved within the same second - the same
-    granularity limit history.jsonl's own 'ts' already has), the LAST matching
-    row wins: "the most recent write is authoritative", the same reading
-    baseline.load_ignore() and history.load() already give a duplicate key.
+    save_run gives a second run saved within the same second the id ``<ts>-2`` (then
+    ``-3``, ...), so ids are unique from 4.4.0 on. A file written before that can still
+    hold two rows with one 'ts'; then the LAST matching row wins: "the most recent write
+    is authoritative", the same reading baseline.load_ignore() and history.load()
+    already give a duplicate key.
     """
     p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):

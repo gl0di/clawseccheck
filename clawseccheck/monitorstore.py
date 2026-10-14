@@ -841,6 +841,26 @@ def _last_chain_hash(p: Path) -> str:
     except OSError:
         return ""
     return last
+
+
+def _unused_run_id(p: Path, ts: str, kind: str) -> str:
+    """*ts*, or *ts* with ``-2``, ``-3``, ... appended when a stored *kind* row already
+    carries it: two runs saved within the same second used to print the same id, and the
+    first could no longer be loaded by it. Call it under the journal lock."""
+    taken = set()
+    if pathprobe.is_file(p):
+        try:
+            taken = {str(e.get("ts")) for e in _iter_jsonl(p) if _schema_ok(e) and kind in e}
+        except OSError:
+            taken = set()
+    if ts not in taken:
+        return ts
+    n = 2
+    while f"{ts}-{n}" in taken:
+        n += 1
+    return f"{ts}-{n}"
+
+
 def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
                   when: str | None = None) -> "str | None":
     """Append each drift alert to a local, owner-only event journal (a timeline of

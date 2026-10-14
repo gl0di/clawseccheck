@@ -83,13 +83,16 @@ def test_list_run_ids_lists_every_saved_run(tmp_path):
     assert list_run_ids(str(p)) == [r1, r2]
 
 
-def test_save_run_duplicate_ts_last_write_wins(tmp_path):
+def test_save_run_duplicate_ts_gets_its_own_id(tmp_path):
+    # C-733: a second run saved within the same second used to share the id and hide the
+    # first one from --diff; it now gets "<ts>-2" (tests/test_c733_saved_run_ids_are_unique.py).
     p = tmp_path / "runs.jsonl"
     ts = "2026-01-01T00:00:00"
-    save_run([_f("B2", CRITICAL, FAIL, "first")], str(p), when=ts)
-    save_run([_f("B2", CRITICAL, FAIL, "second")], str(p), when=ts)
-    row = load_run(ts, str(p))
-    assert row["findings"][0]["detail"] == "second"
+    first = save_run([_f("B2", CRITICAL, FAIL, "first")], str(p), when=ts)
+    second = save_run([_f("B2", CRITICAL, FAIL, "second")], str(p), when=ts)
+    assert (first, second) == (ts, ts + "-2")
+    assert load_run(first, str(p))["findings"][0]["detail"] == "first"
+    assert load_run(second, str(p))["findings"][0]["detail"] == "second"
 
 
 def test_save_run_never_raises_on_unwritable_directory(tmp_path):

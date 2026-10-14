@@ -931,7 +931,9 @@ clawseccheck --diff 2026-09-10T09:15:23 2026-09-12T11:02:07
 nothing is written here unless you pass the flag. A full finding list is far heavier per run
 than a score triple, so this store is not on by default and keeps a much smaller retention
 window (the last 50 saved runs, vs. history's thousands). The run id is its timestamp - the
-same `ts` `--trend`'s own rows already carry, not a second identity to track.
+same `ts` `--trend`'s own rows already carry, not a second identity to track. A second run
+saved within the same second gets `-2` appended (then `-3`, ...), so every saved run keeps an
+id of its own; use the id the run printed.
 
 `--diff RUN_ID1 RUN_ID2` reads two saved runs (it runs no live audit itself) and reports:
 

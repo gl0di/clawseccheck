@@ -74,6 +74,10 @@ from PASS to UNKNOWN.
 
 ### Fixed
 
+- **Two runs saved in the same second keep separate ids.** `--save-run` and `--save-sbom-run`
+  use the timestamp as the run id, so a second save within one second printed the same id and
+  `--diff` / `--sbom-diff` could only load the later run. A taken id now gets `-2`, `-3`, ...
+  appended; a store written by an earlier version still reads as before.
 - **Gateway token references and templated binds are judged by what they are.**
   - B2 no longer judges a reference by the length of its text (`${GW_TOKEN}` used to FAIL as
     "shorter than 24 chars"). It looks the variable up where the audit can see it (config

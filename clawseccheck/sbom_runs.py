@@ -38,6 +38,7 @@ from .monitorstore import (
     _last_chain_hash,
     _rotate_journal,
     _schema_ok,
+    _unused_run_id,
 )
 from .safeio import secure_append_text, secure_dir
 
@@ -66,6 +67,7 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
         secure_dir(p.parent)
         with journal_lock(p):
             prev_hash = _last_chain_hash(p)
+            ts = base["ts"] = _unused_run_id(p, ts, "sbom")
             row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
             secure_append_text(p, json.dumps(row) + "\n")
             _rotate_journal(p, max_lines=_SBOM_RUNS_MAX_LINES, keep=_SBOM_RUNS_KEEP)
@@ -75,7 +77,8 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
 
 
 def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
-    """Return the stored run whose 'ts' == run_id, last-write-wins on collision."""
+    """Return the stored run whose 'ts' == run_id. Ids are unique from 4.4.0 on (see
+    runstore.load_run); in an older file with a duplicate, the last write wins."""
     p = pathprobe.expand_user(path)
     if not pathprobe.is_file(p):
         return None
