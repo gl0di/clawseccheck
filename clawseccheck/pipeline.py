@@ -921,7 +921,10 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         )
         if abstain_note:
             lines.append(abstain_note.strip())
-        detail = (f"{len(packet) + vet_item_total} item(s) awaiting adjudication \u2014 no "
+        # the abstained items are IN the packet but are not awaiting anyone: counting them in
+        # both places read as 235 awaiting + 25 abstained out of a packet of 235
+        pending = len(packet) + vet_item_total - abstained_n
+        detail = (f"{pending} item(s) awaiting adjudication \u2014 no "
                   "verdicts submitted." + abstain_note)
         quiet_line = detail + " Produce the packet with: --full --json."
 

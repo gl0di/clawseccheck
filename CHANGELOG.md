@@ -74,6 +74,8 @@ from PASS to UNKNOWN.
 
 ### Fixed
 
+- **The card no longer counts abstained items as awaiting.** With 235 items in the packet and 25 abstentions it printed
+  "235 item(s) awaiting adjudication ... 25 item(s) abstained"; it now says 210 awaiting and 25 abstained.
 - **The judge panel does not fan out over evidence-free items.** An item that carries the `abstain` key has nothing for
   three lenses to read; the agent reads its packet once and answers `ABSTAIN` directly, so a run with 25 such items is
   no longer 75 judge tasks.
