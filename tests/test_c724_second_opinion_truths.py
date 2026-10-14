@@ -166,7 +166,8 @@ _HARNESS_FLAGS = ("--canary", "--redteam", "--dryrun", "--multiturn", "--self-te
 
 
 def _cli(*argv: str):
-    return subprocess.run([sys.executable, "-m", "clawseccheck", *argv], cwd=REPO_ROOT,
+    return subprocess.run([sys.executable, "-m", "clawseccheck", "--no-deptree", "--no-host", *argv],
+                          cwd=REPO_ROOT,
                           capture_output=True, text=True, timeout=300)
 
 

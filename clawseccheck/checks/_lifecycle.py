@@ -4174,6 +4174,9 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     # stale copies. name -> [(tier, rel_dir), ...].
     name_hits: dict[str, list[tuple[str, str]]] = {}
     skills_unreadable: list[str] = []  # C-727
+    # C-727: a skill dir whose SKILL.md could not be read is one dir of unknown name; a
+    # duplicate needs two dirs, so these alone cannot hide one when there is no other dir.
+    unnamed_dirs: list[str] = []
     for base, tier in skill_load_roots(home, ctx.config, user_home=_b104_user_home(home)):
         errs_before = len(ctx.errors)
         if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
@@ -4202,12 +4205,12 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             errs_before = len(ctx.errors)
             if not _safe_is_file(skill_md, ctx, what=f"'{skill_md.name}' in a skill dir"):
                 if len(ctx.errors) > errs_before:  # C-727: could not be looked at, not absent
-                    skills_unreadable.append(_detail_path(skill_md, home))
+                    unnamed_dirs.append(_detail_path(skill_md, home))
                 continue
             try:
                 blob = skill_md.read_text(encoding="utf-8", errors="replace")
             except OSError:
-                skills_unreadable.append(_detail_path(skill_md, home))  # C-727
+                unnamed_dirs.append(_detail_path(skill_md, home))  # C-727
                 continue
             # A raw on-disk SKILL.md starts with `---` (the collector injects the
             # `# file: SKILL.md` header that _frontmatter_name needs, but we read raw), so
@@ -4269,7 +4272,11 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             warns,
         )
     # C-727: a skill directory that could not be read was not compared, so "no duplicates" is
-    # not established (a duplicate found in what WAS read WARNed above).
+    # not established (a duplicate found in what WAS read WARNed above) -- unless the only gaps
+    # are unread SKILL.md files and there are fewer than two skill dirs in all.
+    if unnamed_dirs and (skills_unreadable
+                         or len(unnamed_dirs) + sum(len(h) for h in name_hits.values()) >= 2):
+        skills_unreadable += unnamed_dirs
     if skills_unreadable:
         return _shared._unreadable_dirs_finding(
             "B104", "the installed skill directories (duplicate installs)", skills_unreadable)

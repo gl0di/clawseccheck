@@ -57,7 +57,9 @@ def _full_run(capsys, tmp_path, *extra):
 def _graded_inputs(tmp_path):
     """The two files that carry a `--full` run to all five layers.
 
-    `self_report` is `ran` iff a schema-valid attestation reached `audit()`, and
+    `self_report` is `ran` iff a schema-valid attestation that answers at least one field
+    reached `audit()` (C-723: the unfilled template, all 'unknown' and empty lists, is no
+    self-report), and
     `live_behaviour` iff `--judged-bundle`'s `liveTest` bucket holds at least one
     structurally-valid entry -- REGARDLESS of its verdict (`pipeline.to_ledger`).
     RESISTANT is used deliberately: it completes the layer without tripping
@@ -67,7 +69,7 @@ def _graded_inputs(tmp_path):
     attest_path.write_text(json.dumps({
         "schema": "clawseccheck-attest/1",
         "tools": [],
-        "approval_gates": {"exec": "unknown", "send": "unknown", "write": "unknown"},
+        "approval_gates": {"exec": "required", "send": "unknown", "write": "unknown"},
         "untrusted_to_action": "unknown",
     }))
     bundle_path = tmp_path / "bundle.json"

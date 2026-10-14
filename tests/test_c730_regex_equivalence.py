@@ -341,13 +341,13 @@ def test_new_pattern_is_much_faster_than_the_old_one_on_its_long_run(name):
     old, new, unit = _old(name), _new(name), _QUADRATIC_UNIT[short]
     text = unit * (6000 // len(unit))
 
-    def run(pat):
+    def timed(pat):
         if short in _MATCH_ONLY:
             return lambda: pat.match(text)
         return lambda: list(pat.finditer(text))
 
-    t_old = _best(run(old), 2)
-    t_new = _best(run(new), 3)
+    t_old = _best(timed(old), 2)
+    t_new = _best(timed(new), 3)
     assert t_old > 8 * max(t_new, 1e-5), (name, t_old, t_new)
 
 
@@ -514,10 +514,10 @@ def test_scanners_are_linear_time():
             small = unit * (20_000 // len(unit))
             big = unit * (80_000 // len(unit))
 
-            def run(text):
+            def scan(text):
                 out = fn(text)
                 return out if isinstance(out, (str, list)) else sum(1 for _ in out)
 
-            t1 = _best(lambda: run(small))
-            t2 = _best(lambda: run(big), 2)
+            t1 = _best(lambda: scan(small))
+            t2 = _best(lambda: scan(big), 2)
             assert t2 < 0.02 or t2 < 9 * t1, (fn.__name__, unit, t1, t2)

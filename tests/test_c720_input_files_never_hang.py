@@ -95,7 +95,7 @@ def _run_cli(argv, cwd):
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     env["PYTHONPATH"] = str(ROOT)
     env["HOME"] = str(cwd)
-    cmd = [sys.executable, "-m", "clawseccheck"] + argv
+    cmd = [sys.executable, "-m", "clawseccheck", "--no-deptree", "--no-host"] + argv
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_S, cwd=str(cwd),
                            env=env, stdin=subprocess.DEVNULL)
@@ -158,7 +158,8 @@ def test_every_path_valued_option_is_in_a_table():
     """New input flag => a decision here (read it through the table, or say why not)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
     env["PYTHONPATH"] = str(ROOT)
-    help_text = subprocess.run([sys.executable, "-m", "clawseccheck", "--help"], capture_output=True,
+    help_text = subprocess.run([sys.executable, "-m", "clawseccheck", "--no-deptree", "--no-host",
+                                "--help"], capture_output=True,
                                text=True, timeout=TIMEOUT_S, env=env, cwd=str(ROOT)).stdout
     found = set(re.findall(
         r"^\s+(--[a-z0-9-]+)(?:, -\w)? \[?(?:PATH|FILE|DIR|REFERENCE|NAME\|FILE)\]?(?=\s|$)",

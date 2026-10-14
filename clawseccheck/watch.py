@@ -739,7 +739,7 @@ def _pid_record_state(hb, problem) -> "tuple[str, str]":
         return "stale", f"pid {pid} is gone"
     ident = _pid_is_watcher(pid)
     if ident is False:
-        return "stale", f"pid {pid} is running but is not a clawseccheck --watch process"
+        return "stale", f"pid {pid} is running but is not a ClawSecCheck watcher"
     if ident:
         return "live", f"pid {pid}"
     return "unconfirmed", f"pid {pid} is alive but could not be confirmed as a watcher"

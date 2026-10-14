@@ -609,6 +609,40 @@ def test_b104_unsearchable_skills_directory_is_unknown_not_a_crash_or_pass(tmp_p
     _assert_unreadable_unknown(f, "B104", home, "workspace/skills")
 
 
+def test_b104_an_unread_skill_md_only_matters_when_a_duplicate_is_possible(tmp_path):
+    """A duplicate install needs two skill dirs. One dir whose SKILL.md cannot be read, alone,
+    cannot hide one, so the check stays clean; beside a second dir it is UNKNOWN."""
+    from clawseccheck.checks import check_offboarding_hygiene
+    home = _home(tmp_path, {"skills": {"load": {"extraDirs": []}}})
+    skills = home / "workspace" / "skills"
+    (skills / "x").mkdir(parents=True)
+    (skills / "x" / "SKILL.md").write_text("---\nname: x\n---\nhello\n", encoding="utf-8")
+    with unreadable(skills / "x" / "SKILL.md"):
+        alone = check_offboarding_hygiene(collect(home))
+    assert alone.id == "B104" and alone.status == PASS, alone.detail
+    (skills / "y").mkdir()
+    (skills / "y" / "SKILL.md").write_text("---\nname: y\n---\nhello\n", encoding="utf-8")
+    with unreadable(skills / "x" / "SKILL.md"):
+        beside = check_offboarding_hygiene(collect(home))
+    _assert_unreadable_unknown(beside, "B104", home, "workspace/skills/x/SKILL.md")
+
+
+def test_b104_an_unread_skill_md_is_listed_beside_an_unlistable_root(tmp_path):
+    """A root that cannot be listed may hold any number of dirs, so a lone unread SKILL.md
+    beside it is a gap too, and both are named."""
+    from clawseccheck.checks import check_offboarding_hygiene
+    extra = tmp_path / "extra-skills"
+    extra.mkdir()
+    home = _home(tmp_path, {"skills": {"load": {"extraDirs": [str(extra)]}}})
+    skills = home / "workspace" / "skills"
+    (skills / "x").mkdir(parents=True)
+    (skills / "x" / "SKILL.md").write_text("---\nname: x\n---\nhello\n", encoding="utf-8")
+    with unreadable(skills / "x" / "SKILL.md"), unreadable(extra):
+        f = check_offboarding_hygiene(collect(home))
+    _assert_unreadable_unknown(f, "B104", home, "workspace/skills/x/SKILL.md")
+    assert "extra-skills" in f.detail, f.detail
+
+
 def test_b180_and_b164_unreadable_memory_file_is_not_a_clean_pass(tmp_path):
     from clawseccheck.checks import check_log_threat_hunt, check_memory_reconsumption_injection
     home = _home(tmp_path)

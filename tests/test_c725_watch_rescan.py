@@ -87,7 +87,9 @@ def _drive_watch(tmp_path: Path, head: list, *, cwd: Path, env: "dict | None") -
     with open(out_path, "w", encoding="utf-8") as out_f:
         proc = subprocess.Popen(
             [sys.executable, *head, "--watch", "--home", str(home), "--data-dir", str(store),
-             "--watch-debounce", "0.3", *_OPT_OUT],
+             # _OPT_OUT spelled out: the hermeticity guards read literals, not names
+             "--watch-debounce", "0.3", "--no-native", "--no-host", "--no-sockets",
+             "--no-deptree", "--no-dist"],
             cwd=str(cwd), env=env, stdout=out_f, stderr=subprocess.STDOUT, text=True,
         )
         try:
@@ -253,8 +255,8 @@ def test_a_second_watch_on_a_live_store_is_refused_and_the_first_stays_truthful(
         assert first.poll() is None, "the refused start must not touch the first watcher"
         status = subprocess.run(
             [sys.executable, "-m", "clawseccheck", "--watch-status", "--home", str(home),
-             "--data-dir", str(store)], cwd=str(REPO_ROOT), capture_output=True, text=True,
-            timeout=60)
+             "--data-dir", str(store), "--no-deptree", "--no-host"], cwd=str(REPO_ROOT),
+            capture_output=True, text=True, timeout=60)
         assert status.stdout.startswith("ALIVE"), status.stdout
     finally:
         if second is not None:
@@ -735,8 +737,8 @@ def _status_in_a_process(store: Path) -> str:
     assertion that a planted special file cannot make it hang."""
     r = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--watch-status", "--home", str(HOME_SAFE),
-         "--data-dir", str(store)], cwd=str(REPO_ROOT), capture_output=True, text=True,
-        timeout=30)
+         "--data-dir", str(store), "--no-deptree", "--no-host"], cwd=str(REPO_ROOT),
+        capture_output=True, text=True, timeout=30)
     assert "Traceback" not in r.stderr, r.stderr
     return r.stdout
 

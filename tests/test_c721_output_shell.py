@@ -32,7 +32,7 @@ def _env(**extra):
 
 def _cli(args, tmp_path, *, env=None, stdin_devnull=True):
     """Run the CLI to completion with its stdout and stderr captured as text."""
-    cmd = [sys.executable, "-m", "clawseccheck", *args]
+    cmd = [sys.executable, "-m", "clawseccheck", "--no-deptree", "--no-host", *args]
     return subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, encoding="utf-8",
                           errors="replace", timeout=450, env=env or _env(),
                           stdin=subprocess.DEVNULL if stdin_devnull else None)
@@ -40,7 +40,7 @@ def _cli(args, tmp_path, *, env=None, stdin_devnull=True):
 
 def _cli_into_closed_pipe(args, env=None):
     """Start the CLI with stdout a pipe whose reader has already gone: `... | head -c 0`."""
-    cmd = [sys.executable, "-m", "clawseccheck", *args]
+    cmd = [sys.executable, "-m", "clawseccheck", "--no-deptree", "--no-host", *args]
     child = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
                              env=env or _env(),
