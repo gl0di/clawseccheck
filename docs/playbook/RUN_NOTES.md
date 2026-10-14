@@ -59,7 +59,7 @@ of Step 3's own `--full` render, and it does not by itself replace Step 3 (it co
 attestation for THIS command only; Step 3's command needs the same `--attest` again, since
 each invocation is its own fresh process - attestation is never persisted between them). Parse
 the `judgePacket` array and run the "Judge-panel fan-out for `--judge-packet` items" protocol
-in JUDGE_PANEL.md **now, unconditionally** - 3 lensed judge subagents per borderline item, majority vote per
+in JUDGE_PANEL.md **now, unconditionally** - 3 lensed judge subagents per borderline item that has evidence (an item carrying the `abstain` key gets a direct `ABSTAIN` instead), majority vote per
 item - building the verdicts JSON Step 3 will feed back. An empty `judgePacket` just means
 nothing was in the borderline band this run; proceed to Step 3 with no verdicts file (omit
 `--judged-bundle` entirely).

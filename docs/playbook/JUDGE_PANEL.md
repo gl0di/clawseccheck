@@ -72,6 +72,12 @@ section.
    severity: it means "I could not assess this". It is never a way out of a `SUSPICIOUS`
    or `DANGEROUS` answer the judge has grounds for, and it is never to be replaced by
    `SAFE` to look finished. An item with no `abstain` key always gets one of the three.
+
+   **No fan-out for an evidence-free item.** An item that carries the `abstain` key has no
+   evidence for 3 lenses to read. Read its packet once yourself: if nothing in it lets you
+   decide, submit `ABSTAIN` for it directly, with no `votes` and no subagents (25 such items
+   are not 75 judge tasks). Run the 3-lens panel only for an item where something in the
+   packet bears on the answer.
 3. **Majority vote** per item across its 3 lens verdicts. A tie (no single verdict has
    at least 2 of the 3 votes - e.g. one SAFE, one SUSPICIOUS, one DANGEROUS) escalates
    to the **worst** of the three rather than picking arbitrarily - the same fail-safe

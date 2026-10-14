@@ -74,6 +74,9 @@ from PASS to UNKNOWN.
 
 ### Fixed
 
+- **The judge panel does not fan out over evidence-free items.** An item that carries the `abstain` key has nothing for
+  three lenses to read; the agent reads its packet once and answers `ABSTAIN` directly, so a run with 25 such items is
+  no longer 75 judge tasks.
 - **Contradictions the agent itself reported in the skill's instructions are resolved.**
   `docs/playbook/RUN_NOTES.md` opened with the judge-panel pull and only later told the agent
   to stop on a welcome or sandbox screen or an error; it now says which part applies first.
