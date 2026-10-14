@@ -252,12 +252,59 @@ from PASS to UNKNOWN.
   started the way the watcher itself was. A re-scan that fails is reported with its whole
   output as a run that did not complete. One store has one watcher: a running watcher holds
   a lock, so a second start is refused, and a planted or stale heartbeat file can neither
-  block a start nor make `--watch-status` report a watcher that is not there.
+  block a start nor make `--watch-status` report a watcher that is not there. Every file in
+  the watch store is opened without blocking and only if it is a regular file, so a pipe,
+  link or directory put at the lock or heartbeat path can no longer hang `--watch` or
+  `--watch-status`. `--watch-status` prints `ALIVE` only when the lock is held and the
+  heartbeat agrees with it; a held lock whose heartbeat does not back it is `LOCK HELD`,
+  and a lock that cannot be probed is `UNKNOWN`. A process running as the same user can
+  still stop the watcher or imitate its files: the status is a convenience, not proof.
 - **A config saved with a byte order mark is read.** OpenClaw accepts an `openclaw.json`
   that starts with a UTF-8 byte order mark (measured with its validator on 2026.10.2); the
   audit did not parse it, answered UNKNOWN on about 199 checks and gave no grade. The loader
   now treats the mark as the platform does, in the config, its included fragments and the
   legacy config name. A config without the mark is read exactly as before.
+- **A hand-edited config is read with the values OpenClaw reads.** A config that is not
+  strict JSON (a comment, a trailing comma, an unquoted key) went through a second reader
+  that applied Python's string rules: `"https:\/\/host"` kept its backslashes, an escaped
+  emoji became two broken halves, and `"\U"` made the whole config unreadable. The audit
+  judged other values than the ones in force, and one such workspace path ended the run.
+  Strings, whitespace between tokens and comment endings now follow OpenClaw's own JSON5
+  parser, checked against it on 1,887 documents. A strict-JSON config is read as before.
+- **A path the audit cannot read is never a crash and never a clean result.** A directory
+  or file under the home that the current user cannot read made up to ten checks report
+  "the check crashed", ended the whole audit when it was the state directory, or was
+  quietly read as clean (an unreadable `hooks.json`, `config.toml` or `paired.json`, a log
+  or transcript directory without the search bit). Each now answers UNKNOWN under the
+  check's own id, names the path and says how to make it readable; a WARN or FAIL found in
+  what could be read stands. A state database or cron store behind a symbolic link is
+  refused rather than called absent, and a database of the same name in a subdirectory is
+  no longer read as the live one.
+- **A file that is there but was not understood is UNKNOWN, not clean.** A connector's
+  `hooks.json` that is empty, truncated or not a JSON object read as "no shell hooks"
+  (B151); a Codex `config.toml` that is not text read as "no trusted project" (B136); a
+  `devices/paired.json` replaced by a dangling link, a directory or a named pipe read as
+  "no paired devices" (B176); and a named pipe in place of a session log crashed B79. Each
+  now answers UNKNOWN and names the file. B136 also read only one way of writing a trusted
+  project: a trailing comment, single quotes, a dotted key or an inline table read as PASS.
+  It reads those now, and a `trust_level` it still cannot read is UNKNOWN.
+- **One long line no longer stalls the audit.** A bootstrap file, a memory file or an
+  installed skill's `SKILL.md` holding a single long line made the whole audit spin at full
+  CPU: 20,000 characters took 10 seconds, 40,000 took 40, and a 3 MB line had not finished
+  after half an hour. A base64 blob pasted into a skill is such a line, and an agent could
+  write one into its own bootstrap file to stall the audit and the monitor. 36 detection
+  patterns took time that grew with the square of the line length; all are linear now, with
+  the same matches (checked against the old patterns on every fixture, on 1,171 installed
+  skills and on random input). The 40,000-character line takes a tenth of a second.
+- **A `~user` that does not exist no longer ends the run.** `agents.defaults.workspace:
+  "~nosuchuser/x"` (or the same in `skills.load.extraDirs`, `plugins.load.paths`,
+  `logging.file`) ended the audit with "unexpected internal error", and so did nearly
+  every path option typed that way. A config value is now read as OpenClaw reads it, as a
+  path that is not there; a path option is refused with one line and exit 1 before
+  anything is read or written. With `HOME` unset and no passwd entry for the account, a
+  run given an explicit `--home` kept its own baseline and history in a directory
+  literally named `~` under the working directory; it now ends with one line and exit 1
+  before anything is produced.
 - **A live-test trajectory hint cannot hide a contradicting session.** The `liveTest`
   bucket is written by the agent under test, and its `trajectory.path` narrowed the
   cross-check to one file: an agent that complied with the canary in one session and
