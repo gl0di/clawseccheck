@@ -906,9 +906,13 @@ def check_incident_readiness(ctx: Context) -> Finding:
 # common infrastructure for a long-running gateway service. WARN (LOW/advisory) only
 # when an OpenClaw-related unit is found with a persistent-restart directive; PASS/
 # UNKNOWN otherwise. Never FAIL.
-_SYSTEMD_RESTART_RE = re.compile(r"^\s*Restart\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
-_SYSTEMD_EXECSTART_RE = re.compile(r"^\s*ExecStart\s*=\s*(.*\S)?\s*$", re.IGNORECASE | re.MULTILINE)
-_SYSTEMD_WANTEDBY_RE = re.compile(r"^\s*WantedBy\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+# C-730: linear time. `^\s*` under re.M also ran across the blank lines before the key, so a
+# unit file of blank lines was rescanned from every line start. `^[^\S\n]*` stays on the key's
+# line: the same directive is found with the same group 1 (all three call sites read group 1
+# of `.search`); only the match start moves.
+_SYSTEMD_RESTART_RE = re.compile(r"^[^\S\n]*Restart\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+_SYSTEMD_EXECSTART_RE = re.compile(r"^[^\S\n]*ExecStart\s*=\s*(.*\S)?\s*$", re.IGNORECASE | re.MULTILINE)
+_SYSTEMD_WANTEDBY_RE = re.compile(r"^[^\S\n]*WantedBy\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 
 # Persistent-restart directives worth disclosing (systemd.service(5)): "always" restarts
 # unconditionally; "on-failure"/"on-abnormal"/"on-watchdog"/"on-abort" are conditional and

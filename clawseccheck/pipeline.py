@@ -1627,7 +1627,10 @@ def _worse_status(a: str, b: str) -> str:
 # behavioral's own Finding text, not as structured counts"). Parsed here rather than
 # re-derived as a fresh count, so the ledger's not_reached line and B164's own sentence
 # can never disagree.
-_B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
+# C-730: `(?<!\d)` on this and the three patterns below: a count is a whole run of digits,
+# so only the run's first digit may start (every digit used to, each scanning to the run's
+# end). Same spans and groups.
+_B164_NOT_SCANNED_RE = re.compile(r"(?<!\d)(\d+) log/transcript sinks? not scanned")
 
 # B-817: B164's SQLite-trajectory disclosure (checks/_egress.py's
 # check_log_threat_hunt) names unscanned SQLite trajectory evidence with different
@@ -1635,7 +1638,7 @@ _B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
 # not have to match the same regex; purely additive, the JSONL regex/behavior above is
 # unchanged.
 _B164_SQLITE_UNSCANNED_RE = re.compile(
-    r"(\d+) row\(s\) across (\d+) session\(s\) unexamined"
+    r"(?<!\d)(\d+) row\(s\) across (\d+) session\(s\) unexamined"
 )
 
 # C-699: B164's SQLite-TRANSCRIPT disclosure (checks/_egress.py's
@@ -1643,10 +1646,10 @@ _B164_SQLITE_UNSCANNED_RE = re.compile(
 # "row(s)" on purpose: the trajectory regex above needs digits directly before "row(s)",
 # so neither pattern can match the other's sentence.
 _B164_SQLITE_TRANSCRIPT_RE = re.compile(
-    r"(\d+) transcript row\(s\) across (\d+) session\(s\) unexamined"
+    r"(?<!\d)(\d+) transcript row\(s\) across (\d+) session\(s\) unexamined"
 )
 _B164_SQLITE_TRANSCRIPT_DB_RE = re.compile(
-    r"(\d+) per-agent database\(s\) could not be examined for transcripts"
+    r"(?<!\d)(\d+) per-agent database\(s\) could not be examined for transcripts"
 )
 
 

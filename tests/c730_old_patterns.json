@@ -1,0 +1,157 @@
+{
+ "checks._content._B58_HIDDEN_TAG_RE": {
+  "flags": 50,
+  "mode": "reference",
+  "pattern": "<(?P<tag>[A-Za-z][\\w:-]*)(?P<attrs>[^>]*)>(?P<body>.{0,4096}?)</(?P=tag)>"
+ },
+ "checks._content._B58_URL_OR_EMAIL_RE": {
+  "flags": 34,
+  "mode": "truth",
+  "pattern": "https?://|\\b[\\w.+-]+@[\\w-]+\\.[\\w.-]+"
+ },
+ "checks._content._B59_HTML_TAG_RE": {
+  "flags": 34,
+  "mode": "reference",
+  "pattern": "<(?:img|a)\\b[^>]*>"
+ },
+ "checks._content._B59_MD_IMG_RE": {
+  "flags": 34,
+  "mode": "reference",
+  "pattern": "!\\[[^\\]]*\\]\\(([^)\\n]+)\\)"
+ },
+ "checks._content._B59_MD_LINK_RE": {
+  "flags": 34,
+  "mode": "reference",
+  "pattern": "(?<!\\!)\\[[^\\]]+\\]\\(([^)\\n]+)\\)"
+ },
+ "checks._content._B61_TOOL_DECL_RE": {
+  "flags": 42,
+  "mode": "spans",
+  "pattern": "^([ \\t]*[-*]?[ \\t]*(?:allowed[-_]?tools|disallowed[-_]?tools|tools)[ \\t]*:)([^\\n]*)"
+ },
+ "checks._content._DEP_PKG_NAME_RE": {
+  "flags": 40,
+  "mode": "spans",
+  "pattern": "^[ \\t]*(?!#)(?!-[rcei])(?!\\s*$)([A-Za-z0-9_.\\-]+)"
+ },
+ "checks._content._FM_HOMEPAGE_RE": {
+  "flags": 42,
+  "mode": "startfree",
+  "pattern": "^\\s*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\\s*:\\s*[\\\"']?(https?://[^\\s\\\"'#]+)"
+ },
+ "checks._content._MODEL_FILE_URL_RE": {
+  "flags": 34,
+  "mode": "reference",
+  "pattern": "https?://[^\\s\"\\'<>)\\]]+\\.(?:gguf|safetensors|onnx)\\b"
+ },
+ "checks._content._PTH_IMPORT_LINE_RE": {
+  "flags": 40,
+  "mode": "startfree",
+  "pattern": "^\\s*import\\s+\\S"
+ },
+ "checks._content._PYPROJECT_DEP_LINE_RE": {
+  "flags": 40,
+  "mode": "startfree",
+  "pattern": "^\\s*\\\"?([A-Za-z0-9_.\\-\\[,\\]]+)\\\"?(?:\\s*$|\\s*>=\\s*\\S+|\\s*>\\s*\\S+|\\s*==\\s*\\*|\\s*@\\s*latest)"
+ },
+ "checks._content._REQ_UNPINNED_RE": {
+  "flags": 42,
+  "mode": "spans",
+  "pattern": "^[ \\t]*(?!#)(?!-[rcei])(?!\\s*$)([A-Za-z0-9_.\\-\\[,\\]]+)(?:\\s*$|\\s*>=\\s*\\S+|\\s*>\\s*\\S+|\\s*==\\s*\\*|\\s*@\\s*latest)"
+ },
+ "checks._host._SYSTEMD_EXECSTART_RE": {
+  "flags": 42,
+  "mode": "startfree",
+  "pattern": "^\\s*ExecStart\\s*=\\s*(.*\\S)?\\s*$"
+ },
+ "checks._host._SYSTEMD_RESTART_RE": {
+  "flags": 42,
+  "mode": "startfree",
+  "pattern": "^\\s*Restart\\s*=\\s*(\\S+)\\s*$"
+ },
+ "checks._host._SYSTEMD_WANTEDBY_RE": {
+  "flags": 42,
+  "mode": "startfree",
+  "pattern": "^\\s*WantedBy\\s*=\\s*(\\S+)\\s*$"
+ },
+ "checks._shared._PB_TOK_RE": {
+  "flags": 32,
+  "mode": "reference",
+  "pattern": "\\$\\{?\\w+\\}?|\\{\\{[^}]*\\}\\}|<[A-Za-z_][\\w-]*>|`[^`\\n]*`|https?://\\S+|[A-Za-z][A-Za-z'\u2019]*(?:\\.[a-z]{2,}(?:/\\S*)?)?|\u2014|\u2013|--|[,;:()]|\\S"
+ },
+ "checks._shared._SECRET_PATH_RE": {
+  "flags": 34,
+  "mode": "spans",
+  "pattern": "[\\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\\w./~+-]*"
+ },
+ "checks._vet._F052_NONBREAK_RE": {
+  "flags": 34,
+  "mode": "spans",
+  "pattern": "(?:\\b[A-Za-z]\\.)+\\Z|\\b(?:ie|eg|cf|viz|vs|etc|approx)\\.\\Z"
+ },
+ "checks._vet._RUNTIME_FETCH_TABLE_DELIM_LINE_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "^[^\\S\\n]*\\|?[^\\S\\n]*:?-+:?[^\\S\\n]*(?:\\|[^\\S\\n]*:?-+:?[^\\S\\n]*)*\\|?[^\\S\\n]*$"
+ },
+ "logsafe._URL_SHAPE_RE": {
+  "flags": 32,
+  "mode": "urlsub",
+  "pattern": "[A-Za-z][A-Za-z0-9+.-]*://[^\\s'\\\"]+"
+ },
+ "monitordims._skills._SKILL_VERSION_RE": {
+  "flags": 42,
+  "mode": "startfree",
+  "pattern": "(?im)^\\s*version:\\s*['\\\"]?([\\w.\\-+]+)['\\\"]?\\s*$"
+ },
+ "pipeline._B164_NOT_SCANNED_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "(\\d+) log/transcript sinks? not scanned"
+ },
+ "pipeline._B164_SQLITE_TRANSCRIPT_DB_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "(\\d+) per-agent database\\(s\\) could not be examined for transcripts"
+ },
+ "pipeline._B164_SQLITE_TRANSCRIPT_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "(\\d+) transcript row\\(s\\) across (\\d+) session\\(s\\) unexamined"
+ },
+ "pipeline._B164_SQLITE_UNSCANNED_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "(\\d+) row\\(s\\) across (\\d+) session\\(s\\) unexamined"
+ },
+ "report._TRACKER_CONNECTOR_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "[ \\t]+(?:via|since|per|of|from)[ \\t]+(?:CLAWSECCHECK-)?(?:[BCFI]-\\d{2,4}|E-0\\d\\d)(?:/W\\d+(?:\\.\\d+)?)?(?:[ \\t]+(?:(?:shortlist[ \\t]+)?item|bug|round|part|Phase)[ \\t]+\\d+)?(?!\\w)"
+ },
+ "skillast._JS_CP_DESTRUCTURE_BIND_RE": {
+  "flags": 32,
+  "mode": "jsbrace",
+  "pattern": "\\{\\s*([^}]+?)\\s*\\}\\s*=\\s*require\\(\\s*['\\\"](?:node:)?child_process['\\\"]\\s*\\)|\\bimport\\s*\\{\\s*([^}]+?)\\s*\\}\\s*from\\s+['\\\"](?:node:)?child_process['\\\"]"
+ },
+ "skillast._SH_CASE_WILDCARD_ARM_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "[ \\t\\n]*\\(?[ \\t\\n]*\\*[ \\t\\n]*\\)"
+ },
+ "skillast._SH_RUN_PATH_RE": {
+  "flags": 34,
+  "mode": "shrun",
+  "pattern": "(?:^|[\\n;&|]|\\b(?:then|do|else)\\s+)\\s*(?:sudo\\s+)?(?:source|\\.|bash|sh|zsh|python3?|node|perl|ruby)\\s+(?P<path>[\\\"']?[\\w./$~{}-]{2,128}[\\\"']?)"
+ },
+ "skillast._SSH_R_SPEC_RE": {
+  "flags": 32,
+  "mode": "spans",
+  "pattern": "^\\S*:\\S+:\\d+$"
+ },
+ "trajaudit._OPENCLAW_CRED_STORE_RE": {
+  "flags": 34,
+  "mode": "spans",
+  "pattern": "[\\w.-]*-(?:allowFrom|pairing)\\.json\\b"
+ }
+}

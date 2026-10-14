@@ -2814,8 +2814,10 @@ _TRACKER_SPLIT_RE = re.compile(
 # (g) "wrapping, via B-121, so a ..." keeps one comma; (h) "done via B-121." loses the phrase.
 _TRACKER_COMMA_CONNECTOR_RE = re.compile(
     r",[ \t]+(?:via|since)[ \t]+" + _TRACKER_ID_CORE + r",")
+# C-730: `(?<![ \t])` - only the first blank of a run may start (every blank used to, each
+# scanning the run). The leftmost match always began there, so the removed text is the same.
 _TRACKER_CONNECTOR_RE = re.compile(
-    r"[ \t]+(?:via|since|per|of|from)[ \t]+" + _TRACKER_ID_CORE)
+    r"(?<![ \t])[ \t]+(?:via|since|per|of|from)[ \t]+" + _TRACKER_ID_CORE)
 # (i) a dash- or comma-separated list item: "payment - C-339, ESET ...", "(B338, E-065)".
 _TRACKER_LIST_ITEM_RE = re.compile(
     r"(?:[ \t]-[ \t]|[,;][ \t]+)(?<![\w/.-])" + _TRACKER_ID_CORE

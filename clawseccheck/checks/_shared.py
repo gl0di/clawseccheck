@@ -1341,9 +1341,19 @@ def _build_known_exfil_host_re() -> re.Pattern:
         r"rentry\.co|rentry\.org|"
         r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
         r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
-        r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
-        r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b"
+        r"[a-z0-9-]{1,63}\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
+        r"[a-z0-9-]{1,63}\.pipedream\.net|pipedream\.net)\b"
     )
+    # C-730: the two subdomain arms were `[a-z0-9-]+`. On a long run such as "a-a-a-..." every
+    # word boundary began an attempt that scanned to the run's end (quadratic: 12,000
+    # characters took 1.9 s inside one call). A DNS label is at most 63 octets (RFC 1035), so
+    # the label is bounded instead: every host that can exist is matched exactly as before.
+    # The one difference is a "label" LONGER than 63 characters, which names no reachable
+    # host: it is no longer swallowed whole into the match. `...ngrok.io` and
+    # `...pipedream.net` are then still convicted by the bare-domain arms next to them;
+    # an over-long label before `.ngrok.app` / `.ngrok-free.io` is matched from the last
+    # word boundary within 63 characters of the dot, or not at all when there is none
+    # (pinned in tests/test_c730_regex_equivalence.py).
     ioc_fragments = [
         _iocdb_host_fragment(value, typ)
         for value, typ in sorted(_iocdb_known_bad_host_records())
@@ -1370,8 +1380,15 @@ _KNOWN_EXFIL_HOST_RE = _build_known_exfil_host_re()
 # recorded as trajectory tool-output content is exactly this shape. Accepted as a known
 # residual for Phase 1 (advisory/scored=False, WARN-only, never FAILs) - a future
 # precision pass on logscan.py's class 4 could adopt the same "/"-required discipline.
+#
+# C-730: linear time. Every keyword character is in the class, so a match is always the
+# whole maximal run of class characters that holds a keyword, and it always starts at the
+# run's first character; the `(?<![\w./~+-])` lookbehind lets only that start position
+# try, instead of every position inside a long run (which scanned to the run's end each
+# time: 20,000 characters of `x` took 10 s). Same spans, same text, no groups.
 _SECRET_PATH_RE = re.compile(
-    r"[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*", re.I
+    r"(?<![\w./~+-])[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*",
+    re.I,
 )
 
 
@@ -6768,10 +6785,74 @@ class ProseBinding(_NamedTuple):
     unresolved: bool  # B-879 round 4: a clouded EXEC verb reaches the block
 
 
+class _ScanMatch:
+    """The part of ``re.Match`` the content checks read, for a match a one-pass scanner
+    found: ``start()`` / ``end()`` / ``span()`` of the whole match and ``group(key)``."""
+
+    __slots__ = ("_text", "_start", "_end", "_groups")
+
+    def __init__(self, text: str, start: int, end: int, groups: "dict | None" = None):
+        self._text, self._start, self._end, self._groups = text, start, end, groups or {}
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+    def span(self) -> "tuple[int, int]":
+        return (self._start, self._end)
+
+    def group(self, key=0):
+        return self._text[self._start:self._end] if key == 0 else self._groups[key]
+
+
+# The token shape, kept as the executable definition of what `_pb_tok_matches` returns.
+# C-730: it is no longer run over text - its `{{...}}` arm scanned from every "{{" to the next
+# "}" (quadratic on a run of "{" and on "{{ {{ {{ ...").
 _PB_TOK_RE = re.compile(
     r"\$\{?\w+\}?|\{\{[^}]*\}\}|<[A-Za-z_][\w-]*>|`[^`\n]*`|https?://\S+|"
     r"[A-Za-z][A-Za-z'" "\u2019" r"]*(?:\.[a-z]{2,}(?:/\S*)?)?|" "\u2014" r"|" "\u2013" r"|--|[,;:()]|\S"
 )
+_PB_TOK_BRACE_ARM = r"\{\{[^}]*\}\}|"
+assert _PB_TOK_RE.pattern.count(_PB_TOK_BRACE_ARM) == 1
+# Every arm but `{{...}}`: identical tokens on text with no "{{", and on text with one for
+# every position the brace arm does not win.
+_PB_TOK_REST_RE = re.compile(_PB_TOK_RE.pattern.replace(_PB_TOK_BRACE_ARM, ""))
+
+
+def _pb_tok_matches(s: str) -> list:
+    """What ``list(_PB_TOK_RE.finditer(s))`` returns - objects with ``start()``, ``end()``
+    and ``group(0)`` - in one pass (C-730).
+
+    The `{{...}}` arm matches exactly when the FIRST "}" after the "{{" is followed by a
+    second one. That "}" is found once and remembered while it is still ahead of the scan,
+    instead of being searched for again from every "{{". Every "{{" inside one run of braces
+    shares it, so only the run's first can be where the arm wins; a later one is never tried.
+    """
+    if "{{" not in s:
+        return list(_PB_TOK_REST_RE.finditer(s))
+    out: list = []
+    pos, n, close = 0, len(s), -2
+    while pos < n:
+        if s.startswith("{{", pos) and (pos == 0 or s[pos - 1] != "{"):
+            if close < pos + 2:
+                close = s.find("}", pos + 2)
+                if close < 0:
+                    close = n
+            if close < n and s.startswith("}", close + 1):
+                out.append(_ScanMatch(s, pos, close + 2))
+                pos = close + 2
+                continue
+        m = _PB_TOK_REST_RE.match(s, pos)
+        if m is None:               # whitespace: no arm starts on it
+            pos += 1
+            continue
+        out.append(m)
+        pos = m.end()
+    return out
+
+
 _PB_EMPH_RE = re.compile(r"\*\*|__|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
 
 _PB_DELIM = {",", ";", ":", "(", ")", "\u2014", "\u2013", "--"}
@@ -6952,7 +7033,7 @@ def _pb_tokens(s: str) -> list[str]:
       the word, so it is split into its own token here.
     """
     s = _pb_protect_abbrev(s)
-    matches = list(_PB_TOK_RE.finditer(s))
+    matches = _pb_tok_matches(s)
     out: list[str] = []
     for k, m in enumerate(matches):
         raw = m.group(0)
@@ -7721,7 +7802,10 @@ def _soft_break(prev: str, rest: str) -> bool:
     p = prev.rstrip()
     if not p.endswith(".") or p.endswith(".."):
         return False
-    wm = re.search(r"([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
+    # C-730: only the first character of the final run of letters and dots may start (every
+    # letter used to, each scanning the run); the run's leading dots are skipped outside the
+    # group, so group 1 - the only thing read - is what it was.
+    wm = re.search(r"(?<![A-Za-z.])\.*([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
     if not wm:
         return False
     w = wm.group(1)

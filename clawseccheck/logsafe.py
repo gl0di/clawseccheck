@@ -146,7 +146,14 @@ def redact(text: str | None) -> str:
 # B-073: any URL-shaped substring (scheme://...) so embedded credentials
 # (userinfo, query tokens, path segments) can be found and stripped even when
 # they appear inside a larger command string rather than as a bare URL value.
-_URL_SHAPE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+")
+#
+# C-730: linear time. The old `[A-Za-z][A-Za-z0-9+.-]*://...` tried from every letter of a
+# long run of scheme characters and scanned to the run's end each time. A match always began
+# at the run's FIRST LETTER, so: only the run's first character may start (lookbehind), group 1
+# takes the run's leading digits and `+.-`, and group 2 is exactly what the old pattern matched.
+# `redact_urls_in_text` puts group 1 back unchanged.
+_URL_SHAPE_RE = re.compile(
+    r"(?<![A-Za-z0-9+.-])([0-9+.-]*)([A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+)")
 
 
 def sanitize_url_host_only(url: str) -> str:
@@ -182,7 +189,7 @@ def redact_urls_in_text(text: str) -> str:
     """
     if not text:
         return text or ""
-    return _URL_SHAPE_RE.sub(lambda m: sanitize_url_host_only(m.group(0)), text)
+    return _URL_SHAPE_RE.sub(lambda m: m.group(1) + sanitize_url_host_only(m.group(2)), text)
 
 
 def _replace_secret_pattern(m: re.Match) -> str:  # type: ignore[type-arg]

@@ -8,6 +8,7 @@ import base64
 import binascii
 import bisect
 import errno
+import functools
 import html
 import ipaddress
 import os
@@ -56,6 +57,7 @@ from ._shared import (
     _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
     _KNOWN_EXFIL_HOST_RE,
+    _ScanMatch,
     _MANIFEST_HEADER_RE,
     _SENTENCE_BREAK_RE,
     _channels,
@@ -151,10 +153,107 @@ _B58_HIDDEN_STYLE_RE = re.compile(
 # A hidden-injection payload inside one styled tag is far under 4KB; the loop is also
 # gated on a global hidden-style pre-check (see _b58_hidden_segments) so the common case
 # (no hidden style anywhere) skips the scan entirely.
+# The hidden-tag shape, kept as the executable definition of what `_b58_hidden_tags` yields.
+# C-730: it is no longer run over file text - on "<a <a <a ..." every tag start scanned the
+# attributes to the next ">" (or to the end of the text), which is quadratic.
 _B58_HIDDEN_TAG_RE = re.compile(
     r"<(?P<tag>[A-Za-z][\w:-]*)(?P<attrs>[^>]*)>(?P<body>.{0,4096}?)</(?P=tag)>",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+_B58_TAG_OPEN_RE = re.compile(r"<(?P<tag>[A-Za-z][\w:-]*)", re.IGNORECASE)
+
+
+_B58_BODY_MAX = 4096        # the `.{0,4096}?` of the body
+# `</(?P=tag)>` compares the closing name the way the regex engine compares a BACKREFERENCE
+# under re.I, which is not quite how it compares a literal (a long s does not close an "s"
+# tag). The same engine is asked, so the answer cannot drift from the pattern above.
+_B58_SAME_NAME_RE = re.compile(r"(.*)\x00\1\Z", re.IGNORECASE | re.DOTALL)
+
+
+_B58_SHORT_NAME = 64        # a name up to this long gets one compiled prefix searcher
+
+
+@functools.lru_cache(maxsize=512)
+def _b58_prefix_closer_re(name: str) -> "re.Pattern":
+    """Finds a closing tag for ANY prefix of *name* - ``</a>``, ``</ab>``, ... - in one
+    search. A literal under re.I matches at least what a backreference would, so nothing is
+    missed; `_B58_SAME_NAME_RE` then decides."""
+    nested = ""
+    for ch in reversed(name[1:]):
+        nested = "(?:" + re.escape(ch) + nested + ")?"
+    return re.compile("</" + re.escape(name[0]) + nested + ">", re.IGNORECASE)
+
+
+def _b58_closing_tag(text: str, body_at: int, name: str) -> "tuple[int, int]":
+    """``(k, c)``: the closing tag `_B58_HIDDEN_TAG_RE` would settle on for an opening tag
+    whose name run is *name* and whose body starts at *body_at* - the LONGEST prefix
+    ``name[:k]`` that has a ``</name[:k]>`` beginning within `_B58_BODY_MAX` characters, at
+    the first such place ``c`` (the lazy body takes the nearest). ``(0, -1)`` when there is
+    none.
+
+    Each closing tag in the window closes at most one prefix - the one as long as the name
+    it spells - so the window is searched once, not once per prefix: with one compiled
+    searcher for a short name, by walking its "</" for a long one (a long name leaves room
+    for few such tags in a text, so the walk stays linear).
+    """
+    limit = body_at + _B58_BODY_MAX
+    longest = len(name)
+    best_k, best_c = 0, -1
+    if longest <= _B58_SHORT_NAME:
+        hits = ((h.start(), h.end() - 1) for h in
+                _b58_prefix_closer_re(name).finditer(text, body_at, limit + 3 + longest)
+                if h.start() <= limit)
+    else:
+        def _walk():
+            c = text.find("</", body_at, limit + 2)
+            while c >= 0:
+                gt = text.find(">", c + 2, c + 3 + longest)
+                if gt >= 0:
+                    yield c, gt
+                c = text.find("</", c + 1, limit + 2)
+        hits = _walk()
+    for c, gt in hits:
+        k = gt - c - 2
+        if best_k < k <= longest and (
+                text[c + 2:gt] == name[:k]
+                or _B58_SAME_NAME_RE.match(name[:k] + "\x00" + text[c + 2:gt])):
+            best_k, best_c = k, c
+            if k == longest:
+                break                   # nothing can beat the full name
+    return best_k, best_c
+
+
+def _b58_hidden_tags(text: str):
+    """Yield a match for each one `_B58_HIDDEN_TAG_RE.finditer(text)` would produce, with
+    the same span and the same ``tag`` / ``attrs`` / ``body`` groups (C-730).
+
+    The regex tried, at every "<name", to read the attributes up to the next ">" - so a run
+    of unclosed tag starts rescanned the same stretch each time. Here that ">" is found once
+    and remembered while it is still ahead, and the closing tag is found in one pass over
+    the window after it. The regex could also settle for a SHORTER tag name (`<ab>..</a>`
+    reads as tag "a" with attributes "b"); `_b58_closing_tag` picks the prefix it would.
+    """
+    pos = 0
+    gt = -2         # the first ">" at or after the end of the last tag name looked at
+    while True:
+        o = _B58_TAG_OPEN_RE.search(text, pos)
+        if o is None:
+            return
+        start, name_end = o.start(), o.end()
+        if gt < name_end:
+            gt = text.find(">", name_end)
+            if gt < 0:
+                return                  # no ">" left: no tag from here on can match
+        name = o.group("tag")
+        k, c = _b58_closing_tag(text, gt + 1, name)
+        if c < 0:
+            pos = start + 1
+            continue
+        yield _ScanMatch(text, start, c + 3 + k, {
+            "tag": name[:k], "attrs": text[start + 1 + k:gt], "body": text[gt + 1:c]})
+        pos = c + 3 + k
 
 
 _B58_HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.IGNORECASE | re.DOTALL)
@@ -179,7 +278,16 @@ _B58_JS_UHEX_RE = re.compile(r"\\u\{([0-9a-fA-F]{1,6})\}")
 _B58_JS_UNI_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
-_B58_URL_OR_EMAIL_RE = re.compile(r'https?://|\b[\w.+-]+@[\w-]+\.[\w.-]+', re.I)
+# C-730: linear time. The e-mail leg used to be `\b[\w.+-]+@...`; a run of `[\w.+-]` (which holds
+# every `\w`, so what precedes it is never `\w`) has a `\b` inside it exactly when it holds a
+# `\w` character, and its outcome depends on the run alone. So: only the run's first character
+# may start (lookbehind), and `(?=[.+-]*\w)` asks for that one `\w`. The match may now begin at
+# the run's leading dots instead of its first letter: its ONLY call site
+# (`_b58_extract_actionable`, `bool(... .search(seg_norm))`) reads the truth value, never the span
+# (and, like _B63_DEST_RE's e-mail leg, it is not equivalent under `.finditer`).
+_B58_URL_OR_EMAIL_RE = re.compile(
+    r'https?://|(?<![\w.+-])(?=[.+-]*\w)[\w.+-]+@[\w-]+\.[\w.-]+', re.I
+)
 
 
 _B59_HTML_ATTR_RE = re.compile(
@@ -189,7 +297,26 @@ _B59_HTML_ATTR_RE = re.compile(
 )
 
 
+# The img/a tag shape, kept as the executable definition of what `_b59_html_tags` yields.
+# C-730: not run over file text any more (unclosed "<a " starts each rescanned to the next ">").
 _B59_HTML_TAG_RE = re.compile(r"<(?:img|a)\b[^>]*>", re.IGNORECASE)
+_B59_HTML_TAG_OPEN_RE = re.compile(r"<(?:img|a)\b", re.IGNORECASE)
+
+
+def _b59_html_tags(text: str):
+    """Yield a match (``start()``, ``group(0)``) for each one `_B59_HTML_TAG_RE.finditer`
+    would produce (C-730): every "<img" / "<a" start runs to the first ">" after it, found
+    once and remembered while it is still ahead of the scan."""
+    pos = 0
+    while True:
+        o = _B59_HTML_TAG_OPEN_RE.search(text, pos)
+        if o is None:
+            return
+        gt = text.find(">", o.end())
+        if gt < 0:
+            return                      # no ">" left: no tag from here on can match
+        yield _ScanMatch(text, o.start(), gt + 1)
+        pos = gt + 1
 
 
 _B59_IMG_TEXT_ATTR_RE = re.compile(
@@ -199,10 +326,82 @@ _B59_IMG_TEXT_ATTR_RE = re.compile(
 )
 
 
+# The markdown-image shape, kept as the executable definition of what `_b59_md_images`
+# yields (C-730: not run over file text any more - see `_b59_md_scan`).
 _B59_MD_IMG_RE = re.compile(r"!\[[^\]]*\]\(([^)\n]+)\)", re.IGNORECASE)
 
 
+# The markdown-link shape, kept as the executable definition of what `_b59_md_links` yields.
+# C-730: it is no longer run over file text - on a run of "[" every bracket began an attempt
+# that scanned to the next "]" (quadratic), and the same again for the URL after each "](".
 _B59_MD_LINK_RE = re.compile(r"(?<!\!)\[[^\]]+\]\(([^)\n]+)\)", re.IGNORECASE)
+
+
+def _b59_md_scan(text: str, image: bool):
+    """Yield ``(start, url)`` for each match `_B59_MD_LINK_RE.finditer(text)` (*image* False)
+    or `_B59_MD_IMG_RE.finditer(text)` (*image* True) would produce - ``start`` is
+    ``m.start()`` and ``url`` is ``m.group(1)`` - in one pass (C-730).
+
+    Either regex is decided by three positions: the opening "[" (for a link: not after "!",
+    for an image: right after one), the FIRST "]" after it (a link's text may not be empty,
+    an image's may), and the first ")" or newline after the "](" that must follow (the URL
+    must not be empty and must end at ")"). Every opener before the same "]" shares that
+    fate, so when the tail fails the scan resumes after that "]" instead of retrying each of
+    them. Each position is found with `str.find` and remembered while it is still ahead of
+    the scan, so no stretch is searched twice.
+    """
+    n = len(text)
+    pos = 0
+    close = -2      # the first "]" after the last "[" tried (-2: not looked for yet)
+    paren = -2      # the first ")" at or after the last URL start tried; n when there is none
+    newline = -2    # the same for a newline
+    while True:
+        if image:
+            start = text.find("![", pos)
+            if start < 0:
+                return
+            i = start + 1
+        else:
+            i = start = text.find("[", pos)
+            if i < 0:
+                return
+            if i > 0 and text[i - 1] == "!":
+                pos = i + 1
+                continue
+        if close <= i:
+            close = text.find("]", i + 1)
+            if close < 0:
+                return
+        if close == i + 1 and not image:    # "[]": a link's text needs one character
+            pos = i + 1
+            continue
+        url_at = close + 2
+        if not text.startswith("(", close + 1):
+            pos = close + 1
+            continue
+        if paren < url_at:
+            paren = text.find(")", url_at)
+            if paren < 0:
+                paren = n
+        if newline < url_at:
+            newline = text.find("\n", url_at)
+            if newline < 0:
+                newline = n
+        if paren == n or newline < paren or paren == url_at:
+            pos = close + 1             # no ")" on this line, or an empty URL
+            continue
+        yield start, text[url_at:paren]
+        pos = paren + 1
+
+
+def _b59_md_links(text: str):
+    """``(m.start(), m.group(1))`` of every `_B59_MD_LINK_RE` match, in one pass."""
+    return _b59_md_scan(text, image=False)
+
+
+def _b59_md_images(text: str):
+    """``(m.start(), m.group(1))`` of every `_B59_MD_IMG_RE` match, in one pass."""
+    return _b59_md_scan(text, image=True)
 
 
 # Self-reference to the instructions themselves (reduces FP when target is generic)
@@ -685,8 +884,11 @@ def _mark_truncated(snippet: str, truncated_head: bool, truncated_tail: bool) ->
 # and in the measured case it began PAST the `allowed-tools:` key, seeing only the bare
 # tail `, Write, Read`. A pattern applied to the window alone would not have matched the
 # declaration it needs to erase - which is exactly how this evidence stayed invisible.
+# C-730: linear time. `[ \t]*[-*]?[ \t]*` let two adjacent blank runs split a run of n blanks
+# in n ways, so ONE long line of spaces cost n^2 from a single start. `(?:[-*][ \t]*)?` is the
+# same language (blanks, then optionally a marker and blanks) with one way to read it.
 _B61_TOOL_DECL_RE = re.compile(
-    r"^([ \t]*[-*]?[ \t]*(?:allowed[-_]?tools|disallowed[-_]?tools|tools)[ \t]*:)([^\n]*)",
+    r"^([ \t]*(?:[-*][ \t]*)?(?:allowed[-_]?tools|disallowed[-_]?tools|tools)[ \t]*:)([^\n]*)",
     re.I | re.M,
 )
 
@@ -2116,7 +2318,12 @@ _B63_DEST_RE = re.compile(
         # an @-handle, but only when it is the OBJECT of a destination cue - a bare @word matches
         # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
         r"|\b(?:to|via|dm)\s+@\w{2,}"
-        r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+        # C-730: the e-mail leg's lookbehind lets only a run's first character try (the leg's
+        # outcome depends on the run, not on where inside it the attempt starts, and it has
+        # no \b), so a long run of `[\w.+-]` is no longer rescanned from every position.
+        # FIRST MATCH ONLY: every call site is `.search`; `.finditer` would skip a match that
+        # starts inside the run a previous match ended in (tests/test_c730_regex_equivalence.py).
+        r"|https?://|(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.-]+"
         # B-947 round 2: every alternative here is now word-bounded - "k sebe" and each
         # "v <noun>" destination noun (moy/nash/chat/bot) are complete standalone Russian
         # words in this destination-phrase usage, so an UNbounded literal substring-
@@ -4039,8 +4246,13 @@ _DEFENSIVE_HEADING_RE = re.compile(
 # Regex to extract dep names from the manifest headers injected by _read_skill_text.
 # Reuses _MANIFEST_HEADER_RE / _REQ_UNPINNED_RE / _PKG_JSON_DEP_RE infrastructure.
 # We want ALL dep names regardless of pinning status.
+# C-730: linear time. The old `(?!\s*$)` ("not a blank line") sat right before the name, where
+# it can never fail a match that goes on to succeed (the next character is then a name
+# character, so `\s*$` cannot hold) - but at every line start it scanned all the blank lines
+# that follow, and on one line of blanks every backtrack rescanned the rest. Dropped; same
+# matches, spans and group.
 _DEP_PKG_NAME_RE = re.compile(
-    r"^[ \t]*(?!#)(?!-[rcei])(?!\s*$)([A-Za-z0-9_.\-]+)",
+    r"^[ \t]*(?!#)(?!-[rcei])([A-Za-z0-9_.\-]+)",
     re.MULTILINE,
 )
 
@@ -4487,11 +4699,17 @@ _DEP_LOCAL_ALIAS_RE = re.compile(r"^(?:file:|link:|npm:)", re.IGNORECASE)
 # unpinned-deps scan above) rather than a new file-collection pass. Read-only: only the
 # .pth TEXT content is inspected, never executed (§2). A benign path-only .pth (no
 # `import` line) is not flagged.
-_PTH_IMPORT_LINE_RE = re.compile(r"^\s*import\s+\S", re.MULTILINE)
+# C-730: linear time, as _FM_HOMEPAGE_RE: the leading blank run stays on one line. The call
+# site reads only whether there is a match.
+_PTH_IMPORT_LINE_RE = re.compile(r"^[^\S\n]*import\s+\S", re.MULTILINE)
 
 
+# C-730: linear time, as _FM_HOMEPAGE_RE: the leading blank run stays on the entry's own line.
+# The same entries are found with the same group 1 and the same END; the match START no longer
+# reaches back over preceding blank lines, and both call sites read group 1 or
+# `group(0).strip()`, which drops exactly that leading whitespace.
 _PYPROJECT_DEP_LINE_RE = re.compile(
-    r"^\s*\"?([A-Za-z0-9_.\-\[,\]]+)\"?"
+    r"^[^\S\n]*\"?([A-Za-z0-9_.\-\[,\]]+)\"?"
     r"(?:\s*$|\s*>=\s*\S+|\s*>\s*\S+|\s*==\s*\*|\s*@\s*latest)",
     re.MULTILINE,
 )
@@ -4521,7 +4739,9 @@ _REQ_PINNED_SUFFIX_RE = re.compile(r"==\s*[0-9]")  # == X.Y.Z exact pin is clean
 # A pinned line uses == X.Y.Z  (exact pin is clean; range specs are supply-chain risk).
 # Lines starting with # (comments), -r/-c/-e/-i (options), or blank are skipped.
 _REQ_UNPINNED_RE = re.compile(
-    r"^[ \t]*(?!#)(?!-[rcei])(?!\s*$)"  # not comment, option, blank
+    # C-730: no `(?!\s*$)` here - see _DEP_PKG_NAME_RE: redundant before the name, and
+    # quadratic on blank lines / one long line of blanks. Same matches, spans and group.
+    r"^[ \t]*(?!#)(?!-[rcei])"  # not comment, option (a blank line has no name)
     r"([A-Za-z0-9_.\-\[,\]]+)"  # package name (+ extras)
     r"(?:"
     r"\s*$|"  # 1. bare (no version)
@@ -4841,6 +5061,34 @@ def _b58_decode_base64_layer(
             )
 
 
+def _b58_strip_tags(text: str) -> str:
+    """``re.sub(r"<[^>]+>", " ", text)`` in one pass (C-730).
+
+    On a run of "<" the regex began an attempt at every one and scanned to the next ">"
+    each time (quadratic). The outcome is fixed by two positions - a "<" and the first ">"
+    after it, which must not be the very next character - so they are found with
+    ``str.find`` instead: same replacements, same text left over.
+    """
+    out = []
+    pos = 0
+    while True:
+        i = text.find("<", pos)
+        if i < 0:
+            break
+        r = text.find(">", i + 1)
+        if r < 0:
+            break                       # no ">" left: no "<" from here on can match
+        if r == i + 1:                  # "<>": the tag needs one character
+            out.append(text[pos:i + 1])
+            pos = i + 1
+            continue
+        out.append(text[pos:i])
+        out.append(" ")
+        pos = r + 1
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def _b58_decode_html_entities(text: str) -> str:
     return html.unescape(text)
 
@@ -4994,12 +5242,12 @@ def _b58_hidden_segments(text: str) -> list[tuple[str, str]]:
     # B-102: a hidden-styled tag can only exist if a hidden-style token exists somewhere
     # in the text; this cheap linear pre-check lets the common (and adversarial all-tags)
     # case skip the O(n)-per-tag body scan entirely. Lossless - attrs subset-of text.
-    tag_scan = _B58_HIDDEN_TAG_RE.finditer(text) if _B58_HIDDEN_STYLE_RE.search(text) else ()
+    tag_scan = _b58_hidden_tags(text) if _B58_HIDDEN_STYLE_RE.search(text) else ()
     for m in tag_scan:
         attrs = m.group("attrs") or ""
         if not _B58_HIDDEN_STYLE_RE.search(attrs):
             continue
-        body = re.sub(r"<[^>]+>", " ", m.group("body") or "")
+        body = _b58_strip_tags(m.group("body") or "")
         body = normalize_for_scan(html.unescape(body))
         if body.strip():
             segments.append((body, "hidden-html/css"))
@@ -6121,21 +6369,21 @@ def _check_markdown_image_exfil(ctx: Context) -> Finding:
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
 
-        for m in _B59_MD_IMG_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
+        for img_start, img_url in _b59_md_images(norm):
+            if _is_code_example(norm, img_start, fr, fence_needs_negation=True):
                 continue
-            url = _b59_markdown_url(m.group(1))
+            url = _b59_markdown_url(img_url)
             if url and _b59_url_has_data_query(url):
                 evidence.append(f"{source}: markdown image URL with query params: {_safe_url(url)}")
 
-        for m in _B59_MD_LINK_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
+        for link_start, link_url in _b59_md_links(norm):
+            if _is_code_example(norm, link_start, fr, fence_needs_negation=True):
                 continue
-            url = _b59_markdown_url(m.group(1))
+            url = _b59_markdown_url(link_url)
             if url and _b59_url_has_data_query(url):
                 evidence.append(f"{source}: markdown link URL with query params: {_safe_url(url)}")
 
-        for m in _B59_HTML_TAG_RE.finditer(norm):
+        for m in _b59_html_tags(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             tag = m.group(0)
@@ -7174,8 +7422,13 @@ def _frontmatter_name(blob: str) -> str | None:
 # (C-210): a second topic (prose-intent bulk-exfil) now needs the same allowlist, and
 # _content.py already has every dependency these need (_frontmatter_name, _in_fence,
 # _skill_frontmatter_block, _MANIFEST_HEADER_RE) -- moving avoided a circular import.
+# C-730: linear time. `^\s*` under re.M also runs across the blank lines BEFORE the key, so
+# every line start in a run of blank lines rescanned the rest of the run. `^[^\S\n]*` stays on
+# the key's own line: the same keys are found and group 1 is the same; only the match START
+# moves from the first blank line of the run to the key's line, and the one call site reads
+# group 1.
 _FM_HOMEPAGE_RE = re.compile(
-    r"^\s*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\s*:\s*"
+    r"^[^\S\n]*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\s*:\s*"
     r"[\"']?(https?://[^\s\"'#]+)",
     re.I | re.MULTILINE,
 )
@@ -9198,10 +9451,38 @@ _OLLAMA_PULL_RE = re.compile(
     r'|["\']ollama["\']\s*,\s*["\']pull["\']\s*,\s*["\']([^"\']+)["\']',
     re.I,
 )
+# The model-file URL shape, kept as the executable definition of what `_model_file_urls`
+# yields. C-730: not run over file text any more - in "http://http://http://..." every
+# scheme began an attempt that scanned the whole run of URL characters.
 _MODEL_FILE_URL_RE = re.compile(
     r'https?://[^\s"\'<>)\]]+\.(?:gguf|safetensors|onnx)\b',
     re.I,
 )
+_MODEL_URL_RUN_RE = re.compile(r'[^\s"\'<>)\]]+')
+_MODEL_URL_SCHEME_RE = re.compile(r"https?://", re.I)
+_MODEL_URL_EXT_RE = re.compile(r"\.(?:gguf|safetensors|onnx)\b", re.I)
+
+
+def _model_file_urls(text: str):
+    """Yield a match (``start()``, ``end()``, ``span()``, ``group(0)``) for each one
+    `_MODEL_FILE_URL_RE.finditer(text)` would produce (C-730).
+
+    A match lies inside one maximal run of URL characters: the regex starts at the run's
+    FIRST scheme and, being greedy, ends at the run's LAST model-file extension, with at
+    least one character between them - so a run holds at most one match, and it is found
+    with one search for each instead of one scan of the run per scheme.
+    """
+    for run in _MODEL_URL_RUN_RE.finditer(text):
+        lo, hi = run.span()
+        last = None
+        for ext in _MODEL_URL_EXT_RE.finditer(text, lo, hi):
+            last = ext
+        if last is None:
+            continue
+        scheme = _MODEL_URL_SCHEME_RE.search(text, lo, hi)
+        if scheme is None or scheme.end() >= last.start():
+            continue
+        yield _ScanMatch(text, scheme.start(), last.end())
 # A revision/commit/digest pin near the call site - checked in a window around the
 # match, not just inside the captured argument, since revision= is usually a sibling
 # kwarg on the same call rather than part of the repo-id string.
@@ -9238,7 +9519,7 @@ def _model_provenance_hits(
         window = blob[max(0, start - _MODEL_PIN_WINDOW) : end + _MODEL_PIN_WINDOW]
         return bool(_MODEL_REVISION_PIN_RE.search(window))
 
-    for m in _MODEL_FILE_URL_RE.finditer(blob):
+    for m in _model_file_urls(blob):
         if m.span() in seen_spans:
             continue
         seen_spans.add(m.span())
@@ -11563,7 +11844,7 @@ def check_image_attr_injection(ctx: Context) -> Finding:
     def _scan(blob: str, source: str) -> None:
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
-        for m in _B59_HTML_TAG_RE.finditer(norm):
+        for m in _b59_html_tags(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             tag = m.group(0)

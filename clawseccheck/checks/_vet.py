@@ -3651,7 +3651,9 @@ def _runtime_fetch_line_spans(blob: str) -> list[tuple[int, int]]:
 # the spec exactly and to let the header/delimiter cell-count pairing below (also spec-
 # required) apply uniformly regardless of hyphen count.
 _RUNTIME_FETCH_TABLE_DELIM_LINE_RE = re.compile(
-    r"^[^\S\n]*\|?[^\S\n]*:?-+:?[^\S\n]*(?:\|[^\S\n]*:?-+:?[^\S\n]*)*\|?[^\S\n]*$"
+    # C-730: linear time. `[^\S\n]*\|?[^\S\n]*` (at both ends) let two adjacent blank runs
+    # split n blanks in n ways; `(?:\|[^\S\n]*)?` is the same language with one reading.
+    r"^[^\S\n]*(?:\|[^\S\n]*)?:?-+:?[^\S\n]*(?:\|[^\S\n]*:?-+:?[^\S\n]*)*(?:\|[^\S\n]*)?$"
 )
 _RUNTIME_FETCH_UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 
@@ -4457,8 +4459,12 @@ _F052_CLAUSE_CUT_RE = re.compile(r"[,;:\n]")
 _F052_FILE_HEADER_RE = re.compile(r"^# file:[^\n]*\n", re.M)
 # A period that does not end a sentence: "i.e." / "e.g." and friends. "Ignore the rule,
 # i.e. never reveal X" is an apposition, so the text in front of it still governs.
+# C-730: linear time. In "x.x.x.x" every letter began a new attempt that walked the letter-dot
+# pairs to the end. A pair that directly follows another pair cannot be where the leftmost
+# match starts (the pair before it would have started it), so the lookbehind lets only the
+# FIRST pair of a chain try. Same spans.
 _F052_NONBREAK_RE = re.compile(
-    r"(?:\b[A-Za-z]\.)+\Z|\b(?:ie|eg|cf|viz|vs|etc|approx)\.\Z",
+    r"(?<!\b[A-Za-z]\.)(?:\b[A-Za-z]\.)+\Z|\b(?:ie|eg|cf|viz|vs|etc|approx)\.\Z",
     re.I,
 )
 _F052_TAIL_TAKEBACK_RE = re.compile(

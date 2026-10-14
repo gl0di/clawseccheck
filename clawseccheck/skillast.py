@@ -1177,7 +1177,10 @@ _TUNNEL_ARGV_SUBCOMMANDS = {
 _CLOUDFLARED_TUNNEL_SUBCOMMANDS = {"--url", "run", "create"}
 # `\bssh\s+(?:-\w+\s+)*-R\s+\S*:\S+:\d+` -- the port-forward spec immediately after a
 # literal "-R" element, e.g. "8080:localhost:22".
-_SSH_R_SPEC_RE = re.compile(r"^\S*:\S+:\d+$")
+# C-730: linear time. `^\S*:` could stop at ANY colon and `\S+:\d+$` then rescanned the rest,
+# n^2 on a word of colons. A word matches exactly when it does with the split at its FIRST
+# colon (what follows that colon only gets longer), so the first part may not hold a colon.
+_SSH_R_SPEC_RE = re.compile(r"^[^\s:]*:\S+:\d+$")
 
 
 def _argv_str_elts(node: ast.List | ast.Tuple) -> list[str | None]:
@@ -16820,12 +16823,49 @@ _SH_DOWNLOAD_TO_PATH_RE = re.compile(
 _SH_LINE_URL_RE = re.compile(r"https?://[^\s\"'<>|)]{4,512}")
 # The URL may sit on the same line or come from a variable assigned earlier, so the
 # download line itself is not required to carry an http literal - see _sh_staged_exec.
+#
+# C-730: linear time. The statement start used to be followed by `\s*`, which also runs
+# across newlines, so in a run of blank lines EVERY newline began an attempt that scanned
+# the rest of the run (and `then\s+\s*` could split a blank run in n ways). The blanks
+# after the start now stay on one line (`[^\S\n]*`): a command after blank lines is reached
+# from the LAST newline before it instead of the first. The same commands are found with
+# the same `path` group; only where the match begins moves, and `_sh_run_stmt_start` gives
+# the caller the position the old pattern began at, so the reported line is unchanged.
 _SH_RUN_PATH_RE = re.compile(
-    r"(?:^|[\n;&|]|\b(?:then|do|else)\s+)\s*(?:sudo\s+)?"
-    r"(?:source|\.|bash|sh|zsh|python3?|node|perl|ruby)\s+"
+    r"(?:^|[\n;&|]|\b(?:then|do|else)(?=\s))[^\S\n]*"
+    r"(?P<cmd>(?:sudo\s+)?(?:source|\.|bash|sh|zsh|python3?|node|perl|ruby))\s+"
     r"(?P<path>[\"']?[\w./$~{}-]{2,128}[\"']?)",
     re.I,
 )
+_SH_RUN_KEYWORDS = ("then", "else", "do")
+
+
+def _sh_run_stmt_start(text: str, m: "re.Match", floor: int = 0) -> int:
+    """Where the pre-C-730 `_SH_RUN_PATH_RE` began the match *m* now begins later.
+
+    The old pattern began at the LEFTMOST point from which whitespace alone led to the
+    command: the `;`, `&` or `|` before the blank run, else the `then`/`do`/`else` before it,
+    else the start of the text when the run begins there, else the run's first newline.
+    *floor* is where the previous match ended: a keyword that was itself the previous
+    match's path (`bash then` followed by another command) was already consumed and could
+    not start the next one.
+    """
+    q = m.start("cmd")
+    w = q
+    while w > 0 and text[w - 1].isspace():
+        w -= 1
+    if w == 0:
+        return 0
+    if text[w - 1] in ";&|":
+        return w - 1
+    if q > w:
+        for kw in _SH_RUN_KEYWORDS:
+            k = w - len(kw)
+            if k >= floor and text[k:w].lower() == kw and (
+                    k == 0 or not (text[k - 1].isalnum() or text[k - 1] == "_")):
+                return k
+    nl = text.find("\n", w, q)
+    return nl if nl >= 0 else m.start()
 _SH_HTTP_RE = re.compile(r"https?://", re.I)
 
 
@@ -16860,10 +16900,13 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
     if not staged:
         return []
     found: list[tuple[int, str]] = []
+    prev_end = 0
     for m in _SH_RUN_PATH_RE.finditer(masked):
         p = _sh_norm_path(m.group("path"))
         if p in staged:
-            found.append((masked.count("\n", 0, m.start()) + 1, p))
+            found.append(
+                (masked.count("\n", 0, _sh_run_stmt_start(masked, m, prev_end)) + 1, p))
+        prev_end = m.end()
     return found
 
 
@@ -17826,7 +17869,9 @@ _SH_BRANCH_KW_RE = re.compile(
 # (`Pattern.match(string, pos)` anchors there directly; no `\A`/`^` token needed, and
 # neither would work correctly here since `\A` anchors to offset 0 of the STRING, not
 # to `pos`).
-_SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*\(?[ \t\n]*\*[ \t\n]*\)")
+# C-730: `(?:\([ \t\n]*)?` instead of `\(?[ \t\n]*` after the first blank run: the same
+# language, but two adjacent blank runs no longer split n blanks in n ways.
+_SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*(?:\([ \t\n]*)?\*[ \t\n]*\)")
 # The literal `in` closing a case's own `case WORD in` header. Searched for ONLY
 # right after a recognized `case` keyword (never scanned for globally -- a bare
 # `\bin\b` search over the whole file would collide with a `for NAME in` loop
@@ -18616,9 +18661,18 @@ _JS_CP_NAMESPACE_BIND_RE = re.compile(
 )
 # Destructures exec-family names directly out of child_process: `const { exec, spawn } =
 # require('child_process')`, `import { exec, spawn as sp } from 'node:child_process'`.
+#
+# C-730: the two name lists were `[^}]+?`, so on a run of "{" every brace began an attempt
+# that scanned to the next "}" (quadratic). They are `[^{}]+?` now: an attempt stops at the
+# next brace of either kind. Where the two readings differ, the old one had started at an
+# EARLIER "{" and swallowed text up to the list into the first name - a destructure inside
+# a function body, `function go() { const { exec } = require(...) }`, read as the name
+# "const { exec", and a default-value pattern, `{ a: { b } = require('child_process') }`,
+# as "a: { b". The innermost list is matched now, so the real name (`exec`, `b`) is
+# recorded; a list that holds no "{" reads as it always did.
 _JS_CP_DESTRUCTURE_BIND_RE = re.compile(
-    r"\{\s*([^}]+?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
-    r"|\bimport\s*\{\s*([^}]+?)\s*\}\s*from\s+['\"](?:node:)?child_process['\"]",
+    r"\{\s*([^{}]+?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\s*\{\s*([^{}]+?)\s*\}\s*from\s+['\"](?:node:)?child_process['\"]",
 )
 
 
@@ -18652,7 +18706,8 @@ def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
             entry = entry.strip()
             if not entry:
                 continue
-            local = re.split(r":\s*|\s+as\s+", entry)[-1].strip()
+            # C-730: `(?<!\s)` - only the first blank of a run may start the ` as ` arm.
+            local = re.split(r":\s*|(?<!\s)\s+as\s+", entry)[-1].strip()
             if local:
                 names.add(local)
     return receivers, names

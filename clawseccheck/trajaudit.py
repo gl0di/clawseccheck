@@ -360,8 +360,12 @@ _MAX_CRED_MATCHES_PER_BLOB = 256
 # goes stale behind the next channel OpenClaw adds. The context-token gate is a
 # channel-agnostic replacement for that same specificity, and is now the ONLY thing this
 # anchor's precision depends on.
+# C-730: linear time. The suffix is made of class characters, so a match is always one
+# maximal run of `[\w.-]` from its first character to the run's last suffix occurrence;
+# the lookbehind lets only that start position try instead of every position in the run
+# (which scanned to the run's end each time). Same spans, no groups.
 _OPENCLAW_CRED_STORE_RE = re.compile(
-    r"[\w.-]*-(?:allowFrom|pairing)\.json\b",
+    r"(?<![\w.-])[\w.-]*-(?:allowFrom|pairing)\.json\b",
     re.I,
 )
 # B-573 part (3): the OpenClaw context-token gate `_OPENCLAW_CRED_STORE_RE` needs - see
