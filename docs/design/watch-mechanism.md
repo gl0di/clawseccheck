@@ -82,9 +82,14 @@ module handles that by hand:
   followed - the same discipline `safeio.walk_dir_safely` already applies to file walks
   elsewhere in this codebase). A tree that would need more watches than the cap is disclosed
   (`watch_dirs_capped: true` in the heartbeat) rather than silently watching only part of it.
-- A directory created *after* start-up is caught via its own `IN_CREATE | IN_ISDIR` event on its
-  parent's watch, and a watch is added for it immediately - so a new subdirectory is never a
-  permanent blind spot, only a brief one between its creation and the next event drain.
+- A directory that appears *after* start-up - created (`IN_CREATE | IN_ISDIR`) or moved in
+  (`IN_MOVED_TO | IN_ISDIR`) - is caught by that event on its parent's watch, and a watch is
+  added for it **and for every real directory already below it** (`_watch_new_tree`, the same
+  cap and the same no-symlink rule as start-up; a tree that passes the cap sets
+  `watch_dirs_capped`). The walk below the top is the point: `mkdir -p a/b/c`, `cp -r` and `mv`
+  of a whole skill deliver one event for the top, and everything under it exists by the time the
+  watch is added, so watching only the top left every deeper change unseen. The gap between the
+  creation and the next event drain is covered by the re-scan the creation event itself triggers.
 - `IN_Q_OVERFLOW` (the kernel dropped events because they were not read fast enough) is treated
   as "something changed" unconditionally, never silently absorbed - under-reporting here would
   reopen exactly the gap this module exists to close.

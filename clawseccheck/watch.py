@@ -235,8 +235,9 @@ class InotifyWatcher(Watcher):
 
     Recursive by hand - Linux inotify is not natively recursive: every existing
     subdirectory gets its own watch descriptor up front (`_bounded_watch_dirs`), and a
-    newly created subdirectory is watched the moment its IN_CREATE|IN_ISDIR event is
-    seen, so a directory created after start-up is not a blind spot.
+    directory that appears later (created or moved in) is watched together with every
+    directory already below it (`_watch_new_tree`): `mkdir -p a/b/c`, `cp -r` and `mv`
+    deliver ONE event for the top, with everything under it already in place.
     """
 
     mode = "inotify"
@@ -245,17 +246,18 @@ class InotifyWatcher(Watcher):
         self._root = Path(root)
         self._fd = _inotify_init()
         self._wd_to_path: dict = {}
+        self._max_dirs = max_dirs
         self.unreadable = 0
         self.overflowed = False
-        dirs, capped = _bounded_watch_dirs(self._root, max_dirs)
-        self.capped = capped
+        dirs, self.capped = _bounded_watch_dirs(self._root, max_dirs)
+        self._add_dirs(dirs)
+
+    def _add_dirs(self, dirs) -> None:
         for d in dirs:
             try:
-                wd = _inotify_add_watch(self._fd, d, WATCH_MASK)
+                self._wd_to_path[_inotify_add_watch(self._fd, d, WATCH_MASK)] = d
             except OSError:
                 self.unreadable += 1
-                continue
-            self._wd_to_path[wd] = d
 
     def poll_for_change(self, timeout: float) -> bool:
         try:
@@ -290,16 +292,24 @@ class InotifyWatcher(Watcher):
                     self._wd_to_path.pop(wd, None)
                     continue
                 changed = True
-                if (mask & IN_CREATE) and (mask & IN_ISDIR):
+                if (mask & (IN_CREATE | IN_MOVED_TO)) and (mask & IN_ISDIR):
                     parent = self._wd_to_path.get(wd)
                     if parent is not None:
-                        newdir = parent / os.fsdecode(name)
-                        try:
-                            new_wd = _inotify_add_watch(self._fd, newdir, WATCH_MASK)
-                            self._wd_to_path[new_wd] = newdir
-                        except OSError:
-                            pass
+                        self._watch_new_tree(parent / os.fsdecode(name))
         return changed
+
+    def _watch_new_tree(self, top: Path) -> None:
+        """Watch *top* and every real directory below it, within the start-up cap (no
+        symlink is followed; passing the cap sets ``capped``, which the heartbeat shows)."""
+        if _is_symlink(top):
+            return
+        room = self._max_dirs - len(self._wd_to_path)
+        if room <= 0:
+            self.capped = True
+            return
+        dirs, capped = _bounded_watch_dirs(top, room)
+        self.capped = self.capped or capped
+        self._add_dirs(dirs)
 
     def close(self) -> None:
         try:

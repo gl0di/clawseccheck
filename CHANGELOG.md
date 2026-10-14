@@ -74,6 +74,11 @@ from PASS to UNKNOWN.
 
 ### Fixed
 
+- **`--watch` keeps watching a tree that appeared after it started.** A skill installed with
+  `mkdir -p`, `cp -r` or `mv` created or moved in a whole directory tree at once, and the watcher
+  only watched the top of it: the first install was noticed and every later change under that
+  tree (a second skill, an edited script) was not. It now watches the whole new tree, within the
+  same directory cap, and says so in the heartbeat when the cap is passed.
 - **Two runs saved in the same second keep separate ids.** `--save-run` and `--save-sbom-run`
   use the timestamp as the run id, so a second save within one second printed the same id and
   `--diff` / `--sbom-diff` could only load the later run. A taken id now gets `-2`, `-3`, ...
