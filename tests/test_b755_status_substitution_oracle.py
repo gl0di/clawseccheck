@@ -329,7 +329,9 @@ def _pdf_text(blob: bytes) -> str:
 #: declaring the consumer unjudgeable — which would have retired the drift monitor, the single
 #: most important consumer in this file, from the oracle. Scrubbing keeps it judged.
 _NON_DETERMINISTIC = (
-    re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"),   # ISO timestamps
+    # ISO timestamps; the optional "-2" is the suffix save_run gives a second run saved in the
+    # same second (C-733), which is as clock-dependent as the timestamp it is appended to
+    re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:-\d+)?"),
     re.compile(r"(elapsed_s['\"]?[=:]\s*)-?\d+\.?\d*(?:e-?\d+)?"),   # wall-clock durations
 )
 
