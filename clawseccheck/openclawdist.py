@@ -399,7 +399,14 @@ def self_reported_version(config: "dict | None") -> str:
 # the 773-row harness battery re-ran on the installed build with no moved answer and the
 # oracle window was widened to 10.2, and the B391 default worker image is unchanged. No new
 # advisory was published after 2026-10-05.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 2)
+# Raised to 2026.10.3 on 2026-10-14 on the same evidence: the installed tree equals the
+# release tarball, the config schema is identical (5,430 paths, +0/-0), the dist-verified
+# paths, state DDL, vendor table set and DM-policy manifest differ by stamp, date and bundle
+# name only, the 773-row harness battery and the 999-row retired-format battery re-ran with no
+# moved answer (both windows widened to 10.3), the resolved-default oracle located 63 of 205
+# paths with 0 flipped (both controls run), the B391 default worker image is unchanged and no
+# advisory was published after 2026-10-05.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 3)
 
 
 def grounding_gap(installed_version: "str | None"):

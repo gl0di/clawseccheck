@@ -123,10 +123,11 @@ def test_battery_catches_a_short_retired_value_list(monkeypatch):
 # --- the window ---
 
 def test_window_is_the_validated_builds_only():
-    assert DATA["build"] == "2026.10.2"
+    assert DATA["build"] == "2026.10.3"
     assert rf.in_window((2026, 10, 1)) and rf.in_window((2026, 10, 2))
+    assert rf.in_window((2026, 10, 3))
     assert rf.in_window((2026, 10, 2, 1))  # a correction release stays inside
-    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 3))
+    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 4))
     assert not rf.in_window((2027, 1, 1))
     assert not rf.in_window(None) and not rf.in_window(()) and not rf.in_window((2026, 10))
     assert not rf.in_window("2026.10.2")

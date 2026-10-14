@@ -200,7 +200,7 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-10-12 against the vendor repository's own advisory endpoint (722 published
+# Last swept: 2026-10-14 against the vendor repository's own advisory endpoint (722 published
 # advisories). The global GitHub advisory database lags it and missed a whole batch, so it is
 # not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
 # npm package (70 rows, titles as published); below that it is a curated subset, so the id

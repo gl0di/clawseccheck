@@ -128,7 +128,7 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "config_symlink_escapes_home": false,
   "config_parse_reason": null,
   "errors": [],
-  "grounding": { "grounded_max": "2026.10.2", "installed": "2026.10.2", "newer_than_grounded": false, "detail": null },
+  "grounding": { "grounded_max": "2026.10.3", "installed": "2026.10.3", "newer_than_grounded": false, "detail": null },
   "inventory": {
     "openclaw": { "status": "FAIL", "findings": ["B2"], "unassessed": 24, "not_applicable_count": 0 },
     "host": { "status": "WARN", "findings": ["B50"], "unassessed": 0, "not_applicable_count": 0 },

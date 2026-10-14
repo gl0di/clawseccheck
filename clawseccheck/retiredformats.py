@@ -10,7 +10,9 @@ locates them by declaration. Grounded on the installed **openclaw@2026.10.2**
 the sha256 of the ``retired-config-formats``, ``legacy-config-record-shared``,
 ``record-coerce``, ``prototype-keys`` and ``command-format`` bundles of an extracted
 2026.10.1 package equals the installed 2026.10.2's, under the same content-hashed file names
-(so no bundle-name normalising was needed). Nothing else of 2026.10.1 was compared.
+(so no bundle-name normalising was needed). Nothing else of 2026.10.1 was compared. The
+same five bundles of the 2026.10.3 release tarball are byte-identical to 2026.10.2's, under
+the same file names (compared 2026-10-14), and the battery re-ran on the installed 2026.10.3.
 
 WHY IT IS A PORT AND NOT A TABLE. ``checks/_shared.py::_RETIRED_CONFIG_KEYS`` (B382) lists
 keys that were MEASURED against a build's root config schema, one row at a time. The vendor
@@ -56,8 +58,8 @@ JS FIDELITY, each measured against the vendor and pinned by the battery:
   ``byChannel.*`` entry against ``queue`` / ``steer-backlog`` / ``steer+backlog``.
 
 THE BUILD WINDOW is ``ORACLE_MIN..ORACLE_MAX``. 2026.9.9's finder is a different, smaller
-function (about 17 families); 2026.10.1 and 2026.10.2 are the only builds the battery was
-executed on. Outside the window ``in_window`` is False and the caller must NOT claim the
+function (about 17 families); 2026.10.1, 2026.10.2 and 2026.10.3 are the only builds the
+battery was executed on. Outside the window ``in_window`` is False and the caller must NOT claim the
 finder was applied: a newer build is exactly "an input this port does not model", so it
 degrades to the hand table's answer until ``tests/_retiredformatsoracle.py --write`` is run
 against it and ``ORACLE_MAX`` is raised.
@@ -73,7 +75,7 @@ from dataclasses import dataclass
 #: The window of builds this port was differentially validated on (first three components
 #: compared, so a correction release of a validated build stays inside it).
 ORACLE_MIN = (2026, 10, 1)
-ORACLE_MAX = (2026, 10, 2)
+ORACLE_MAX = (2026, 10, 3)
 
 #: The vendor's two ``bridgeVersion`` values, verbatim.
 BRIDGE_DEFAULT = "2026.9.5"
