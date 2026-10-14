@@ -2801,6 +2801,8 @@ def _b78_judge_entries(entries: dict, scope: str = "", unread_note: str = "") ->
 
 def _b78_judge_file(health_path: Path) -> tuple:
     try:
+        # C-731: the caller has lstat-ed this path as a regular file; the open itself stays
+        # `read_text` (test_c687 pins the unreadable branch through it).
         data = _loads_bounded(health_path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return (
@@ -2863,13 +2865,20 @@ def check_config_health_integrity(ctx: Context) -> Finding:
     # not an absent one; a database without the table is simply a legacy install.
     judged: list[tuple] = []
     logs_unreadable: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
     try:
-        health_file = pathprobe.is_file(health_path)
+        health_kind = _shared._file_kind_resolved(health_path)
     except OSError:
         # C-727: logs/ cannot be entered, so the legacy file was not looked for. The state
         # database below is still read, and a WARN from it stands.
         logs_unreadable.append(_detail_path(health_path.parent, ctx.home))
-        health_file = False
+        health_kind = "absent"
+    if health_kind in ("symlink-unusable", "directory", "special"):
+        # C-731: present but no regular file is there - not opened, never "absent". (A link
+        # to a regular file is read as it always was.)
+        not_understood.append(
+            (_detail_path(health_path, ctx.home), _shared._NOT_UNDERSTOOD_REASONS[health_kind]))
+    health_file = health_kind == "file"
     if health_file:
         judged.append(("legacy file logs/config-health.json", "legacy file",
                        _b78_judge_file(health_path)))
@@ -2877,9 +2886,10 @@ def check_config_health_integrity(ctx: Context) -> Finding:
         judged.append(("state database", "state database",
                        _b78_judge_db(db.status, db.entries, db.unread, db.truncated)))
 
-    if logs_unreadable and not any(item[2][0] == WARN for item in judged):
-        return _shared._unreadable_dirs_finding(
-            "B78", "the config-health record (logs/config-health.json)", logs_unreadable)
+    if (logs_unreadable or not_understood) and not any(item[2][0] == WARN for item in judged):
+        return _shared._not_understood_finding(
+            "B78", "the config-health record (logs/config-health.json)", not_understood,
+            logs_unreadable, engine_degraded=bool(logs_unreadable))
     if not judged:
         return _finding(
             "B78",

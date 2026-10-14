@@ -2911,6 +2911,152 @@ def _unreadable_dirs_finding(cid: str, what: str, unreadable: list) -> "Finding"
     )
 
 
+# ---------- C-731: a file that is present but was not understood ----------
+# C-727 covers a path that cannot be READ (permissions). This is the sibling for what the path
+# IS and what is IN it: a symbolic link, a directory, a pipe or a device where a regular file
+# is expected, a file that does not parse, a document of the wrong top-level type. Each is
+# "present but not understood" - UNKNOWN under the check's own id, never a clean result and
+# never an `is_file()`-style "absent". Nothing here opens a path before `lstat` (or, for a
+# link a check has always read through, `stat`) has said a regular file is there.
+_FILE_KIND_ABSENT_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+
+_NOT_UNDERSTOOD_REASONS = {
+    "symlink": "is a symbolic link, which this audit does not follow",
+    "symlink-unusable": "is a symbolic link that does not lead to a regular file",
+    "directory": "is a directory, not a regular file",
+    "special": "is not a regular file",
+}
+_REASON_TOO_LARGE = "is larger than this audit reads"
+
+
+def _file_kind(path) -> str:
+    """What *path* is by ``lstat`` (never opened, never followed): "absent", "file",
+    "symlink", "directory" or "special" (pipe, socket, device).
+
+    "absent" is pathprobe's own "not there" set; any other ``OSError`` is raised, because
+    "could not look" is a different fact from "absent" (see :func:`_probe_noting`).
+    """
+    import stat as _stat  # noqa: PLC0415
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        if exc.errno in _FILE_KIND_ABSENT_ERRNOS:
+            return "absent"
+        raise
+    except ValueError:
+        return "absent"      # an embedded NUL byte in the path: not a path that is there
+    if _stat.S_ISLNK(mode):
+        return "symlink"
+    if _stat.S_ISREG(mode):
+        return "file"
+    if _stat.S_ISDIR(mode):
+        return "directory"
+    return "special"
+
+
+def _file_kind_resolved(path) -> str:
+    """:func:`_file_kind`, except that a symbolic link whose TARGET is a regular file is
+    "file", and any other link (dangling, a loop, to a pipe / device / directory) is
+    "symlink-unusable".
+
+    For the files a check has always read THROUGH a link (`is_file()` follows one, and so
+    does the platform when it loads the file): refusing such a link would turn a finding the
+    audit used to make into UNKNOWN. Only the kind is asked here (`stat`, which never blocks);
+    the read that follows still goes through the non-blocking regular-file reader.
+    """
+    import stat as _stat  # noqa: PLC0415
+    kind = _file_kind(path)
+    if kind != "symlink":
+        return kind
+    try:
+        mode = os.stat(path).st_mode
+    except PermissionError:
+        raise                       # could not look at the target: "unreadable", not "no file"
+    except (OSError, ValueError):
+        return "symlink-unusable"   # dangling, a loop, a target that is not there
+    return "file" if _stat.S_ISREG(mode) else "symlink-unusable"
+
+
+def _probe_kind(path, home, unreadable: list, *, resolve: bool = False) -> str:
+    """:func:`_file_kind` (or :func:`_file_kind_resolved` with *resolve*); "absent" plus a
+    home-relative note in *unreadable* on OSError."""
+    try:
+        return _file_kind_resolved(path) if resolve else _file_kind(path)
+    except OSError:
+        unreadable.append(_detail_path(path, home))
+        return "absent"
+
+
+def _read_failure_reason(exc: OSError) -> "str | None":
+    """The reason text when a read failed because of what the path IS (a pipe, a directory,
+    a file past the size bound); None for a plain permission / I/O error."""
+    from .. import safeio as _safeio  # noqa: PLC0415
+    if isinstance(exc, (_safeio.NotARegularFile, IsADirectoryError)):
+        return _NOT_UNDERSTOOD_REASONS["special"]
+    if isinstance(exc, _safeio.UserFileTooLarge):
+        return _REASON_TOO_LARGE
+    return None
+
+
+def _read_regular_text(path) -> str:
+    """The text of a regular file, bounded, decoded leniently; ``OSError`` for anything else.
+
+    ``safeio.read_user_text``: a pipe / device / oversized file raises instead of blocking
+    or filling memory. The decode is ``errors="replace"``, as the callers' ``read_text`` was.
+    """
+    from .. import safeio as _safeio  # noqa: PLC0415
+    return _safeio.read_user_text(path, errors="replace")
+
+
+def _read_regular_bytes(path) -> bytes:
+    """The bytes of a regular file, bounded; ``OSError`` for anything else (see above)."""
+    from .. import safeio as _safeio  # noqa: PLC0415
+    return _safeio.read_user_file(path)
+
+
+def _toml_text(raw: bytes) -> "str | None":
+    """*raw* as the text of a TOML file, or None when it is not text at all: a NUL byte
+    (UTF-16 or UTF-32 text always holds one, and so does a binary file).
+
+    Otherwise the bytes are decoded leniently, as this file always was: one stray byte in a
+    comment must not turn a readable config into an unread one. A leading UTF-8 byte-order
+    mark is dropped, so the line scan sees the first table header. Whether the text is VALID
+    TOML is deliberately not asked: the stdlib parser exists only from 3.11, and a verdict
+    must not depend on the interpreter.
+    """
+    if b"\x00" in raw:
+        return None
+    text = raw.decode("utf-8", errors="replace")
+    return text[1:] if text.startswith("\ufeff") else text
+
+
+def _not_understood_finding(cid: str, what: str, problems: list, unreadable=(), *,
+                            engine_degraded: bool = True) -> "Finding":
+    """UNKNOWN for a check whose input file is present but was not understood (C-731).
+
+    *problems* is ``[(home-relative path, reason)]``; *unreadable* the C-727 notes of paths
+    that could not be read at all. *what* names the role of what was not examined. With no
+    *problems* this is exactly :func:`_unreadable_dirs_finding`. ``engine_degraded`` follows
+    the neighbouring present-but-unread finding of the calling check.
+    """
+    if not problems:
+        return _unreadable_dirs_finding(cid, what, list(unreadable))
+    items = sorted({f"{p} {r}" for p, r in problems})
+    items += [f"{p} could not be read" for p in sorted(set(unreadable))]
+    shown = "; ".join(items[:6]) + (f" (+{len(items) - 6} more)" if len(items) > 6 else "")
+    return _finding(
+        cid,
+        UNKNOWN,
+        f"{shown} (paths are relative to the audited home), so {what} could not be fully "
+        "checked and no clean result is claimed for it.",
+        "Open the listed file(s) and check that each is an ordinary, valid file of the expected "
+        "format; repair or replace one that is not (this audit never opens a pipe, socket, "
+        "device or directory in place of a file), make an unreadable one readable by the user "
+        "running the audit, then re-run.",
+        engine_degraded=engine_degraded,
+    )
+
+
 def _finding(
     cid,
     status,

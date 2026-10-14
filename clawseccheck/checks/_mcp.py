@@ -8579,6 +8579,7 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
     shell_ev: list[str] = []
     clean_connectors: list[str] = []
     too_deep: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
 
     for cache_dir in cache_dirs:
         try:
@@ -8588,21 +8589,38 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
             continue
         for connector_dir in connector_dirs:
             hooks_path = connector_dir / "hooks.json"
-            if (not _shared._probe_noting(pathprobe.is_file, hooks_path, ctx.home, unreadable)
-                    or pathprobe.is_symlink(hooks_path)):
+            shown_path = _detail_path(hooks_path, ctx.home)
+            kind = _shared._probe_kind(hooks_path, ctx.home, unreadable)
+            if kind == "absent":
+                continue
+            if kind != "file":
+                # C-731: a link / directory / pipe is present but not read - never "no hooks".
+                not_understood.append((shown_path, _shared._NOT_UNDERSTOOD_REASONS[kind]))
                 continue
             any_hooks_file = True
             try:
-                shallow = loads_shallow(hooks_path.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                unreadable.append(_detail_path(hooks_path, ctx.home))  # C-727: not a clean skip
+                shallow = loads_shallow(_shared._read_regular_text(hooks_path))
+            except OSError as exc:
+                reason = _shared._read_failure_reason(exc)
+                if reason:
+                    not_understood.append((shown_path, reason))
+                else:
+                    unreadable.append(shown_path)  # C-727: not a clean skip
                 continue
             except ValueError:
+                # C-731: empty / binary / truncated / not JSON - the file was never understood.
+                not_understood.append((shown_path, "could not be parsed as JSON"))
+                continue
+            refs: list[tuple[str, str]] = []
+            _walk_hook_shell_refs(shallow.value, None, refs)
+            if not isinstance(shallow.value, dict) and not refs:
+                # C-731: a list / string / number with no wiring the walk can see is a file
+                # that was not understood, not a clean one. Wiring it DOES see (the walk is
+                # shape-tolerant on purpose) is reported below as before.
+                not_understood.append((shown_path, "is not a JSON object"))
                 continue
             if shallow.elided:
                 too_deep.append(connector_dir.name)  # C-664: partly read - never "clean"
-            refs: list[tuple[str, str]] = []
-            _walk_hook_shell_refs(shallow.value, None, refs)
             if refs:
                 for event_name, script in refs[:3]:
                     shell_ev.append(
@@ -8613,9 +8631,9 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
 
     # C-727: a WARN found in a readable connector stands; otherwise an unreadable part of the
     # cache means neither "clean" nor "no hooks.json" can be said.
-    if unreadable and not shell_ev:
-        return _shared._unreadable_dirs_finding(
-            "B151", "the Codex CLI plugin doc-cache", unreadable)
+    if (unreadable or not_understood) and not shell_ev:
+        return _shared._not_understood_finding(
+            "B151", "the Codex CLI plugin doc-cache", not_understood, unreadable)
 
     if not any_hooks_file:
         return _finding(

@@ -5134,6 +5134,7 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # regardless of how safe other agents are - safe agents cannot dilute a dangerous one.
     # C-727: an unreadable agents/<id> tree is noted and skipped, never a crash.
     unreadable: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
     agent_dirs = _shared._agent_dirs_noting(ctx.home, unreadable)
 
     any_sessions = False  # at least one .jsonl file found anywhere
@@ -5187,6 +5188,15 @@ def check_session_approval_policy(ctx: Context) -> Finding:
         a_total = 0
         a_never = 0
         for fp in recent:
+            # C-731: lstat before any open - a named pipe here would block the read, a
+            # device or link is not a session log. Present but not read is never "clean".
+            kind = _shared._probe_kind(fp, ctx.home, unreadable)
+            if kind not in ("absent", "file"):
+                not_understood.append(
+                    (_detail_path(fp, ctx.home), _shared._NOT_UNDERSTOOD_REASONS[kind]))
+                continue
+            if kind == "absent":
+                continue
             try:
                 raw, fp_truncated = _read_jsonl_tail(fp)
             except OSError:
@@ -5226,8 +5236,9 @@ def check_session_approval_policy(ctx: Context) -> Finding:
 
     # C-727: part of the session-log tree could not be read. A WARN found in what WAS read
     # stands (worst_agent); anything else cannot be reported as clean or as "no sessions".
-    if unreadable and worst_agent is None:
-        return _shared._unreadable_dirs_finding("B79", "the Codex session logs", unreadable)
+    if (unreadable or not_understood) and worst_agent is None:
+        return _shared._not_understood_finding(
+            "B79", "the Codex session logs", not_understood, unreadable)
 
     if not any_sessions:
         return no_sessions
@@ -5286,40 +5297,118 @@ def check_session_approval_policy(ctx: Context) -> Finding:
 # under that project path. Same on-disk neighborhood as B79's codex-home/sessions read
 # (agents/<id>/agent/codex-home/), different sub-path (config.toml, not sessions/).
 #
-# No TOML library is used anywhere else in this codebase (stdlib-only, no third-party
-# TOML dep) and we only need to detect ONE specific shape, not parse general TOML - a
-# narrow line-scan is sufficient and deliberately conservative (no false PASS on a
-# section we can't confidently rule out).
-_TOML_PROJECT_SECTION_RE = re.compile(r'^\[projects\.(?P<path>"(?:[^"\\]|\\.)*")\]\s*$')
-_TOML_TRUST_LEVEL_TRUSTED_RE = re.compile(r'^trust_level\s*=\s*"trusted"\s*$')
+# No TOML library is used anywhere else in this codebase (stdlib-only; `tomllib` exists only
+# from 3.11 and a verdict must not depend on the interpreter), so this is a line scan, not a
+# parser. C-731: it used to know exactly one spelling - `[projects."<path>"]` followed by a
+# bare `trust_level = "trusted"` line - and answered PASS for every other VALID way to write
+# the same thing: a trailing comment, a single-quoted value or key, a dotted key
+# (`projects."/p".trust_level = "trusted"`), an inline table. It now reads those, and a
+# `trust_level` it still cannot read (a multi-line string, an escape that spells the key or
+# the value) is counted so the caller answers UNKNOWN instead of PASS.
+_TOML_QUOTED = r'"(?:[^"\\]|\\.)*"|\'[^\']*\''
+_TOML_PROJECT_SECTION_RE = re.compile(
+    r'^\[\s*projects\s*\.\s*(?P<path>' + _TOML_QUOTED + r'|[A-Za-z0-9_-]+)\s*\]$')
+_TOML_TRUST_ASSIGN_RE = re.compile(
+    r'(?<![A-Za-z0-9_-])(?:trust_level|"trust_level"|\'trust_level\')\s*=\s*'
+    r'(?P<val>' + _TOML_QUOTED + r')')
+# the quoted key a dotted or inline `trust_level` belongs to: `"/p".` or `"/p" = {`
+_TOML_KEY_BEFORE_RE = re.compile(r'(?P<key>' + _TOML_QUOTED + r')\s*(?:\.\s*|=\s*\{[^{}"\']*)$')
+# an unescaped \uXXXX / \UXXXXXXXX (an even number of backslashes before it is an escaped
+# backslash, as in a Windows path "C:\\Users")
+_TOML_UNICODE_ESCAPE_RE = re.compile(
+    r'(?<!\\)((?:\\\\)*)\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8}))')
+
+
+def _toml_strip_comment(line: str) -> str:
+    """*line* without a trailing `# comment` (a "#" inside a quoted string is not one)."""
+    quote = ""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quote = ""
+        elif quote == "'":
+            if ch == "'":
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+        i += 1
+    return line
+
+
+def _toml_spells(line: str) -> str:
+    """*line* with its unicode escapes decoded, for the one question "does this line spell
+    `trust_level` or `projects` through an escape?"."""
+    def _decode(m):
+        try:
+            return m.group(1) + chr(int(m.group(2) or m.group(3), 16))
+        except (ValueError, OverflowError):
+            return m.group(0)
+    return _TOML_UNICODE_ESCAPE_RE.sub(_decode, line)
+
+
+def _codex_trust_scan(text: str) -> "tuple[list, int]":
+    """``(trusted, unread)`` for codex-home config.toml text.
+
+    *trusted*: one entry per `trust_level = "trusted"` found - the project path as written
+    (quotes stripped), or None when the setting is there but its project path was not read.
+    *unread*: lines that set or mention `trust_level` in a form this scan does not read.
+    """
+    trusted: list = []
+    unread = 0
+    section: "str | None" = None        # the project path of the [projects."..."] we are in
+    for raw_line in text.splitlines():
+        line = _toml_strip_comment(raw_line).strip()
+        if not line:
+            continue
+        m = _TOML_PROJECT_SECTION_RE.match(line)
+        if m:
+            section = m.group("path").strip("\"'")
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            # Any other table header ([projects] alone, an unrelated table) ends the section.
+            section = None
+            continue
+        assigns = list(_TOML_TRUST_ASSIGN_RE.finditer(line))
+        if not assigns:
+            if "trust_level" in line or (section is not None and "=" in line and "trust" in line):
+                unread += 1             # a multi-line string, an unquoted value, ...
+            elif _toml_spells(line) != line and (
+                    "trust_level" in _toml_spells(line) or "projects" in _toml_spells(line)):
+                unread += 1             # an escape that spells the key or the table
+            continue
+        for a in assigns:
+            val = a.group("val")
+            if line[a.end():a.end() + 1] in ("'", '"') and line[a.end():a.end() + 1]:
+                unread += 1             # a multi-line string (three quotes): not read
+                continue
+            if val.startswith('"') and "\\" in val:
+                unread += 1             # an escaped value: not interpreted, not guessed
+                continue
+            if val[1:-1] != "trusted":
+                continue
+            whole_line = a.start() == 0 and a.end() == len(line)
+            if whole_line:
+                if section is None:
+                    continue            # a top-level `trust_level`: not a project's
+                trusted.append(section)
+                section = None          # one trust_level line per section is all we track
+                continue
+            before = _TOML_KEY_BEFORE_RE.search(line[:a.start()])
+            trusted.append(before.group("key").strip("\"'") if before else None)
+    return trusted, unread
 
 
 def _codex_trusted_projects(text: str) -> list[str]:
-    """Scan codex-home config.toml text for [projects."..."] sections with trust_level="trusted".
-
-    Returns the list of project paths (quotes stripped) found trusted. A narrow,
-    line-oriented scan - not a general TOML parser - since we only need to detect this
-    one specific key/section shape.
-    """
-    trusted: list[str] = []
-    current_project: str | None = None
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Any other top-level section (e.g. "[projects]" alone, or an unrelated table)
-        # ends the current [projects."..."] context.
-        m = _TOML_PROJECT_SECTION_RE.match(line)
-        if m:
-            current_project = m.group("path").strip('"')
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            current_project = None
-            continue
-        if current_project is not None and _TOML_TRUST_LEVEL_TRUSTED_RE.match(line):
-            trusted.append(current_project)
-            current_project = None  # one trust_level line per section is all we track
-    return trusted
+    """The project paths codex-home config.toml text marks trusted (see `_codex_trust_scan`);
+    a setting whose path was not read is listed as an empty string."""
+    return [p or "" for p in _codex_trust_scan(text)[0]]
 
 
 def check_codex_project_trust(ctx: Context) -> Finding:
@@ -5338,29 +5427,58 @@ def check_codex_project_trust(ctx: Context) -> Finding:
 
     any_config = False
     trusted_ev: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
 
     for agent_dir in agent_dirs:
         config_path = agent_dir / "agent" / "codex-home" / "config.toml"
-        if not _shared._probe_noting(pathprobe.is_file, config_path, ctx.home, unreadable):
+        shown_path = _detail_path(config_path, ctx.home)
+        kind = _shared._probe_kind(config_path, ctx.home, unreadable, resolve=True)
+        if kind == "absent":
+            continue
+        if kind != "file":
+            # C-731: a link / directory / pipe is present but not read - never "no trust set".
+            not_understood.append((shown_path, _shared._NOT_UNDERSTOOD_REASONS[kind]))
             continue
         any_config = True
         try:
-            text = config_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            unreadable.append(_detail_path(config_path, ctx.home))  # C-727: not a clean skip
+            raw = _shared._read_regular_bytes(config_path)
+        except OSError as exc:
+            reason = _shared._read_failure_reason(exc)
+            if reason:
+                not_understood.append((shown_path, reason))
+            else:
+                unreadable.append(shown_path)  # C-727: not a clean skip
             continue
-        for project_path in _codex_trusted_projects(text):
+        text = _shared._toml_text(raw)
+        if text is None:
+            # C-731: not text at all (not UTF-8, or NUL bytes: UTF-16, a binary file). A
+            # trusted project the line scan still finds in a lenient decode stands as a WARN;
+            # nothing else may be called clean.
+            not_understood.append((shown_path, "is not a text file"))
+            text = raw.decode("utf-8", errors="replace")
+        trusted_paths, unread_lines = _codex_trust_scan(text)
+        for project_path in trusted_paths:
+            if project_path is None:
+                # C-731: set through a dotted key / inline table whose key was not read.
+                trusted_ev.append(
+                    f"agent {agent_dir.name}: a project whose path this audit did not read")
+                continue
             # B-757: the codex-home config stores the project's absolute path;
             # collapse the OS account home before it reaches rendered evidence.
             trusted_ev.append(
                 f"agent {agent_dir.name}: project "
                 f"{_shared._username_safe_path(project_path)!r}"
             )
+        if unread_lines and not trusted_paths:
+            # C-731: a trust_level the scan could not read is not "no project is trusted".
+            not_understood.append(
+                (shown_path, "sets trust_level in a form this audit does not read"))
 
     # C-727: a trusted project found in a readable config still WARNs; otherwise an
     # unreadable codex-home cannot be reported as clean or as "Codex not in use".
-    if unreadable and not trusted_ev:
-        return _shared._unreadable_dirs_finding("B136", "the Codex project trust settings", unreadable)
+    if (unreadable or not_understood) and not trusted_ev:
+        return _shared._not_understood_finding(
+            "B136", "the Codex project trust settings", not_understood, unreadable)
 
     if not any_config:
         return _finding(
@@ -5887,21 +6005,34 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     paired_path = ctx.home / "devices" / "paired.json"
     paired_unreadable: list[str] = []
     try:
-        paired_file = pathprobe.is_file(paired_path)
+        paired_kind = _shared._file_kind_resolved(paired_path)
     except OSError:
         # C-727: devices/ cannot be entered, so the legacy file was not looked for. The state
         # database is still read below (a WARN from it stands); no PASS may rest on the file
         # being "absent".
         paired_unreadable.append(_detail_path(paired_path.parent, ctx.home))
-        paired_file = False
+        paired_kind = "absent"
+    if paired_kind in ("symlink-unusable", "directory", "special"):
+        # C-731: present but no regular file is there - not opened, never "absent". (A link
+        # to a regular file is read as it always was.)
+        return _shared._not_understood_finding(
+            "B176", "paired device operator authority",
+            [(_detail_path(paired_path, ctx.home), _shared._NOT_UNDERSTOOD_REASONS[paired_kind])],
+            engine_degraded=False)
+    paired_file = paired_kind == "file"
     if paired_file:
         try:
             # C-648: nesting deeper than MAX_JSON_NESTING raises JSONNestingError here, before
             # the parser runs, so every interpreter answers alike. Before, a document past the
             # interpreter's own limit raised RecursionError out of this check (an `ERR:`
             # degrade), and one inside it parsed - a different answer per machine.
-            data = _loads_bounded(paired_path.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
+            data = _loads_bounded(_shared._read_regular_text(paired_path))
+        except OSError as exc:
+            reason = _shared._read_failure_reason(exc)
+            if reason:  # C-731: swapped for a pipe / directory, or past the size bound, since the probe
+                return _shared._not_understood_finding(
+                    "B176", "paired device operator authority",
+                    [(_detail_path(paired_path, ctx.home), reason)], engine_degraded=False)
             return _finding(
                 "B176",
                 UNKNOWN,
