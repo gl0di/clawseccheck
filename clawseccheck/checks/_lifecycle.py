@@ -5363,6 +5363,7 @@ def _codex_trust_scan(text: str) -> "tuple[list, int]":
     trusted: list = []
     unread = 0
     section: "str | None" = None        # the project path of the [projects."..."] we are in
+    in_projects = False                 # inside a bare [projects] table
     for raw_line in text.splitlines():
         line = _toml_strip_comment(raw_line).strip()
         if not line:
@@ -5370,10 +5371,12 @@ def _codex_trust_scan(text: str) -> "tuple[list, int]":
         m = _TOML_PROJECT_SECTION_RE.match(line)
         if m:
             section = m.group("path").strip("\"'")
+            in_projects = False
             continue
         if line.startswith("[") and line.endswith("]"):
             # Any other table header ([projects] alone, an unrelated table) ends the section.
             section = None
+            in_projects = line.strip("[] \t") == "projects"
             continue
         assigns = list(_TOML_TRUST_ASSIGN_RE.finditer(line))
         if not assigns:
@@ -5400,6 +5403,8 @@ def _codex_trust_scan(text: str) -> "tuple[list, int]":
                 trusted.append(section)
                 section = None          # one trust_level line per section is all we track
                 continue
+            if not in_projects and "projects" not in line[:a.start()]:
+                continue                # a dotted / inline `trust_level` of some other table
             before = _TOML_KEY_BEFORE_RE.search(line[:a.start()])
             trusted.append(before.group("key").strip("\"'") if before else None)
     return trusted, unread

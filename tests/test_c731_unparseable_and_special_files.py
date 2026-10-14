@@ -412,6 +412,8 @@ TOML_STILL_CLEAN = [
     ("top-level-key", 'trust_level = "trusted"\n[other]\nx = 1\n'),
     ("other-table", '[projects."/work/p"]\nx = 1\n[other]\ntrust_level = "trusted"\n'),
     ("windows-path", '[projects."C:' + BS * 2 + 'Users' + BS * 2 + 'me"]\ntrust_level = "untrusted"\n'),
+    ("inline-in-another-table", '[tools]\nshell = { trust_level = "trusted" }\n'),
+    ("dotted-in-another-table", '[tools]\nshell.trust_level = "trusted"\n'),
     ("escape-elsewhere", '[mcp.x]\nargs = ["' + BS + 'u001b[0m"]\n[projects."/p"]\ntrust_level = "untrusted"\n'),
     ("latin1-byte-in-a-comment", b'# caf' + bytes([0xE9]) + b'\n[projects."/work/p"]\ntrust_level = "untrusted"\n'),
 ]
