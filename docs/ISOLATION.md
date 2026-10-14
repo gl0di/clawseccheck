@@ -70,7 +70,8 @@ and the free-text fields of those verdicts stay untrusted data.
 ## Opt-in and graceful fallback
 
 This pattern is **opt-in**. If the host environment does not support subagents (`agents.subagents`
-disabled, `maxChildrenPerAgent: 0`, or `sessions_spawn` unavailable), **fall back to today's
+disabled, `maxChildrenPerAgent: 0`, or `sessions_spawn` unavailable), or if it cannot
+spawn a subagent with the parameters above (no tools, depth 1, ephemeral), **fall back to today's
 inline single-agent reading** with the SECURITY rule in [`SKILL.md`](../SKILL.md) as the active
 guard. Do not claim or depend on a capability that is not present.
 

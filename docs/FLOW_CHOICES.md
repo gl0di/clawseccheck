@@ -36,7 +36,11 @@ skill with no code).
 **There is no letter grade here, and you must not invent one.** A "before you install" answer is
 a verdict; the audit's own A-F is a different scale for a different question, and one letter
 standing for both would be read as the same thing. `--vet --json` carries no `grade` or `score`
-key either. Report the verdict in plain language:
+key either. Three vocabularies appear here and they are not interchangeable: the tool's install
+verdict (INSTALL / CAUTION / DO-NOT-INSTALL - say this first), the per-axis status words below
+(a failing axis reads DANGEROUS, a warning one SUSPICIOUS, a clean one NO KNOWN ISSUE), and the
+judge panel's advisory SAFE / SUSPICIOUS / DANGEROUS, which never replaces either. Report the
+verdict in plain language:
 
 - **Nothing assessable** ("This target is not a skill package ... no verdict is given") -> the tool
   refused to judge what it was pointed at. Say so plainly and ask for a
@@ -237,6 +241,7 @@ you just built:
 ```
 python3 {baseDir}/audit.py --dashboard --full --attest <same file or -> --judged-bundle <verdicts-path-or- -> --pdf
 ```
+Only ONE of `--attest` and `--judged-bundle` can read stdin (`-`). With no files, put both in a single bundle on stdin - `--judged-bundle -` with an `attestation` object beside `judged` / `liveTest` - and leave `--attest` out; otherwise write the other one to a file.
 Omit `--judged-bundle` only when Step 2's judge panel had nothing to feed back (an empty
 `judgePacket`). Then follow Step 3's own delivery rules exactly - do not improvise a shorter
 close: paste the new card verbatim, reproduce the `MEDIA:<path>` line for the PDF alone on its

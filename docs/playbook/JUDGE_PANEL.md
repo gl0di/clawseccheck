@@ -90,7 +90,8 @@ section.
    items, not unboundedly across items × 3 lenses at once.
 5. **Mandatory, with graceful fallback**: run this panel every time item 1's audit
    completes - never skip it and never wait to be asked, the same posture Step 2's
-   attestation already has. If subagents are unavailable, fall back to reasoning
+   attestation already has. If subagents are unavailable - or cannot be spawned with the controls
+   [`docs/ISOLATION.md`](../ISOLATION.md) requires (no tools, one level deep, ephemeral) - fall back to reasoning
    through all 3 lenses yourself in one inline turn per item, with the SECURITY rule as
    the active guard - never claim a panel ran when it did not, and never claim 3
    distinct subagents ran when you reasoned through it inline instead.

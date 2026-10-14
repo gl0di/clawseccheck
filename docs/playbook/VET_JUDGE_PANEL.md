@@ -32,7 +32,8 @@ makes a successful injection against it worthless.
    step 5 of JUDGE_PANEL.md, not weaker: run this panel every time a `--vet`/`--vet-skill`/
    `--vet-plugin` target is vetted, including a target swept inside item 1's full
    check, never only when the user separately asks for one. If subagents are
-   unavailable, fall back to reasoning through all 3 lenses yourself in one inline
+   unavailable - or cannot be spawned with the controls ISOLATION.md requires (no tools, one
+   level deep, ephemeral) - fall back to reasoning through all 3 lenses yourself in one inline
    turn per item, with the same SECURITY rule as the guard - never claim a panel
    ran when it did not, and never claim 3 distinct subagents ran when you reasoned
    through it inline instead.

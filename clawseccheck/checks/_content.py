@@ -9926,7 +9926,9 @@ def check_agent_snooping(ctx: Context) -> Finding:
         fix = (
             "Remove or sandbox any skill that reads foreign-agent config files "
             "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
-            "A legitimate skill only accesses its own files."
+            "A legitimate skill only accesses its own files. The path named may be this "
+            "host's own OpenClaw configuration rather than a sibling agent's: a skill has "
+            "no business reading it and sending it out either way."
         )
         if slug_ambiguous_skills:
             # B-535, accepted §2.5 residual (routed per (d) for a FAIL-band signal,

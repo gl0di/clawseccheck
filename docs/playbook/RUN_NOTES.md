@@ -7,26 +7,7 @@
 This is part of the ClawSecCheck skill, moved out of `SKILL.md` unchanged so the always-loaded
 manifest stays small. `SKILL.md` says when to read it. A reference here to a numbered step or a named section of the skill (for example "Step 2") points to that section of `SKILL.md`; other playbook files are named. Read it when a run printed a welcome or sandbox screen or failed, and before the judge-packet pull.
 
-Then, still before showing anything to the user, run the now-**mandatory** judge-panel pull
-(Dave, 2026-07-30 - this used to be an opt-in extra the user had to ask for; it now runs every
-time item 1 is chosen, the same posture the capability self-report already has):
-
-```
-python3 {baseDir}/audit.py --judge-packet --attest <path-or- ->
-```
-
-**This command's stdout is internal-only: parse it to run the panel (JUDGE_PANEL.md), but never paste,
-quote, or summarize its raw JSON to the user** - the panel's own output (the "Second opinion"
-block Step 3 pastes) is the user-facing artifact, not this packet. It is a cheap, own-config-only
-pull - it never runs `--full`'s heavier sweep/behavioral phases, so it adds no real cost on top
-of Step 3's own `--full` render, and it does not by itself replace Step 3 (it consumes the
-attestation for THIS command only; Step 3's command needs the same `--attest` again, since
-each invocation is its own fresh process - attestation is never persisted between them). Parse
-the `judgePacket` array and run the "Judge-panel fan-out for `--judge-packet` items" protocol
-in JUDGE_PANEL.md **now, unconditionally** - 3 lensed judge subagents per borderline item, majority vote per
-item - building the verdicts JSON Step 3 will feed back. An empty `judgePacket` just means
-nothing was in the borderline band this run; proceed to Step 3 with no verdicts file (omit
-`--judged-bundle` entirely).
+**Which part applies.** Read only the part that matches what the run printed. A first-run welcome screen, a sandbox notice, an error or an empty result: the two blocks directly below, and nothing after them - relay, stop. The capability self-report and the judge-panel pull after them apply ONLY to a normal item-1 run that produced a real audit.
 
 **No OpenClaw config yet?** If `~/.openclaw` is missing or empty, a **bare** default run prints a
 short first-run **welcome** screen (Screen 13) instead of a Dashboard - "I looked for an OpenClaw
@@ -62,8 +43,29 @@ and `untrusted_to_action` from your own runtime (you already know these), self-p
 inconclusive, then assemble the attestation into a file (or have it ready for stdin) - you feed
 the SAME attestation into both commands below, in the SAME turn.
 
-**For any other item**, run the flag for that mode directly - no self-report and no judge panel
-needed. Pick the right interpreter for the OS:
+Then, still before showing anything to the user, run the now-**mandatory** judge-panel pull
+(Dave, 2026-07-30 - this used to be an opt-in extra the user had to ask for; it now runs every
+time item 1 is chosen, the same posture the capability self-report already has):
+
+```
+python3 {baseDir}/audit.py --judge-packet --attest <path-or- ->
+```
+
+**This command's stdout is internal-only: parse it to run the panel (JUDGE_PANEL.md), but never paste,
+quote, or summarize its raw JSON to the user** - the panel's own output (the "Second opinion"
+block Step 3 pastes) is the user-facing artifact, not this packet. It is a cheap, own-config-only
+pull - it never runs `--full`'s heavier sweep/behavioral phases, so it adds no real cost on top
+of Step 3's own `--full` render, and it does not by itself replace Step 3 (it consumes the
+attestation for THIS command only; Step 3's command needs the same `--attest` again, since
+each invocation is its own fresh process - attestation is never persisted between them). Parse
+the `judgePacket` array and run the "Judge-panel fan-out for `--judge-packet` items" protocol
+in JUDGE_PANEL.md **now, unconditionally** - 3 lensed judge subagents per borderline item, majority vote per
+item - building the verdicts JSON Step 3 will feed back. An empty `judgePacket` just means
+nothing was in the borderline band this run; proceed to Step 3 with no verdicts file (omit
+`--judged-bundle` entirely).
+
+**For any other item**, run the flag for that mode directly - no self-report and no audit judge panel
+needed (a pre-install check has its own panel: `VET_JUDGE_PANEL.md`). Pick the right interpreter for the OS:
 
 - **Linux / macOS:** `python3 {baseDir}/audit.py`
 - **Windows:** `python {baseDir}\audit.py` (or `py {baseDir}\audit.py`)

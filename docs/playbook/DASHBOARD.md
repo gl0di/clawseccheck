@@ -20,6 +20,8 @@ passed again) and folds in the mandatory judge panel's verdicts:
 python3 {baseDir}/audit.py --dashboard --full --attest <path-or- -> --judged-bundle <verdicts-path-or- -> --pdf
 ```
 
+Only ONE of `--attest` and `--judged-bundle` can read stdin (`-`). With no files, put both in a single bundle on stdin - `--judged-bundle -` with an `attestation` object beside `judged` / `liveTest` - and leave `--attest` out; otherwise write the other one to a file.
+
 **`--pdf` is what makes this fit a chat message (C-374).** With it, the run writes a
 complete PDF - every finding with its why and evidence, *plus* the Skills/Plugins/MCP,
 RISK-chain, Behavioural, Second-opinion and Coverage blocks - and the card collapses to a

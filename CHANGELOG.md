@@ -74,6 +74,14 @@ from PASS to UNKNOWN.
 
 ### Fixed
 
+- **Contradictions the agent itself reported in the skill's instructions are resolved.**
+  `docs/playbook/RUN_NOTES.md` opened with the judge-panel pull and only later told the agent
+  to stop on a welcome or sandbox screen or an error; it now says which part applies first.
+  "check", "go" and "1" are answers to the menu, "no judge panel" for the other items no longer
+  reads as covering the pre-install panel, the inline fallback also applies when a subagent
+  cannot be spawned with the isolation controls, the one-stdin limit of `--attest` and
+  `--judged-bundle` is stated with the single-bundle form, and `--monitor --probe` is in the
+  quick map. The B61 advice says the named path may be the host's own configuration.
 - **`--watch` keeps watching a tree that appeared after it started.** A skill installed with
   `mkdir -p`, `cp -r` or `mv` created or moved in a whole directory tree at once, and the watcher
   only watched the top of it: the first install was noticed and every later change under that
