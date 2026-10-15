@@ -45,7 +45,7 @@ kept here so the always-loaded playbook stays lean.
   partially-scanned target: an incomplete sweep is disclosed in its printed section, never
   by reddening the gate. The adjudication phase (judge packet / second opinion) never trips
   this - advisory-only by design.
-  `--vet`'s exit code is a separate contract (1 on SUSPICIOUS *or* DANGEROUS; 2 when the
+  `--vet`'s exit code is a separate contract (1 on a `CAUTION` or `DO-NOT-INSTALL` verdict; 2 when the
   target cannot be assessed at all - a path that is absent, a link to nothing, or
   unreadable, or a `--vet-mcp` name that is neither a configured server nor a readable
   spec file - which is a usage error, not a verdict, and prints no dossier). `--advise`
@@ -87,6 +87,10 @@ kept here so the always-loaded playbook stays lean.
   the file's top level instead of inside `judged` is applied as the judged bucket with a
   `note:` saying so (an explicit `judged` always wins over it), and a file none of whose
   top-level keys is a bucket is reported rather than treated as an empty submission.
+  A `liveTest` bucket's optional `trajectory` hint can only widen the cross-check (`path`,
+  inside `--home`, is read in addition to the home's own sidecars; `sessionId` is ignored),
+  never narrow it. `--seed` (the harness flags) takes 1 to 128 characters and refuses an
+  empty, blank or longer value with exit 2.
 - `--verbose` / `--debug` / `--log PATH` - local logging with secret redaction.
 - `--no-native` - skip the built-in `openclaw security audit` (for offline / hermetic testing).
 - `--no-deptree` - skip the OpenClaw dependency-tree walk behind B349 ("Obfuscated install-time
@@ -99,9 +103,10 @@ kept here so the always-loaded playbook stays lean.
   by that budget is reported as UNKNOWN, never as a clean tree). Use it on a very large installed
   tree, or to keep the scan inside the OpenClaw home. Note the asymmetry with the library API:
   `audit()` takes `include_deptree=False` by default, so only the CLI walks unless asked.
-- `--no-dist` - skip reading the installed OpenClaw package's own version (C4 corroborates it
-  against `meta.lastTouchedVersion` to surface a version rollback). Read-only `PATH` lookup, no
-  subprocess.
+- `--no-dist` - skip reading the installed OpenClaw package's own version (B33 judges that
+  installed build, not the config stamp `meta.lastTouchedVersion`, on this machine's own OpenClaw
+  home, and C4 corroborates it against the stamp to surface a version rollback; with this flag the
+  stamp decides B33). Read-only `PATH` lookup, no subprocess.
 - `--no-update-notice` - suppress the offline "your build may be stale" reminder
   (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only - never a network call.
 - `--no-freshness-notice` - suppress the report's advisory freshness lines (also via
@@ -112,7 +117,9 @@ kept here so the always-loaded playbook stays lean.
   ships no indicators for. The same switch suppresses the IOC pair on `--vet-source`, where the
   two print to stderr. All of it is offline and advisory - never a network call, never a finding,
   and never a change to score or grade; none of it appears in `--json` / `--card` / `--sarif`.
-- `--verify-self` - print SHA-256 digest of ClawSecCheck's source files for tamper detection.
+- `--verify-self` - print SHA-256 digest of ClawSecCheck's source files for tamper detection;
+  also discloses importable files beside `audit.py` (`audit.py` itself refuses to run, exit 2,
+  while any exist).
 - `--recursive` - alias for `--vet-all` (vet every installed skill across all discovered skill
   roots - one verdict per skill plus an aggregate). Same flag, same behavior; both spellings
   are accepted.
@@ -148,8 +155,9 @@ kept here so the always-loaded playbook stays lean.
   saved SBOM runs, read-only, no live audit. See `docs/OUTPUT_SCHEMA.md` §25.
 - `--incident-open` - opt-in: persist a mutable incident record (status=open) linked to
   this run's actionable findings, a best-effort PID/process name when one of them names
-  one, and the current `--monitor` journal position - refuses if nothing actionable was
-  found this run. `--incident-mark ID STATUS` transitions it (`open`/`investigating`/
+  one, and the current `--monitor` journal position - refuses (non-zero exit, nothing
+  written) when `--home` is missing or an empty directory and the run found no FAIL, or
+  when the run found nothing actionable (no FAIL or WARN). `--incident-mark ID STATUS` transitions it (`open`/`investigating`/
   `mitigated`/`closed` - forward one step at a time, backward freely). `--incident-show
   ID` prints its current status, history, and the live timeline of `--monitor` events
   since it opened. Separate from the stateless `--incident` evidence pack, which never
@@ -166,3 +174,6 @@ pass a second mode, or a modifier the chosen mode can't use (e.g. `--save` with 
 `--exit-code` with `--sbom`), ClawSecCheck prints a `note: ...` to **stderr** naming what was
 ignored and continues - machine-readable stdout (`--json`/`--sarif`) stays clean. `--no-history`
 is honored everywhere except `--trend`/`--monitor`, which record a score point as part of their job.
+Among the four artifact flags the order is `--badge`, `--html`, `--sarif`, `--pdf`: with two of them
+(and no `--dashboard`) the earlier one is written and the other is named in a `note: ... ignored
+(running ...)` line.

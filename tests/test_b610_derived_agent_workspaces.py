@@ -1,7 +1,7 @@
 """B-610 — a non-default agent's whole workspace was invisible to the audit.
 
 OpenClaw derives an agent's workspace directory from its **id**, by four rules in priority
-order (`resolveAgentWorkspaceDir`, `dist/config-utils-*.js`):
+order (`resolveAgentWorkspaceDir`, `dist/agent-scope-config-*.mjs`):
 
 1. the agent's own ``workspace``;
 2. for the DEFAULT agent, ``agents.defaults.workspace`` or the plain ``workspace`` dir;
@@ -19,9 +19,10 @@ substitute for the rules. So every non-default agent's ``skills/``, bootstrap fi
 memory went unread, and every content check scored clean over a surface it never opened.
 
 **The trigger is precise, and getting it wrong is easy**: with a SINGLE entry in
-``agents.list`` that entry IS the default agent (``resolveDefaultAgentId`` falls back to
-``agents[0]``), so its workspace is the ordinary ``workspace`` directory and nothing is
-derived. The defect needs two or more agents. The first measurement of this bug used a
+``agents.list`` that entry IS the default agent (``tryResolveSoleAgentId``), so its workspace is
+the ordinary ``workspace`` directory and nothing is derived. (C-684: there is NO ``agents[0]``
+fallback for several agents - with no unique ``default: true`` every agent is derived, the
+first included; ``tests/test_c684_default_agent_differential.py`` executes the vendor.) The defect needs two or more agents. The first measurement of this bug used a
 one-agent config and drew the wrong conclusion from a real observation; the parametrised
 cases below pin both halves so that mistake cannot be repeated silently.
 
@@ -138,13 +139,16 @@ def test_a_derived_workspace_gets_exactly_the_same_verdicts_as_the_default_one(t
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("cfg,expected", [
-    (_TWO_AGENTS, ["workspace-personal"]),
-    (_TWO_PLUS_DEFAULTS, ["ws/client"]),
+    # C-684: two agents and nobody marked -> OpenClaw gives the plain workspace to NO agent
+    # (measured by executing `resolveAgentWorkspaceDir`), so `main` is derived as well.
+    (_TWO_AGENTS, ["workspace-main", "workspace-personal"]),
+    (_TWO_PLUS_DEFAULTS, ["ws/main", "ws/client"]),
     (_DEFAULT_FLAGGED_SECOND, ["workspace-a"]),
     # A single entry IS the default agent, so rule 2 applies and nothing is derived.
     (_ONE_AGENT, []),
-    # An explicit `workspace` wins (rule 1); the caller collects it separately.
-    (_EXPLICIT, []),
+    # An explicit `workspace` wins (rule 1); the caller collects it separately. `main` has
+    # none and nobody is marked, so it is derived (C-684).
+    (_EXPLICIT, ["workspace-main"]),
     ({}, []),
     ({"agents": {}}, []),
     ({"agents": {"list": []}}, []),
@@ -219,7 +223,7 @@ def test_agent_id_normalisation_matches_the_products_rule(raw, expected):
 
 def test_a_blank_id_becomes_main_not_an_empty_directory_name():
     """A blank id normalises to `main`, so the derived name is never `workspace-`."""
-    cfg = {"agents": {"list": [{"id": "x"}, {"id": "   "}]}}
+    cfg = {"agents": {"list": [{"id": "x", "default": True}, {"id": "   "}]}}
     assert _collector_derive(cfg) == ["workspace-main"]
 
 
@@ -235,7 +239,7 @@ def test_a_normalised_id_can_never_escape_the_state_dir(tmp_path):
     home = _home(tmp_path, None)
     for hostile in ("/etc", "../../../etc", "~/.ssh"):
         cfg = {"agents": {"defaults": {"workspace": "ws"},
-                          "list": [{"id": "main"}, {"id": hostile}]}}
+                          "list": [{"id": "main", "default": True}, {"id": hostile}]}}
         derived = _collector_derive(cfg)
         assert derived == [f"ws/{_collector_normalize(hostile)}"]
         assert "/" not in _collector_normalize(hostile)

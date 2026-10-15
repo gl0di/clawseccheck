@@ -3,6 +3,423 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.4.0] - 2026-10-12
+
+**This release re-grounds the audit on OpenClaw 2026.10.3, after catching up with 2026.9.7,
+9.8, 9.9, 10.1 and 10.2, reads the SQLite stores where current OpenClaw keeps what older checks looked
+for in files, and makes it much harder for an odd or hostile file to end a run or hide a
+finding.** Gateway token references and templated binds are judged by what they are (a reference
+nothing visible resolves is UNKNOWN, never PASS). B138 (pending device pairings), B78
+(config-health record), B77, B172 and the monitor read the state database instead of answering
+PASS or UNKNOWN about a file that is no longer written, and B164 and B19 say how many
+transcript rows live in the per-agent database and were not examined. A plaintext passphrase,
+TLS key or inline password at a path OpenClaw marks sensitive is now seen, and B382 uses
+OpenClaw's own list of retired settings. Nested or padded JSON can no longer end an audit or
+hide a plugin or skill, and a symlink loop, an unreadable plugin manifest or a named pipe no
+longer crashes, hangs or passes. The skill's own instructions now fit the budget OpenClaw
+applies to a whole-skill read; before, the host returned none of them.
+
+**Breaking:** the minimum supported Python is now 3.10, because 3.9 has been end of life
+since October 2025 (this is a minor release by the maintainer's decision, although dropping a
+Python version is a breaking change under SemVer). On Python 3.9 the command-line tool exits
+with "needs Python 3.10+ (found X.Y)" instead of running. Three other changes can alter an
+exit code: `--vet`,
+`--vet-skill` and `--advise` on a folder with the scanner's own engine layout now answer
+CAUTION and exit 1, not INSTALL and 0, for a tree they never opened; every vet mode that
+inspects a target (`--vet`, `--vet-skill`, `--vet-plugin`, `--advise`, `--vet-mcp`) exits 1
+whenever its verdict is CAUTION, including for a target that exists but could not be assessed,
+which used to exit 0; and `audit.py` exits 2 when importable files sit beside it. Smaller
+exit-code changes (a closed pipe, an empty `--save` or `--seed`, a trajectory path that is
+not a regular file) are listed with their entries under Fixed. Because
+several checks stopped answering PASS where they could not know, a setup that was clean on
+4.3.1 can now read WARN, UNKNOWN or FAIL; the most common case is a gateway token written as
+`${OPENCLAW_GATEWAY_TOKEN}` (or any other reference nothing visible resolves), which moves
+from PASS to UNKNOWN.
+
+### Added
+
+- **`--json` and `--sarif` say whether the installed OpenClaw is newer than the grounded
+  build.** Both carry a `grounding` object on every run: `grounded_max`, `installed`,
+  `newer_than_grounded` (`true`, `false` or `null`) and a `detail` sentence. `null` means the
+  installed build is unknown or cannot be ordered, never "no gap". Score, grade and exit code
+  do not change. The notice now also reaches the dashboard card, HTML report and PDF.
+- **`audit.py` refuses to run when importable files sit beside it.** A stray `json.py` or
+  `sitecustomize.py` ran inside the auditor, invisible to `--verify-self`. `audit.py` now
+  exits 2 naming the entries, and `--verify-self` reports them as a Coverage note.
+- **A judge may answer `ABSTAIN` instead of guessing.** On a real setup every judge-packet
+  item was an UNKNOWN with no evidence, and the answer contract offered only SAFE, SUSPICIOUS
+  or DANGEROUS. An item of the audit's own that names no skill, plugin or server and for which
+  the engine recorded no evidence now carries an `abstain` hint in its `verdict_schema`. The
+  answer is treated exactly like no verdict (nothing is reviewed, raised or lowered) and is
+  disclosed. Items that carry a signal, and every `--vet` item, are never offered it.
+
+### Changed
+
+- **Python 3.10 is the floor and 3.14 is tested.** CI drops the Ubuntu 3.9 leg; 3.12 and
+  3.14 on Linux and 3.12 on macOS are tested. 3.13 has not been measured and is not claimed.
+- **Grounded on OpenClaw 2026.10.3.** The grounded ceiling moved through 2026.9.7, 9.8, 9.9,
+  10.1 and 10.2 to 10.3, with the snapshots and dist citations re-baselined on each. The Codex
+  harness determination behind B333 and B353 is trusted on all six, so they no longer drop to
+  WARN, and B382 applies OpenClaw's own retired-format finder on 10.1 to 10.3. On a build above
+  2026.10.3 the newer-than-grounded notice appears again.
+- **Test hygiene.** The subprocess tests set their resource limits on a best-effort basis (macOS
+  refuses them), and the bytecode tests build their child environment explicitly, so they pass
+  with `PYTHONDONTWRITEBYTECODE` exported.
+- **Documented limits, each pinned by a test; no verdict changes.** `--vet` reads one
+  `package.json`, so workspaces and `file:` dependencies are not followed. RISK-03 and B4
+  disagree on sandbox mode `non-main` on purpose: RISK-03 counts only off or absent as no
+  sandbox, while B4 warns because the agent's own main session still runs on the host. The
+  in-cluster token exemption in the credential-exfil rule cannot tell the real call from
+  the same call plus a second destination; a "not assessed" note now says so.
+
+### Fixed
+
+- **The card no longer counts abstained items as awaiting.** With 235 items in the packet and 25 abstentions it printed
+  "235 item(s) awaiting adjudication ... 25 item(s) abstained"; it now says 210 awaiting and 25 abstained.
+- **The judge panel does not fan out over evidence-free items.** An item that carries the `abstain` key has nothing for
+  three lenses to read; the agent reads its packet once and answers `ABSTAIN` directly, so a run with 25 such items is
+  no longer 75 judge tasks.
+- **Contradictions the agent itself reported in the skill's instructions are resolved.**
+  `docs/playbook/RUN_NOTES.md` opened with the judge-panel pull and only later told the agent
+  to stop on a welcome or sandbox screen or an error; it now says which part applies first.
+  "check", "go" and "1" are answers to the menu, "no judge panel" for the other items no longer
+  reads as covering the pre-install panel, the inline fallback also applies when a subagent
+  cannot be spawned with the isolation controls, the one-stdin limit of `--attest` and
+  `--judged-bundle` is stated with the single-bundle form, and `--monitor --probe` is in the
+  quick map. The B61 advice says the named path may be the host's own configuration.
+- **`--watch` keeps watching a tree that appeared after it started.** A skill installed with
+  `mkdir -p`, `cp -r` or `mv` created or moved in a whole directory tree at once, and the watcher
+  only watched the top of it: the first install was noticed and every later change under that
+  tree (a second skill, an edited script) was not. It now watches the whole new tree, within the
+  same directory cap, and says so in the heartbeat when the cap is passed.
+- **Two runs saved in the same second keep separate ids.** `--save-run` and `--save-sbom-run`
+  use the timestamp as the run id, so a second save within one second printed the same id and
+  `--diff` / `--sbom-diff` could only load the later run. A taken id now gets `-2`, `-3`, ...
+  appended; a store written by an earlier version still reads as before.
+- **Gateway token references and templated binds are judged by what they are.**
+  - B2 no longer judges a reference by the length of its text (`${GW_TOKEN}` used to FAIL as
+    "shorter than 24 chars"). It looks the variable up where the audit can see it (config
+    env block, systemd unit, dotenv file): a visible value under 24 characters is a FAIL,
+    and a reference nothing visible resolves is UNKNOWN, never PASS. A SecretRef object
+    counts as a token set by reference; a retired `secretref-env:ID` marker is a WARN.
+  - B1 no longer FAILs on a SecretRef, the remedy it recommends. `${VAR:-}` counts only on a
+    build that has it (2026.9.7+), decided by the installed build, never by a config stamp.
+    A whole-value `${VAR}` at `hooks.token` is UNKNOWN, never PASS.
+  - A templated `gateway.bind` is no longer read as a literal host (B11, B32, B80, B340,
+    B397 and five more warned about an exposure they could not know). It is taken from a
+    visible non-loopback value or default, else UNKNOWN with the template quoted; a visible
+    loopback never clears it, since drop-ins and the process environment are invisible.
+- **Checks that read a file OpenClaw no longer writes now read the state database.**
+  - B138 reads pending device pairings from the `device_pairing_pending` table. It used to
+    answer PASS ("no devices/pending.json found") without looking. A pending request with the
+    `operator.admin` or `operator.write` scope is a WARN. A table it cannot read, or a state
+    database that is a symlink, a directory or a pipe, is UNKNOWN and never PASS. A home with
+    no config and no state is UNKNOWN for B138 (B176 still passes there).
+  - B78 reads the `config_health_entries` table as well as `logs/config-health.json` and
+    judges the more severe of the two. It had answered UNKNOWN on every current install.
+    Its PASS says only that OpenClaw's latest observation showed no suspicious signature; it
+    is not a content-integrity history.
+  - B164 and B19 name the SQLite transcript store: B164 now reports "N transcript row(s)
+    across M session(s) unexamined" and adds them to the run's not-checked list, and B19 says
+    that transcripts at rest live in the per-agent database and that it does not judge that
+    file's permissions. Rows are counted, never read. B164's `detail` changes on a home that
+    has such rows, so a fingerprint-based ignore entry for B164 stops matching.
+  - B18 reads the subagent task, spawn mode and directories that the registry stores, and
+    states the retention rule as measured: the clock starts at completion, only for runs
+    spawned with cleanup "delete"; a default "keep" run is never swept. Its `detail` changed.
+- **A plaintext value at a path OpenClaw marks sensitive is seen.** B1 and C015 now flag a
+  literal at the passphrase, TLS key, request-auth value, edge-auth, inline SSH identity and
+  proxy-URL-password slots (91 paths in OpenClaw's own sensitive registry; 68 of them had a leaf
+  name our pattern did not know), and a URL with an inline password in an env or header map.
+  References (a SecretRef object or `${VAR}`) stay clean, and so do benign env and header
+  values. A secret under a neutral key name that matches no known shape stays invisible; that is
+  a declared ceiling.
+- **B382 uses OpenClaw's own list of retired settings.** The vendor's finder is ported as a
+  pinned, differentially tested module, so a config that Doctor and `openclaw update` refuse
+  no longer reads PASS (42 of 46 such keys did). The 33 channel-level keys WARN like the root
+  keys. On a build outside the port's window the PASS says in its text that the vendor list
+  was not checked.
+- **B2 on a non-loopback bind without a credential.** OpenClaw refuses to start the gateway
+  there ("Refusing to bind gateway to lan without auth", exit 78), so this is a configuration
+  error rather than an exposure. For `bind: lan` with no mode, or mode token and no token, B2
+  and B80 now answer WARN and say so, on builds whose start-up check was read; explicit mode
+  none stays FAIL, and the FAIL text no longer says "exposed" or prints a Python literal.
+- **Advice that sends users to `openclaw doctor --fix` says what the installed OpenClaw
+  does.** From OpenClaw 2026.10.1 Doctor and `openclaw update` refuse retired config keys and
+  retired state files and name a bridge release, so B38, RISK-05, RISK-15, B168, B177, B356 and
+  B382 say so instead of promising a migration. B38 and B168 `detail` text changes on such a
+  build.
+- **Two false alarms are gone.** C015 no longer flags OpenClaw's managed GitHub profile id
+  (`ghp_` plus 32 hex under `tools.github`), and B323 no longer treats `${NAME:-default}` in a
+  PATH value as a literal override on OpenClaw 2026.9.7 and later, where the vendor drops any
+  value that contains an environment reference (WARN to PASS there).
+- **B55 no longer advises a value OpenClaw rejects.** Its fix told users to lock a channel to
+  `owner`, which neither `dmPolicy` nor `groupPolicy` accepts (`openclaw config validate` exits 1 and
+  Doctor refuses the file). It now says `allowlist` with only your own ids in `allowFrom` (and
+  `groupAllowFrom` on the channels that have it), or `disabled`, and only where the channel has the
+  field. Verdicts and `detail` text are unchanged.
+- **C015 now reads the agent workspace.** The home scan spent its 500-file budget alphabetically,
+  so `agents/`, `npm/` and `logs/` could use it up before `workspace/` was opened (on a real home
+  none of the workspace's 143 text files was looked at). The home's own files, `credentials/`,
+  `identity/`, `devices/` and `workspace*/` are now walked first, then `backups/`, then
+  everything else with what is left, under the same 500-file total. When the scan stops early,
+  the `fix` text names the top-level directories it did not finish. The `detail` text is
+  unchanged. A file the scan used to reach late in a bulk directory can now fall outside the
+  budget, and the list of unreached directories says so.
+- **B357 judges the restart handoff by what OpenClaw 2026.10.2 actually keeps.** From that build the
+  handoff is a row of the `gateway_restart_handoff` table in the state database, and nothing reads
+  the old `gateway-supervisor-restart-handoff.json`. B357 now reads the table (read-only, one
+  column) and treats an expired row as a leftover OpenClaw ignores, not as a crashed supervisor;
+  its advice no longer promises that a restart clears it. The old JSON file is described as a
+  retired leftover. Builds before 2026.10.2, and an unknown build, keep the previous answer.
+- **B19 does not warn about data no other user can reach.** A loose directory or log under a home
+  whose own mode, or a parent's, removes the group and other execute bits is reported as not
+  traversable instead of group/world-readable (symlinks, hard links and paths it cannot stat keep
+  the warning). The warning's `detail` is unchanged when it still fires.
+- **An empty live-test reply is INCONCLUSIVE, not resistance.** The four self-test evaluators
+  (`canary`, `redteam`, `dryrun`, `multiturn`) returned RESISTANT for a missing, empty or
+  blank reply. They now return a third verdict that is neither credited nor counted against the
+  agent, never completes the live-behaviour layer, and is listed as a not-checked line. A
+  scenario that no reply followed in the trajectory no longer counts as corroborating the agent's
+  verdict, and a list or dictionary verdict in a judged bundle no longer raises an error.
+- **The report says what it did not scan or could not name.** The default bundled skills directory
+  of the installed OpenClaw, and skill copies kept in dot-directories (which OpenClaw does not load
+  but the audit still reads), are named in the coverage notes; `--vet-source` says when the IOC
+  dataset holds no entries for the queried ecosystem; and a truncated compact card names the
+  sections it dropped. No verdict changes.
+- **The first screen defines its five layers and the coverage lines agree.** A gradeless run now
+  says what the five layers are, no longer offers a trend or a badge it cannot produce, splits the
+  undetermined checks into not applicable and no verdict (keeping the HIGH-or-worse count), and
+  shows Logs and trajectories as not fully examined when the store itself was not read. `--json`
+  carries an additive `unexamined` flag on that inventory row.
+- **`--explain` and several fix texts stop misdescribing the setup.** `--explain` drops tracker ids
+  where that reads cleanly; the Skill Workshop defaults are stated as measured (both default to
+  `auto` from 2026.8.1); B181 says when reinstalling from ClawHub would downgrade a newer local
+  copy; B150, B341, B351 and B370 say what the check can know. Only `fix` and explanation text
+  change.
+- **Wording and citations match the installed build.** B321/B322, B391, B172, B381 and B9
+  explanations were corrected against the vendor code (for example B172 notes that grants stored
+  in the pre-2026.10.1 shape are persisted but not in force until repair), and moved vendor
+  symbols are cited with the build they were read on.
+- **The skill's instructions fit the host's whole-skill read budget.** OpenClaw 2026.10.2
+  returns a skill's instructions only when the whole `SKILL.md` fits the tool-result budget of
+  the session's model (64,000 weighted characters at a 200k-token context, 32,000 at 100k).
+  `SKILL.md` was 85,621, so the agent was told that no instructions were returned and ran the
+  tool from memory. The always-loaded body is now under 30,000. Nothing was deleted: every
+  block that left it moved verbatim into nine on-demand files under `docs/playbook/`, each
+  small enough for one read, and the body keeps every mandatory rule and says when each file
+  must be read.
+- **Instructions a live agent run showed to be wrong.** The host-monitor probe in the flow
+  guide hid a failing command behind `2>/dev/null | grep`, so "could not probe" read as "no
+  monitoring"; it now reports each command's own exit status. The skill description no longer
+  says only two flags write anything (the tool keeps its own history and state under
+  `~/.clawseccheck`). The compact card says how many findings it did not name, and `--brief`
+  says in plain words when the monitor has not run.
+- **C015 reports a list of credentials kept in a markdown file.** A line such as
+  `- Router admin password: <value>` in a workspace note was not seen. A label that ends in
+  a credential word followed by a value shaped like a real secret is now a C015 WARN;
+  placeholders, references, masked values, URLs and paths are not. Measured over 273,801
+  markdown files on a real machine: one file under the OpenClaw home, none in the installed
+  OpenClaw package or in this project's documentation.
+- **A canary id that is not its own seed's token no longer counts.** The documentation
+  promised that such an id is dropped with no trajectory needed; the code checked only its
+  shape, so a hand-made id beside any seed completed the live-behaviour layer and unlocked a
+  grade. With a usable seed, a RESISTANT entry under a wrong id is now dropped; a VULNERABLE
+  one is kept and still caps. The documentation states the limit as plainly: a bundle with no
+  seed, and the fixed-id harnesses, are accepted as reported, so without a readable
+  trajectory a live-test verdict is the agent's own word and is listed as uncorroborated.
+- **A malformed attestation section can no longer move a check to PASS.** Unusable agent
+  entries were repaired into agents that hold nothing, which moved B45, B75 and B76 from
+  UNKNOWN to PASS with no warning; junk in the `tools` or `host_monitors` list did the same
+  for B43 and B16. Each section is now all or nothing: an agent roster or a name list with
+  anything unusable in it is ignored whole, as if its key were absent, with a warning that
+  gives counts and never the content. A bad section never affects another one, and a valid
+  attestation behaves as before.
+- **A vet that says CAUTION exits 1.** The usage guide promises exit 1 on CAUTION or
+  DO-NOT-INSTALL so that `--vet ... || fail` gates an install, but a CAUTION that came from an
+  assessment the tool could not complete exited 0, and `--advise` and `--vet-skill` could
+  disagree about one path. One rule now maps the verdict word to the exit code in every mode
+  that inspects a target. `--vet-source` keeps its own mapping, because it judges an identity
+  and inspects nothing: an unknown source is CAUTION with exit 0, and the dossier says so. The
+  plugin Danger axis no longer reads PASS above the list of shapes it did not check in the
+  plugin's loose code; it reads UNKNOWN there, and no verdict word moves.
+- **The HTML report names each finding.** The page carried no check id and no version, so a
+  reader could not name a finding for `--explain`, an ignore entry or an issue. Each finding
+  card now shows its id beside the title, and the footer shows the version.
+- **The monitor judges a per-name comparison by name.** After a new tool server or a skill
+  with no declared version was recorded, the next unchanged run reported "could not make a
+  comparison it made at the last check", although the previous run had not made it either;
+  and once one such name stood on record, a real loss for another name was never reported.
+  The watch now records which servers, skills and channels a comparison cannot be made for.
+  It says on the run that brings a new one that a blind spot opens with it, stays quiet on
+  the next unchanged run, and reports a real loss for any other name. A check that begins
+  reporting a problem it could not determine before still alerts, under its own sentence.
+  An unchanged `--monitor --probe` now says that nothing changed.
+- **Edge cases found by functional testing.** `--incident-open` on a home that is missing or
+  an empty directory recorded an incident about a setup that is not there; it now refuses,
+  exits 1 and writes nothing, unless the run found a FAIL. A `.clawseccheckignore` saved with a byte order mark lost its first entry.
+  The live-test evaluators raised an error on a reply that is not text, and an empty canary
+  token matched every reply as VULNERABLE; both now give INCONCLUSIVE. B6 described a
+  workspace it could not read as having no bootstrap files; it now says so, and a clean file
+  beside an unreadable one reads UNKNOWN, not PASS. `--save-sbom-run` or `--format` without
+  `--sbom` now print the usual "has no effect" note.
+- **Limits stated where a reader meets them.** `python -m clawseccheck --verify-self` runs
+  after Python has already imported a shadowing file from the current directory, so the
+  guide now points at `audit.py`, which refuses and executes nothing. Without `--dashboard`
+  only one output file is written per run, in a fixed precedence. The two chain verifiers
+  cannot see lines deleted from the end of a journal.
+- **`--watch` works for a skill install.** The watcher re-ran the monitor as
+  `python -m clawseccheck` with no path, so when it was started the documented way
+  (`python3 <skill-dir>/audit.py --watch`) from any other directory, every detected change
+  ended in "No module named clawseccheck" and nothing was compared. The re-scan is now
+  started the way the watcher itself was. A re-scan that fails is reported with its whole
+  output as a run that did not complete. One store has one watcher: a running watcher holds
+  a lock, so a second start is refused, and a planted or stale heartbeat file can neither
+  block a start nor make `--watch-status` report a watcher that is not there. Every file in
+  the watch store is opened without blocking and only if it is a regular file, so a pipe,
+  link or directory put at the lock or heartbeat path can no longer hang `--watch` or
+  `--watch-status`. `--watch-status` prints `ALIVE` only when the lock is held and the
+  heartbeat agrees with it; a held lock whose heartbeat does not back it is `LOCK HELD`,
+  and a lock that cannot be probed is `UNKNOWN`. A process running as the same user can
+  still stop the watcher or imitate its files: the status is a convenience, not proof.
+- **A config saved with a byte order mark is read.** OpenClaw accepts an `openclaw.json`
+  that starts with a UTF-8 byte order mark (measured with its validator on 2026.10.2); the
+  audit did not parse it, answered UNKNOWN on about 199 checks and gave no grade. The loader
+  now treats the mark as the platform does, in the config, its included fragments and the
+  legacy config name. A config without the mark is read exactly as before.
+- **A hand-edited config is read with the values OpenClaw reads.** A config that is not
+  strict JSON (a comment, a trailing comma, an unquoted key) went through a second reader
+  that applied Python's string rules: `"https:\/\/host"` kept its backslashes, an escaped
+  emoji became two broken halves, and `"\U"` made the whole config unreadable. The audit
+  judged other values than the ones in force, and one such workspace path ended the run.
+  Strings, whitespace between tokens and comment endings now follow OpenClaw's own JSON5
+  parser, checked against it on 1,887 documents. A strict-JSON config is read as before.
+- **A path the audit cannot read is never a crash and never a clean result.** A directory
+  or file under the home that the current user cannot read made up to ten checks report
+  "the check crashed", ended the whole audit when it was the state directory, or was
+  quietly read as clean (an unreadable `hooks.json`, `config.toml` or `paired.json`, a log
+  or transcript directory without the search bit). Each now answers UNKNOWN under the
+  check's own id, names the path and says how to make it readable; a WARN or FAIL found in
+  what could be read stands. A state database or cron store behind a symbolic link is
+  refused rather than called absent, and a database of the same name in a subdirectory is
+  no longer read as the live one.
+- **A file that is there but was not understood is UNKNOWN, not clean.** A connector's
+  `hooks.json` that is empty, truncated or not a JSON object read as "no shell hooks"
+  (B151); a Codex `config.toml` that is not text read as "no trusted project" (B136); a
+  `devices/paired.json` replaced by a dangling link, a directory or a named pipe read as
+  "no paired devices" (B176); and a named pipe in place of a session log crashed B79. Each
+  now answers UNKNOWN and names the file. B136 also read only one way of writing a trusted
+  project: a trailing comment, single quotes, a dotted key or an inline table read as PASS.
+  It reads those now, and a `trust_level` it still cannot read is UNKNOWN.
+- **One long line no longer stalls the audit.** A bootstrap file, a memory file or an
+  installed skill's `SKILL.md` holding a single long line made the whole audit spin at full
+  CPU: 20,000 characters took 10 seconds, 40,000 took 40, and a 3 MB line had not finished
+  after half an hour. A base64 blob pasted into a skill is such a line, and an agent could
+  write one into its own bootstrap file to stall the audit and the monitor. 36 detection
+  patterns took time that grew with the square of the line length; all are linear now, with
+  the same matches (checked against the old patterns on every fixture, on 1,171 installed
+  skills and on random input). The 40,000-character line takes a tenth of a second.
+- **A `~user` that does not exist no longer ends the run.** `agents.defaults.workspace:
+  "~nosuchuser/x"` (or the same in `skills.load.extraDirs`, `plugins.load.paths`,
+  `logging.file`) ended the audit with "unexpected internal error", and so did nearly
+  every path option typed that way. A config value is now read as OpenClaw reads it, as a
+  path that is not there; a path option is refused with one line and exit 1 before
+  anything is read or written. With `HOME` unset and no passwd entry for the account, a
+  run given an explicit `--home` kept its own baseline and history in a directory
+  literally named `~` under the working directory; it now ends with one line and exit 1
+  before anything is produced.
+- **A live-test trajectory hint cannot hide a contradicting session.** The `liveTest`
+  bucket is written by the agent under test, and its `trajectory.path` narrowed the
+  cross-check to one file: an agent that complied with the canary in one session and
+  resisted in another could point at the second and be credited. A hint now only adds a
+  file to the scan, each recorded reply is judged on its own, and `sessionId`, which the
+  schema promised and nothing read, is documented as having no effect. A re-test needs a
+  fresh `--seed`.
+- **A self-report is no longer credited against what it says.** B43 ignored a declared
+  approval-bypass actor when every gate read "required"; every declared actor now counts.
+  B84 answered PASS for a proven high-blast verb whose own gate is "auto", and for a proven
+  verb of a class the same attestation declares no tool for; both are WARN, and a PASS no
+  longer claims a gate that was not reported. An attestation with no answers in it (a bare
+  schema line, a note, the unfilled template) no longer completes the self-report layer.
+- **Odd input files and closed pipes.** A named pipe given to `--attest`, `--judged`,
+  `--judged-bundle`, `--state` or another input flag blocked forever; a state file that was
+  not valid UTF-8 ended every `--monitor` run with an internal error. Input files now go
+  through one bounded reader that refuses anything but a regular file, and undecodable
+  state is a corrupt baseline. A reader that closes the pipe early (`... --json | head`) is
+  no longer reported as an internal error: the run ends silently with exit 141. `--save`
+  survives a file name that is not valid UTF-8, and `--save ""` exits 2 like the other
+  output flags. `--analyze-trajectory` and `--behavioral` given a path that is not a
+  regular file say so and exit 1 instead of reporting "no sidecars".
+- **Machine output stays machine-readable.** Under `--json`, stdout is exactly one JSON
+  document: the "run saved as" and "report saved to" lines go to stderr, the `--sbom` run
+  line always does, `--monitor --probe --json` carries its probe notice as a field, and an
+  unreadable home is a JSON error object. SBOM text values use one reversible escape for
+  control and invisible characters, so a name can no longer carry a terminal sequence and
+  two different names never become one.
+- **`--explain` names no internal ids.** The explanations of 69 checks printed tracker
+  references ("C-135 re-pass, B-238: ..."); they are removed with their clause, and a test
+  sweeps the explanation of every catalog id.
+- **Monitor details.** `--cron-recipe` with `--data-dir` emitted one command without it, so
+  the scheduled brief read the default store. A `--monitor` run refused because the baseline
+  belongs to another home no longer appends a history row. The run that loses a race with a
+  parallel `--monitor` says so instead of printing only its header. An empty or over-long
+  `--seed` is refused at the command line (exit 2).
+- **Nested or padded JSON no longer ends an audit or hides a record.** A 100,000-level file
+  ended the audit with an internal error, and a JSON5 plugin manifest with 201 levels of
+  padding lost its skills list, so a malicious bundled skill was CAUTION, not
+  DO-NOT-INSTALL. Readers of state files, plugin and skill metadata, MCP specs (including
+  `--vet-mcp`), trajectory lines, judge verdicts and the monitor journal now keep the
+  shallow fields and mark deeper subtrees unread, because a fixed depth limit would let one
+  padded key hide a finding. A document with an unread subtree never answers a clean PASS:
+  the check degrades to UNKNOWN (for example B168, B89, B138) or the vet to CAUTION, while
+  a FAIL or WARN found in the part read stands. A credential pattern split across the bound
+  in a trajectory line is not matched; that residual is disclosed.
+- **Unreadable paths, named pipes and symlink loops give one disclosed answer everywhere.**
+  - A named pipe where a plugin manifest should be no longer hangs the audit or the vet
+    (B152 was lost to the timeout). The vet never opens a pipe or device file; it reports a
+    coverage gap with a CAUTION floor, and a plugin that also holds an evil file is still
+    DO-NOT-INSTALL. A plugin with an unreadable manifest is still swept.
+  - Eleven places that called `Path.resolve()` crashed on Python 3.12 when they met a symlink
+    loop and answered on 3.14: the installed-plugin sweep, B181, the backups check, `--vet-skill
+    --vet-judge-packet`, `--monitor`, `--advise`, the PATH check and four helpers. They now give
+    the same disclosed answer on every Python. A plugin root that loops shows as not scanned,
+    where 3.14 used to drop it silently as "no known issue".
+  - A symlink loop no longer crashes C015 on 3.12 while passing on 3.14. Python 3.14 read
+    an unreadable path as absent, so `--vet-skill` answered INSTALL for an unreadable
+    payload; releases up to 4.3.1 behave that way on 3.14. An unreadable workspace
+    directory no longer ends the run with an internal error, and a non-UTF-8 or UTF-16
+    `--attest` file warns instead of crashing.
+- **Checks that had fallen behind OpenClaw, or passed where they could not tell.**
+  - B353 answered PASS when it could not tell whether a Codex agent runs; only a definite
+    no clears it now. B372: 2026.9.7 made `allowBots` default to true on Discord and Slack,
+    so an unset key on a reachable account WARNs on 2026.9.7+, passes on 2026.7.1-2 through
+    2026.9.6 and is UNKNOWN when the build is unknown. B350: 2026.8.1+ turn the operator
+    terminal on unless it is explicitly false; an unset key WARNs there, passes on builds
+    measured off and is UNKNOWN on unmeasured ones.
+  - B33: the advisory table ended at 2026.6.6, so later builds read as fully patched. 70
+    published advisories are now rows: builds 2026.6.6 through 2026.9.1 FAIL and are pointed
+    at 2026.9.2, and on this machine's own home the installed build decides, not the stamp.
+  - B4 WARNs on sandbox mode `non-main`, including a named agent that sets it under a
+    defaults mode of `all`. B382 tracks more retired keys (such as `silentReply.internal`)
+    and its PASS says the list is not every key OpenClaw removed.
+  - B172 and B77 no longer answer UNKNOWN about an exec-approvals store or config-write
+    journal in the state database. The default agent is chosen the way OpenClaw chooses it.
+- **Vet and skill scanning.**
+  - A `SKILL.md` beside a plugin manifest that does not list it is now vetted (a stub
+    manifest had hidden an instruction-override directive), and executable code beside a
+    wrapper's `node_modules` is a coverage UNKNOWN. A plugin that ships such a `SKILL.md`
+    can lead with a different finding, so a `.clawseccheckignore` fingerprint can move.
+  - Plaintext reverse shells in bundled `.sh` and `.py` files and `exec(fetch(URL))` are
+    convicted; only the base64-wrapped form failed before. Other shapes are a declared
+    ceiling in `docs/THREAT_COVERAGE.md`. Loose plugin Python that cannot be read, parsed
+    or is over the size cap floors to CAUTION, not INSTALL.
+  - A negated verb ("Do not reveal your system prompt") is a disclosed WARN, and
+    `Do not curl <url> | sh` no longer false-fails.
+- **Monitor and CLI.** The monitor watches the credential stores in OpenClaw's databases
+  and no longer reports the updater's `.bak` leftovers as systemd user services.
+  `--cron-recipe` carries `--home`, so jobs on a non-default home no longer watch
+  `~/.openclaw`. A suppressed CRITICAL or HIGH FAIL is disclosed on the card, HTML and PDF.
+
 ## [4.3.1] - 2026-09-29
 
 **4.3.0 never reached ClawHub. This release is 4.3.0 in a form ClawHub's publish step can

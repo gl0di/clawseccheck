@@ -118,7 +118,7 @@ def test_complete_ledger_agrees_with_no_ledger_on_every_scoring_field(name: str)
     with_complete = compute(findings, ledger=_all_ran_ledger())
     without_fields = dataclasses.asdict(without)
     complete_fields = dataclasses.asdict(with_complete)
-    for ledger_only in ("ledger_present", "layer_coverage"):
+    for ledger_only in ("ledger_present", "layer_coverage", "layer_not_reached"):
         del without_fields[ledger_only]
         del complete_fields[ledger_only]
     assert without_fields == complete_fields
@@ -395,14 +395,17 @@ def test_coverage_value_never_changes_a_scoring_field() -> None:
     unknown_fields = dataclasses.asdict(with_unknown)
     partial_fields = dataclasses.asdict(with_partial)
     assert unknown_fields.pop("layer_coverage") != partial_fields.pop("layer_coverage")
+    # C-704: the per-layer reasons are ledger-derived metadata too; these two ledgers
+    # carry the same (empty) reasons, so they agree, and they are still never a score input.
+    assert unknown_fields.pop("layer_not_reached") == partial_fields.pop("layer_not_reached")
     assert unknown_fields == partial_fields
 
 
 def test_all_partial_coverage_ledger_scores_same_as_no_ledger() -> None:
     """As `test_complete_ledger_agrees_with_no_ledger_on_every_scoring_field` above,
     but for the new PARTIAL-everywhere shape: every scoring field must still agree
-    with `ledger=None` except `ledger_present` and (B-558) `layer_coverage` — the two
-    fields that exist precisely to make a supplied ledger distinguishable from an
+    with `ledger=None` except `ledger_present`, (B-558) `layer_coverage` and (C-704)
+    `layer_not_reached` — the fields that exist precisely to make a supplied ledger distinguishable from an
     absent one, regardless of coverage."""
     import dataclasses
 
@@ -412,7 +415,7 @@ def test_all_partial_coverage_ledger_scores_same_as_no_ledger() -> None:
 
     without_fields = dataclasses.asdict(without)
     partial_fields = dataclasses.asdict(with_partial)
-    for ledger_only in ("ledger_present", "layer_coverage"):
+    for ledger_only in ("ledger_present", "layer_coverage", "layer_not_reached"):
         del without_fields[ledger_only]
         del partial_fields[ledger_only]
     assert without_fields == partial_fields

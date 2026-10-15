@@ -78,7 +78,9 @@ def test_exposed_bind_without_env_still_fails(tmp_path):
     when a credential WAS supplied; with nothing observable, FAIL is correct."""
     f = check_gateway(collect(_home(tmp_path, EXPOSED_NO_AUTH)))
     assert f.status == FAIL
-    assert "exposed with auth.mode=None" in f.detail
+    # C-693: reworded - no "exposed", no Python literal "None" (owner ruling, 2026-10-12)
+    assert "is non-loopback, no gateway.auth.mode is set and no usable gateway token is configured" in f.detail
+    assert "exposed" not in f.detail
 
 
 def test_exposed_bind_with_unit_supplied_token_no_longer_fails(tmp_path):

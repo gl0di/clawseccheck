@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from .. import attest as _attest
+from .. import pathprobe
 from .. import hostpersist as _hostpersist
 from .. import trajectory as _trajectory
 from .. import trajectorystore as _trajectorystore
@@ -453,7 +455,7 @@ def _attested_monitors_any(ctx: Context) -> list:
     declared = att.get("host_monitors")
     if not isinstance(declared, list):
         return []
-    return [d for d in declared if isinstance(d, str) and d.strip()]
+    return [d for d in declared if isinstance(d, str) and not _attest.is_blank_text(d)]
 
 
 def check_monitoring(ctx: Context) -> Finding:
@@ -775,7 +777,8 @@ def check_incident_readiness(ctx: Context) -> Finding:
         )
 
     from ..scanbudget import limits_for  # noqa: PLC0415 (F-164, leaf import, no cycle)
-    files = _trajectory.find_trajectory_files(ctx.home, max_files=limits_for(ctx).traj_max_files) if isinstance(ctx.home, Path) else []
+    traj_stats: dict = {}
+    files = _trajectory.find_trajectory_files(ctx.home, max_files=limits_for(ctx).traj_max_files, stats=traj_stats) if isinstance(ctx.home, Path) else []
     if not files:
         corr = (
             _trajectorystore.corroborate(ctx.home)
@@ -801,7 +804,10 @@ def check_incident_readiness(ctx: Context) -> Finding:
             "(OPENCLAW_TRAJECTORY=0), relocated (OPENCLAW_TRAJECTORY_DIR), or the agent "
             "may simply not have run yet.",
             "Keep trajectory tracing on (the default) so tool use is recorded, and run "
-            "this audit on the host where those session logs live.",
+            "this audit on the host where those session logs live."
+            + (f" {traj_stats['unlistable_dirs']} director{'y' if traj_stats['unlistable_dirs'] == 1 else 'ies'} "
+               "under agents/ could not be listed (check their permissions), so a sidecar there "
+               "was not seen." if traj_stats.get("unlistable_dirs") else ""),
         )
 
     tamper: list[str] = []
@@ -900,9 +906,13 @@ def check_incident_readiness(ctx: Context) -> Finding:
 # common infrastructure for a long-running gateway service. WARN (LOW/advisory) only
 # when an OpenClaw-related unit is found with a persistent-restart directive; PASS/
 # UNKNOWN otherwise. Never FAIL.
-_SYSTEMD_RESTART_RE = re.compile(r"^\s*Restart\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
-_SYSTEMD_EXECSTART_RE = re.compile(r"^\s*ExecStart\s*=\s*(.*\S)?\s*$", re.IGNORECASE | re.MULTILINE)
-_SYSTEMD_WANTEDBY_RE = re.compile(r"^\s*WantedBy\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+# C-730: linear time. `^\s*` under re.M also ran across the blank lines before the key, so a
+# unit file of blank lines was rescanned from every line start. `^[^\S\n]*` stays on the key's
+# line: the same directive is found with the same group 1 (all three call sites read group 1
+# of `.search`); only the match start moves.
+_SYSTEMD_RESTART_RE = re.compile(r"^[^\S\n]*Restart\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
+_SYSTEMD_EXECSTART_RE = re.compile(r"^[^\S\n]*ExecStart\s*=\s*(.*\S)?\s*$", re.IGNORECASE | re.MULTILINE)
+_SYSTEMD_WANTEDBY_RE = re.compile(r"^[^\S\n]*WantedBy\s*=\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 
 # Persistent-restart directives worth disclosing (systemd.service(5)): "always" restarts
 # unconditionally; "on-failure"/"on-abnormal"/"on-watchdog"/"on-abort" are conditional and
@@ -936,7 +946,7 @@ def check_systemd_persistence(ctx: Context) -> Finding:
               simply absent), or no OpenClaw-related unit file found there.
     """
     user_units_dir = ctx.home.parent / ".config" / "systemd" / "user"
-    if not user_units_dir.is_dir():
+    if not pathprobe.is_dir(user_units_dir):
         return _finding(
             "B150",
             UNKNOWN,
@@ -948,13 +958,14 @@ def check_systemd_persistence(ctx: Context) -> Finding:
 
     try:
         unit_files = sorted(p for p in user_units_dir.iterdir()
-                             if p.is_file() and not p.is_symlink() and p.suffix == ".service")
+                             if pathprobe.is_file(p) and not pathprobe.is_symlink(p) and p.suffix == ".service")
     except OSError:
         unit_files = []
 
     any_openclaw_unit = False
     persistent_ev: list[str] = []
     other_ev: list[str] = []
+    not_linked: list[str] = []   # C-705: WantedBy= set, but no enable link on disk
 
     for unit_path in unit_files:
         try:
@@ -977,6 +988,16 @@ def check_systemd_persistence(ctx: Context) -> Finding:
             if wanted_by:
                 detail += f", WantedBy={wanted_by}"
             persistent_ev.append(detail)
+            if wanted_by:
+                link = user_units_dir / f"{wanted_by}.wants" / unit_path.name
+                try:
+                    linked = pathprobe.is_symlink(link) or pathprobe.exists(link)
+                except OSError:
+                    # WantedBy= is attacker-shaped text: an over-long or unreadable path
+                    # raises here. "Cannot tell" keeps today's WARN and adds no note.
+                    linked = True
+                if not linked:
+                    not_linked.append(unit_path.name)
         else:
             other_ev.append(unit_path.name)
 
@@ -1000,7 +1021,13 @@ def check_systemd_persistence(ctx: Context) -> Finding:
             "gateway service, not proof of compromise.",
             "Confirm this restart policy is intentional. If the service should not "
             "persist automatically, change Restart= to 'no' or 'on-failure', and "
-            "review any WantedBy= target that starts it automatically at login/boot.",
+            "review any WantedBy= target that starts it automatically at login/boot."
+            + (f" For {', '.join(not_linked[:6])} no enable link was found under "
+               "~/.config/systemd/user/<target>.wants/, so the unit file asks to start "
+               "automatically but it may not be enabled; this audit reads unit files "
+               "only and does not ask systemd - check with `systemctl --user "
+               "is-enabled <unit>` and `systemctl --user is-active <unit>`."
+               if not_linked else ""),
             evidence=persistent_ev,
         )
 
@@ -1038,9 +1065,9 @@ def _bounded_read_text(path: Path) -> "str | None":
     reads more of a host file than `hostpersist.scan()` itself was willing to digest.
     """
     try:
-        if path.is_symlink() and not path.exists():
+        if pathprobe.is_symlink(path) and not pathprobe.exists(path):
             return None
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return None
         with open(path, "rb") as fh:
             raw = fh.read(_hostpersist.MAX_FILE_BYTES)
@@ -1416,7 +1443,7 @@ def check_bundled_root_override(ctx: Context) -> Finding:
         # where the code-load root points. The scan below still runs against the literal
         # value; the only thing this changes is what gets PRINTED.
         resolved = Path(value)
-        state = "exists" if resolved.is_dir() else "does not currently exist"
+        state = "exists" if pathprobe.is_dir(resolved) else "does not currently exist"
         # B-349: `resolved` is the LITERAL override value and stays verbatim (it is what
         # the owner has to go unset, and it varies only when the audited subject does).
         # `source` is the artifact this scan happened to read it out of, so it carries the

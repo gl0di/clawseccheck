@@ -66,7 +66,8 @@ flag but one only reads and reports. Its permitted operations are:
   `<home>/media/outbound/clawseccheck-report.pdf`, OpenClaw's own managed attachment
   directory, so the report can be attached into the conversation rather than pasted
   (B-606). That resolution is guarded: the directory must already exist and be writable,
-  it is **never created**, and the fallback is `~/.clawseccheck/report.pdf`. Given a PATH,
+  it is **never created**, and the fallback is `report.pdf` in the local store
+  (`~/.clawseccheck/report.pdf`, or `<DIR>/report.pdf` under `--data-dir DIR`). Given a PATH,
   `--pdf` writes exactly there and touches the home not at all. Neither case writes the
   OpenClaw config, a skill, or a bootstrap file. Every other write stays under
   `~/.clawseccheck/` or a path named on the command line.
@@ -342,8 +343,9 @@ with `--no-history`) and the `--monitor` event journal (`~/.clawseccheck/events.
 timeline viewed with `--watch-log`) are both **tamper-evident via a hash chain**. Each
 entry carries a `chain_hash` field: `sha256(prev_chain_hash +
 canonical_json(entry_without_chain_hash))` (`history.py` and `monitor.py` share the same
-scheme). Editing, reordering, or deleting a historical entry breaks the chain from that
-point forward. Verify either chain with:
+scheme). Editing, reordering, or deleting a non-final historical entry breaks the chain
+from that point forward (deleting the LAST entry leaves a valid shorter chain - see
+below). Verify either chain with:
 
 ```bash
 clawseccheck --verify-history            # ~/.clawseccheck/history.jsonl
@@ -374,19 +376,35 @@ unknown-future-`_schema` entry (`OK (1 unknown-schema entry present)`, pre-exist
 first entry whose recomputed hash does not match its stored `chain_hash` still reports
 exactly where the chain broke (`False, "broken at entry N"`).
 
+**C-624: legacy entries are a PREFIX carve-out.** An entry with no `chain_hash` that
+appears after a chained entry has no legitimate writer (this tool's writers always chain,
+and rotation re-chains every survivor), so it is BROKEN, with the message `unchained entry
+N follows a chained entry - not legacy` - whether the row was inserted, forged, or had its
+`chain_hash` stripped. The one ordinary cause is appending with a build older than the
+chaining (F-094) after a newer one.
+
 **What the chain does and does not defend.** It is a plain SHA-256 chain, not a keyed
 (HMAC) or externally-anchored one, so it detects *accidental corruption* and *naive edits*
 (editing/reordering/deleting an entry breaks it) - not a knowledgeable attacker who already
 has write access to the file, who can simply recompute the whole chain forward after
-tampering - that still verifies "clean", and no local chain can do better. Truncating the
-tail is disclosed as an unparseable line, and deleting or emptying the file is reported as
-`NOT VERIFIED` rather than "clean" (B-589); neither is *proof* of tampering, which is why
-both are their own outcome rather than a verdict. The
+tampering - that still verifies "clean", and no local chain can do better. Cutting the
+tail MID-line (a crash-mid-write shape) is disclosed as an unparseable line; removing WHOLE
+trailing lines leaves a shorter chain that verifies exactly as before and is not
+detectable locally - only an off-machine copy of the last hash could catch it, and this
+tool keeps none (a disclosed limit). Deleting or emptying the file is reported as
+`NOT VERIFIED` (B-589), not clean; neither is *proof* of tampering, which is why both are
+their own outcome rather than a verdict. The
 chain is therefore a drift/tamper-*evidence* aid, **not** a substitute for filesystem
 permissions on `~/.clawseccheck/`: anyone who can write that file already runs as your
 user and could edit history, patch the engine, or read anything you can. This is the same
 honest boundary as `--verify-self` (it does not defend against an adversary who also
-patches the verifier).
+patches the verifier). One narrow, mechanical guard sits beside it: `audit.py` puts its own
+directory at the front of `sys.path`, so before importing anything it refuses to run
+(exit 2) while an importable file other than itself and `clawseccheck/` sits in that
+directory, and `--verify-self` discloses the same entries. That closes the case of a stray
+`json.py` or `re.py` added beside the shim, which the package digest cannot see; it is not
+a defence against a modified `audit.py` or verifier, or against a file planted between the
+scan and the import.
 
 **The drift BASELINE is a different file, and is NOT chained.** `--monitor`'s comparison
 snapshot (`~/.clawseccheck/state.json` - see "Trust boundaries" above for what it holds)
@@ -511,8 +529,9 @@ scanner would stop tripping on the tool's own signature vocabulary - the detecti
 regexes, the `"child_process" in masked` logic, and every check's label/severity were
 left completely unchanged, and the full test suite stayed green throughout. The
 project's own `--vet` run against its own source (`clawseccheck --vet .`) reports this honestly rather than
-hiding it: a security tool necessarily ships attack signatures as data, and that is
-disclosed as a note, not papered over. That pass is repeated as new detector vocabulary
+hiding it: a security tool necessarily ships attack signatures as data, so `--vet` does not scan
+its own source - it says `CAUTION` / "NOT SCANNED" (exit `1`) and never clears it, because the
+folder is recognised by content that anyone can write. That is disclosed, not papered over. That pass is repeated as new detector vocabulary
 is added - it is a rewording sweep, not a one-time fix, so re-flag a specific new
 file:line if this note goes stale rather than assuming the class was never addressed.
 
@@ -541,9 +560,10 @@ reviewer can check every clause below directly against the cited module:
   `safeio.secure_write_bytes`, like every other write. No other write reaches there, and
   neither is the OpenClaw config. (`collector.py` performs no writes at all - it is
   read-only.)
-- `--purge` deletes ClawSecCheck's own store files (a fixed filename list -
-  history.jsonl, events.jsonl, state.json, coverage.json + lock sidecars), never
-  recursive/glob, never outside `~/.clawseccheck/`.
+- `--purge` deletes ClawSecCheck's own store files (a fixed filename list, see
+  docs/USAGE.md "Uninstall / cleanup" - the store files, the `--watch` heartbeat and the
+  default-named report outputs, each with its lock sidecar), never recursive/glob, never
+  outside the store directory (`~/.clawseccheck/` unless `--data-dir`/`--history` moved it).
 - It does **not** make a network connection of any kind, for any reason, ever (grep the
   import graph: there is no `socket`, `http.client`, `urllib.request` call site that
   reaches the network at runtime - `urllib.parse` is used only for local string

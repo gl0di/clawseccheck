@@ -8,10 +8,12 @@ verdict - `monitor.py` is the consumer, the same leaf->consumer split `sockets.p
 
 **Why this exists.** B33 ("known-vulnerable OpenClaw version gate", HIGH) and C4 read
 `meta.lastTouchedVersion` out of `openclaw.json` - a string the agent writes about itself.
-A swapped `npm install` of openclaw is the top of the supply chain and nothing anywhere
-compared it against the artifact actually on disk. On the maintainer's machine the two
-happen to agree (`2026.7.1-2` in both), which is the expected state and exactly why the
-disagreement is worth watching for.
+B33 also reads the installed package's version number when it audits this machine's own home
+(with `--no-dist` the stamp alone decides), and C4 compares the two numbers. A swapped
+`npm install` of openclaw is the top of the supply chain, and no version number shows it:
+nothing compared the program files actually on disk. On the maintainer's machine the two
+numbers agreed when this was written, which is the expected state and exactly why
+the disagreement is worth watching for.
 
 **What each digest can and cannot catch**, because a field called "integrity" that covers
 less than its name suggests is the failure this project keeps removing:
@@ -47,11 +49,12 @@ walk wander outside the package root. Skipping is recorded in `notes`.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import pathprobe
+from .configloader import loads_shallow
 from .deptree import find_package_root
 
 # Bounds on the code walk, set to roughly 2.5x the real install. The margin erodes with every
@@ -132,8 +135,10 @@ def _digest_file(p: Path) -> str:
 def _read_version(root: Path) -> str:
     """The `version` string out of the package manifest, or ``""``."""
     try:
-        manifest = json.loads((root / "package.json").read_text(encoding="utf-8",
-                                                                errors="replace"))
+        # C-664: `version` is a top-level field, so it is read exactly however the file is
+        # padded; the old json.loads raised RecursionError out of the monitor on a deep file.
+        manifest = loads_shallow((root / "package.json").read_text(encoding="utf-8",
+                                                                   errors="replace")).value
     except (OSError, ValueError):
         return ""
     version = manifest.get("version") if isinstance(manifest, dict) else None
@@ -237,7 +242,7 @@ def describe_install(binary_name: str = "openclaw", *, which=None,
     lock_name, lock_digest = "", ""
     for name in _LOCK_NAMES:
         candidate = root / name
-        if candidate.is_file():
+        if pathprobe.is_file(candidate):
             lock_name, lock_digest = name, _digest_file(candidate)
             break
     if not lock_name:
@@ -364,8 +369,44 @@ def self_reported_version(config: "dict | None") -> str:
 # a newer dist - the same discipline the code-digest measurements above already keep
 # release over release. Bump it only when a check was actually re-grounded that far, never
 # just because a newer OpenClaw exists. Raised to 2026.9.6 for 4.3.0: the 9.6 pass
-# re-recorded the dist citation baseline and widened the harness oracle to 9.6.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 9, 6)
+# re-recorded the dist citation baseline and widened the harness oracle to 9.6. Raised to
+# 2026.9.7 for 4.4.0: the 9.7 pass made B372 and B350 fork on the installed build, taught
+# B1 and B2 the config template forms, re-read the B396 and B397 dist claims on 9.7,
+# regenerated the schema and state snapshots and re-recorded the dist citation baseline.
+# Raised to 2026.9.8 on 2026-10-09: 9.8 removed two config paths no check reads and moved
+# no default, table, column or tool table a check stands on (the delta was read against
+# the vendor source and the installed dist); the pass added the 9.8 row of the B391 image
+# table, re-read the B350, B396 and B397 dist claims there, widened the harness oracle to
+# 9.8 and regenerated the schema, state and channel snapshots.
+# Raised to 2026.9.9 on 2026-10-10: 9.9 moved nothing a check stands on - the config schema
+# is identical (5,408 paths, +0/-0), the 167 dist-verified paths, the 12 state tables, the 132
+# vendor tables and the DM-policy manifest differ by version stamp and bundle name only, the
+# 773-row harness battery re-ran on the installed build with no moved answer, and no new
+# advisory was published. The pass widened the harness oracle to 9.9 and regenerated the
+# schema, state, channel and citation snapshots.
+# Raised to 2026.10.1 on 2026-10-11: the 167 dist-verified paths are all still accepted by the
+# installed build, the DM-policy manifest moved no channel shape (its version stamp, bundle
+# name and total path count 5,408 -> 5,430 only), the 773-row harness battery re-ran with no
+# moved answer and the oracle window was widened to 10.1, and three citations whose bundle
+# names rotated were re-read in the new bundles and still hold. The vendor renamed the
+# automatic-repair gate `admitAutomaticConfigRepairSnapshot` -> `canPlanAutomaticConfigRepair`;
+# its two $include clauses are unchanged, and it gained two others (it declines a config with
+# a retired-format upgrade requirement and now also admits a VALID snapshot that carries a
+# legacy Talk voice-call inheritance rule issue); nothing in this repo models either.
+# Raised to 2026.10.2 on 2026-10-12: 10.2 moved nothing a check stands on - the config schema
+# is identical (5,430 paths, +0/-0), the 167 dist-verified paths, the 13 state tables, the 136
+# vendor tables and the DM-policy manifest differ by version stamp, date and bundle name only,
+# the 773-row harness battery re-ran on the installed build with no moved answer and the
+# oracle window was widened to 10.2, and the B391 default worker image is unchanged. No new
+# advisory was published after 2026-10-05.
+# Raised to 2026.10.3 on 2026-10-14 on the same evidence: the installed tree equals the
+# release tarball, the config schema is identical (5,430 paths, +0/-0), the dist-verified
+# paths, state DDL, vendor table set and DM-policy manifest differ by stamp, date and bundle
+# name only, the 773-row harness battery and the 999-row retired-format battery re-ran with no
+# moved answer (both windows widened to 10.3), the resolved-default oracle located 63 of 205
+# paths with 0 flipped (both controls run), the B391 default worker image is unchanged and no
+# advisory was published after 2026-10-05.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 3)
 
 
 def grounding_gap(installed_version: "str | None"):

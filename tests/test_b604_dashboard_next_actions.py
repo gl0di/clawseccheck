@@ -27,6 +27,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from clawseccheck import canary
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VULN = str(REPO_ROOT / "fixtures" / "home_vuln")
 
@@ -58,8 +60,9 @@ def _bundle(tmp_path: Path) -> str:
     p = tmp_path / "bun.json"
     # F-193: a real canary-token-shaped id, not the bare tool name.
     p.write_text('{"judged":{"verdicts":[]},"liveTest":{"seed":"b604","verdicts":'
-                 '[{"tool":"canary","id":"CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",'
-                 '"verdict":"RESISTANT"}]}}', encoding="utf-8")
+                 '[{"tool":"canary","id":"%s",'
+                 '"verdict":"RESISTANT"}]}}' % canary.make_canary("b604")["token"],
+                 encoding="utf-8")
     return str(p)
 
 
@@ -119,11 +122,12 @@ def test_the_disclosed_card_size_counts_the_block(tmp_path):
 
 def test_an_ungraded_run_does_not_offer_a_grade_it_does_not_have(tmp_path):
     """`guide.suggest_actions` already adapts to `ScoreResult.graded`; this pins that the
-    dashboard passes it the REAL score object rather than a default. On an ungraded run the
-    badge item must say so instead of implying a letter exists."""
+    dashboard passes it the REAL score object rather than a default. C-704: on an ungraded
+    run the trend and badge items are withdrawn rather than reworded, so neither command
+    may appear in the block."""
     out = _run(tmp_path, "--dashboard", store="g1").stdout
     tail = out[out.index(BLOCK):]
-    assert "no grade" in tail.lower(), tail[-600:]
+    assert "--badge" not in tail and "--trend" not in tail, tail[-600:]
 
 
 def test_a_graded_run_offers_the_grade(tmp_path):
@@ -222,5 +226,7 @@ def test_the_findings_are_unchanged_by_adding_the_block(tmp_path):
 def test_skill_md_lists_the_block_in_the_fixed_order():
     """C-125. SKILL.md states the card's section order (F-153) as exhaustive; a section the
     tool prints and the list omits makes the doc false for every reader after this."""
-    flat = " ".join((REPO_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    from _skillcorpus import skill_corpus
+
+    flat = " ".join(skill_corpus().split())
     assert "What you can do next" in flat

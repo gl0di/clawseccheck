@@ -16,7 +16,13 @@ import re
 from pathlib import Path
 
 import pytest
-from _distgrounding import _JS_EXTS, dist_file, require_dist
+from _distgrounding import (
+    _JS_EXTS,
+    catalog_category_ids,
+    catalog_tool_ids,
+    dist_file,
+    require_dist,
+)
 
 from clawseccheck.checks import _shared
 from clawseccheck.checks._shared import (
@@ -175,6 +181,8 @@ def _catalog_text() -> str:
 
 
 # C-472: ONE parser, because two copies of it drifted apart the moment the catalog moved.
+# It now lives in `_distgrounding.catalog_tool_ids` / `catalog_category_ids` (shared with
+# B-674's grounding test); the record-shape history is written up there.
 #
 # OpenClaw 2026.8.1 restructured the records. A tool is now
 #
@@ -184,21 +192,16 @@ def _catalog_text() -> str:
 # and `label:` survives only on the 14 CATEGORY records (`agents`, `coding`, `fs`, …).
 # The old regex anchored on `id:` + `label:` adjacency, so it stopped matching tools
 # entirely and matched categories instead: 14 ids, none of them a tool, while every
-# assertion below still read as if it were looking at the tool set.
+# assertion below still read as if it were looking at the tool set. 2026.10.1 then put an
+# `executionLocation:` line between `id:` and `description:` on 14 tool records, which an
+# adjacency regex on `id` / `description` / `sectionId` read as "not a tool" -- so the
+# parser reads each record whole and asks which fields it carries.
 #
 # `sectionId` is the discriminator, and it is exact rather than convenient: no category
-# record carries one. Measured on the installed catalog — 67 distinct ids = 55 tools +
-# 14 categories, with ZERO in neither bucket. (The upgrade triage recorded "67 tool ids";
-# 67 is the id TOTAL, of which 55 are tools.)
-def _tool_ids(text: str) -> set:
-    """Ids of TOOL records — the ones carrying `sectionId`."""
-    return set(re.findall(
-        r'\n\t*id: "([a-z0-9_]+)",\n\t*description:[^\n]*\n\t*sectionId:', text))
-
-
-def _category_ids(text: str) -> set:
-    """Ids of CATEGORY records — the ones carrying `label`."""
-    return set(re.findall(r'\n\t*id: "([a-z0-9_]+)",\n\t*label:', text))
+# record carries one. Measured on the installed catalog — 78 distinct ids = 66 tools +
+# 14 categories, with ZERO in neither bucket (`nodes` and `sessions` are in both).
+_tool_ids = catalog_tool_ids
+_category_ids = catalog_category_ids
 
 
 def test_the_catalog_parse_accounts_for_every_id():

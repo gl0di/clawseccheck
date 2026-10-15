@@ -194,10 +194,12 @@ def test_item_has_verdict_schema_and_question():
     # This previously pinned {"answer": ["yes", "no"], ...} — a schema the parser
     # rejects outright, so a judge that followed the packet had 100% of its verdicts
     # silently dropped. See the round-trip tests below for the structural guard.
-    assert item["verdict_schema"] == {
+    # C-712: plus the separate, non-severity "abstain" key; the verdict list is untouched.
+    assert {k: v for k, v in item["verdict_schema"].items() if k != "abstain"} == {
         "verdict": ["SAFE", "SUSPICIOUS", "DANGEROUS"],
         "reason": "free text",
     }
+    assert "ABSTAIN" in item["verdict_schema"]["abstain"]
     assert isinstance(item["question"], str) and len(item["question"]) > 0
 
 
@@ -1236,9 +1238,10 @@ def test_vet_judge_packet_attest_items_also_get_corroboration():
 def test_skill_md_states_corroboration_is_context_not_a_threshold():
     """C-285 DoD: SKILL.md's panel instructions must tell the judge corroboration is
     context, not a verdict rule — mechanically pinned so it can't rot silently."""
-    skill_md = (Path(__file__).resolve().parent.parent / "SKILL.md").read_text(encoding="utf-8")
+    # C-709: the panel text moved verbatim to the playbook file; the section runs to its end.
+    skill_md = (Path(__file__).resolve().parent.parent / "docs" / "playbook" / "JUDGE_PANEL.md").read_text(encoding="utf-8")
     start = skill_md.index("### Judge-panel fan-out for `--judge-packet` items")
-    end = skill_md.index("### Judge-panel fan-out for `--vet` targets")
+    end = len(skill_md)
     section = " ".join(skill_md[start:end].split())  # collapse markdown line-wrapping
     assert "corroboration" in section.lower()
     assert "never a rule to apply mechanically" in section

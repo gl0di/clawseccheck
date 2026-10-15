@@ -480,6 +480,14 @@ class ScoreResult:
     # `covered`).
     layer_coverage: tuple[tuple[str, str], ...] = ()
 
+    # C-704: every layer paired with the reasons ITS ledger entry left something unread
+    # (`layers.LayerState.not_reached`), in LAYER_ORDER. `not_checked` above is the flat
+    # union of these and cannot say which layer a reason belongs to, so a subject row that
+    # must not read "clear" over an unread store (the logs subject) had to guess from the
+    # reason's wording. `()` whenever `ledger is None`; tail-appended for the same
+    # positional-construction reason as every ledger-derived field above.
+    layer_not_reached: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
 
 def _degraded_signal(findings: list[Finding]) -> tuple[bool, int]:
     """B-313/B-399: count checks that could not reach a reliable verdict this run.
@@ -795,6 +803,7 @@ def compute(findings: list[Finding], ctx=None, *,
     ledger_present = ledger is not None
     # B-558: fifth - see `ScoreResult.layer_coverage`.
     layer_coverage = () if ledger is None else ledger.coverages
+    layer_not_reached = () if ledger is None else ledger.reasons
 
     if total == 0:
         if (not config_blind and not runtime_hit and not degraded_hit and not live_hit
@@ -806,6 +815,7 @@ def compute(findings: list[Finding], ctx=None, *,
                 0, "N/A", False, 0, 0, 0, assessable=False,
                 graded=graded, not_checked=not_checked, missing_layers=missing_layers,
                 ledger_present=ledger_present, layer_coverage=layer_coverage,
+                layer_not_reached=layer_not_reached,
             )
         # B-306 (C-135 follow-up #2) / B-313 / F-155 / F-154: nothing else scored this
         # run, BUT a blind config (ctx.config_parse_error), a corroborated runtime
@@ -846,6 +856,7 @@ def compute(findings: list[Finding], ctx=None, *,
             not_checked=not_checked,
             missing_layers=missing_layers,
             ledger_present=ledger_present, layer_coverage=layer_coverage,
+            layer_not_reached=layer_not_reached,
         )
 
     earned = 0.0
@@ -971,6 +982,7 @@ def compute(findings: list[Finding], ctx=None, *,
         not_checked=not_checked,
         missing_layers=missing_layers,
         ledger_present=ledger_present, layer_coverage=layer_coverage,
+        layer_not_reached=layer_not_reached,
     )
 
 

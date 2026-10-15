@@ -34,6 +34,12 @@ coincidence, through a different mechanism, and would stop firing the moment tho
 checks stopped crashing. `test_b13_is_counted_on_its_own_merits` below pins the
 difference so the coincidence can never be mistaken for the contract again.
 
+C-619 then made exactly that prediction true: those two checks no longer crash on the
+unparseable file. They catch it per file and return their own `UNKNOWN` with
+`engine_degraded=True` (a real catalog id, so B-399's branch counts them, not B-313's),
+so the total stays `(True, 3)`. The B13-alone pin below therefore excludes those two
+findings by id as well as the `ERR:` ones.
+
 ## Scope
 
 The **vet** path (`--vet`) grades through `dossier._grade_profile`, not `scoring.compute`,
@@ -118,10 +124,17 @@ def test_b13_is_counted_on_its_own_merits(tmp_path):
     ]
     assert _b13(findings) in counted
 
-    # and the signal still fires with the crashed checks excluded — i.e. B13 alone is
-    # enough. Without the fix this drops to (False, 0).
-    without_err = [f for f in findings if not f.id.startswith("ERR:")]
-    assert _degraded_signal(without_err) == (True, 1)
+    # the same unparseable file also degrades B66 / B156 (C-619: an engine_degraded
+    # UNKNOWN under their own ids, no longer an `ERR:` crash) -- the total is unchanged.
+    assert _degraded_signal(findings) == (True, 3)
+
+    # and the signal still fires with every OTHER degraded check excluded -- i.e. B13
+    # alone is enough. Without the fix this drops to (False, 0).
+    only_b13 = [
+        f for f in findings
+        if not f.id.startswith("ERR:") and f.id not in ("B66", "B156")
+    ]
+    assert _degraded_signal(only_b13) == (True, 1)
 
 
 # ------------------------------------------------------- the other direction (B-092)

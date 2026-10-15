@@ -1351,8 +1351,10 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="tools",
     ),
-    # B172 (B-236, re-scoped): inventory of standing ~/.openclaw/exec-approvals.json
-    # "allow-always" grants -- a persisted per-command exec approval that lives entirely
+    # B172 (B-236, re-scoped): inventory of standing exec-approvals "allow-always" grants
+    # (the legacy ~/.openclaw/exec-approvals.json file OR the exec_approvals_config table
+    # of the state database, which is where current builds keep the same document) --
+    # a persisted per-command exec approval that lives entirely
     # outside openclaw.json and, before this check, no check ever read (grep for
     # "exec-approvals" across clawseccheck/ was zero hits). Originally filed as a
     # suspected tools.exec gate BYPASS (a standing grant making B8/B22/B23/B48 give a
@@ -1371,7 +1373,7 @@ CATALOG: list[CheckMeta] = [
     # other check's verdict.
     CheckMeta(
         "B172",
-        "Standing exec-approvals.json allow-always grant (uninventoried persisted authority)",
+        "Standing exec-approvals allow-always grant (uninventoried persisted authority)",
         MEDIUM,
         "hardening",
         "Least Privilege / Exec Approvals",
@@ -2323,13 +2325,14 @@ CATALOG: list[CheckMeta] = [
         confidence="MEDIUM",
         surface="tools",
     ),
-    # B138: dangling high-scope pending device pairing (devices/pending.json). A pending
+    # B138: dangling high-scope pending device pairing (the device_pairing_pending state-database
+    # table; devices/pending.json on an older install). A pending
     # isRepair=true request with an operator.admin/operator.write scope is awaiting human
     # approval - informational awareness, not proof of compromise. Hardening advisory,
     # never FAIL; surface="agents" (control-plane device/identity onboarding).
     CheckMeta(
         "B138",
-        "Dangling high-scope pending device pairing (devices/pending.json)",
+        "Dangling high-scope pending device pairing (device_pairing_pending / devices/pending.json)",
         MEDIUM,
         "advisory",
         "Control Plane / Human Approval",
@@ -2893,7 +2896,11 @@ CATALOG: list[CheckMeta] = [
     # to a record at all -- it returns before the record-builder is ever called -- so the
     # one reachable route to a FAIL-qualifying record is a retired
     # plugins.installs.<id>.clawhubTrustDisposition config record imported by a doctor or
-    # startup config-repair pass, not a live moderation verdict on this install. WARN on
+    # startup config-repair pass (C-645: the STARTUP pass was removed in OpenClaw 2026.9.7;
+    # on 2026.9.7 through 2026.9.9 the import runs from Doctor's preflight; C-686: from
+    # 2026.10.1 the importer is gone and plugins.installs is on the vendor's retired list,
+    # so Doctor refuses it and the route is no longer established), not a live moderation
+    # verdict on this install. WARN on
     # any other non-clean disposition ("review-required", "review-recommended", or a future
     # value) and on clawhubTrustPending/Stale (an unverified/outdated verdict). UNKNOWN when
     # the state DB, the index row, or the column is absent/locked/unreadable (Golden Rule
@@ -3308,9 +3315,11 @@ CATALOG: list[CheckMeta] = [
     ),
     # B350: the gateway operator terminal - a PTY-backed shell with the gateway process
     # environment, served to Control UI and mobile. Grounded on the installed dist
-    # (config-schema.d.ts:4499-4503, description :129-131), default false. WARN-only:
-    # enabling it is the owner's explicit act, so it is a capability disclosure, not a
-    # compromise. A FAIL tier would need its own C-135 pass.
+    # (config-schema.d.ts:4499-4503, description :129-131). The DEFAULT is build-dependent
+    # (C-640): an unset key is OFF on 2026.7.1-2026.7.35 and ON from 2026.8.1 (`!== false`),
+    # so the check forks on the installed build. WARN-only: enabling it (or inheriting the
+    # vendor default) is a capability disclosure, not a compromise. A FAIL tier would need
+    # its own C-135 pass.
     # B351: code mode swaps the model's tool surface for exec+wait behind a catalog
     # bridge. MEDIUM, not HIGH: on releases before 2026.9.6 the guest is sandboxed
     # (QuickJS-WASI) and the feature fails closed, so this is a disclosure that
@@ -4119,7 +4128,7 @@ REMEDIATION = {
                 # Re-grounded against the INSTALLED openclaw@2026.9.1 (2026-09-05): the
                 # bundle name B-738 cited (launch-BmPwk1y9.js) rotated away in 9.1, but the
                 # behaviour did not. The vendor states it itself, as advice for ESCAPING the
-                # sandbox: runtime-status-hcw0I7bE.js:153 offers "Use the agent main session
+                # sandbox: runtime-status-hcw0I7bE.js:153 (2026.9.1) offers "Use the agent main session
                 # instead of a non-main session" when sandbox.mode === "non-main", and
                 # sandbox-cli-W3C8RnNf.js:283 branches on the same mode against
                 # payload.sandbox.sessionIsSandboxed. Cite the STRINGS above, not the bundle

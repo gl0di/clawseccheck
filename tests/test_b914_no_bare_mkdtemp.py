@@ -20,13 +20,15 @@ All 27 were converted. Two shapes did the conversion:
     mirrors an idiom already established in this suite: `_oracle_scratch` in
     tests/test_toolgrant_dist_grounding.py, and `_isolate_local_store` in conftest.py.
 
-Two call sites remain, each with a same/adjacent-line justifying comment naming why
+Three call sites remain, each with a same/adjacent-line justifying comment naming why
 `tmp_path`/`tmp_path_factory` genuinely cannot substitute — the carve-out B-914 itself
 allows ("except where a comment justifies it"):
   * tests/_harnessoracle.py — this module doubles as a standalone CLI
     (`python3.12 tests/_harnessoracle.py --write`), run OUTSIDE pytest to regenerate the
     pinned battery, so no tmp_path/tmp_path_factory fixture is ever available there.
     Self-cleans via a try/finally `shutil.rmtree`.
+  * tests/_retiredformatsoracle.py — the same standalone-CLI case as _harnessoracle.py
+    (`python3.12 tests/_retiredformatsoracle.py --write`), self-cleaning in a try/finally.
   * tests/test_vet_plan_advise.py — needs a path verifiably under
     `tempfile.gettempdir()` specifically (the real-quarantine-path advice branch), which
     pytest's `tmp_path` is not guaranteed to be on every platform. Cleaned up via
@@ -63,6 +65,7 @@ _JUSTIFICATION_TOKEN = "mkdtemp"
 #: originals got (see the module docstring) -- not a place to park an unreviewed one.
 _ACCEPTED_RESIDUALS = frozenset({
     "tests/_harnessoracle.py",
+    "tests/_retiredformatsoracle.py",
     "tests/test_vet_plan_advise.py",
 })
 

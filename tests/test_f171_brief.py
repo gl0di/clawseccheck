@@ -106,7 +106,7 @@ def test_bare_brief_always_returns_zero_even_when_notable(tmp_path, capsys):
     _write_state(store, age_days=20)
     rc = main(["--brief", "--data-dir", str(store), "--home", str(tmp_path / "nohome")])
     out, _ = capsys.readouterr()
-    assert "not running" in out
+    assert "own monitor has not run" in out
     assert rc == 0
 
 
@@ -125,7 +125,7 @@ def test_exit_code_flag_is_zero_when_silent_and_nonzero_when_notable(tmp_path, c
     rc = main(["--brief", "--exit-code", "--data-dir", str(store),
               "--home", str(tmp_path / "nohome")])
     out, _ = capsys.readouterr()
-    assert "not running" in out
+    assert "own monitor has not run" in out
     assert rc == 1
 
 
@@ -149,12 +149,12 @@ def test_silence_past_the_measured_gap_asks_about_the_schedule():
     tier means something stopped rather than that checks are merely infrequent."""
     out = render_brief({"ts": _iso(5)}, [], [], now=_NOW)
     assert "longer than" in out
-    assert "not running" not in out, "5 days is stale, not dead"
+    assert "own monitor has not run" not in out, "5 days is stale, not dead"
 
 
 def test_long_silence_says_monitoring_is_not_running():
     out = render_brief({"ts": _iso(20)}, [], [], now=_NOW)
-    assert "effectively not running" in out
+    assert "ClawSecCheck's own monitor has not run for 20 days" in out  # C-712 wording
     assert "cheapest way to silence a monitor" in out
 
 
@@ -163,8 +163,8 @@ def test_the_ladder_boundaries_are_the_measured_ones():
     assert _BRIEF_STALE_DAYS == 3.0 and _BRIEF_DEAD_DAYS == 14.0
     assert "longer than" not in render_brief({"ts": _iso(2.9)}, [], [], now=_NOW)
     assert "longer than" in render_brief({"ts": _iso(3.1)}, [], [], now=_NOW)
-    assert "not running" not in render_brief({"ts": _iso(13.9)}, [], [], now=_NOW)
-    assert "not running" in render_brief({"ts": _iso(14.1)}, [], [], now=_NOW)
+    assert "own monitor has not run" not in render_brief({"ts": _iso(13.9)}, [], [], now=_NOW)
+    assert "own monitor has not run" in render_brief({"ts": _iso(14.1)}, [], [], now=_NOW)
 
 
 def test_a_baseline_without_a_timestamp_falls_back_to_the_file_time_and_says_so():

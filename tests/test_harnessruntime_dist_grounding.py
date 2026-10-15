@@ -76,7 +76,9 @@ def test_the_installed_build_is_inside_the_validated_window():
         f"installed OpenClaw {ver} is outside the window the Codex-harness determination was "
         f"validated on {hr.ORACLE_MIN}..{hr.ORACLE_MAX}: re-run the live soundness test, "
         f"regenerate the battery (`python3.12 tests/_harnessoracle.py --write`) and raise "
-        f"ORACLE_MAX -- until then B353/B333 fall back to the pre-gate WARN")
+        f"ORACLE_MAX -- until then the harness determination answers unknown for every "
+        f"config, and B353/B333 can only give a disclosed conditional WARN (never a PASS or "
+        f"an exposure stated as fact) wherever the harness is what decides the verdict")
 
 
 def test_pinned_battery_has_not_drifted_from_the_vendor(live):

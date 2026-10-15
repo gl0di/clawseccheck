@@ -39,36 +39,87 @@ broader than "did A1 fire", so an unrelated check moving would hide a planted cr
 Names and digests, never a value and never an absolute path (section 8, the `hostpersist`
 rule). `plaintext` marks the files C015's own secret detector recognises, so one definition
 of "this file carries a plaintext secret" serves both the check and the watch.
+
+## The SQLite stores (C-675)
+
+OpenClaw now keeps its credentials in databases (`config_machine_state` for
+`authProfiles.store` / `auth.sharedStore`, and each agent's `auth_profile_store`), where the
+directory above is empty. For those the watch records, per store, only the label, the value's
+LENGTH and the store's own `updated_at` column: enough to see one appear, vanish or be
+rewritten without reading a value, and no digest of a SQLite store's value is kept. A baseline
+written before this has no `stores` key; the first run after the change records without
+alerting and says so.
 """
 
 from __future__ import annotations
 
-from ._shared import NOTE_INSPECTION_CAPPED, NOTE_UNDETERMINED  # noqa: F401
+import hashlib
+
+from ..logsafe import redact
+from ._shared import (  # noqa: F401
+    NOTE_INSPECTION_CAPPED,
+    NOTE_NO_PRIOR_RECORD,
+    NOTE_UNDETERMINED,
+)
+
+#: A store this long or shorter is the vendor's own initialised-but-empty shape
+#: (`{"version":1,"profiles":{}}`, B-749's `_AUTH_PROFILE_STORE_EMPTY_BYTES`).
+_EMPTY_STORE_BYTES = 27
+
+#: Longest label (store name) kept in a snapshot or printed in an alert. A label is a KEY NAME
+#: the vendor or a user chose, so it is redacted like any other text that may hold a secret, and
+#: a label that was shortened or redacted ends in a short hash of the original so that two keys
+#: sharing a long prefix (or two redacted ones) stay two entries instead of one.
+_LABEL_CAP = 48
+
+
+def _safe_store_label(label) -> str:
+    text = str(label)
+    safe = redact(text)
+    if safe == text and len(text) <= _LABEL_CAP:
+        return text
+    return safe[:_LABEL_CAP - 7] + "~" + hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:6]
+
 
 #: How many file names to spell out before falling back to a count.
 _CRED_NAME_CAP = 3
 
 
-def _credentials_sig(state) -> dict:
-    """The stored form of `checks/_shared._credential_store_state`.
+def _credentials_sig(state, stores=None) -> dict:
+    """The stored form of `checks/_shared._credential_store_state`, plus the SQLite stores.
 
     `{}` when the caller did not scan, which is how a baseline written by a build without
     this dimension is told from a store that is genuinely empty - the same conditional-key
     contract `openclaw_install` and `host_persist` use.
+
+    *stores* is `collector.read_credential_store_rows`' result (C-675). Its `stores` key is
+    written on every run that read them - an EMPTY dict when no database exists, so the first
+    store to appear after a baseline with none is an addition rather than an unexplained
+    absence. Label, length and the store's own timestamp only.
     """
-    if not isinstance(state, dict) or not state.get("present"):
-        return {}
-    digests = state.get("digests")
-    secret = set(state.get("secret_files") or ())
-    files = {}
-    if isinstance(digests, dict):
-        for name, digest in digests.items():
-            files[str(name)] = {"digest": str(digest), "plaintext": str(name) in secret}
-    return {
-        "files": files,
-        "incomplete": bool(state.get("incomplete")),
-        "reason": str(state.get("reason") or ""),
-    }
+    sig: dict = {}
+    if isinstance(state, dict) and state.get("present"):
+        digests = state.get("digests")
+        secret = set(state.get("secret_files") or ())
+        files = {}
+        if isinstance(digests, dict):
+            for name, digest in digests.items():
+                files[str(name)] = {"digest": str(digest), "plaintext": str(name) in secret}
+        sig = {
+            "files": files,
+            "incomplete": bool(state.get("incomplete")),
+            "reason": str(state.get("reason") or ""),
+        }
+    if isinstance(stores, dict):
+        rows = {}
+        for label, rec in (stores.get("stores") or {}).items():
+            rec = rec if isinstance(rec, dict) else {}
+            rows[_safe_store_label(label)] = {
+                "length": rec.get("length"), "updated": rec.get("updated")}
+        sig["stores"] = rows
+        sig["stores_incomplete"] = bool(stores.get("incomplete"))
+        sig["stores_reason"] = str(stores.get("reason") or "")
+    return sig
 
 
 def _credential_names(names) -> str:
@@ -87,6 +138,7 @@ def _diff_credentials(pair, alerts, note) -> None:
     if pair is None:
         return
     prev_rec, curr_rec = pair
+    _diff_credential_stores(prev_rec, curr_rec, alerts, note)
     prev_files = prev_rec.get("files")
     curr_files = curr_rec.get("files")
     if not isinstance(prev_files, dict) or not isinstance(curr_files, dict):
@@ -156,3 +208,89 @@ def _diff_credentials(pair, alerts, note) -> None:
             "INFO",
             f"{len(removed)} file(s) are no longer in your credential store: "
             f"{_credential_names(removed)}."))
+
+
+def _diff_credential_stores(prev_rec, curr_rec, alerts, note) -> None:
+    """What the SQLite credential stores gained, lost, or had rewritten (C-675).
+
+    A credential LANDING is MEDIUM: a store that appears holding more than the vendor's empty
+    shell, or an empty shell (`_EMPTY_STORE_BYTES` or fewer) that now holds more - the
+    planted-credential case, and the shape a first sign-in takes on a real install, where the
+    shell row already exists. A store that was already populated and CHANGED is INFO, never
+    paged, for the reason the directory arm records above: OpenClaw refreshes OAuth grants and
+    writes them back, so length and `updated_at` move on a schedule, and without reading the
+    value a refresh cannot be told from a second credential added to the same row. A shell
+    that merely appears is INFO. Unreadable never reads as unchanged: an incomplete read on
+    either side stands the removals down wholesale and says so.
+    """
+    prev_s, curr_s = prev_rec.get("stores"), curr_rec.get("stores")
+    if not isinstance(curr_s, dict):
+        return
+    if prev_s is None:
+        # A baseline from before this was recorded: heal on this run, say so, alert on nothing.
+        note(NOTE_NO_PRIOR_RECORD,
+             "The credentials your agent keeps in OpenClaw's databases had nothing to compare "
+             "against \u2014 your saved record predates this, and will cover it from the next "
+             "run onwards.")
+        return
+    if not isinstance(prev_s, dict):
+        return
+    incomplete = bool(prev_rec.get("stores_incomplete")) or bool(curr_rec.get("stores_incomplete"))
+    if incomplete:
+        why = curr_rec.get("stores_reason") or prev_rec.get("stores_reason")
+        note(NOTE_INSPECTION_CAPPED,
+             "The credentials kept in OpenClaw's databases were not read in full this time"
+             + (f" ({why})" if why else "")
+             + ", so anything that disappeared from them was not reported.")
+
+    def _length(rec):
+        n = rec.get("length") if isinstance(rec, dict) else None
+        return n if isinstance(n, int) else None
+
+    added = sorted(set(curr_s) - set(prev_s))
+    removed = sorted(set(prev_s) - set(curr_s))
+    added_real = [k for k in added if (_length(curr_s[k]) or 0) > _EMPTY_STORE_BYTES]
+    added_shell = [k for k in added if k not in added_real]
+    if added_real:
+        alerts.append((
+            "MEDIUM",
+            f"{len(added_real)} new credential store(s) appeared in OpenClaw's databases: "
+            f"{_store_names(added_real)}. Confirm you signed in \u2014 a credential planted "
+            "here is one your agent will use."))
+    if added_shell:
+        alerts.append((
+            "INFO",
+            f"{len(added_shell)} new, still-empty credential store(s) appeared in OpenClaw's "
+            f"databases: {_store_names(added_shell)}."))
+    moved = [k for k in sorted(set(prev_s) & set(curr_s))
+             if isinstance(prev_s[k], dict) and isinstance(curr_s[k], dict)
+             and (_length(prev_s[k]) != _length(curr_s[k])
+                  or prev_s[k].get("updated") != curr_s[k].get("updated"))]
+    populated = [k for k in moved
+                 if _length(prev_s[k]) is not None
+                 and _length(prev_s[k]) <= _EMPTY_STORE_BYTES
+                 and (_length(curr_s[k]) or 0) > _EMPTY_STORE_BYTES]
+    changed = [k for k in moved if k not in populated]
+    if populated:
+        alerts.append((
+            "MEDIUM",
+            f"{len(populated)} credential store(s) that were empty now hold a credential in "
+            f"OpenClaw's databases: {_store_names(populated)}. Confirm you signed in \u2014 a "
+            "credential planted here is one your agent will use."))
+    if changed:
+        alerts.append((
+            "INFO",
+            f"{len(changed)} credential store(s) in OpenClaw's databases changed: "
+            f"{_store_names(changed)}. Routine for an OAuth grant, which OpenClaw refreshes and "
+            "rewrites on its own; recorded here so the timeline has it."))
+    if removed and not incomplete:
+        alerts.append((
+            "INFO",
+            f"{len(removed)} credential store(s) are no longer in OpenClaw's databases: "
+            f"{_store_names(removed)}."))
+
+
+def _store_names(names) -> str:
+    shown = sorted(names)[:_CRED_NAME_CAP]
+    hidden = len(names) - len(shown)
+    return ", ".join(shown) + (f" and {hidden} more" if hidden > 0 else "")

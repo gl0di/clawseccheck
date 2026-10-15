@@ -112,10 +112,16 @@ def _step(version, delta):
 
 BELOW_WINDOW = _step(hr.ORACLE_MIN, -1)
 ABOVE_WINDOW = _step(hr.ORACLE_MAX, +1)
+# Builds a re-baseline will want to call "newer", derived from the ceiling rather than written
+# as literals: the first minor and the first year past it, and a two-digit patch (numeric, not
+# lexicographic, comparison) on the ceiling's own minor.
+NEXT_MINOR = (hr.ORACLE_MAX[0], hr.ORACLE_MAX[1] + 1, 1)
+NEXT_YEAR = (hr.ORACLE_MAX[0] + 1, 1, 1)
+TWO_DIGIT_PATCH = (hr.ORACLE_MAX[0], hr.ORACLE_MAX[1], hr.ORACLE_MAX[2] + 9)
 
 
 @pytest.mark.parametrize("version", [None, (), BELOW_WINDOW, ABOVE_WINDOW,
-                                     (2026, 8, 2), (2026, 7, 1, 2), (2026, 10, 1), (2027, 1, 1)])
+                                     (2026, 8, 2), (2026, 7, 1, 2), NEXT_MINOR, NEXT_YEAR])
 def test_outside_the_validated_window_or_unknown_is_always_unknown(version):
     for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
         row = next(r for r in ROWS if r["label"] == label)
@@ -139,7 +145,7 @@ def test_a_newer_build_is_never_definite_until_the_battery_is_rerun():
     ``value?.id?.trim`` on a numeric ``agentRuntime.id``) where 9.4 returned a runtime."""
     for label in ("openai-primary", "anthropic-primary", "pin-provider-codex"):
         row = next(r for r in ROWS if r["label"] == label)
-        for newer in (ABOVE_WINDOW, (2026, 10, 1), (2027, 1, 1), (2026, 9, 9)):
+        for newer in (ABOVE_WINDOW, NEXT_MINOR, NEXT_YEAR, TWO_DIGIT_PATCH):
             assert _reach(row, newer).answer == hr.UNKNOWN, (label, newer)
 
 

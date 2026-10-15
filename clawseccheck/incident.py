@@ -27,10 +27,12 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from . import pathprobe
 from . import trajectory as _trajectory
 from . import trajectorystore as _trajectorystore
-from .catalog import ACTIONABLE_STATUSES
-from .checks import SECRET_PATTERNS, _pattern_hits_real_secret, _secret_paths
+from .catalog import ACTIONABLE_STATUSES, FAIL_WEIGHT_STATUSES
+from .checks import SECRET_PATTERNS, _is_secret_reference, _pattern_hits_real_secret, _secret_paths
+from .collector import dig
 from .incidentstore import DEFAULT_INCIDENTS, _incident_to_dict, create_incident
 from .monitor import DEFAULT_EVENTS, load_events
 from .monitorstore import _last_chain_hash
@@ -79,7 +81,8 @@ def _pid_from_findings(findings) -> "tuple[str | None, str | None]":
 
 def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
                              events: "str | Path | None" = None,
-                             when: "str | None" = None) -> "tuple[dict | None, str | None]":
+                             when: "str | None" = None,
+                             nothing_to_audit: bool = False) -> "tuple[dict | None, str | None]":
     """--incident-open's entry point: derive a new persisted Incident from findings this
     audit run actually produced. Filters to catalog.ACTIONABLE_STATUSES -- the same
     shared FAIL-weight/WARN vocabulary B-751/B-755 exist to keep every consumer using,
@@ -89,16 +92,27 @@ def open_incident_from_audit(ctx, findings, *, path: "str | Path | None" = None,
 
     Returns (record_dict, None) on success, or (None, reason) where reason is
     "no_actionable_findings" (refused -- an incident needs a real basis, never a
-    fabricated one) or "write_failed".
+    fabricated one), "nothing_to_audit" (refused -- C-716, see below) or "write_failed".
+
+    *nothing_to_audit* is the caller's statement that the audited home is missing or an
+    empty directory (the CLI passes its own first-run predicate, ``_onboarding_reason``).
+    Such a run still emits a few WARNs (A1, B16, C5) that describe the absence of a setup,
+    and an incident recorded from those is an incident about nothing. It refuses ONLY when
+    no finding is FAIL-weight: a FAIL is never dropped on the strength of this flag. The
+    first version of this gate refused whenever no openclaw.json was found, which also
+    refused a home with no config and a malicious skill in it - two CRITICAL FAILs and no
+    incident. A home that holds anything is not "nothing to audit".
     """
     actionable = [f for f in findings if f.status in ACTIONABLE_STATUSES]
+    if nothing_to_audit and not any(f.status in FAIL_WEIGHT_STATUSES for f in actionable):
+        return None, "nothing_to_audit"
     if not actionable:
         return None, "no_actionable_findings"
 
     finding_ids = [f.id for f in actionable]
     pid, process_name = _pid_from_findings(actionable)
     events_path = DEFAULT_EVENTS if events is None else events
-    monitor_watermark = _last_chain_hash(Path(events_path).expanduser()) or None
+    monitor_watermark = _last_chain_hash(pathprobe.expand_user(events_path)) or None
     store_path = DEFAULT_INCIDENTS if path is None else path
 
     inc = create_incident(finding_ids, pid=pid, process_name=process_name,
@@ -232,6 +246,10 @@ def _trajectory_hash_entries(home, *, max_files: int | None = None) -> list[dict
     return entries
 
 
+# The two config paths check_secrets (B1) names unconditionally, at any length.
+_B1_NAMED_PATHS = ("gateway.auth.password", "hooks.token")
+
+
 def _credential_rotation_list(ctx, findings) -> list[str]:
     """Inventory-driven, not verdict-driven (B-569). The old version returned
     B41's evidence verbatim; B41's scope is "credentials reachable by untrusted
@@ -252,9 +270,19 @@ def _credential_rotation_list(ctx, findings) -> list[str]:
         blast-radius framing; unioned in rather than replaced.
       * checks/_shared.py _secret_paths(ctx.config) - NOW COVERED, this is the
         fix. Every SECRET_KEY_RE-matching config path holding a real inline
-        value (password/secret/token/apiKey/botToken) - the same inventory B1
-        counts but does not always surface - independent of file permissions
-        or any check's PASS/FAIL. Paths only, never values (§8).
+        value of >= 16 chars (password/secret/token/apiKey/botToken) - the same
+        inventory B1 counts but does not always surface - independent of file
+        permissions or any check's PASS/FAIL. Paths only, never values (§8).
+      * B1's two named config paths, gateway.auth.password and hooks.token - NOW
+        COVERED at ANY length (C-623). B1 names them whenever they are set, so
+        the pack lists them whenever they are a non-reference string, however
+        short. A 15-char password is exactly what a person types; silence would
+        read as absence (the same rule as the bootstrap-file bullet below).
+      * Any other SECRET_KEY_RE-matching non-empty, non-reference string shorter
+        than 16 chars - NOW COVERED, marked "(short value, unconfirmed)": it may
+        be a placeholder or a mode word ("env"), so it is listed with that
+        caveat rather than omitted (C-623). The label never carries the value
+        or its length.
       * B1's bootstrap-file pattern hits (ctx.bootstrap, SECRET_PATTERNS) - NOW
         COVERED, marked uncertain. A free-text regex match against prose, not a
         structured key: this can name the FILE but not confirm the string is a
@@ -286,8 +314,19 @@ def _credential_rotation_list(ctx, findings) -> list[str]:
         for line in b41.evidence:
             seen.setdefault(line, None)
 
-    for path in _secret_paths(ctx.config if isinstance(ctx.config, dict) else {}):
+    cfg = ctx.config if isinstance(ctx.config, dict) else {}
+    for path in _secret_paths(cfg):  # >= 16 chars, as before
         seen.setdefault(f"config: {path}", None)
+    # B1 names these two whenever they are set, however short (B1 parity). Strings
+    # only: the structured SecretRef object form is a dict and holds no value.
+    for path in _B1_NAMED_PATHS:
+        v = dig(cfg, path)
+        if isinstance(v, str) and v and not _is_secret_reference(v):
+            seen.setdefault(f"config: {path}", None)
+    # Any other secret-keyed short string: listed, but honestly marked, never omitted.
+    for path in _secret_paths(cfg, min_len=1):
+        if f"config: {path}" not in seen:
+            seen.setdefault(f"config: {path} (short value, unconfirmed)", None)
 
     for fname, text in (ctx.bootstrap or {}).items():
         if _pattern_hits_real_secret(SECRET_PATTERNS, text):

@@ -38,6 +38,11 @@ short-circuiting on `collector._is_own_source`) had two defects, now fixed:
    markers' identifiers occur in its raw text) survived the move to AST and remains
    sound: an AST node's identifier is always spelled exactly as in source.
 
+C-636 (Dave, 2026-09-30) supersedes item 1's "danger's PASS is a policy default": the
+canned B13 PASS is gone, the skip is an engine-degraded B13 UNKNOWN (CAUTION, "NOT
+SCANNED"), and the residual in item 2 is pinned by name in
+`tests/test_c636_own_source_identity_is_not_a_clean_bill.py`.
+
 Every test below is offline and reads/writes only `tmp_path` / bundled fixtures.
 """
 from __future__ import annotations
@@ -47,7 +52,7 @@ import time
 from pathlib import Path
 
 from clawseccheck import collector as _collector_mod
-from clawseccheck.catalog import FAIL, PASS, UNKNOWN
+from clawseccheck.catalog import FAIL, UNKNOWN
 from clawseccheck.checks import vet_skill
 from clawseccheck.collector import (
     _MAX_OWN_SOURCE_BYTES,
@@ -61,7 +66,7 @@ _REPO = Path(__file__).resolve().parent.parent
 _FIXTURES = _REPO / "fixtures"
 _ENVTOOLS = _FIXTURES / "bad_b335_runtime_persist_install" / "skills" / "envtools"
 
-_SELF_SOURCE_PHRASE = "This is ClawSecCheck's own source"
+_SELF_SOURCE_PHRASE = "NOT SCANNED. This directory matched ClawSecCheck's own-source layout"
 
 
 def _axis(profile, name):
@@ -350,8 +355,9 @@ def test_planting_the_nested_fstring_spoof_beside_a_real_malicious_skill_does_no
 
 def test_self_source_wording_no_longer_claims_the_danger_axis_ran():
     """The real repo root (genuinely own source) must not claim danger "ran" in the
-    text explaining why the other four axes are unmeasured, and danger's own PASS
-    reason must not claim a completed scan either."""
+    text explaining why the other four axes are unmeasured, and danger's own reason
+    must not claim a completed scan either (C-636: it is UNKNOWN / "NOT SCANNED" now,
+    where it used to be a policy-default PASS)."""
     finding = vet_skill(_REPO)
     assert _SELF_SOURCE_PHRASE in finding.detail, (
         f"the real repo root must trip _is_own_source: {finding.detail!r}"
@@ -359,12 +365,13 @@ def test_self_source_wording_no_longer_claims_the_danger_axis_ran():
     profile = build_profile(finding, str(_REPO), "skill")
 
     danger = _axis(profile, "danger")
-    assert danger.status == PASS
+    assert danger.status == UNKNOWN
     assert "no malware signature or known-bad indicator" not in danger.reason, (
-        "danger's self-source PASS must not claim a completed scan: "
+        "danger's self-source reason must not claim a completed scan: "
         f"{danger.reason!r}"
     )
-    assert "scan" in danger.reason and "not" in danger.reason.lower(), danger.reason
+    assert "not scanned" in danger.reason.lower(), danger.reason
+    assert profile.verdict == "CAUTION"
 
     for name in ("build", "behavior", "persistence", "connections"):
         axis = _axis(profile, name)

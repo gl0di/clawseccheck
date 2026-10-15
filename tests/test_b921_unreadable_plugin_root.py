@@ -17,8 +17,8 @@ listable, not searchable) made every check inside `_locate_plugin_root` raise
     loop over every `npm/projects/<wrapper>` directory, so ONE unreadable wrapper dir
     aborted visibility into every other plugin cache in the same run.
 
-Confirmed live against the two Python versions this repo's CI actually pins (3.9, 3.12)
-before writing the fix: stat-ing *p* itself never raises (mode 0000 on *p* only blocks
+Confirmed live against the two Python versions this repo's CI pinned when the fix was
+written (3.9, 3.12; CI gained a 3.14 leg later, C-647): stat-ing *p* itself never raises (mode 0000 on *p* only blocks
 searching INTO it — resolving *p* needs search permission on *p*'s PARENT, not on *p*),
 but stat-ing a child of *p* does.
 
@@ -186,27 +186,13 @@ def test_unreadable_root_via_cli_renders_a_dossier_not_a_crash_banner(tmp_path, 
     stdout empty -- no dossier, no JSON, nothing a downstream consumer (human or SARIF/
     JSON parser) can read at all.
 
-    rc == 0 here, NOT != 0: `vet_plugin()`'s early-return UNKNOWNs (this one and its two
-    pre-existing siblings, "no plugin found at {p}" / "not an OpenClaw plugin: no
-    manifest found") carry no ring_findings/axis_reasons, so build_profile() drops the
-    bare PLUGIN-VET container from every axis bucket (dossier.py's `_normalize_pool`
-    docstring: "the container id itself maps to None and is dropped from axes") --
-    `_danger_coverage_gap` never sees this finding's `engine_degraded` flag, so
-    `overall_status` stays UNKNOWN rather than the WARN B-092 would floor a
-    ring-findings-bearing engine-degraded UNKNOWN to (the B-902 tree-sweep shape).
-    cli.py's own documented mapping then reads "UNKNOWN + target exists" as rc=0 --
-    "valid target, inconclusive assessment". This is IDENTICAL to what the sibling
-    "not an OpenClaw plugin" branch already returns for a readable-but-manifest-less
-    directory (verified directly against `vet_plugin()` on this branch before writing
-    this test) -- this fix does not introduce a new, more lenient rc for this shape; it
-    replaces a crash (no output at all) with the SAME rc the nearest existing precedent
-    already produces, plus an honest CAUTION dossier and a properly `engine_degraded`
-    Finding (verified in the raw JSON: `--json` renders `"verdict": "CAUTION"`,
-    `"engine_degraded": true`) where there used to be nothing. Whether early-return
-    PLUGIN-VET containers SHOULD also feed the axis-bucket mechanism (so
-    engine_degraded escalates rc for this whole family of early exits, not just the
-    sub-finding-bearing ones) is a pre-existing question this fix does not attempt to
-    resolve — see the task's final report for the flagged follow-up."""
+    rc == 1: the dossier's verdict is CAUTION, and every CAUTION exits 1 (the one rule
+    `cli._vet_exit_code` applies to --vet / --vet-skill / --vet-plugin / --advise). This
+    test used to pin rc == 0, the old "UNKNOWN + target exists" mapping it shared with the
+    readable-but-manifest-less directory: a plugin root nothing could read passed an
+    `--vet-plugin ... || fail` install gate with a CAUTION header on screen. What this
+    test guards is unchanged: a dossier and an honest CAUTION, not a crash banner and not
+    the usage-error code 2."""
     root = _mk_plugin(tmp_path / "plug")
     root.chmod(0o000)
     try:
@@ -214,7 +200,7 @@ def test_unreadable_root_via_cli_renders_a_dossier_not_a_crash_banner(tmp_path, 
     finally:
         root.chmod(0o755)
     out = capsys.readouterr()
-    assert rc == 0
+    assert rc == 1
     assert "unexpected internal error" not in out.err
     assert "RISK DOSSIER" in out.out
     assert "CAUTION" in out.out
@@ -236,7 +222,7 @@ def test_unreadable_root_via_cli_json_discloses_engine_degraded_and_reason(tmp_p
         root.chmod(0o755)
 
     out = capsys.readouterr()
-    assert rc == 0
+    assert rc == 1  # CAUTION exits 1, see the test above
     payload = _json.loads(out.out)
     assert payload["verdict"] == "CAUTION"
     findings = payload["findings"]
@@ -348,19 +334,19 @@ def test_normal_readable_plugin_root_still_resolves_and_scans(tmp_path):
 # 6. B-966 — the EACCES-vs-ENOENT distinction must come from os.stat()'s own  #
 #    errno, not from Path.is_file()/is_dir()'s internal ignore-set.          #
 #                                                                              #
-#    CPython's pathlib was rewritten around 3.13; on 3.13+ Path.is_file()/    #
-#    is_dir() started swallowing EACCES/EPERM too (returning False instead    #
-#    of raising), which is exactly what the guard above depended on NOT       #
-#    happening. os.stat()'s raised OSError.errno is stable across versions,   #
-#    so _locate_plugin_root_or_reason now resolves via _stat_or_reason()      #
-#    instead of Path.is_file()/is_dir(). These tests pin that mechanism       #
-#    directly rather than only the outward behavior sections 1-5 already      #
-#    cover on this repo's pinned 3.9/3.12 -- section 1-5's tests would not    #
-#    have caught this on a 3.13+ interpreter before this fix (Path.is_file()  #
-#    silently returning False looks identical to "genuinely absent"); the     #
-#    tests below no longer route through Path.is_file()/is_dir() at all for   #
-#    the permission check, so they hold regardless of how a future CPython    #
-#    version implements pathlib internally.                                   #
+#    A later CPython changed that: measured on 3.14.4, Path.is_file()/        #
+#    is_dir() return False for EACCES/EPERM too instead of raising (3.9 and   #
+#    3.12 raise; 3.13 was not measured), which is exactly what the guard      #
+#    above depended on NOT happening. os.stat()'s raised OSError.errno is     #
+#    the same on every version, so _locate_plugin_root_or_reason resolves     #
+#    via _stat_or_reason() instead of Path.is_file()/is_dir(). These tests    #
+#    pin that mechanism directly rather than only the outward behavior        #
+#    sections 1-5 already cover: on the 3.9 and 3.12 legs CI had when this    #
+#    was written, sections 1-5 could not have caught the regression           #
+#    (Path.is_file() silently returning False looks identical to              #
+#    "genuinely absent"). The tests below do not route through                #
+#    Path.is_file()/is_dir() at all for the permission check, so they hold    #
+#    however a given CPython implements pathlib internally.                   #
 # --------------------------------------------------------------------------- #
 
 

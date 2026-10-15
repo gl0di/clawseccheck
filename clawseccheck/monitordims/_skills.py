@@ -11,7 +11,10 @@ import re  # noqa: F401
 from ._shared import NOTE_INSPECTION_CAPPED, _h  # noqa: F401
 
 
-_SKILL_VERSION_RE = re.compile(r"(?im)^\s*version:\s*['\"]?([\w.\-+]+)['\"]?\s*$")
+# C-730: linear time. `^\s*` under (?m) also ran across the blank lines before the key, so a
+# skill file of blank lines was rescanned from every line start. `^[^\S\n]*` stays on the
+# key's line: the same line is found with the same group 1 (what every caller reads).
+_SKILL_VERSION_RE = re.compile(r"(?im)^[^\S\n]*version:\s*['\"]?([\w.\-+]+)['\"]?\s*$")
 
 
 def _b62_families(name: str, ctx) -> "frozenset":

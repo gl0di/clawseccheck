@@ -13,6 +13,7 @@ from __future__ import annotations
 import re  # noqa: F401
 from pathlib import Path  # noqa: F401
 
+from .. import pathprobe
 from ..logsafe import sanitize_url_host_only  # noqa: F401
 from ._shared import (  # noqa: F401
     NOTE_INSPECTION_CAPPED,
@@ -201,10 +202,10 @@ def _snapshot_memory_files(ctx, capped: "list | None" = None) -> dict:
 
     for ws in WORKSPACE_DIRS:
         mem_dir = ctx.home / ws / "memory"
-        if not mem_dir.is_dir():
+        if not pathprobe.is_dir(mem_dir):
             continue
         for p in sorted(mem_dir.rglob("*")):
-            if p.is_symlink() or not p.is_file():
+            if pathprobe.is_symlink(p) or not pathprobe.is_file(p):
                 continue
             try:
                 rel = p.relative_to(ctx.home)

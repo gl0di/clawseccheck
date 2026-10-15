@@ -181,11 +181,14 @@ def test_vet_valid_skill_dir_pass_returns_zero(tmp_path, capsys):
     assert rc == 0
 
 
-def test_vet_valid_target_unknown_returns_zero(tmp_path, monkeypatch, capsys):
-    """Valid target that vets to UNKNOWN (inconclusive) must return rc == 0.
+def test_vet_valid_target_unknown_is_a_caution_and_returns_one(tmp_path, monkeypatch, capsys):
+    """Valid target that vets to UNKNOWN (inconclusive) prints CAUTION and returns rc == 1.
 
-    UNKNOWN on an existing path is a legitimate audit result, not an
-    operational failure — only a missing/unusable target returns rc != 0.
+    This pinned rc == 0 ("a legitimate audit result, not an operational failure") until
+    the exit code was made to follow the verdict word: the dossier says CAUTION for a
+    target the scan could not assess, and a CAUTION that exits 0 passes an
+    `--vet ... || fail` install gate. It is still not the usage error: a missing or
+    unusable target returns 2, and this must not.
     """
     skill = tmp_path / "SKILL.md"
     skill.write_text("---\nname: test\nversion: 0.1.0\n---\n", encoding="utf-8")
@@ -203,7 +206,8 @@ def test_vet_valid_target_unknown_returns_zero(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr("clawseccheck.cli.vet_skill", _fake_vet_unknown)
     rc = main(["--vet", str(skill)])
-    assert rc == 0
+    assert rc == 1
+    assert "CAUTION" in capsys.readouterr().out
 
 
 def test_vet_nonexistent_target_unknown_returns_nonzero(tmp_path, monkeypatch, capsys):

@@ -129,6 +129,7 @@ from ._shared import (
     OUTBOUND_TOOL_HINTS,
     OUTBOUND_TOOL_IDS,
     _OWN_ENGINE_MARKERS,
+    _own_source_symlinks,
     parse_bind_host,
     _perms_loose,
     _POWERFUL_PROFILES,
@@ -143,6 +144,19 @@ from ._shared import (
     SECRET_KEY_RE,
     _SECRET_PATH_RE,
     _secret_paths,
+    _vendor_secret_slot_paths,
+    _vendor_slot_covers,
+    _vendor_slot_hit,
+    _url_inline_password,
+    _concrete_secret_literal,
+    _header_name_is_credential,
+    _map_entry_is_indirection,
+    _c015_md_credential_lines,
+    _c015_md_value_is_real_secret,
+    _c015_text_without_managed_github_ids,
+    _managed_github_profile_ids,
+    _CONFIG_SECRET_LEAF_RE,
+    _VENDOR_NOT_SECRET_PATHS,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
     _skill_corpus_complete,
@@ -181,6 +195,12 @@ from ._host import (
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_tool_texts, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
 from ._shared import (_RETIRED_CONFIG_KEYS, _retired_keys_present,)
+# C-645: the boot-time config self-heal was removed in 2026.9.7; B382 / B38 / RISK-05 /
+# RISK-15 word their advice off this one predicate (risk.py reaches it only through here).
+from ._shared import (_startup_repair_removed, _legacy_ssrf_alias_startup_blocked, _LEGACY_SSRF_ALIAS_970_FACT, _LEGACY_SSRF_ALIAS_970_ORDER,)
+# C-686: from 2026.10.1 Doctor and `openclaw update` refuse the retired formats; the advice that
+# sent the user to `openclaw doctor --fix` is worded off this one predicate.
+from ._shared import (_DOCTOR_REFUSES_RETIRED_MIN, _RETIRED_STATE_BRIDGE_VERSION, _LEGACY_SSRF_ALIAS_1010_FACT, _LEGACY_SSRF_ALIAS_1010_ORDER, _LEGACY_SSRF_ALIAS_1010_INERT, _DOCTOR_WHOLE_CONFIG_HEDGE, _doctor_refuses_retired_formats, _doctor_whole_config_hedge, _legacy_ssrf_alias_consequence, _legacy_ssrf_alias_fact, _legacy_ssrf_alias_order,)
 from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands, _node_allow_skills,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate - risk.py's ingress leg reaches it only
@@ -219,9 +239,11 @@ from ._egress import (
     check_state_db_atrest,
     check_debug_proxy_capture,
     _other_can_reach_write,
+    _B188_COPY_CAP,
     _b188_collect_state_copies,
     _b188_collect_backups,
     _b188_dir_traversable_by_other,
+    _b188_retained_copy_warn,
     check_discovery_mdns_mode,
     check_egress,
     check_egress_inventory,
@@ -253,6 +275,12 @@ from ._shared import (  # B-666
     _credential_store_state,
 )
 from ._shared import (_unpolicied_open_wildcard_group_channels,)  # B-371
+from ._shared import (  # C-646
+    _credential_is_plaintext,
+    _ENV_SUBSTITUTION_REFERENCE_RE,
+    _has_env_template,
+    _is_secret_ref_object,
+)
 from ._agents import (
     _ACTIONS_ALLOW_UNDETERMINED,
     _B21_OBEY_RE,
@@ -354,6 +382,7 @@ from ._config import (
     _MISSING_LEG_ACTIVATORS,
     _c015_candidate_files,
     _c015_has_secret,
+    _c015_md_credential_list_hit,
     _capabilities_attested,
     _is_constraining_proxy_entry,
     _distance_note,
@@ -414,10 +443,13 @@ from ._config import (
 )
 
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
-from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference,)  # B-397: relocated from _config (reused by B326 too)
+from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference, _b323_token_body_is_valid,)  # B-397: relocated from _config (reused by B326 too)
 from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
 from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEASURED_MIN, _cross_context_default,)  # B-833
 from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
+from ._shared import (_TERMINAL_DEFAULT_ON_MIN, _TERMINAL_OFF_MEASURED_MIN, _TERMINAL_OFF_MEASURED_MAX, _TERMINAL_OFF_MEASURED_SPANS, _terminal_default,)  # C-640
+from ._shared import (_ALLOW_BOTS_DEFAULT_ALLOW_MIN, _ALLOW_BOTS_DENY_MEASURED_MIN, _ALLOW_BOTS_FLIPPED_CHANNELS, _allow_bots_default,)  # B372 re-grounded
+from ._shared import (_ENV_DEFAULT_OPERATOR_MIN, _ENV_DEFAULT_OPERATOR_SERIES_YEAR, _env_default_operator, _empty_fallback_template,)  # C-646
 from ._shared import (_PORTALS_ABSENT_MEASURED_MIN, _PORTALS_GROUNDED_MIN, _portal_model_version,)  # B397
 from ._lifecycle import (
     _APPROVAL_BYPASS_RE,
@@ -616,6 +648,9 @@ from ._content import (
     _KNOWN_NAMES,
     _LIFECYCLE_HOOK_RE,
     _MANIFEST_HEADER_RE,
+    _NEGATION_DONOT_REACH,
+    _NEGATION_DONOT_RE,
+    _NEGATION_DONOT_VERBS,
     _NEGATION_RE,
     _NEGATION_WINDOW,
     _PKG_JSON_DEP_RE,
@@ -714,6 +749,7 @@ from ._content import (
     _skill_declared_tools,
     _skill_is_unreachable,
     _squat_hits,
+    _straddling_donot_marker,
     _symlink_scan_roots,
     _symlink_target_sensitive,
     _try_b64_decode,
@@ -786,6 +822,20 @@ from ._vet import (
     _CRON_PERSIST_RE,
     _DAEMONIZE_RE,
     _DESTRUCTIVE_CMD_RE,
+    _F052_ACTION_START_RE,
+    _F052_BARE_NEGATOR_RE,
+    _F052_CLAUSE_CUT_RE,
+    _F052_DEBRIS_RE,
+    _F052_EVEN_IF_RE,
+    _F052_FILE_HEADER_RE,
+    _F052_FRONT_WORDS,
+    _F052_GAP,
+    _F052_LEAD_WORDS,
+    _F052_LOOKBACK,
+    _F052_NONBREAK_RE,
+    _F052_TAIL_TAKEBACK_RE,
+    _F052_TAIL_WINDOW,
+    _F052_TOKEN_RE,
     _HTML_TAG_RE,
     _IOC_IPURL_RE,
     _LOCAL_SINK_CHANNELS,
@@ -800,6 +850,7 @@ from ._vet import (
     _RUNTIME_FETCH_URL_RE,
     _RUNTIME_FETCH_VERB_RE,
     _RUNTIME_FETCH_WINDOW,
+    _SAFETY_EXAMPLE_MAY_CONTAIN_RE,
     _SAFETY_EXAMPLE_RE,
     _SAFETY_EXAMPLE_WINDOW,
     _SELF_MOD_RE,
@@ -826,6 +877,10 @@ from ._vet import (
     _agent_config_write_hits,
     _blank_fences,
     _decoded_payloads,
+    _f052_action_negated,
+    _f052_clause_start,
+    _f052_negator_opens_clause,
+    _f052_words,
     _fetch_prohibition_governs,
     _has_cred_exfil_outside_fence,
     _in_example_context,
@@ -935,6 +990,7 @@ from ._mcp import (
     _b333_modern_surface_verdict,
     _b333_waived_tool_names,
     _CODEX_APPSERVER_RUNTIME_CAVEAT,
+    _CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ,
     _CODEX_EXEC_UNRESOLVED,
     _codex_appserver_posture,
     _codex_appserver_yolo_reach,
@@ -1552,7 +1608,7 @@ CHECKS = [
     check_cron_scheduler,
     check_cron_job_content,  # B168 - cron job store payload.message/trigger.script scan (B-231)
     check_cron_run_log_orphans,  # B189 - cron run log without a surviving job definition (B-294)
-    check_exec_approvals_grants,  # B172 - standing exec-approvals.json allow-always grant inventory (B-236)
+    check_exec_approvals_grants,  # B172 - standing exec-approvals allow-always grant inventory, state DB or legacy file (B-236)
     # Content-security ring - single source of truth (also consumed by vet_skill).
     # SKILL_CONTENT_RING is DEFINED in checks/_vet.py and imported at the top of this
     # file; the block above documents it, it does not declare it. Splicing it here is

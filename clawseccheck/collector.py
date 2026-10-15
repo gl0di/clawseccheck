@@ -4,7 +4,8 @@ This module never writes, never makes a network call, and imports nothing beyond
 stdlib - but "reads only config and bootstrap files" undersells its real scope, which
 every check needs to draw on. The ``LIMIT_DOMAIN_*`` constants below name every domain
 it reads from: ``~/.openclaw/openclaw.json``, workspace bootstrap markdown, installed
-skill/plugin text, the cron job store, exec-approvals state, the OpenClaw dotenv files
+skill/plugin text, the cron job store, exec-approvals state (the legacy JSON file and its
+SQLite successor), the OpenClaw dotenv files
 and systemd ``EnvironmentFile=`` lines, subagent-run and audit-event trails. Each read
 is bounded (size caps, no execution of anything read) - see the individual
 ``_collect_*`` functions and ``SECURITY_MODEL.md`` for the full, itemized capability
@@ -18,7 +19,6 @@ import errno
 import math
 import hashlib
 import io
-import json
 import re
 import os
 import sqlite3
@@ -31,9 +31,15 @@ import lzma
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from . import pathprobe
 from .configloader import (
     ConfigLoadError as _ConfigLoadError,
+    JSONNestingError as _JSONNestingError,
+    MAX_JSON_NESTING as _MAX_JSON_NESTING,
+    SHALLOW_JSON_DEPTH as _SHALLOW_JSON_DEPTH,
     load_openclaw_config as _load_openclaw_config,
+    loads_bounded as _loads_bounded,
+    loads_shallow as _loads_shallow,
 )
 from .safeio import walk_dir_safely, is_safe_tar_member
 from .skilldiscovery import (
@@ -193,6 +199,30 @@ _MAX_CONFIG_BYTES = 5_000_000
 # start dropping real sources -- which would cost RECOGNITION of our own tree, not safety.
 _MAX_OWN_SOURCE_BYTES = 2_000_000
 
+# C-616: the per-file cap above bounds ONE file, not the directory. `_is_own_source` also
+# had no bound on how many `*.py` entries the engine directory lists or on the sum of the
+# bytes it reads and parses, so one planted `<root>/clawseccheck/checks/` full of under-cap
+# decoy files (marker names in a comment is enough to force the parse) cost seconds and
+# about 1 GB per directory, unbounded in the number of files. These two bound the WHOLE
+# directory. Either one tripping answers "not our source" (False = scan the tree), the safe
+# direction -- never a grant of identity. They bound files, bytes and entry types, NOT
+# parse time, so they do NOT make one directory cheap: on Python 3.12 the parse of
+# f-string-dense source is superlinear (dominated by the per-file cap), one measured shape
+# that fits every bound costs at least ~110-160 s CPU, a denser one about twice that, and
+# NO ceiling is claimed -- see the C-616 RESIDUAL in `_is_own_source`'s docstring before
+# relying on any figure quoted here.
+#   * _MAX_OWN_SOURCE_FILES: the real engine has 11 files, so 32 is ~2.9x headroom.
+#   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.6 MB in all,
+#     largest about 0.95 MB, so 8 MB is ~1.7x headroom, in line with the ~2x the per-file
+#     cap keeps over the largest real file. Only files under the per-file cap count
+#     toward it. (The engine figures are rounded; a test fails if they drift over 3%.)
+# Do NOT lower any of the three without re-measuring: a cap the real install exceeds loses
+# recognition of the tool's own tree and the audit then self-flags CRITICAL on its own
+# skill. `tests/test_c616_own_source_directory_bounds.py` pins the headroom on the real
+# package so it goes red BEFORE the engine outgrows a cap.
+_MAX_OWN_SOURCE_FILES = 32
+_MAX_OWN_SOURCE_TOTAL_BYTES = 8_000_000
+
 # B-231 sub-item 1: the cron job store (~/.openclaw/cron/jobs.json, or the SQLite-backed
 # cron_jobs table when the legacy JSON file is absent) is read-only, symlink-safe, and
 # capped the same way as the config/bootstrap reads above - a huge/padded store must not
@@ -210,11 +240,22 @@ _MAX_CRON_RUN_LOGS = 500
 # read-only and size/entry-capped the same way as the cron store above.
 _MAX_EXEC_APPROVALS_BYTES = _MAX_CONFIG_BYTES
 _MAX_EXEC_APPROVALS_AGENTS = 200
+# Current OpenClaw builds keep the SAME document as one row of the state database's
+# `exec_approvals_config` table (src/infra/exec-approvals-sqlite.ts:
+# EXEC_APPROVALS_CONFIG_KEY = "current"); the legacy file above is then only a pending
+# import. Both readers share the cap constants above and one ingest helper.
+_EXEC_APPROVALS_SQLITE_KEY = "current"
 
 # F-192: `update_runs` is one row per self-update attempt (chat/control-ui/cli/campaign/
 # mac-app/api triggered) -- a far rarer event than a cron tick, so a generous cap that
 # never truncates a real machine while still bounding a hostile/corrupt store.
 _MAX_UPDATE_RUNS = 50
+
+# C-701: the supervisor restart handoff (`gateway_restart_handoff` in the state DB). The
+# vendor keeps ONE row (handoff_key = 'current'); the cap only bounds a hostile or padded
+# store. Rows are read oldest-expiry first, so a cut-off can never hide a stale row: if the
+# oldest `_MAX_RESTART_HANDOFF_ROWS` have not expired, no later row has either.
+_MAX_RESTART_HANDOFF_ROWS = 16
 
 # B-725: the shared skill-library surface in the state DB (skill_library_entries,
 # skill_uploads) -- bounded the same way as the row-scanning readers above. A hostile
@@ -296,7 +337,7 @@ def _note_skill_gap(ctx, skill_dir: Path, entry: str) -> None:
     """
     if ctx is None:
         return
-    owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+    owner = skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
     ctx.skill_coverage_gaps.setdefault(owner, []).append(entry)
 
 
@@ -320,7 +361,7 @@ def _note_skill_traversal(ctx, skill_dir: Path, entry: str) -> None:
     """
     if ctx is None:
         return
-    owner = skill_dir if skill_dir.is_dir() else skill_dir.parent
+    owner = skill_dir if pathprobe.is_dir(skill_dir) else skill_dir.parent
     ctx.skill_traversal_violations.setdefault(str(owner), []).append(entry)
 
 
@@ -371,6 +412,7 @@ LIMIT_DOMAIN_BOOTSTRAP = "bootstrap"  # AGENTS.md / SOUL.md & friends
 LIMIT_DOMAIN_AGENTS = "agents"        # subagent_runs disk-disclosure (B-296 / B18)
 LIMIT_DOMAIN_AUDIT = "audit"          # audit_events runtime trail (F-134 / B191)
 LIMIT_DOMAIN_PAIRED = "paired"        # migrated paired-device store size/row caps (B176)
+LIMIT_DOMAIN_STATE_DB = "state_db"    # state-DB retained-copy walk file limit (B188)
 
 LIMIT_DOMAINS = (
     LIMIT_DOMAIN_SKILL,
@@ -383,6 +425,7 @@ LIMIT_DOMAINS = (
     LIMIT_DOMAIN_AGENTS,
     LIMIT_DOMAIN_AUDIT,
     LIMIT_DOMAIN_PAIRED,
+    LIMIT_DOMAIN_STATE_DB,
 )
 
 
@@ -556,7 +599,12 @@ class _ScopedLimitSink:
 # module is surfaced.
 def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
                   domain: str | None = None) -> bool:
-    """``Path.is_dir()`` that answers False instead of raising on a permission error.
+    """``is_dir`` that answers False instead of raising on a permission error.
+
+    C-647: the probe is ``pathprobe.is_dir``, not ``Path.is_dir()``. Python 3.14's
+    ``Path.is_dir()`` returns False for ANY OS error, which would make the ``except OSError``
+    arm below dead code (an unreadable path read as absent, with nothing recorded);
+    ``pathprobe`` raises exactly where 3.9-3.12's ``Path.is_dir()`` did, on every interpreter.
 
     B-404: when *domain* is given (alongside *ctx*), a genuine OSError also
     becomes a domain-tagged ``limit_hits`` entry, not just a ``ctx.errors`` note - so a
@@ -567,7 +615,7 @@ def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
     to ``ctx.errors``, unchanged.
     """
     try:
-        return p.is_dir()
+        return pathprobe.is_dir(p)
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
@@ -580,9 +628,9 @@ def _safe_is_dir(p: Path, ctx: Context | None = None, what: str | None = None,
 
 
 def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_file()`` sibling of ``_safe_is_dir`` - see its docstring (B-303)."""
+    """``is_file`` sibling of ``_safe_is_dir`` - see its docstring (B-303, C-647)."""
     try:
-        return p.is_file()
+        return pathprobe.is_file(p)
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
@@ -590,9 +638,9 @@ def _safe_is_file(p: Path, ctx: Context | None = None, what: str | None = None) 
 
 
 def _safe_is_symlink(p: Path, ctx: Context | None = None, what: str | None = None) -> bool:
-    """``Path.is_symlink()`` sibling of ``_safe_is_dir`` - see its docstring (B-303)."""
+    """``is_symlink`` sibling of ``_safe_is_dir`` - see its docstring (B-303, C-647)."""
     try:
-        return p.is_symlink()
+        return pathprobe.is_symlink(p)
     except OSError as exc:
         if ctx is not None:
             ctx.errors.append(f"could not check {what or p}: {exc}")
@@ -802,6 +850,18 @@ class Context:
     #                          WHERE store_key = ? (store-ScQ9SjOe.js:643-645): rows filed
     #                          under a DIFFERENT cron.store are not a shadow of this file.
     cron_jobs_truncated: bool = False
+    # C-664: a job store (jobs.json, or a job_json column) nests deeper than the shallow
+    # reader follows, so the jobs ARE read (their payload/trigger fields sit a few levels
+    # down) but whatever lay below that depth was not. Only a clean verdict is unsound over
+    # that, so B168 degrades its PASS to UNKNOWN; B189 reasons about job ids, which the
+    # padding cannot hide, and does not read this.
+    cron_content_elided: bool = False
+    # C-680: the machine-state `cron.store` value is nested deeper than the shallow reader
+    # follows, so the store it names is unknown. Read by B168 only (a clean PASS over the
+    # store that was scanned becomes UNKNOWN). Deliberately NOT cron_store_shadowed: that flag
+    # makes B189 decline before it compares run logs with job ids, and the padding hides
+    # neither the jobs nor the run logs, so a real orphan must still be reported.
+    cron_store_key_elided: bool = False
 
     # F-183: the machine-owned config store (`config_machine_state` in the state DB).
     # `_read` False means the store could not be consulted at all -- UNDETERMINED. An
@@ -810,6 +870,10 @@ class Context:
     config_machine_state: dict = field(default_factory=dict)
     config_machine_state_read: bool = False
     config_machine_state_unparsed: set = field(default_factory=set)
+    # C-680: keys whose value was read but had a subtree nested past the shallow reader's
+    # depth cut off (a subset of config_machine_state_unparsed). Consumers that would answer
+    # "not set" for such a key must not.
+    config_machine_state_elided: set = field(default_factory=set)
     cron_store_shadowed: bool = False
     # B-749: presence-only signal for `config_machine_state["authProfiles.store"]` -- the
     # machine-owned auth-profile SECRETS row, deliberately excluded from
@@ -857,6 +921,25 @@ class Context:
     update_runs_read: bool = False        # the table was present and queried at all
     update_runs_parse_error: bool = False  # table present but the read genuinely failed
     update_runs_truncated: bool = False   # the _MAX_UPDATE_RUNS row cap was hit
+    # C-701: the supervisor restart handoff, which OpenClaw 2026.9.x+ keeps in the state DB
+    # (`gateway_restart_handoff`) instead of `gateway-supervisor-restart-handoff.json`.
+    # `restart_handoff_read` is "the table is a real table and was queried" (False for no DB,
+    # a capped listing, or an absent table: the layout is then NOT shown to be in use here);
+    # `restart_handoff_parse_error` is "it exists but the read failed or it is not a real
+    # table" (UNKNOWN downstream, never a clean answer). `restart_handoff_expires_at_ms`
+    # holds the expires_at value of each row, oldest first -- no other column is read.
+    restart_handoff_expires_at_ms: list = field(default_factory=list)
+    restart_handoff_read: bool = False
+    restart_handoff_parse_error: bool = False
+    # C-687: OpenClaw's config-health record (`config_health_entries` in the state DB, which
+    # replaced `logs/config-health.json`), normalised to the legacy file's `entries` shape.
+    # `config_health_status` is "" when nothing collected it (a bare Context), otherwise one
+    # of the CONFIG_HEALTH_* statuses -- "no table" and "could not look" never collapse.
+    # `_unread` counts cells that exist but were not parsed; see `read_config_health_entries`.
+    config_health_status: str = ""
+    config_health_entries: dict = field(default_factory=dict)
+    config_health_unread: int = 0
+    config_health_truncated: bool = False
     # B-294: the cron EXECUTION trail (cron_run_logs in ~/.openclaw/state/openclaw.sqlite,
     # OR (B-709) its task_runs successor on a database that has run the migration -- see
     # _collect_cron_run_logs's docstring, and note it selects on the OBSERVED TABLES, not
@@ -910,16 +993,35 @@ class Context:
     # declared digest (`sha256`) -- an in-progress (uncommitted) upload legitimately
     # has a partial/absent actual_sha256, so only committed rows are counted.
     skill_uploads_digest_mismatch_count: int = 0
-    # B-236 (B172): standing exec-approvals.json grants, one dict per agent present in
-    # the store's `agents` map: {agent_id, security, ask, allow_always_count}. Populated
-    # regardless of whether allow_always_count is 0 -- the consuming check filters.
+    # B-236 (B172): standing exec-approvals grants (the legacy exec-approvals.json file
+    # AND/OR the `exec_approvals_config` row of the state database), one dict per agent
+    # present in a store's `agents` map: {agent_id, security, ask, allow_always_count,
+    # binary_wide_count, arg_restricted_count}, plus "store": "sqlite" when the entry came
+    # from the state database (absent for the JSON file). Populated regardless of whether
+    # allow_always_count is 0 -- the consuming check filters.
     exec_approvals_grants: list = field(default_factory=list)
-    exec_approvals_found: bool = False        # exec-approvals.json present and read
+    exec_approvals_found: bool = False        # any store present (or verified-empty) and attempted
     # B-831: the store's top-level `defaults` {security, ask} (str or None each) -- the
     # floor OpenClaw applies to every agent the `agents` map does not override. Empty
-    # when the file is absent or has no `defaults` object.
+    # when no store was read or it has no `defaults` object. The state database is read
+    # FIRST and wins: it is the canonical store on current builds.
     exec_approvals_defaults: dict = field(default_factory=dict)
-    exec_approvals_parse_error: bool = False  # present but could not be parsed/read
+    exec_approvals_parse_error: bool = False  # a PRESENT store could not be parsed/read in full
+    # The state database's exec_approvals_config table was read (a `current` row parsed,
+    # or the table holds no row -- OpenClaw itself treats an absent row as "empty
+    # approvals"). False when the DB or the table is absent (older build) or unreadable.
+    exec_approvals_sqlite_read: bool = False
+    # The state database's exec-approvals store is PRESENT but could not be read in full
+    # (unknown schema, view/virtual-table masquerade, unreadable DB, over the byte cap,
+    # not valid JSON). Distinguishes that failure from a legacy-JSON one; both set
+    # `exec_approvals_parse_error`.
+    exec_approvals_sqlite_unreadable: bool = False
+    # The state database's exec-approvals row carries at least one entry in the shape
+    # OpenClaw wrote before 2026.10.1 (see `_exec_approvals_row_has_pre_10_1_shape`).
+    # Builds from 2026.10.1 on refuse to load such a row until the store is repaired, so
+    # its grants are persisted but not in force; B172 says so in its advice. It is a
+    # disclosure flag only -- it never changes a count or a verdict.
+    exec_approvals_legacy_row_shape: bool = False
     # B-240 (B177): OpenClaw's OWN persisted per-plugin ClawHub trust verdict, read from
     # the installed_plugin_index.install_records_json column in the shared state SQLite DB
     # (~/.openclaw/state/openclaw.sqlite) -- OR, since OpenClaw's state-consolidation-v13
@@ -933,6 +1035,10 @@ class Context:
     plugin_trust_records: list = field(default_factory=list)
     plugin_trust_found: bool = False        # a usable trust-index row was found and read
     plugin_trust_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
+    # C-680: the trust document nests deeper than the shallow reader follows. Records are read
+    # (their fields sit near the root) but whatever lay below the cut was not, so B177 may not
+    # answer a clean PASS over it and discloses it in the finding's `fix`.
+    plugin_trust_elided: bool = False
     # B-292 (RT-2): the SIBLING plugins_json column -- installed_plugin_index.plugins_json,
     # or (2026.8.2+) config_machine_state['plugins.installedIndex'].index.plugins, read over
     # the exact same connection and the exact same row/state-key as plugin_trust_records
@@ -949,21 +1055,29 @@ class Context:
     plugin_index_records: list = field(default_factory=list)
     plugin_index_found: bool = False        # a usable plugin-index row was found and read
     plugin_index_parse_error: bool = False  # present but could not be read/parsed (locked/corrupt)
+    # C-680: the plugin index nests deeper than the shallow reader follows; same contract as
+    # plugin_trust_elided, consumed by B187 (and disclosed by B177).
+    plugin_index_elided: bool = False
     # B-296 (DISK-5 increment 1): rows from the subagent-spawn registry (``subagent_runs`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict:
     # child_session_key, model, agent_dir, workspace_dir, spawn_mode, run_timeout_seconds,
     # task (capped, see _MAX_SUBAGENT_TASK_CHARS), outcome (parsed outcome_json dict, or None
     # when the run has not ended / no outcome was recorded yet), ended_reason, created_at.
-    # B-709: on the MODERN (payload_json column present) table shape, agent_dir/workspace_dir/
-    # spawn_mode/task are permanently None -- that schema does not carry them at all (see
-    # _collect_subagent_runs's docstring). A one-time LIMIT_DOMAIN_AGENTS disclosure names
-    # this per collection run; a consumer must not read the None as "no workspace recorded".
+    # B-709/C-690: on the MODERN (payload_json column present) table shape, agent_dir/
+    # workspace_dir/spawn_mode/task are read from the payload blob (and from parentCompletion
+    # when the completion target is the parent); a row whose payload lacks one keeps None. A
+    # one-time LIMIT_DOMAIN_AGENTS disclosure is emitted only when NO row read carries any of
+    # the four (see _collect_subagent_runs's docstring); a consumer must not read a None as
+    # "no workspace recorded".
     # DISCLOSURE ONLY - see checks/_agents.py::_disk_subagent_disclosure for the consumer;
     # there is deliberately no FAIL-capable predicate anywhere over this data (CLAUDE.md GR#5,
     # the task's own out-of-tree-workspace_dir / model-fallback traps).
     subagent_runs: list = field(default_factory=list)
     subagent_runs_found: bool = False        # state DB + subagent_runs table present and read
     subagent_runs_parse_error: bool = False  # present but no row could be reliably parsed
+    # C-680: how many rows had a payload/outcome cell nested deeper than the shallow reader
+    # follows. The rows are read and counted; B18's disk disclosure names the number.
+    subagent_runs_elided: int = 0
     # B176 follow-up (2026-09-25): OpenClaw 2026.9.6 migrates the legacy
     # devices/paired.json store into a dedicated device_pairing_paired table in
     # state/openclaw.sqlite, leaving only devices/paired.json.migrated behind --
@@ -981,6 +1095,21 @@ class Context:
     paired_devices_sqlite: dict = field(default_factory=dict)
     paired_devices_sqlite_found: bool = False        # table present and read (0 rows still counts)
     paired_devices_sqlite_parse_error: bool = False  # present but could not be reliably read
+    # C-685 (B138): pending pairing requests live in ``device_pairing_pending`` of the same
+    # state database (the legacy ``devices/pending.json`` is what an older OpenClaw wrote).
+    # Keyed by request id; same per-entry field names as the legacy JSON, no ``publicKey``
+    # (never selected). Three facts, not one: ``state_db`` (a state database was located),
+    # ``found`` (the table exists there, 0 rows still counts), ``parse_error`` (the store
+    # could not be reliably read: a view, a locked/odd file, or a state-directory listing cut
+    # short before the database). ``dropped`` counts rows the reader did not read (size/row cap).
+    pending_pairings_sqlite: dict = field(default_factory=dict)
+    pending_pairings_sqlite_state_db: bool = False
+    pending_pairings_sqlite_found: bool = False
+    pending_pairings_sqlite_parse_error: bool = False
+    pending_pairings_sqlite_dropped: int = 0
+    # What sits at state/openclaw.sqlite (or at state/ itself) when it EXISTS but is not a
+    # regular file this reader opens - "a symlink", "a directory", ... ; "" otherwise.
+    pending_pairings_sqlite_not_regular: str = ""
     # F-134 (DISK-1, B191): rows from OpenClaw's OWN runtime audit trail (``audit_events`` in
     # the shared state SQLite DB), most-recent first. Each entry is a plain dict: kind,
     # action, status, error_code, actor_type, actor_id, agent_id, session_key, session_id,
@@ -1160,13 +1289,51 @@ def _read_with_limit(file_obj: io.BufferedIOBase, byte_limit: int) -> tuple[byte
             return bytes(out[:byte_limit]), True
 
 
+# The CPython 3.x bytecode magic is a 16-bit little-endian number N followed by CR LF:
+# ``<N low byte><N high byte>\r\n`` (importlib.util.MAGIC_NUMBER). This file recognises
+# N in [0x0d00, 0x0eff] = 3328..3839, i.e. the high byte is CR (0x0d) or SO (0x0e).
+#
+# Measured here (importlib.util.MAGIC_NUMBER on each interpreter): 3.9.25 = 3425
+# (0x0d61), 3.12.3 = 3531 (0x0dcb), 3.14.4 = 3627 (0x0e2b). Read from files installed
+# here, not measured as .pyc files: the table in 3.12's importlib/_bootstrap_external.py
+# gives 3.5b1 = 3330 (the first N inside the range; 3.5a1 = 3320 and 3.4rc2 = 3310 =
+# 0x0cee are below it), and the 3.14.4 header pycore_magic_number.h gives 3.13b1 = 3571
+# (0x0df3) and 3.14a1 = 3600 (0x0e10) .. 3.14rc3 = 3627, plus "Python 3.15 will start
+# with 3650" and the rule "from 3.11 on, Python 3.n starts with magic number 2900+50n".
+# So the range covers a .pyc written by CPython 3.5b1 through 3.14 (all measured or
+# tabulated above) and the START of 3.15 (3650, documented; the later 3.15 numbers are not
+# measured). Derived from the stated rule, NOT measured: 3.16, 3.17 and 3.18 would start at
+# 3700, 3750 and 3800, still inside; 3.19 would start at 3850 = 0x0f0a, outside it. A CI
+# interpreter whose own magic leaves the range fails
+# tests/test_f116_ipynb_stowaway.py::test_the_running_interpreters_own_pyc_is_recognised.
+#
+# Why exactly these two high bytes: the old test was `data[1:4] == \r\r\n`, i.e. high
+# byte 0x0d only, which covers 3.5b1..3.13 and is blind to every 3.14+ file (3.14 starts
+# at 3600 = 0x0e10). 0x0e is the next C0 control byte after 0x0d.
+#
+# The header does NOT decide text vs binary: `_pyc_fmt` is consulted only on the BINARY
+# return paths of `classify_bytes`, so a file that starts with this header but has a
+# printable body (`+\x0e\r\n# Heading ...`, like `#\r\r\n# Heading ...`) still classifies
+# TEXT - measured, and pinned by test_the_widened_byte_does_not_turn_text_into_pyc and
+# test_classify_markdown_crcrlf_not_pyc. What the closed pair of control bytes narrows is
+# which unrecognised BINARY files get named pyc: a printable high byte is not accepted
+# (`AB\r\n` followed by a binary body stays `('BINARY', None)`, measured), so the range is
+# a closed pair and not "anything from 0x0d up". N below 3328 was never matched by the old
+# test either and still is not.
+_PYC_MAGIC_MIN = 0x0D00
+_PYC_MAGIC_MAX = 0x0EFF
+
+
 def _pyc_fmt(data: bytes) -> str | None:
-    r"""Name a would-be-binary file 'pyc' when it carries the CPython bytecode magic
-    (``<version-low-byte>\r\r\n`` - bytes 1..3 are ``\x0d\x0d\x0a`` for every 3.x release,
-    since the 16-bit magic's high byte is 0x0d). F-116: consulted ONLY on the binary return
-    paths, so a benign text file that merely starts with ``#\r\r\n`` (which stays high-
-    printable-ratio TEXT) is never misnamed pyc."""
-    return "pyc" if len(data) >= 4 and data[1:4] == b"\x0d\x0d\x0a" else None
+    r"""Name a would-be-binary file 'pyc' when it carries a CPython bytecode magic in range:
+    ``<N low><N high>\r\n`` with N in ``_PYC_MAGIC_MIN..._PYC_MAGIC_MAX`` (3328..3839,
+    high byte 0x0d or 0x0e - see the comment above for the CPython versions that is).
+    F-116: consulted ONLY on the binary return paths, so a benign text file that merely
+    starts with ``#\r\r\n`` (which stays high-printable-ratio TEXT) is never misnamed pyc.
+    The low byte is deliberately unconstrained: it is the per-release part of the magic."""
+    if len(data) < 4 or data[2:4] != b"\r\n":
+        return None
+    return "pyc" if _PYC_MAGIC_MIN <= int.from_bytes(data[:2], "little") <= _PYC_MAGIC_MAX else None
 
 
 # How many leading bytes classify_bytes samples when deciding text vs binary. Named
@@ -2403,7 +2570,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
     # actually misattribute to.
     _stowaway_owner = skill_dir.name
 
-    if skill_dir.is_file():
+    if pathprobe.is_file(skill_dir):
         # Anchor relative paths / traversal checks on the parent dir, same as
         # is_safe_tar_member expects a directory, never the archive file itself.
         base_dir = skill_dir.parent
@@ -2501,7 +2668,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                 # about. The probe is itself guarded, because the reason we are here is that
                 # stat calls on this path fail.
                 try:
-                    is_dir = Path(dpath).is_dir()
+                    is_dir = pathprobe.is_dir(Path(dpath))
                 except OSError:
                     is_dir = False
                 label = "directory not entered" if is_dir else "could not be read"
@@ -2520,7 +2687,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     # bridge for the unreadable *file* case; the directory case has to cross it
                     # too or the two paths disagree about the same fact.
                     ctx.unreadable_manifests.add(
-                        skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+                        skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
                     )
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_SKILL,
@@ -2570,7 +2737,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         if p.name.lower() == "skill.md":
             # Keyed the same way vet_skill/the skill sweep key ctx.installed_skills (the
             # skill DIRECTORY's name), so B88 can tell "unreadable" from "absent".
-            owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+            owner = skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
             ctx.unreadable_manifests.add(owner)
         note_limit(
             ctx.limit_hits, LIMIT_DOMAIN_SKILL,
@@ -2578,7 +2745,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
         )
 
     for f in files:
-        if not f.is_file():
+        if not pathprobe.is_file(f):
             # B-549: the walk yields everything os.walk did not classify as a directory, so a
             # FIFO, a socket or a device node lands here - and this `continue` dropped it with
             # no bookkeeping. Measured through `--vet-skill` on a skill whose `run.sh` was a
@@ -2605,7 +2772,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
                     #
                     # B-654: routed through the shared helper so this call site and
                     # `_iter_skill_dirs_guarded`'s discovery-time one agree byte-for-byte.
-                    owner = skill_dir.name if skill_dir.is_dir() else skill_dir.parent.name
+                    owner = skill_dir.name if pathprobe.is_dir(skill_dir) else skill_dir.parent.name
                     _note_unreadable_manifest(ctx, owner)
                 else:
                     rel = _rel(f)
@@ -3055,7 +3222,7 @@ def skill_tree_signature(skill_dir: Path) -> dict:
         except (ValueError, OSError):
             rel = f.name
         try:
-            if not f.is_file():
+            if not pathprobe.is_file(f):
                 continue
             size = f.stat().st_size
         except OSError:
@@ -3101,7 +3268,8 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
     source, or None when the notebook JSON can't be parsed - in which case a limit_hit is
     recorded so the AST layer degrades to UNKNOWN (AST_UNANALYZABLE), never a false PASS."""
     try:
-        nb = json.loads(text)
+        shallow = _loads_shallow(text)
+        nb = shallow.value
         cells = nb["cells"]
         if not isinstance(cells, list):
             raise ValueError("cells is not a list")
@@ -3113,6 +3281,14 @@ def _ipynb_code_source(text: str, skill_name: str, ctx: "Context | None") -> str
                 "were NOT analyzed (AST_UNANALYZABLE)",
             )
         return None
+    if shallow.elided and ctx is not None:
+        # The code cells sit a few levels down and are read; only what lay below the depth
+        # the reader follows was not.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_SKILL,
+            f"notebook in skill '{skill_name}' nests deeper than {_SHALLOW_JSON_DEPTH} "
+            "levels \u2014 content below that depth was NOT analyzed (AST_UNANALYZABLE)",
+        )
     parts: list[str] = []
     for cell in cells:
         if not isinstance(cell, dict) or cell.get("cell_type") != "code":
@@ -3836,43 +4012,48 @@ def agent_roster(cfg) -> "list[AgentEntry]":
     return []
 
 
-def _default_agent_id(agents_list) -> str:
-    """OpenClaw's `resolveDefaultAgentId`: the entry flagged `default`, else the FIRST one.
+def _default_agent_id(agents_list, explicit_ownership: bool = False) -> "str | None":
+    """The agent whose workspace is the PLAIN one: ``tryResolveLegacyDataOwnerAgentId``.
 
-    ```js
-    const chosen = (agents.find((agent) => agent?.default) ?? agents[0])?.id;
-    return normalizeAgentId(chosen);
-    ```
+    ``resolveAgentWorkspaceDir`` (``dist/agent-scope-config-*.mjs``) gives the plain
+    ``workspace`` (or ``agents.defaults.workspace``) to exactly one agent and derives every
+    other agent's directory from its id. Who that agent is, executed in node across a
+    generated battery (``tests/test_c684_default_agent_differential.py``)::
 
-    The "else the first one" half is the part that is easy to get wrong and changes the
-    answer completely: with a SINGLE entry in `agents.list`, that entry IS the default agent,
-    so its workspace is the ordinary `workspace` directory and nothing is derived at all. A
-    first measurement of this defect used a one-agent config and drew the wrong conclusion
-    from it (B-610).
+        tryResolveRawLegacyDefaultAgentId(cfg) ?? tryResolveSoleAgentId(cfg)
+
+    * the one entry whose ``default`` is the boolean ``true`` - ``"yes"`` and ``1`` are
+      ignored - and only when EXACTLY one entry carries it; never under
+      ``agents.ownership: "explicit"``, where the marker is not consulted at all
+      (``agents.defaults.systemAgent.agentId`` does not place a workspace either: measured);
+    * otherwise the SOLE agent;
+    * otherwise NOBODY (``None``): with two or more agents and no unique marker every agent's
+      directory is derived, the first one included. There is no ``agents[0]`` fallback here -
+      this function used to invent one, which hid ``workspace-<first id>`` from the scan.
+      (``resolveMemoryHostAgentWorkspaceDir`` in ``config-utils-*`` DOES keep that fallback,
+      but it places the memory-search workspace, not the agent's, and is not what this mirrors.)
+
+    ``None`` derives every agent's directory, so on a scan surface it can only add to what is read.
     """
-    chosen = None
-    for entry in agents_list:
-        if isinstance(entry, dict) and entry.get("default"):
-            chosen = entry
-            break
-    if chosen is None and agents_list:
-        # `agents[0]` unconditionally, NOT the first dict. A truthy non-object entry survives
-        # JS's own `listAgentEntries` filter (it drops only falsy ones), and `"junk"?.id` is
-        # `undefined`, which normalises to the default id. Skipping to the first dict picked a
-        # different default agent than the product does, and therefore derived a different set
-        # of workspaces.
-        chosen = agents_list[0]
-    return _normalize_agent_id(chosen.get("id") if isinstance(chosen, dict) else None)
+    if not explicit_ownership:
+        marked = [e for e in agents_list if isinstance(e, dict) and e.get("default") is True]
+        if len(marked) == 1:
+            return _normalize_agent_id(marked[0].get("id"))
+    if len(agents_list) == 1:
+        sole = agents_list[0]
+        return _normalize_agent_id(sole.get("id") if isinstance(sole, dict) else None)
+    return None
 
 
 def _derived_agent_workspaces(cfg: dict) -> "list[str]":
     """The workspace directories OpenClaw DERIVES for configured agents (B-610).
 
-    `resolveAgentWorkspaceDir` (`dist/config-utils-*.js`) has four branches in priority
+    `resolveAgentWorkspaceDir` (`dist/agent-scope-config-*.mjs`) has four branches in priority
     order, and until B-610 this project implemented only the first two:
 
     1. the agent's own `workspace`, if set;
-    2. for the DEFAULT agent, `agents.defaults.workspace` or the plain `workspace` dir;
+    2. for the DEFAULT agent (see `_default_agent_id` - there may be none), `agents.defaults.workspace`
+       or the plain `workspace` dir;
     3. otherwise, if `agents.defaults.workspace` is set, ``join(that, id)``;
     4. otherwise ``join(stateDir, "workspace-" + id)``.
 
@@ -3904,8 +4085,13 @@ def _derived_agent_workspaces(cfg: dict) -> "list[str]":
     default_workspace = dig(cfg, "agents.defaults.workspace")
     fallback = default_workspace.strip() if isinstance(default_workspace, str) else ""
     # `agent_roster` injects the record KEY as `id` on the entries shape, so
-    # `_default_agent_id` keeps reading `entry["id"]` and needs no change.
-    default_id = _default_agent_id([a.entry for a in roster])
+    # `_default_agent_id` keeps reading `entry["id"]` and needs no change. It may answer
+    # `None` (several agents, no unique `default: true`): then NO agent owns the plain
+    # workspace and every one of them is derived, as in the product.
+    agents = cfg.get("agents")
+    default_id = _default_agent_id(
+        [a.entry for a in roster],
+        explicit_ownership=isinstance(agents, dict) and agents.get("ownership") == "explicit")
     out: list[str] = []
     for entry in (a.entry for a in roster):
         if not isinstance(entry.get("id"), str):
@@ -3964,7 +4150,7 @@ def _config_workspace_dirs(
     out: list[Path] = []
     seen: set[Path] = set()
     for r in raw:
-        p = Path(r).expanduser()
+        p = pathprobe.expand_user(r)
         if not p.is_absolute():
             p = home / p
         try:
@@ -4065,6 +4251,108 @@ def _own_engine_symbols_in_ast(tree: ast.AST) -> set:
     return found
 
 
+def _list_own_engine_sources(d: Path):
+    """C-616: the `*.py` entries of engine directory `d`, sorted, or ``None`` when the
+    listing cannot be trusted (more than `_MAX_OWN_SOURCE_FILES` entries, or an
+    ``OSError``) -- ``None`` means "not our source", the same fail-closed answer the
+    callers already gave for an unlistable directory.
+
+    The glob is consumed LAZILY and abandoned as soon as the count bound trips, so a
+    directory holding millions of entries is never turned into millions of `Path`
+    objects or sorted in full. Sorting happens only after the bound, so the order (and
+    with it which files get parsed first) stays deterministic.
+    """
+    found = []
+    try:
+        for entry in d.glob("*.py"):
+            found.append(entry)
+            if len(found) > _MAX_OWN_SOURCE_FILES:
+                return None
+    except OSError:
+        return None
+    return sorted(found)
+
+
+def _own_engine_sources(p: Path):
+    """C-636: the single layout test behind `_is_own_source` and `_own_source_symlinks`.
+
+    Returns ``None`` when `p` does not have ClawSecCheck's engine layout (or when its
+    engine directory cannot be listed), else ``(components, sources)``:
+
+    * ``components`` - ``[(label, path), ...]``: every path the layout test FOLLOWED to
+      reach the engine (the target itself, the package dir, the ``checks`` dir or
+      ``checks.py``, and each engine source), with `label` relative to `p` in posix form
+      (``"."`` for `p` itself);
+    * ``sources`` - the engine ``.py`` files whose text is parsed for the markers.
+
+    B-303: every is_dir()/is_file()/glob() below goes through the _safe_* helpers (or a
+    try/except) - a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
+    our own source", never crash the whole audit with an uncaught PermissionError.
+    Behaviour is byte-identical to the chain this replaced in `_is_own_source`.
+    """
+    if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
+        sources = _list_own_engine_sources(p / "clawseccheck" / "checks")
+        if sources is None:
+            return None  # C-616: over the file-count bound, or unlistable
+        spine = [("clawseccheck", p / "clawseccheck"),
+                 ("clawseccheck/checks", p / "clawseccheck" / "checks")]
+        base = p
+    elif _safe_is_file(p / "clawseccheck" / "checks.py"):  # repo root / install dir (legacy)
+        sources = [p / "clawseccheck" / "checks.py"]
+        spine = [("clawseccheck", p / "clawseccheck")]
+        base = p
+    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_dir(p / "checks"):  # package dir
+        sources = _list_own_engine_sources(p / "checks")
+        if sources is None:
+            return None  # C-616: same bound, second layout
+        spine = [("checks", p / "checks")]
+        base = p
+    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_file(p / "checks.py"):  # package dir (legacy)
+        sources = [p / "checks.py"]
+        spine = []
+        base = p
+    else:
+        return None
+    components = [(".", base), *spine]
+    for src in sources:
+        try:
+            label = src.relative_to(base).as_posix()
+        except ValueError:
+            label = src.name
+        components.append((label, src))
+    return components, sources
+
+
+def _own_source_symlinks(p: Path) -> list:
+    """C-636: the labels of every symlink on the path `_is_own_source` followed to
+    recognise `p` as ClawSecCheck's own engine (``[]`` when `p` is not own source, or when
+    no component is a link).
+
+    Recognition is by content, and a symlink lets a forger point `p` at a directory that
+    really has the engine (or the three stub definitions) while the rest of what the
+    caller thinks it is looking at lives elsewhere. A genuine ClawHub install is a real
+    directory copy, never a symlink, so a link here is worth a WARN in `--vet-skill`.
+
+    Only the identity components are lstat-ed (the target, the package dir, the checks
+    dir/file and each engine source) - never an ancestor, so a symlinked ``/tmp`` or
+    ``$HOME`` does not fire it. An ``OSError`` on one component means "cannot tell" for
+    that component only: it is skipped (never guessed to be a link, never a crash), and
+    the caller's base verdict - already "not scanned" - is unchanged either way.
+    """
+    layout = _own_engine_sources(p)
+    if layout is None:
+        return []
+    components, _sources = layout
+    found = []
+    for label, path in components:
+        try:
+            if pathprobe.is_symlink(path):
+                found.append(label)
+        except OSError:
+            continue
+    return found
+
+
 def _is_own_source(p: Path) -> bool:
     """True if `p` is ClawSecCheck's own source tree (repo root, install dir, or the
     package dir itself). A security auditor necessarily ships attack signatures and
@@ -4096,6 +4384,63 @@ def _is_own_source(p: Path) -> bool:
     a signed/attested identity, not a content heuristic. Separately, `check_installed_
     skills` is only one of the surfaces that sees a skill at all. Pinned by
     `tests/test_b846_self_source_axis_and_marker_forgery.py`.
+
+    C-636 (Dave, 2026-09-30: ACCEPTED, no further static-fix rounds): the same forgery
+    also works through a SYMLINK to any directory that has the three definitions, and a
+    real engine copy beside an arbitrary payload matches too (the whole target is
+    skipped, not only `clawseccheck/`). Nothing here tries to make the oracle smarter.
+    What changed is what a match MEANS to the callers: it is no longer "verified safe".
+    `--vet`/`--vet-skill`/`--advise` report B13 UNKNOWN (engine-degraded) - CAUTION,
+    "NOT SCANNED", exit 1 - and WARN when the engine identity is reached through a
+    symlink (`_own_source_symlinks`); the audit's self-excluded note says "treat it as
+    suspicious" (INFO, no score impact). Consequence, accepted: the GENUINE own source
+    also reads CAUTION under `--vet`. Pinned by
+    `tests/test_c636_own_source_identity_is_not_a_clean_bill.py`, which must flip only
+    by Dave's decision.
+
+    C-616 (resource bound, no change to what counts as identity): the engine directory is
+    bounded AS A WHOLE, not only per file. More than `_MAX_OWN_SOURCE_FILES` `*.py`
+    entries, an admitted-bytes sum over `_MAX_OWN_SOURCE_TOTAL_BYTES`, or any entry that is
+    not a regular file (a symlink to a device or FIFO defeats a size cap, since `st_size`
+    is 0) each answer False -- "not our source, scan the tree", the safe direction -- and
+    nothing is read once a bound has tripped. A file over `_MAX_OWN_SOURCE_BYTES` is still
+    skipped whole and is NOT counted toward the total, so the total bounds the admitted
+    bytes only. The real engine is 11 files, about 4.6 MB in all, largest about 0.95 MB
+    (rounded; measured 2026-10-05); `tests/test_c616_own_source_directory_bounds.py` pins
+    that headroom and goes red if these quoted figures drift over 3%.
+
+    C-616 RESIDUAL, stated plainly (re-measured in C-135 rounds 2 and 3, 2026-09-30 and
+    2026-10-05). THIS IS NOT A CEILING: the three bounds limit files, bytes and entry
+    types, NOT parse time, and no figure below is the worst case. Two earlier drafts each
+    named a worst case and each was beaten by a denser shape: a flat 2.7 s/MB (about 7x too
+    low on Python 3.12), then `f"{a}";` repeated (about 2x too low for many interpolations
+    per f-string). Do not add a third "worst shape" number: the shape space is open, and
+    only a cap or a parse budget (Dave's decision, below) can turn this into a ceiling.
+    What was measured. The cost of ONE call is NOT linear in bytes. On CPython 3.12
+    `ast.parse` is SUPERLINEAR on f-string-dense source: CPU seconds for `f"{a}";`
+    repeated were 0.6-0.8 at 250 KB, 2.0-2.6 at 500 KB, 7.7-9.5 at 1 MB, 14-16 at 1.4 MB
+    and 27-37 at 1.99 MB (load-dependent), against a steady ~2.0-2.9 s/MB for `a;`
+    repeated. A denser shape costs more again: with 16 interpolations per f-string
+    (`f"{a}{a}...{a}";`) one 1,999,979-byte file took 55.7 s CPU and ~1.0 GB peak RSS,
+    against 27.3 s for the `f"{a}";` file of the same size at the same load (2.0x), and
+    the ratio was 1.7-2.1x at 500 KB, 1 MB and 1.4 MB. So the PER-FILE cap, not the total
+    cap, dominates the cost, and the total cap multiplies it: 4 files of ~2 MB each
+    (7,999,948 bytes, under every bound, the three marker names in a comment header so the
+    parse is forced) cost 126-160 s CPU for a single `_is_own_source` call with `f"{a}";`
+    (up to ~250 s wall on a loaded box) and ~940 MB peak RSS, and the answer is False; the
+    denser shape extrapolates to about 220-300 s CPU, four times its single-file figure
+    because each file is parsed on its own (the 4-file run was not executed end to end).
+    Memory is bounded only per file too: one 1.99 MB `a;` file peaks near 1.8 GB. The bound
+    is per directory, not per run, so the sum over the up-to-`_MAX_SKILLS` (300) candidate
+    directories that discovery admits is unbounded by this change. Not fixed here, and
+    why: lowering the per-file cap trades recognition of the REAL install for speed (its
+    largest file is about 0.94 MB and the headroom test wants 1.5x, so the cap cannot fall
+    below ~1.4 MB, where `f"{a}";` still costs ~14-16 s per file and the denser shape
+    ~33 s); a per-call or per-run CPU/parse budget makes the verdict depend on timing, and
+    a per-RUN one is worse -- an attacker could exhaust it with decoys and so flip the REAL
+    install's recognition, i.e. change a verdict. Whether to tighten a cap or accept an
+    unbounded-shape cost is Dave's decision. Pinned (prose and arithmetic, not wall-clock)
+    by `tests/test_c616_own_source_directory_bounds.py::TestTheDisclosedResidualIsTheTrueOne`.
 
     RETRACTED APPROACHES (B-846 - do not reintroduce; each was tried and defeated by a
     C-135 reviewer, reproduced end-to-end against the real DO-NOT-INSTALL fixture
@@ -4133,31 +4478,37 @@ def _is_own_source(p: Path) -> bool:
     """
     # The engine is the checks/ package (current) or a legacy single-file checks.py.
     # Read every engine source so the markers are found regardless of which topic module
-    # the I-022 split scattered them into.
-    # B-303: every is_dir()/is_file()/glob() below goes through the _safe_* helpers (or a
-    # try/except) - a non-traversable *p* (e.g. an ancestor chmod 000) must answer "not
-    # our own source", never crash the whole audit with an uncaught PermissionError.
-    if _safe_is_dir(p / "clawseccheck" / "checks"):  # repo root / install dir (package)
-        try:
-            sources = sorted((p / "clawseccheck" / "checks").glob("*.py"))
-        except OSError:
-            return False
-    elif _safe_is_file(p / "clawseccheck" / "checks.py"):  # repo root / install dir (legacy)
-        sources = [p / "clawseccheck" / "checks.py"]
-    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_dir(p / "checks"):  # package dir
-        try:
-            sources = sorted((p / "checks").glob("*.py"))
-        except OSError:
-            return False
-    elif p.name.lower() in _OWN_SKILL_NAMES and _safe_is_file(p / "checks.py"):  # package dir (legacy)
-        sources = [p / "checks.py"]
-    else:
-        return False
-    heads = []
+    # the I-022 split scattered them into. C-636: the layout choice lives in ONE helper
+    # (`_own_engine_sources`) that `_own_source_symlinks` shares, so the symlink warning
+    # can never describe a different set of files than the ones matched here.
+    layout = _own_engine_sources(p)
+    if layout is None:
+        return False  # C-616: also over the file-count bound, or unlistable
+    _components, sources = layout
+    # C-616: two passes, so NOTHING is read unless every bound holds. Pass 1 only stats:
+    # a non-regular entry (a symlink to /dev/zero reports st_size 0 and would defeat every
+    # byte cap, then read to exhaustion), or an admitted-bytes sum over the total cap,
+    # answers False before a single read. An over-per-file-cap file is skipped whole and
+    # does not count toward the total (see _MAX_OWN_SOURCE_BYTES). `total == cap` is
+    # allowed; `cap + 1` is not.
+    admitted = []
+    total = 0
     for src in sources:
         try:
-            if src.stat().st_size > _MAX_OWN_SOURCE_BYTES:
-                continue  # see _MAX_OWN_SOURCE_BYTES: skipped whole, never truncated
+            st = src.stat()
+        except OSError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_size > _MAX_OWN_SOURCE_BYTES:
+            continue  # see _MAX_OWN_SOURCE_BYTES: skipped whole, never truncated
+        total += st.st_size
+        if total > _MAX_OWN_SOURCE_TOTAL_BYTES:
+            return False
+        admitted.append(src)
+    heads = []
+    for src in admitted:
+        try:
             heads.append(src.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             return False
@@ -4167,8 +4518,8 @@ def _is_own_source(p: Path) -> bool:
     # source that lexes differently from how it parses) can forge one.
     #
     # PERFORMANCE: `ast.parse` is real parsing, not a cheap scan, and the real engine
-    # is ~3.4M characters across 11 files. The short-circuit below skips parsing a file
-    # outright when none of the still-missing markers' bare IDENTIFIERS appear
+    # is 11 files, about 4.6 MB in all, largest about 0.95 MB. The short-circuit below skips
+    # parsing a file outright when none of the still-missing markers' bare IDENTIFIERS appear
     # anywhere in that file's raw text - sound, not a heuristic: an `ast.FunctionDef`
     # or `ast.Name` node's identifier is always spelled EXACTLY as it appears in the
     # source (the parser reads the characters directly; no lexer/grammar trick renames
@@ -4181,8 +4532,9 @@ def _is_own_source(p: Path) -> bool:
     # `_shared.py`, `_vet.py` - every file whose text mentions `vet_skill`/
     # `check_installed_skills` at all, including plain imports/re-exports that never
     # define them), the other 6 are skipped on the raw-text check alone. `heads`
-    # above is still read in full regardless (reading is cheap and preserves the
-    # existing fail-closed-on-any-unreadable-file behaviour unchanged).
+    # above is still read in full for every admitted file (reading is cheap and
+    # preserves the existing fail-closed-on-any-unreadable-file behaviour unchanged);
+    # C-616 bounds how many files and bytes can be admitted at all.
     # `ast.parse` costs more than tokenizing (parsing does strictly more work than
     # lexing): ~0.39s/call on
     # python3.12.3 and ~0.26s/call on python3.9.25 against the real repo root (a
@@ -4208,6 +4560,9 @@ def _is_own_source(p: Path) -> bool:
             # match. Our own engine sources always parse cleanly (they compile).
             continue
         remaining -= _own_engine_symbols_in_ast(tree)
+        # C-616: release the tree before the next `ast.parse`, so the peak is ONE tree
+        # rather than two (measured on three ~1 MB dense files: 1,262 MB -> 908 MB).
+        tree = None
     return not remaining
 
 
@@ -4261,6 +4616,54 @@ def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
         yield item
     for name in unassessable:
         _note_unreadable_manifest(ctx, name)
+
+
+def _find_openclaw_package_root() -> "Path | None":
+    """The installed OpenClaw package root, or None. A seam so tests stay off the real PATH."""
+    from .deptree import find_package_root  # noqa: PLC0415 - leaf; kept local, no import-time edge
+
+    try:
+        return find_package_root("openclaw")
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _note_bundled_tier_not_inspected(ctx: Context) -> None:
+    """Disclose OpenClaw's own bundled skills directory: loaded by OpenClaw, never scanned here.
+
+    It ships with the OpenClaw package, is not an installed or user-chosen skill, and is
+    outside every home-rooted root above - so it is not in `ctx.installed_skills` and `SKILL_TIER_ORDER`
+    omits it. In the dist (bundled-dir-*.mjs) resolveBundledSkillsDir tries, in order, the
+    OPENCLAW_BUNDLED_SKILLS_DIR override, a `skills` directory beside the running executable,
+    then `<package root>/skills`. The count below reads `<package root>/skills` only, so the
+    wording claims "the installed package's bundled skills directory" and never which of the
+    fallbacks OpenClaw actually used. The decision is to DISCLOSE, not scan: the scan
+    population and every verdict are unchanged, and this is an inert `Disclosure`.
+    Subject/detail name the tier, never a path.
+    """
+    n = None
+    root = _find_openclaw_package_root()
+    if root is not None:
+        try:
+            n = sum(1 for _ in _iter_discovered_skill_dirs(
+                root / "skills", allow_symlink_entries=False, limit_hits=[]))
+        except (OSError, ValueError, RuntimeError):
+            n = None
+    if n:
+        detail = (
+            f"{n} {'skill ships' if n == 1 else 'skills ship'} in the bundled skills "
+            f"directory of the installed OpenClaw package and "
+            f"{'loads' if n == 1 else 'load'} alongside yours. This audit does not inspect "
+            "them: they are part of OpenClaw, not installed content, so a clean result here "
+            "says nothing about them."
+        )
+    else:
+        detail = (
+            "OpenClaw also loads the skills in the bundled skills directory of the installed "
+            "OpenClaw package. This audit does not inspect them, and could not locate that "
+            "directory on this machine to count them."
+        )
+    note_disclosure(ctx.disclosures, "bundled_skills_not_inspected", "skills", detail)
 
 
 def _read_installed_skills(home: Path, ctx: Context) -> None:
@@ -4356,10 +4759,13 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # evidenced by a persistent artifact is followed - the auditing shell's environment is
     # not the agent's (see persistent_env_evidence). Note this ADDS a load root: the
     # default bundled-dist tier is still not scanned (SKILL_TIER_ORDER omits it), so this
-    # is an unenumerated-root fix, not a stale-snapshot one.
+    # is an unenumerated-root fix, not a stale-snapshot one. That default tier is DISCLOSED
+    # (not scanned) by `_note_bundled_tier_not_inspected` below; a relocation replaces it.
+    _skills_relocated = False
     for _var, _kind, _value, _src in bundled_root_overrides(ctx):
         if _kind != "skills":
             continue  # a hooks root holds hook modules, not SKILL.md dirs - B186 discloses it
+        _skills_relocated = True  # resolveBundledSkillsDir returns the override unconditionally
         try:
             _override = Path(_value).expanduser()
         except (OSError, ValueError, RuntimeError):
@@ -4371,6 +4777,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     if _safe_is_dir(plugin_skills, ctx, what=f"'{plugin_skills}'", domain=LIMIT_DOMAIN_SKILL):
         roots.append((plugin_skills, True))
     seen_roots: set[Path] = set()
+    # Skill folders inside a dot-directory under a root (an installer's backup folder). The
+    # loaders in the OpenClaw dist skip every entry whose name starts with "." (the skill-root
+    # discovery, the workspace refresh and the resource loader), so these are on disk but not
+    # loaded. They are still read below: a hostile copy missed is the worse error.
+    dot_dir_skills: set[str] = set()
     for base, allow_symlink in roots:
         # B-303: a load root that exists but is not traversable (most commonly the whole
         # home, e.g. chmod 000) must be skipped like a root that does not exist at all -
@@ -4394,6 +4805,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         # discovery engine confirm and walk" - see the field's docstring on Context.
         ctx.installed_skill_roots.append(base)
         for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
+            if base != plugin_skills:
+                try:
+                    if any(part.startswith(".") for part in sd.relative_to(base).parts):
+                        dot_dir_skills.add(str(target))
+                except ValueError:
+                    pass
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 # B-268: this used to `return` - the collection stopped dead, leaving
                 # ctx.installed_skills a silently truncated view with no trace that more
@@ -4464,6 +4881,28 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                 ctx.installed_skill_dirs[key] = target
             except OSError as exc:
                 ctx.errors.append(f"could not read skill {key}: {exc}")
+
+    if dot_dir_skills:
+        n_dot = len(dot_dir_skills)
+        note_disclosure(
+            ctx.disclosures,
+            "skills_in_dot_directories",
+            "skills",
+            f"{n_dot} skill {'folder sits' if n_dot == 1 else 'folders sit'} inside a "
+            "dot-directory (a folder whose name starts with '.', such as an installer backup) "
+            "under a skills root. They are present on disk but not loaded by OpenClaw, whose "
+            "skill loader skips such folders; this audit still reads them.",
+        )
+    # The default bundled tier, gated like the personal ~/.agents/skills root so a fixture or
+    # custom --home stays hermetic; a persistent relocation replaces that tier.
+    if (
+        not _skills_relocated
+        and user_home is not None
+        and audited_home is not None
+        and audited_home.parent == user_home
+        and audited_home.name.startswith(".openclaw")
+    ):
+        _note_bundled_tier_not_inspected(ctx)
 
     # B-268: record the cap hit, mirroring what skilldiscovery.py already does for its
     # sibling _MAX_DIRS cap. This is what makes check_installed_skills (B13) degrade to
@@ -4594,9 +5033,17 @@ def _dormant_cron_payload_text(job: dict) -> "str | None":
     extraction. ``~/.openclaw/cron/jobs.json`` is not read by the live execution path
     (``loadCronJobsStoreWithConfigJobs`` -> ``loadMutableCronStore`` ->
     ``loadCronStoreFromDatabase`` reads only the SQLite ``cron_jobs`` table,
-    store-D_NHWaCW.mjs:266-269) -- but it is NOT inert forever. The installed dist ships
-    a doctor/repair import path (``store-migration-DyyVNWF7.mjs``, openclaw@2026.9.4)
-    that migrates a legacy-shaped job into a live SQLite row, preserving its content:
+    store-D_NHWaCW.mjs:266-269) -- but it is NOT inert forever. THROUGH 2026.9.9 the dist
+    shipped a doctor/repair import path (``store-migration-DyyVNWF7.mjs``, openclaw@2026.9.4)
+    that migrates a legacy-shaped job into a live SQLite row, preserving its content.
+    C-686: that import is gone from OpenClaw 2026.10.1 and later (``legacyCronStoreFilesExist``
+    and ``loadLegacyCronStoreForMigration`` occur in no bundle of the installed 2026.10.2).
+    There Doctor refuses the file: ``assertNoRetiredStateFiles("Cron state", ...)`` throws
+    ``RetiredStateFormatError`` for ``cron/jobs.json`` (EXECUTED), imports nothing, and names
+    the bridge release to run Doctor on first. So on the installed build the file is a latent
+    hazard on that prescribed upgrade route, not something ``openclaw doctor`` reactivates.
+    The shapes below are the 2026.9.x migration's leniency, kept because the bridge
+    release's Doctor still applies it:
 
     * ``normalizePayloadKind`` (:594) matches ``payload.kind`` case-INSENSITIVELY
       (``"systemevent"``/``"agentturn"`` -> canonical casing) -- the canonical
@@ -4619,11 +5066,12 @@ def _dormant_cron_payload_text(job: dict) -> "str | None":
     So a hostile job shaped like ``{"kind": "systemevent", "message": "<payload>"}`` (or
     ``{"message": "<payload>"}`` with no ``payload`` object at all) draws zero signal from
     the canonical extraction today, yet would be silently reactivated -- content intact --
-    by a future ``openclaw doctor`` run. Returns the lenient/reactivation-candidate text,
+    by a 2026.9.x ``openclaw doctor`` run (on 2026.10.1 and later only the bridge release's
+    Doctor does; see above). Returns the lenient/reactivation-candidate text,
     or ``None`` when there is nothing beyond what the canonical extraction already covers.
     Deliberately mirrors the vendor's own leniency rather than widening it: e.g. when a
     systemEvent's ``.text`` IS present, its ``.message`` is left unread here exactly as
-    the doctor leaves it unread (the migration only fires when ``.text`` is absent) --
+    the 2026.9.x doctor leaves it unread (the migration only fires when ``.text`` is absent) --
     that stray key is genuinely inert, never migrated in, so scanning it would be a
     fact this scan-only path does not have license to invent.
 
@@ -4659,6 +5107,14 @@ def _dormant_cron_payload_text(job: dict) -> "str | None":
         else:
             candidate = cmd
     return candidate if isinstance(candidate, str) and candidate.strip() else None
+
+
+def _elided_note(what: str) -> str:
+    """C-664: the note recorded in ctx.limit_hits or ctx.errors for a user-owned state document the shallow reader cut short."""
+    return (
+        f"{what} nests deeper than {_SHALLOW_JSON_DEPTH} levels \u2014 content below that "
+        "depth was NOT scanned"
+    )
 
 
 def _collect_cron(home: Path, ctx: Context) -> None:
@@ -4710,12 +5166,16 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     _collect_cron_run_logs(home, ctx)
     cron_dir = home / "cron"
     json_candidates = (
-        walk_dir_safely(cron_dir, max_files=50)
+        _walk_named(cron_dir, "jobs.json", max_files=50)
         if _safe_is_dir(cron_dir, ctx, what=f"'{cron_dir}'") else []
     )
     jobs_json = next((p for p in json_candidates if p.name == "jobs.json"), None)
     if jobs_json is not None:
         try:
+            if os.path.islink(jobs_json):
+                # C-727: the lookup hands a link to the caller (it would read as "absent"); a link
+                # is never followed, so this is a store that could not be read.
+                raise OSError("the cron job store is a symbolic link; this audit does not follow links")
             with open(jobs_json, "rb") as fp:
                 raw, truncated = _read_with_limit(fp, _MAX_CRON_BYTES)
             if truncated:
@@ -4725,7 +5185,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                     f"{_MAX_CRON_BYTES // 1_000_000}MB cap \u2014 content beyond the cap "
                     "was NOT scanned",
                 )
-            store = json.loads(raw.decode("utf-8", errors="replace"))
+            shallow = _loads_shallow(raw.decode("utf-8", errors="replace"))
+            store = shallow.value
+            if shallow.elided:
+                ctx.cron_content_elided = True
+                note_limit(ctx.limit_hits, LIMIT_DOMAIN_CRON,
+                           _elided_note(f"cron store '{jobs_json}'"))
             jobs = store.get("jobs") if isinstance(store, dict) else None
             if not isinstance(jobs, list):
                 jobs = []
@@ -4787,7 +5252,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
     # No legacy JSON store -- fall back to the SQLite-backed cron_jobs table.
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -4796,7 +5261,7 @@ def _collect_cron(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # B-709: PROBE the real column shape before picking a SELECT -- do NOT try the
@@ -4905,7 +5370,12 @@ def _collect_cron(home: Path, ctx: Context) -> None:
                 job_spec = None
                 if isinstance(job_json, (str, bytes)):
                     try:
-                        parsed = json.loads(job_json)
+                        shallow = _loads_shallow(job_json)
+                        parsed = shallow.value
+                        if shallow.elided:
+                            ctx.cron_content_elided = True
+                            note_limit(ctx.limit_hits, LIMIT_DOMAIN_CRON, _elided_note(
+                                f"job_json for cron job '{job_id}' in '{db_path}'"))
                     except (TypeError, ValueError):
                         parsed = None
                     if isinstance(parsed, dict):
@@ -5046,6 +5516,19 @@ def _flag_cron_store_config_mismatch(ctx: Context, jobs_json: Path) -> None:
     # a current build - the shadow it exists to catch would go unreported. The state value
     # wins where present; the config key remains authoritative on builds that still have
     # one, and on any machine whose state store could not be read.
+    if "cron.store" in ctx.config_machine_state_elided:
+        # C-680: the stored value is nested deeper than the shallow reader follows, so what
+        # it names was not read. The runtime reads the store it names, which may not be the
+        # one just scanned: B168 may not answer a clean PASS (cron_store_key_elided). It is
+        # not the mismatch state above, which is proven, so cron_store_shadowed stays False.
+        ctx.cron_store_key_elided = True
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_CRON,
+            _elided_note("config_machine_state['cron.store']")
+            + f" \u2014 the configured store could not be determined, and the store "
+            f"actually scanned was '{jobs_json}'",
+        )
+        return
     configured = (ctx.config_machine_state or {}).get("cron.store")
     if not isinstance(configured, str) or not configured.strip():
         configured = dig(ctx.config, "cron.store")
@@ -5103,7 +5586,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     """
     state_dir = home / "state"
     candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -5113,7 +5596,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     placeholders = ",".join("?" * len(keys))
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             try:
@@ -5140,6 +5623,68 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
             f"cron_jobs table in '{db_path}' holds {row[0]} row(s) for that same store "
             f"path which were NOT read",
         )
+
+
+def _connect_state_db(db_path: Path):
+    """Open the state database read-only - never through a symbolic link (C-727).
+
+    A symbolic link AT the database path is not followed, on purpose: the walk skips link
+    entries, and the non-regular-path refusal runs before a connect.
+    ``sqlite3.connect("file:...?mode=ro")`` WOULD follow one, so the link path is refused here
+    too, with the same error type every caller already turns into its own "could not open"
+    outcome (never "no database"). This is about the file only: a ``state`` DIRECTORY that is
+    itself a link is entered, as it always was.
+    """
+    if os.path.islink(db_path):
+        raise sqlite3.OperationalError(
+            "the state database path is a symbolic link; this audit does not follow links")
+    return sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+
+
+def _walk_named(directory: Path, name: str, max_files: int, capped: "list | None" = None) -> "list[Path]":
+    """``walk_dir_safely(directory)`` for a lookup of the file called *name* (C-727).
+
+    ``walk_dir_safely`` re-raises for a caller that did not opt in to its unreadable-entry
+    channel, so a directory that can be listed but not searched (mode 0o400) crashed the whole
+    collector; one that can be searched but not listed (0o100) yielded nothing, which every
+    caller reads as "the file is not there". Neither is true. When the walk raised, or the
+    directory is not fully accessible, *name* is also asked for directly: through the
+    directory's listing (0o400) or by name (0o100). The caller then opens that path and its
+    own present-but-unreadable handling (the one a chmod-000 file already reaches) takes over.
+    A fully accessible directory is answered by the walk alone, exactly as before; one that
+    can neither be listed nor searched is reported as holding *name*, unread, because "not
+    found" would be a claim about a directory nobody could look into.
+    """
+    failed = False
+    try:
+        found = walk_dir_safely(directory, max_files=max_files, capped=capped)
+    except OSError:
+        found, failed = [], True
+    # Only <directory>/<name> is the store. A file of the same name further down (a backup
+    # copy, a decoy) is not, and every caller takes the first entry with that name: with the
+    # real one missing or a link, a nested namesake used to be read as if it were the store.
+    found = [p for p in found if p.name != name or p.parent == directory]
+    # A symbolic link is never followed and the walk skips it, so it would read as "absent":
+    # hand it to the caller, whose own could-not-open handling (the refusal of a non-regular
+    # path, or `_connect_state_db`) then answers.
+    if not any(p.name == name for p in found) and os.path.islink(directory / name):
+        found = found + [directory / name]
+    if not failed and os.access(directory, os.R_OK | os.X_OK):
+        return found
+    if any(p.name == name for p in found):
+        return found
+    try:
+        listed = name in os.listdir(directory)
+        list_failed = False
+    except OSError:
+        listed, list_failed = False, True
+    if listed or os.path.lexists(directory / name):
+        return found + [directory / name]
+    if list_failed and not os.access(directory, os.X_OK):
+        # Neither listable nor searchable (0o000): "not found by name" proves nothing, so the
+        # caller is handed the path and its own present-but-unreadable handling answers.
+        return found + [directory / name]
+    return found
 
 
 def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
@@ -5219,7 +5764,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -5228,7 +5773,7 @@ def _collect_cron_run_logs(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # B-709: PROBE which of the two tables exist before picking a SELECT -- do NOT
@@ -5349,6 +5894,34 @@ CONFIG_MACHINE_STATE_KEYS = (
 # `_collect_auth_profile_store_presence` binds this literal into a `LENGTH(value_json)`
 # query and never selects `value_json` itself, so the secret payload is never read.
 _AUTH_PROFILE_STORE_KEY = "authProfiles.store"
+# B-845 settlements (Dave, 2026-09-30) for the two questions B-749 left open. Recorded
+# here, next to the reader, so neither has to be re-derived from a review thread.
+#
+# Q1 - is credentials/ still populated on some installs? Grounded against the 2026.9.7
+# dist: `resolveOAuthDir` is `<state dir>/credentials` unless OPENCLAW_OAUTH_DIR overrides
+# it (paths-CtO6iw0c.mjs:237). The doctor treats `credentials/auth-profiles/<32-hex>.json`
+# as a LEGACY OAuth secret sidecar to list and migrate (2026.9.7 reading; on openclaw@2026.10.2,
+# read 2026-10-12, no `doctor-auth-oauth-sidecar-*` bundle exists any more and the directory
+# `<oauth dir>/auth-profiles` is named only as a legacy path, doctor-auth-legacy-paths-
+# BtYQLXx6.mjs:95 -- i.e. a retired location there, not a live store)
+# (doctor-auth-oauth-sidecar-DAcfHuls.mjs: `listUnreferencedLegacyOAuthSidecars`,
+# `applyLegacyOAuthSidecarMaterial`; dirname constant at :20/:177). The live store is in the
+# state database (`SHARED_STORE_STATE_KEY = "authProfiles.store"`,
+# sqlite-json-DPb0JT1h.mjs:168) and, per agent, in `auth_profile_store`. So the two
+# locations are complementary, not one replacing the other: an un-migrated install can hold
+# real secrets under credentials/, a migrated one holds them in the databases. That is why
+# A1 keeps BOTH the on-disk content scan (`_credential_store_state`, B-666) and the database
+# hedges. Deliberately NOT claimed: that credentials/ has "no current writer" - that is not
+# proven; the accurate word is "legacy per the doctor's own naming".
+#
+# Q3 - should a non-empty database store raise the sensitive-data leg? DECIDED: no. The
+# database stores hedge A1 only (WARN, never a leg and never a FAIL); risk.py, report.py and
+# cli.py read the boolean leg and stay OFF for them by design. That agreement is pinned by
+# `TestConsumersStayConsistent` and `TestPerAgentConsumersStayConsistent`
+# (tests/test_b749_auth_profile_store_presence.py). Reason: whether a non-empty row means a
+# USABLE credential (versus expired, revoked, or keyRef-only) cannot be told from its
+# length, and raising the leg there is FAIL-capable movement on the CRITICAL check that
+# grade-caps the audit (B-499 and B-666 precedent).
 # Grounded by reading the installed dist (2026.9.4: sqlite-CzDV0dcE.mjs,
 # store-BxRoDWvl.mjs, legacy-source-diagnostic-D-_lsE4x.mjs), not inferred: the FIRST
 # save OpenClaw ever makes to this row -- even with zero configured profiles -- writes
@@ -5360,6 +5933,17 @@ _AUTH_PROFILE_STORE_KEY = "authProfiles.store"
 # `json.dumps({"version": 1, "profiles": {}}, separators=(",", ":"))` reproduces the same
 # 27 bytes Node's `JSON.stringify` writes -- a row at or under that length is the
 # vendor's own "initialized, still empty" shape, not evidence of a real credential.
+#
+# RE-GROUND ON EVERY OPENCLAW UPGRADE (part of the upgrade protocol's re-baseline): re-read
+# `buildPersistedAuthProfileSecretsStore` and confirm the empty payload is still exactly
+# `{version: 1, profiles: {}}`, serialized by `JSON.stringify` with no whitespace. Last
+# checked 2026.9.7 (persisted-aVBA9lMv.mjs:660-663: `version: 1, profiles:
+# Object.fromEntries(...)`); grounded at 2026.9.4 and re-checked at 2026.9.5. If the shape
+# drifts: a LONGER empty shape makes the hedge over-fire on empty stores (the safe
+# direction); a SHORTER one means a real store at or under 27 bytes is missed (the unsafe
+# direction). No local-only test asserts this against the installed dist: a tripwire was
+# considered and skipped in maintenance mode, since the upgrade protocol's manual
+# re-baseline already covers it.
 _AUTH_PROFILE_STORE_EMPTY_BYTES = 27
 
 
@@ -5411,7 +5995,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -5427,7 +6011,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             # BEGIN before the schema check, held open across it AND the read below --
             # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
@@ -5485,6 +6069,256 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
     ctx.auth_profile_store_read = True
     if row is not None and row[0] is not None:
         ctx.auth_profile_store_length = int(row[0])
+
+
+# C-674: OpenClaw's config-write journal moved out of ``logs/config-audit.jsonl`` into the
+# state database -- table ``diagnostic_events``, scope ``config-audit`` (dist
+# ``io.audit-*.mjs``: "SQLite diagnostic_events/config-audit state (latest 50000 rows)").
+# The vendor keeps at most 50,000 rows, so that is the row bound; the byte bound is the
+# caller's (``configjournal.read_writes(cap=...)``) and is applied PER ROW as well as in
+# total, exactly as the legacy file reader applies it: a record larger than the whole budget
+# is never read there either (it falls off the tail window), so a row over the budget is
+# counted as not examined, never parsed and never silently dropped.
+CONFIG_AUDIT_SCOPE = "config-audit"
+CONFIG_AUDIT_MAX_ROWS = 50_000
+# Read statuses of :func:`read_config_audit_rows`. Five, not two: "the table is not there"
+# and "I could not look" must never collapse (a refused view is NOT an absent table).
+CONFIG_AUDIT_OK = "ok"                # rows seen (>= 1 row in the scope)
+CONFIG_AUDIT_NO_DB = "no_db"          # no state database
+CONFIG_AUDIT_NO_TABLE = "no_table"    # a state DB that predates the table
+CONFIG_AUDIT_NO_SCOPE = "no_scope"    # a real table, no config-audit rows in it
+CONFIG_AUDIT_UNREADABLE = "unreadable"  # present but refused / locked / corrupt
+
+
+def read_config_audit_rows(home, max_bytes: int, max_rows: int = CONFIG_AUDIT_MAX_ROWS):
+    """``(status, payloads, truncated, oversized, null_rows)`` for the config-write journal
+    rows in ``<home>/state/openclaw.sqlite`` (``diagnostic_events``, scope ``config-audit``).
+
+    *payloads* are the raw ``payload_json`` values, OLDEST first; the NEWEST rows are the
+    ones kept when a bound bites (``ORDER BY sequence DESC``), the same tail the file
+    reader keeps. *truncated* means rows existed that were not returned (the row cap or
+    *max_bytes* in total bit). *oversized* counts rows larger than *max_bytes* on their own
+    and *null_rows* rows whose payload is NULL or not text: neither was examined, and the
+    caller must say so rather than count them as clean.
+
+    Same rules as ``_collect_auth_profile_store_presence`` (B-889) and the exec-approvals
+    reader (B-908), reused rather than re-derived: ``trajectorystore._open_and_verify_table``
+    opens read-only (``mode=ro`` + ``query_only``), refuses a FIFO/device at the database or
+    a sidecar path before ``sqlite3.connect``, and refuses a name that is not a REAL TABLE
+    in the file's own schema (view / virtual table / rootpage alias / generated column)
+    inside the one transaction that also runs the SELECTs. Takes *home*, not a ``Context``:
+    ``configjournal`` is a leaf the monitor calls with a home alone. Never raises.
+    """
+    db_path = pathprobe.expand_user(home) / "state" / "openclaw.sqlite"
+    try:
+        if not pathprobe.exists(db_path):
+            return CONFIG_AUDIT_NO_DB, [], False, 0, 0
+    except OSError:
+        return CONFIG_AUDIT_UNREADABLE, [], False, 0, 0
+    conn, kind, unreadable = _trajectorystore._open_and_verify_table(
+        db_path, "diagnostic_events"
+    )
+    if unreadable:
+        return CONFIG_AUDIT_UNREADABLE, [], False, 0, 0
+    if conn is None:  # kind == "absent"
+        return CONFIG_AUDIT_NO_TABLE, [], False, 0, 0
+    # The three SELECTs are written INLINE at their `.execute()` calls (not named
+    # constants): `scripts/state_db_drift_gate.py` extracts only literal strings handed to
+    # `.execute()`, so a named constant would leave this reader invisible to the drift oracle.
+    try:
+        cur = conn.execute(
+            "SELECT payload_json FROM diagnostic_events "
+            "WHERE scope = ? AND length(CAST(payload_json AS BLOB)) <= ? "
+            "ORDER BY sequence DESC, created_at DESC LIMIT ?",
+            (CONFIG_AUDIT_SCOPE, max_bytes, max_rows + 1),
+        )
+        payloads: list = []
+        used = 0
+        truncated = False
+        null_rows = 0
+        for (payload,) in cur:
+            if len(payloads) + null_rows >= max_rows:
+                truncated = True
+                break
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8", "replace")
+            if not isinstance(payload, str):
+                null_rows += 1  # a non-text value in a payload column is not a record
+                continue
+            size = len(payload.encode("utf-8", "replace"))
+            if payloads and used + size > max_bytes:
+                truncated = True
+                break
+            used += size
+            payloads.append(payload)
+        oversized = conn.execute(
+            "SELECT count(*) FROM diagnostic_events "
+            "WHERE scope = ? AND length(CAST(payload_json AS BLOB)) > ?",
+            (CONFIG_AUDIT_SCOPE, max_bytes),
+        ).fetchone()[0]
+        # `length(CAST(NULL AS BLOB))` is NULL, so a NULL payload matches neither the read
+        # nor the oversized predicate above and would otherwise vanish uncounted.
+        null_rows += conn.execute(
+            "SELECT count(*) FROM diagnostic_events "
+            "WHERE scope = ? AND payload_json IS NULL",
+            (CONFIG_AUDIT_SCOPE,),
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return CONFIG_AUDIT_UNREADABLE, [], False, 0, 0
+    finally:
+        conn.close()
+    if not payloads and not oversized and not null_rows:
+        return CONFIG_AUDIT_NO_SCOPE, [], False, 0, 0
+    payloads.reverse()
+    return CONFIG_AUDIT_OK, payloads, truncated, int(oversized or 0), int(null_rows)
+
+
+# C-687: OpenClaw's config-health record moved out of ``logs/config-health.json`` into the
+# state database -- table ``config_health_entries`` (dist ``io.health-state.kernel-*.mjs``):
+# one row per tracked config path, two JSON "fingerprint" columns and the vendor's own tamper
+# signal ``last_observed_suspicious_signature``. The vendor's ``decodeConfigHealthRows`` turns
+# the rows into the SAME ``{"entries": {<config_path>: {lastKnownGood, lastPromotedGood,
+# lastObservedSuspiciousSignature}}}`` object the legacy file held; this reader returns that
+# shape, so a consumer judges either container with one function. The table holds one row per
+# tracked config file (a handful), so the row bound is generous and a cell bound only exists
+# to keep a hostile database from handing back a gigabyte string.
+CONFIG_HEALTH_TABLE = "config_health_entries"
+CONFIG_HEALTH_MAX_ROWS = 1_000
+CONFIG_HEALTH_MAX_CELL_BYTES = 64 * 1024
+_CONFIG_HEALTH_MAX_PATH_CHARS = 1_024
+_CONFIG_HEALTH_MAX_SIGNATURE_CHARS = 256
+# Read statuses of :func:`read_config_health_entries`. Same discipline as the config-audit
+# statuses above: "the table is not there" and "I could not look" never collapse.
+CONFIG_HEALTH_OK = "ok"                # a real table with >= 1 row
+CONFIG_HEALTH_EMPTY = "empty"          # a real table, no rows
+CONFIG_HEALTH_NO_DB = "no_db"          # no state database
+CONFIG_HEALTH_NO_TABLE = "no_table"    # a state DB that predates the table
+CONFIG_HEALTH_UNREADABLE = "unreadable"  # present but refused / locked / corrupt / not a table
+
+
+@dataclass
+class ConfigHealthRead:
+    """What :func:`read_config_health_entries` found. *entries* is the legacy file's
+    ``entries`` object (``config_path -> {lastKnownGood?, lastPromotedGood?,
+    lastObservedSuspiciousSignature}``); *unread* counts cells that exist but were not parsed
+    (over the cell bound, not JSON, nested past the bound, or not an object) -- the caller
+    must say so rather than count them as clean; *truncated* means rows beyond the row cap
+    were not returned."""
+    status: str
+    entries: dict = field(default_factory=dict)
+    unread: int = 0
+    truncated: bool = False
+
+
+def _config_health_fingerprint(cell):
+    """``(fingerprint dict | None, unread)`` for one fingerprint column. SQL NULL (what the
+    vendor writes for "unset") is absent, not unread; a cell that was dropped by the size
+    bound arrives here as NULL too, so the caller passes *oversized* separately."""
+    if cell is None:
+        return None, 0
+    if isinstance(cell, bytes):
+        cell = cell.decode("utf-8", "replace")
+    if not isinstance(cell, str):
+        return None, 1
+    try:
+        parsed = _loads_bounded(cell)
+    except (ValueError, RecursionError):
+        return None, 1
+    if not isinstance(parsed, dict):
+        return None, 1
+    return parsed, 0
+
+
+def read_config_health_entries(
+    home, max_rows: int = CONFIG_HEALTH_MAX_ROWS,
+    max_cell_bytes: int = CONFIG_HEALTH_MAX_CELL_BYTES,
+) -> ConfigHealthRead:
+    """The config-health record in ``<home>/state/openclaw.sqlite`` (``config_health_entries``),
+    normalised to the shape ``logs/config-health.json`` had. Never raises.
+
+    Same rules as ``read_config_audit_rows`` above: ``trajectorystore._open_and_verify_table``
+    opens read-only (``mode=ro`` + ``query_only``), refuses a FIFO/device at the database or a
+    sidecar path before ``sqlite3.connect``, and refuses a name that is not a REAL TABLE in the
+    file's own schema (view / virtual table / rootpage alias / generated column) inside the one
+    transaction that also runs the SELECT. The signature column is read as a bounded string
+    because the only question asked of it is "is it set"; the config PATH is kept (a caller
+    reports it by basename). A cell the bound drops is counted in *unread*, never skipped.
+    """
+    db_path = pathprobe.expand_user(home) / "state" / "openclaw.sqlite"
+    try:
+        if not pathprobe.exists(db_path):
+            return ConfigHealthRead(CONFIG_HEALTH_NO_DB)
+    except OSError:
+        return ConfigHealthRead(CONFIG_HEALTH_UNREADABLE)
+    conn, kind, unreadable = _trajectorystore._open_and_verify_table(
+        db_path, CONFIG_HEALTH_TABLE
+    )
+    if unreadable:
+        return ConfigHealthRead(CONFIG_HEALTH_UNREADABLE)
+    if conn is None:  # kind == "absent"
+        return ConfigHealthRead(CONFIG_HEALTH_NO_TABLE)
+    # The SELECT is written INLINE at its `.execute()` call (not a named constant):
+    # `scripts/state_db_drift_gate.py` extracts only literal strings handed to `.execute()`.
+    try:
+        cur = conn.execute(
+            "SELECT substr(config_path, 1, ?), "
+            "CASE WHEN length(CAST(last_known_good_json AS BLOB)) <= ? "
+            "THEN last_known_good_json END, "
+            "length(CAST(last_known_good_json AS BLOB)) > ?, "
+            "CASE WHEN length(CAST(last_promoted_good_json AS BLOB)) <= ? "
+            "THEN last_promoted_good_json END, "
+            "length(CAST(last_promoted_good_json AS BLOB)) > ?, "
+            "substr(last_observed_suspicious_signature, 1, ?), "
+            "last_observed_suspicious_signature IS NOT NULL "
+            "FROM config_health_entries ORDER BY config_path LIMIT ?",
+            (_CONFIG_HEALTH_MAX_PATH_CHARS, max_cell_bytes, max_cell_bytes, max_cell_bytes,
+             max_cell_bytes, _CONFIG_HEALTH_MAX_SIGNATURE_CHARS, max_rows + 1),
+        )
+        rows = cur.fetchall()
+    except sqlite3.Error:
+        return ConfigHealthRead(CONFIG_HEALTH_UNREADABLE)
+    finally:
+        conn.close()
+    result = ConfigHealthRead(CONFIG_HEALTH_OK if rows else CONFIG_HEALTH_EMPTY)
+    if len(rows) > max_rows:
+        result.truncated = True
+        rows = rows[:max_rows]
+    for path, known_good, known_big, promoted, promoted_big, signature, signature_set in rows:
+        key = path.decode("utf-8", "replace") if isinstance(path, bytes) else str(path)
+        # The key is only ever shown by basename; a clash after the length cut must not let
+        # one row overwrite another row's signature.
+        while key in result.entries:
+            key += "#"
+        entry: dict = {}
+        for name, cell, big in (("lastKnownGood", known_good, known_big),
+                                ("lastPromotedGood", promoted, promoted_big)):
+            parsed, unread = _config_health_fingerprint(cell)
+            result.unread += unread + (1 if big else 0)
+            if parsed is not None:
+                entry[name] = parsed
+        # Anything but SQL NULL is a recorded signature (the vendor stores a string); the
+        # value itself is never reported. "Set" is decided by `IS NOT NULL` BEFORE the
+        # substr(): substr() of a zero-length BLOB is NULL, which would read as unset.
+        if not signature_set:
+            signature = None
+        elif signature is None:
+            signature = ""
+        elif isinstance(signature, bytes):
+            signature = signature.decode("utf-8", "replace")
+        entry["lastObservedSuspiciousSignature"] = (
+            None if signature is None else str(signature)
+        )
+        result.entries[key] = entry
+    return result
+
+
+def _collect_config_health(home: Path, ctx: Context) -> None:
+    """C-687: record what the state database's config-health table holds on *ctx*."""
+    read = read_config_health_entries(home)
+    ctx.config_health_status = read.status
+    ctx.config_health_entries = read.entries
+    ctx.config_health_unread = read.unread
+    ctx.config_health_truncated = read.truncated
 
 
 # B-845: the row key every real read/write of the per-agent store uses.
@@ -5603,6 +6437,109 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
                 or length > ctx.agent_auth_profile_store_length
             ):
                 ctx.agent_auth_profile_store_length = length
+
+
+# C-675: what the MONITOR may record about the SQLite credential stores. Owner ruling: key
+# NAMES, value LENGTH and the store's own `updated_at_ms` / `updated_at` column -- enough to
+# see a store appear, vanish or be rewritten without ever reading a value, and never a digest
+# of a credential. `authProfiles.store` is the allowlist-exempt key B-749 reads for length
+# only; `auth.sharedStore` is its sibling in the same table (its row is a few bytes).
+_AUTH_SHARED_STORE_KEY = "auth.sharedStore"
+# Rows read per agent database. The runtime itself reads one (`primary`); the bound only
+# stops a hostile table from making the sweep unbounded, and biting is disclosed.
+_MAX_CREDENTIAL_STORE_ROWS = 64
+_CRED_LABEL_MAX = 256
+
+
+def _cred_label(text) -> str:
+    """A key or agent id with anything outside a plain name made inert, bounded at
+    ``_CRED_LABEL_MAX``. Redaction and the short display length belong to the monitor
+    dimension (``monitordims._credentials._safe_store_label``), which must see the whole key
+    to redact it; a name this function altered gets a hash of the original so two different
+    names never merge into one label."""
+    raw = str(text)[:_CRED_LABEL_MAX]
+    clean = re.sub(r"[^A-Za-z0-9._@:-]", "?", raw)
+    if clean != raw:
+        clean += "~" + hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:6]
+    return clean
+
+
+def _cred_int(value) -> "int | None":
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def read_credential_store_rows(home) -> dict:
+    """``{"stores", "incomplete", "reason"}`` for the monitor's credential_store
+    dimension (C-675): one entry per credential store that lives in a SQLite database.
+
+    ``stores`` maps a label (``state/authProfiles.store``, ``state/auth.sharedStore``,
+    ``agent/<agent-id>/<store_key>``) to ``{"length": bytes, "updated": the store's own
+    timestamp}``; ``stores`` is empty when no database exists, and the monitor still records
+    that empty set so the first store to appear is an addition. ``incomplete`` is True when
+    any database was present but could not be read, or a bound bit -- "unreadable" must never
+    read as "unchanged", so the caller stands removals down and says why.
+
+    Same access discipline as the B-749/B-845 readers: ``trajectorystore._open_and_verify_table``
+    (read-only, FIFO/device refused before ``sqlite3.connect``, refuses a name that is not a
+    REAL TABLE inside the transaction that also runs the SELECT). ``LENGTH(CAST(.. AS BLOB))``
+    is selected, never the value column, and the keys are bound parameters. Takes *home*, not
+    a ``Context``, like ``read_config_audit_rows``. Never raises.
+    """
+    out = {"stores": {}, "incomplete": False, "reason": ""}
+    reasons: list = []
+    try:
+        home = pathprobe.expand_user(home)
+        db_path = home / "state" / "openclaw.sqlite"
+        if pathprobe.exists(db_path):
+            conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
+                db_path, "config_machine_state")
+            if unreadable:
+                reasons.append("the state database could not be read")
+            elif conn is not None:
+                try:
+                    for key, length, updated in conn.execute(
+                        "SELECT state_key, LENGTH(CAST(value_json AS BLOB)), updated_at_ms "
+                        "FROM config_machine_state WHERE state_key IN (?, ?) "
+                        "ORDER BY state_key",
+                        (_AUTH_PROFILE_STORE_KEY, _AUTH_SHARED_STORE_KEY),
+                    ):
+                        out["stores"][f"state/{_cred_label(key)}"] = {
+                            "length": _cred_int(length), "updated": _cred_int(updated)}
+                except sqlite3.Error:
+                    reasons.append("the state database could not be read")
+                finally:
+                    conn.close()
+        if _trajectorystore.sqlite_db_paths_capped(home):
+            reasons.append("more agent databases exist than were read")
+        for agent_db in _trajectorystore.sqlite_db_paths(home):
+            agent = _cred_label(agent_db.parent.parent.name)
+            conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
+                agent_db, table_name="auth_profile_store")
+            if conn is None:
+                if unreadable:
+                    reasons.append(f"the database of agent {agent} could not be read")
+                continue
+            try:
+                rows = conn.execute(
+                    "SELECT store_key, LENGTH(CAST(store_json AS BLOB)), updated_at "
+                    "FROM auth_profile_store ORDER BY store_key LIMIT ?",
+                    (_MAX_CREDENTIAL_STORE_ROWS + 1,),
+                ).fetchall()
+            except sqlite3.Error:
+                reasons.append(f"the database of agent {agent} could not be read")
+                continue
+            finally:
+                conn.close()
+            if len(rows) > _MAX_CREDENTIAL_STORE_ROWS:
+                reasons.append(f"agent {agent} holds more credential rows than were read")
+            for key, length, updated in rows[:_MAX_CREDENTIAL_STORE_ROWS]:
+                out["stores"][f"agent/{agent}/{_cred_label(key)}"] = {
+                    "length": _cred_int(length), "updated": _cred_int(updated)}
+    except Exception:  # noqa: BLE001 - never let this reader end a monitor run
+        reasons.append("the credential databases could not be read")
+    out["incomplete"] = bool(reasons)
+    out["reason"] = "; ".join(dict.fromkeys(reasons))
+    return out
 
 
 # B176 follow-up (2026-09-25): legacy devices/paired.json -> device_pairing_paired
@@ -5743,6 +6680,16 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     drops ``displayName``/``bins``/host stats/every other vendor field the real
     ``nodeSurface`` object may carry, by construction (an allowlist, not a denylist).
 
+    ``scopesUnparsed`` (C-648, same per-entry dict) is ``True`` iff the row's
+    ``scopes_json`` or ``approved_scopes_json`` was present but could not be read
+    (malformed, or nested deeper than ``configloader.MAX_JSON_NESTING``); both then stay
+    ``None``. A scopes value is read or lost as a whole: a list holding one too-deep
+    element is unreadable, and an ``operator.admin`` beside that element is NOT recovered
+    (that would take an iterative parser). B176 reads the flag to disclose the unread
+    device and to refuse a clean verdict over it; a WARN found in OTHER, readable rows is
+    unaffected. Only when every row is too deep, with no readable scopes list anywhere, is
+    the table reported unreadable (``paired_devices_sqlite_parse_error``).
+
     Bounded, defense in depth against a hostile state DB (C-135 round 1, see
     ``_PAIRED_DEVICE_SQLITE_SELECT``'s own comment for the full grounding): a row
     whose ``scopes_json``/``approved_scopes_json``/``tokens_json``/``role``/
@@ -5786,7 +6733,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -5811,7 +6758,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("BEGIN")
             conn.execute("PRAGMA query_only = 1")
@@ -5898,17 +6845,49 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         ctx.errors.append(message)
         note_limit(ctx.limit_hits, LIMIT_DOMAIN_PAIRED, message)
 
+    # A scopes/approvedScopes value nested deeper than `_MAX_JSON_NESTING` levels is OUR limit,
+    # enforced by `_loads_bounded` before the parser runs (C-648). Before that the
+    # interpreter's own parser decided: a RecursionError, which is not a ValueError, so it
+    # escaped this reader and aborted the WHOLE audit ("unexpected internal error
+    # (RecursionError)") at a depth that differs per interpreter (~1,000 levels on 3.9,
+    # ~10,000 on 3.12, ~58,000 on 3.14 with its default stack and unbounded in practice with
+    # a larger one - measured), so the same row read differently on different machines. A
+    # 200 KB value of this shape fits under `_MAX_PAIRED_DEVICE_JSON_BYTES`, so the byte cap
+    # does not stop it. RecursionError stays caught as a second net.
+    #
+    # The unit that cannot be read is the VALUE, not the table: a too-deep value (or a
+    # malformed one - same treatment) leaves `scopes`/`approvedScopes` None and sets that
+    # entry's `scopesUnparsed`, which B176 reads to say so and to refuse a clean verdict. The
+    # value is lost WHOLE: a scopes list that contains one too-deep element is unreadable,
+    # and an `operator.admin` next to that element in the same list is not salvaged (that
+    # takes an iterative parser), so that device is UNKNOWN, never a WARN and never clean.
+    # What this per-row split protects is the OTHER rows: a hostile value in one device's
+    # column must not turn another device's readable `operator.admin` from a WARN into
+    # UNKNOWN (B176: "a WARN found in what WAS scanned stands regardless"). Only when EVERY
+    # row is too deep, with no readable scopes anywhere, is there nothing left to evaluate,
+    # and then the table is reported unreadable - the same honest UNKNOWN every other "could
+    # not reliably read device_pairing_paired" case gives, never a device with no scopes.
+    row_scopes_unparsed = False
+    row_scopes_too_deep = False
+
     def _json_list(raw):
+        nonlocal row_scopes_unparsed, row_scopes_too_deep
         if not raw:
             return None
         try:
-            value = json.loads(raw)
+            value = _loads_bounded(raw)
+        except (_JSONNestingError, RecursionError):
+            row_scopes_unparsed = row_scopes_too_deep = True
+            return None
         except ValueError:
+            row_scopes_unparsed = True
             return None
         return value if isinstance(value, list) else None
 
     ctx.paired_devices_sqlite_found = True
     entries: dict = {}
+    too_deep_rows = 0
+    malformed_rows = 0
     for (
         device_id, platform, scopes_json, approved_scopes_json, tokens_json,
         created_at_ms, approved_at_ms, last_seen_at_ms,
@@ -5917,15 +6896,26 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         if not isinstance(device_id, str) or not device_id:
             continue
 
+        row_scopes_unparsed = row_scopes_too_deep = False
+        scopes_value = _json_list(scopes_json)
+        approved_scopes_value = _json_list(approved_scopes_json)
+        if row_scopes_too_deep:
+            too_deep_rows += 1
+        elif row_scopes_unparsed:
+            malformed_rows += 1
+
         # B396: RecursionError is caught here too (not just ValueError) -- "harden it
         # in the same style as the new keys" (see this reader's own follow-up note in
         # its docstring) -- so a deeply-nested tokens_json sets tokensUnparsed rather
-        # than propagating an uncaught exception out of a read-only collector.
+        # than propagating an uncaught exception out of a read-only collector. C-648:
+        # the nesting limit is `_MAX_JSON_NESTING` (`_loads_bounded` raises a ValueError
+        # past it), not the interpreter's parser, so tokens / roles / nodeSurface below
+        # answer the same on every interpreter; RecursionError is the second net.
         tokens: dict = {}
         tokens_unparsed = False
         if tokens_json:
             try:
-                raw_tokens = json.loads(tokens_json)
+                raw_tokens = _loads_bounded(tokens_json)
             except (ValueError, RecursionError):
                 raw_tokens = None
                 tokens_unparsed = True
@@ -5953,7 +6943,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         roles_unparsed = False
         if roles_json is not None:
             try:
-                raw_roles = json.loads(roles_json)
+                raw_roles = _loads_bounded(roles_json)
             except (ValueError, RecursionError):
                 roles_unparsed = True
             else:
@@ -5973,7 +6963,7 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         node_surface_unparsed = False
         if node_surface_json is not None:
             try:
-                raw_surface = json.loads(node_surface_json)
+                raw_surface = _loads_bounded(node_surface_json)
             except (ValueError, RecursionError):
                 node_surface_unparsed = True
             else:
@@ -5996,8 +6986,9 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
         entries[device_id] = {
             "deviceId": device_id,
             "platform": platform,
-            "scopes": _json_list(scopes_json),
-            "approvedScopes": _json_list(approved_scopes_json),
+            "scopes": scopes_value,
+            "approvedScopes": approved_scopes_value,
+            "scopesUnparsed": row_scopes_unparsed,
             "role": role_value,
             "roles": roles_value,
             "rolesUnparsed": roles_unparsed,
@@ -6010,7 +7001,251 @@ def _collect_paired_devices_sqlite(home: Path, ctx: Context) -> None:
             "lastSeenAtMs": last_seen_at_ms,
         }
 
+    if too_deep_rows:
+        # Nothing left to evaluate: every row is too deep AND none kept a readable scopes
+        # list in its other column (a readable `operator.admin` there is still a WARN).
+        everything = too_deep_rows == len(entries) and all(
+            e["scopes"] is None and e["approvedScopes"] is None for e in entries.values()
+        )
+        ctx.errors.append(
+            f"device_pairing_paired in {db_path} holds a scopes/approvedScopes value nested "
+            f"deeper than the {_MAX_JSON_NESTING} levels this reader follows; "
+            + (
+                "the paired-device store was not reliably read" if everything
+                else f"the scopes of {too_deep_rows} paired-device row(s) were not read"
+            )
+        )
+        if everything:
+            ctx.paired_devices_sqlite_parse_error = True
+            return
+    if malformed_rows:
+        ctx.errors.append(
+            f"device_pairing_paired in {db_path} holds {malformed_rows} paired-device row(s) "
+            "whose scopes/approvedScopes value is not valid JSON; their scopes were not read"
+        )
+
     ctx.paired_devices_sqlite = entries
+
+
+# C-685 (B138): the PENDING half of the pairing store. OpenClaw 2026.8.1 moved the pending
+# requests out of ``devices/pending.json`` (left behind as ``pending.json.migrated``) into the
+# ``device_pairing_pending`` table of the same state database `_collect_paired_devices_sqlite`
+# reads; B138 kept reading only the file and answered a clean PASS on every current install.
+# Bounded exactly like the paired reader (the cap is enforced AT THE SQL LEVEL on a BLOB
+# length, so an oversized value never reaches this process), with the text columns capped too:
+# a row over any cap is excluded, counted, and disclosed as "present but not read", so B138
+# can refuse a clean verdict over it. ``public_key``, ``display_name``, ``device_family``,
+# ``client_id``, ``browser_origin`` and ``remote_ip`` are never selected.
+_MAX_PENDING_PAIRINGS = 500
+_MAX_PENDING_TEXT_BYTES = 1024
+_PENDING_PAIRING_ROW_WITHIN_CAP = (
+    "(scopes_json IS NULL OR length(CAST(scopes_json AS BLOB)) <= ?) "
+    "AND (roles_json IS NULL OR length(CAST(roles_json AS BLOB)) <= ?) "
+    "AND (role IS NULL OR length(CAST(role AS BLOB)) <= ?) "
+    "AND (request_id IS NULL OR length(CAST(request_id AS BLOB)) <= ?) "
+    "AND (device_id IS NULL OR length(CAST(device_id AS BLOB)) <= ?) "
+    "AND (platform IS NULL OR length(CAST(platform AS BLOB)) <= ?) "
+    "AND (client_mode IS NULL OR length(CAST(client_mode AS BLOB)) <= ?)"
+)
+_PENDING_PAIRING_SQLITE_SELECT = (
+    "SELECT request_id, device_id, platform, client_mode, role, roles_json, scopes_json, "
+    "silent, is_repair, ts FROM device_pairing_pending "
+    f"WHERE {_PENDING_PAIRING_ROW_WITHIN_CAP} ORDER BY ts DESC LIMIT ?"
+)
+_PENDING_PAIRING_SQLITE_OVERSIZED_COUNT = (
+    "SELECT count(*) FROM device_pairing_pending "
+    f"WHERE NOT ({_PENDING_PAIRING_ROW_WITHIN_CAP})"
+)
+
+
+def _non_regular_kind(path: Path) -> str:
+    """What *path* is when it exists but is NOT a regular file (``lstat``, never followed):
+    "a symlink", "a directory", "a special file", or "an object that could not be inspected";
+    "" when it is absent or an ordinary file. ``walk_dir_safely`` silently skips every one of
+    these, which would read a relocated or replaced database as "no state database"."""
+    try:
+        mode = os.lstat(path).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return ""
+    except OSError:
+        return "an object that could not be inspected"
+    if stat.S_ISREG(mode):
+        return ""
+    if stat.S_ISLNK(mode):
+        return "a symlink"
+    if stat.S_ISDIR(mode):
+        return "a directory"
+    return "a special file"
+
+
+def _collect_pending_pairings_sqlite(home: Path, ctx: Context) -> None:
+    """Read-only collection of ``device_pairing_pending`` (``state/openclaw.sqlite``) into
+    ``ctx.pending_pairings_sqlite``, one entry per pending request, keyed by request id.
+
+    Each row is normalised into the per-entry shape the legacy ``devices/pending.json``
+    envelope uses (``requestId, deviceId, platform, clientMode, role, roles, scopes, silent,
+    isRepair, ts``), so B138 judges either container with the same scope logic. Columns
+    grounded by direct schema inspection of an installed OpenClaw 2026.10.1.
+
+    Four outcomes, never collapsed (a "clean" verdict needs the table actually read):
+    no state database located (all flags stay False); state database located but no such
+    table (``state_db`` only); table read (``found``, 0 rows still counts); table present but
+    not reliably read - a view or other non-table object, a locked or odd file, or a state
+    directory listing cut short before the database was reached (``parse_error``).
+
+    A scopes value that is not valid JSON, is nested deeper than ``_MAX_JSON_NESTING``, or is
+    not a list is kept as ``scopes=None, scopesUnparsed=True`` for THAT request (never read as
+    "no scopes"); a NULL ``scopes_json`` is no scopes. ``ctx.pending_pairings_sqlite_dropped``
+    counts rows excluded for size or row count.
+    """
+    state_dir = home / "state"
+    # An EXISTING database path that is not an ordinary file (a symlink to a relocated state
+    # directory's database, a directory, a FIFO) is present-but-unreadable, never "no state
+    # database": the walk below skips all of them. A symlinked `state` that is not a
+    # directory is the same fact one level up.
+    direct = state_dir / "openclaw.sqlite"
+    odd = _non_regular_kind(direct)
+    where = "state/openclaw.sqlite"
+    if not odd and not _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'"):
+        kind = _non_regular_kind(state_dir) or ("a file" if pathprobe.exists(state_dir) else "")
+        if kind and kind != "a directory":  # a directory _safe_is_dir could not enter reports itself
+            odd, where = kind, "state"
+    if odd:
+        ctx.errors.append(
+            f"{where} exists but is {odd}, not an ordinary "
+            f"{'directory' if where == 'state' else 'file'}; the pending pairing store was not read"
+        )
+        ctx.pending_pairings_sqlite_state_db = True
+        ctx.pending_pairings_sqlite_parse_error = True
+        ctx.pending_pairings_sqlite_not_regular = (
+            f"{where} is {odd}, not a {'directory' if where == 'state' else 'regular file'}"
+        )
+        return
+    capped: list = []
+    sqlite_candidates = (
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        if capped:
+            # A capped listing that never reached the DB is not "no state store" (GR#4).
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the pending pairing store was not read"
+            )
+            ctx.pending_pairings_sqlite_parse_error = True
+        return
+    ctx.pending_pairings_sqlite_state_db = True
+
+    json_cap, text_cap = _MAX_PAIRED_DEVICE_JSON_BYTES, _MAX_PENDING_TEXT_BYTES
+    cap_params = (json_cap, json_cap, json_cap, text_cap, text_cap, text_cap, text_cap)
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = _connect_state_db(db_path)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "device_pairing_pending")
+            if kind == "absent":
+                return
+            ctx.pending_pairings_sqlite_found = True
+            if kind != "table":
+                # A view / virtual table / aliased object: refuse to query it, never conflate
+                # it with "absent" (the view-masquerade defense every sibling reader has).
+                ctx.errors.append(
+                    f"'device_pairing_pending' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object "
+                    "instead); the pending pairing store was not read"
+                )
+                ctx.pending_pairings_sqlite_parse_error = True
+                return
+            rows = conn.execute(
+                _PENDING_PAIRING_SQLITE_SELECT, (*cap_params, _MAX_PENDING_PAIRINGS + 1),
+            ).fetchall()
+            oversized = conn.execute(
+                _PENDING_PAIRING_SQLITE_OVERSIZED_COUNT, cap_params,
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        if "no such table" not in str(exc).lower():
+            ctx.errors.append(f"could not read device_pairing_pending from {db_path}: {exc}")
+            ctx.pending_pairings_sqlite_found = True
+            ctx.pending_pairings_sqlite_parse_error = True
+        return
+
+    dropped = oversized
+    if oversized:
+        ctx.errors.append(
+            f"device_pairing_pending in {db_path} has {oversized} pending request row(s) "
+            "whose scopes/role/roles/id/platform value exceeds the collector's size cap; "
+            "those rows were not read"
+        )
+    if len(rows) > _MAX_PENDING_PAIRINGS:
+        dropped += 1  # at least one more; the probe row is discarded, never evaluated
+        ctx.errors.append(
+            f"device_pairing_pending in {db_path} has more than {_MAX_PENDING_PAIRINGS} "
+            f"pending request rows within the size cap; only the newest {_MAX_PENDING_PAIRINGS} "
+            "were read"
+        )
+    entries: dict = {}
+    unparsed = 0
+    for (
+        request_id, device_id, platform, client_mode, role, roles_json, scopes_json,
+        silent, is_repair, ts,
+    ) in rows[:_MAX_PENDING_PAIRINGS]:
+        if not isinstance(request_id, str) or not request_id:
+            dropped += 1  # a row we cannot key is "present but not read", never skipped quietly
+            continue
+        scopes_value, scopes_unparsed = None, False
+        if scopes_json is not None:
+            try:
+                parsed = _loads_bounded(scopes_json)
+            except (ValueError, RecursionError):  # incl. the nesting limit's ValueError
+                scopes_unparsed = True
+            else:
+                if isinstance(parsed, list):
+                    # The vendor trims each scope string (case is kept, so a differently-cased
+                    # scope stays unmatched, exactly like the vendor). An element that is not
+                    # a plain string (nested list, object, number) cannot be read: the strings
+                    # beside it still count, but the row is flagged so a clean answer is refused.
+                    scopes_value = [s.strip(_JS_TRIM_CHARS) for s in parsed if isinstance(s, str)]
+                    scopes_unparsed = len(scopes_value) != len(parsed)
+                elif parsed is not None:
+                    scopes_unparsed = True  # a shape we cannot interpret is not "no scopes"
+        unparsed += scopes_unparsed
+        roles_value = None
+        if roles_json is not None:
+            try:
+                raw_roles = _loads_bounded(roles_json)
+            except (ValueError, RecursionError):
+                raw_roles = None
+            if isinstance(raw_roles, list):
+                roles_value = [s for s in raw_roles if isinstance(s, str)]
+            elif isinstance(raw_roles, str):
+                roles_value = raw_roles
+        entries[request_id] = {
+            "requestId": request_id,
+            "deviceId": device_id if isinstance(device_id, str) else None,
+            "platform": platform if isinstance(platform, str) else None,
+            "clientMode": client_mode if isinstance(client_mode, str) else None,
+            "role": role if isinstance(role, str) else None,
+            "roles": roles_value,
+            "scopes": scopes_value,
+            "scopesUnparsed": scopes_unparsed,
+            "silent": bool(silent) if isinstance(silent, (int, float)) else False,
+            "isRepair": bool(is_repair) if isinstance(is_repair, (int, float)) else False,
+            "ts": ts if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None,
+        }
+    ctx.pending_pairings_sqlite_dropped = dropped
+    if unparsed:
+        ctx.errors.append(
+            f"device_pairing_pending in {db_path} holds {unparsed} pending request row(s) "
+            f"whose scopes value is not a JSON list or is nested deeper than "
+            f"{_MAX_JSON_NESTING} levels; their scopes were not read"
+        )
+    ctx.pending_pairings_sqlite = entries
 
 
 def _collect_config_machine_state(home: Path, ctx: Context) -> None:
@@ -6023,7 +7258,12 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     * ``config_machine_state``           key -> parsed value, for the keys that were set
     * ``config_machine_state_unparsed``  keys whose row exists but whose ``value_json``
                                          is not valid JSON -- present, and NOT readable,
-                                         which is neither "set to X" nor "not set"
+                                         which is neither "set to X" nor "not set". It
+                                         also lists a key whose document parsed but had
+                                         subtrees nested past the shallow reader's depth
+                                         cut off (C-664): that key is ALSO in
+                                         ``config_machine_state``, holding the value as
+                                         read, with the cut-off subtrees replaced by a marker
 
     Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same pattern
     the cron and plugin-trust readers already use on this exact database.
@@ -6065,7 +7305,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -6085,7 +7325,7 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
     placeholders = ",".join("?" for _ in CONFIG_MACHINE_STATE_KEYS)
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             # BEGIN before the schema check, held open across it AND the read below --
             # closes the same TOCTOU gap `trajectorystore._open_and_verify_table`
@@ -6137,7 +7377,14 @@ def _collect_config_machine_state(home: Path, ctx: Context) -> None:
             ctx.config_machine_state_unparsed.add(state_key)
             continue
         try:
-            ctx.config_machine_state[state_key] = json.loads(value_json)
+            shallow = _loads_shallow(value_json)
+            ctx.config_machine_state[state_key] = shallow.value
+            if shallow.elided:
+                # The value is delivered as read (every consumer looks at its top level
+                # only), and the key is also listed as not fully read.
+                ctx.config_machine_state_unparsed.add(state_key)
+                ctx.config_machine_state_elided.add(state_key)
+                ctx.errors.append(_elided_note(f"config_machine_state[{state_key!r}]"))
         except (TypeError, ValueError):
             # Present but unreadable. Recording it as absent would let a consumer answer
             # "not set" about a row that exists.
@@ -6202,7 +7449,7 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -6219,7 +7466,7 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # Presence-by-metadata, not exception-driven fallback: `PRAGMA table_info` on a
@@ -6268,6 +7515,106 @@ def _collect_update_runs(home: Path, ctx: Context) -> None:
         })
 
 
+def _collect_restart_handoff(home: Path, ctx: Context) -> None:
+    """C-701: read-only collection of the supervisor restart handoff, which OpenClaw moved
+    from ``gateway-supervisor-restart-handoff.json`` into the shared state database.
+
+    Grounded against the installed 2026.10.2 dist (``restart-handoff-*.mjs`` and the
+    ``OPENCLAW_STATE_SCHEMA_SQL`` literal, verbatim):
+
+        CREATE TABLE IF NOT EXISTS gateway_restart_handoff (
+          handoff_key TEXT NOT NULL PRIMARY KEY, kind TEXT NOT NULL, version INTEGER NOT NULL,
+          intent_id TEXT NOT NULL, pid INTEGER NOT NULL, process_instance_id TEXT,
+          created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, reason TEXT, ...
+          source TEXT NOT NULL, restart_kind TEXT NOT NULL, supervisor_mode TEXT NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        ) STRICT;
+
+    The vendor writes one row (``handoff_key = 'current'``) and removes it when a supervisor
+    restart consumes it; an expired or malformed row is removed by the next consume. A row
+    whose ``expires_at`` (epoch milliseconds) has passed is therefore the real "a restart
+    did not complete" signal. It never reads or deletes the old JSON file.
+
+    FIELD-SELECT: only ``expires_at`` is bound into the query -- never ``SELECT *``, no pid,
+    reason or id column. The table is checked to be a REAL table (``_table_kind``) inside a
+    ``BEGIN`` held across the read, as ``_collect_agent_auth_profile_store_presence`` does,
+    so a crafted view of that name cannot feed this reader.
+
+    Three outcomes, kept apart (collapsing them would let an unreadable table read as "no
+    restart pending"): no DB / capped listing / absent table leaves ``restart_handoff_read``
+    False; a table that is present but unreadable (locked, corrupt, a view, a FIFO at the
+    database path) sets ``restart_handoff_parse_error``; a successful read sets
+    ``restart_handoff_read`` and fills ``restart_handoff_expires_at_ms``.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), like every other
+    reader on this database.
+    """
+    state_dir = home / "state"
+    # Same preamble as `_collect_pending_pairings_sqlite`: an EXISTING database path that is not
+    # an ordinary file (a symlink to a relocated database, a directory, a FIFO) is
+    # present-but-unreadable, never "no state database" -- the walk below skips all of them,
+    # which would hand the caller back the old JSON-file answer. A symlinked `state` that is not
+    # a directory is the same fact one level up.
+    odd = _non_regular_kind(state_dir / "openclaw.sqlite")
+    where = "state/openclaw.sqlite"
+    if not odd and not _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'"):
+        kind = _non_regular_kind(state_dir) or ("a file" if pathprobe.exists(state_dir) else "")
+        if kind and kind != "a directory":  # a directory _safe_is_dir could not enter reports itself
+            odd, where = kind, "state"
+    if odd:
+        ctx.errors.append(
+            f"{where} exists but is {odd}, not an ordinary "
+            f"{'directory' if where == 'state' else 'file'}; the restart handoff was not read"
+        )
+        ctx.restart_handoff_parse_error = True
+        return
+    capped: list = []
+    candidates = (
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the restart handoff was not read"
+            )
+        return
+
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = _connect_state_db(db_path)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "gateway_restart_handoff")
+            if kind == "absent":
+                return  # no such table in THIS db: the state-DB layout is not shown here
+            if kind != "table":
+                ctx.errors.append(
+                    f"'gateway_restart_handoff' in {db_path} did not resolve to a real "
+                    "table (found a view, virtual table, or other schema object instead); "
+                    "the restart handoff was not read"
+                )
+                ctx.restart_handoff_parse_error = True
+                return
+            rows = conn.execute(
+                "SELECT expires_at FROM gateway_restart_handoff "
+                "ORDER BY expires_at ASC LIMIT ?",
+                (_MAX_RESTART_HANDOFF_ROWS,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        ctx.errors.append(f"could not read gateway_restart_handoff from {db_path}: {exc}")
+        ctx.restart_handoff_parse_error = True
+        return
+
+    ctx.restart_handoff_read = True
+    ctx.restart_handoff_expires_at_ms = [row[0] for row in rows]
+
+
 def _collect_capture_state(home: Path, ctx: Context) -> None:
     """B-295 (DISK-4): read-only METADATA about OpenClaw's debug-proxy traffic capture,
     stored in the shared state database (~/.openclaw/state/openclaw.sqlite).
@@ -6295,7 +7642,7 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -6304,7 +7651,7 @@ def _collect_capture_state(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             events = conn.execute("SELECT COUNT(*) FROM capture_events").fetchone()[0]
@@ -6361,7 +7708,7 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
     state_dir = home / "state"
     capped: list = []
     candidates = (
-        walk_dir_safely(state_dir, max_files=100, capped=capped)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
@@ -6378,7 +7725,7 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
     except sqlite3.Error as exc:
         ctx.errors.append(f"could not open '{db_path}': {exc}")
         return
@@ -6431,13 +7778,299 @@ def _collect_skill_library_state(home: Path, ctx: Context) -> None:
         conn.close()
 
 
+def _ingest_exec_approvals_document(
+    store: dict, ctx: Context, where: str, store_tag: "str | None"
+) -> None:
+    """Tally one parsed exec-approvals document into ``ctx`` (shared by BOTH stores).
+
+    *store* is the decoded ``{version, socket, defaults, agents}`` document -- the SAME
+    shape whether it came from the legacy ``exec-approvals.json`` file or from the
+    ``raw_json`` column of the state database's ``exec_approvals_config`` row
+    (``serializeExecApprovals`` in src/infra/exec-approvals-sqlite.ts writes one string
+    for both). *where* is the already-quoted store label used in limit disclosures.
+    *store_tag* is ``None`` for the legacy file (its grant dicts stay byte-identical to
+    what they always were) and ``"sqlite"`` for the state database.
+
+    Only counts, tier strings and agent ids are retained on ``ctx``: the document also
+    carries ``socket.token`` and allowlist ``pattern`` text, which never leave this frame.
+    """
+    agents = store.get("agents")
+    if not isinstance(agents, dict):
+        agents = {}
+    ctx.exec_approvals_found = True
+    defaults = store.get("defaults")
+    # The state database is ingested FIRST and is canonical on current builds, so a
+    # later (legacy-file) document never overwrites the tiers it already set.
+    if isinstance(defaults, dict) and not ctx.exec_approvals_defaults:
+        ctx.exec_approvals_defaults = {
+            key: defaults.get(key) if isinstance(defaults.get(key), str) else None
+            for key in ("security", "ask")
+        }
+    # B-657: this cap had NO disclosure at all -- unlike the byte-size cap, a store under
+    # the byte cap but with more than _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and
+    # every agent past the cap was silently never scanned for a standing "allow-always"
+    # grant.
+    if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
+            f"exec-approvals store {where} has {len(agents)} agent(s) \u2014 only the "
+            f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
+        )
+    for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
+        if not isinstance(agent, dict):
+            continue
+        allowlist = agent.get("allowlist")
+        allow_always_count = 0
+        # C-430: split the count by entry SHAPE, not just tallied. Grounded against
+        # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
+        # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
+        # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
+        # `argPattern` key at all - and the matcher (exec-command-resolution*.js) reads
+        # a missing `argPattern` as a wildcard over argv. That is a materially different
+        # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
+        # release) - "any arguments to this binary, forever" vs "this exact argv only" -
+        # and the old single tally could not tell a reader which they were looking at.
+        # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
+        # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
+        # boundary, not merely "is the key present".
+        binary_wide_count = 0
+        arg_restricted_count = 0
+        if isinstance(allowlist, list):
+            for e in allowlist:
+                # `source` is matched as the exact literal, like the vendor's own
+                # normalizePersistedAllowlistSource (anything else becomes undefined);
+                # a bare-string allowlist entry is a manual pattern, never a grant.
+                if not (isinstance(e, dict) and e.get("source") == "allow-always"):
+                    continue
+                allow_always_count += 1
+                if e.get("argPattern"):
+                    arg_restricted_count += 1
+                else:
+                    binary_wide_count += 1
+        security = agent.get("security")
+        ask = agent.get("ask")
+        grant = {
+            "agent_id": agent_id if isinstance(agent_id, str) else str(agent_id),
+            "security": security if isinstance(security, str) else None,
+            "ask": ask if isinstance(ask, str) else None,
+            "allow_always_count": allow_always_count,
+            "binary_wide_count": binary_wide_count,
+            "arg_restricted_count": arg_restricted_count,
+        }
+        if store_tag is not None:
+            grant["store"] = store_tag
+        ctx.exec_approvals_grants.append(grant)
+
+
+def _exec_approvals_row_has_pre_10_1_shape(store: dict) -> bool:
+    """True when an exec-approvals document holds an entry in the pre-2026.10.1 shape.
+
+    MEASURED by executing the vendor's ``parsePersistedExecApprovals``
+    (``exec-approvals-migration-gate-4cEEb67t.mjs`` on the installed openclaw@2026.10.2,
+    2026-10-12) on four documents that differ from a current one in exactly one respect:
+    an allowlist entry WITHOUT an ``id``, an entry WITH a ``commandText`` key, a bare-string
+    entry, and an ``agents.default`` key each come back as the vendor's legacy-policy
+    diagnostic (error text beginning "Legacy exec approval policy requires"); the same
+    entry with an ``id`` parses. ``readExecApprovalsConfigRow`` turns that diagnostic into
+    ``ExecApprovalsMigrationRequiredError``, so the whole row is refused until repaired --
+    including the grants of agents whose entries are well-formed. The 2026.9.9 release
+    tarball has neither that diagnostic nor the ``commandText: never()`` constraint (zero
+    matches), i.e. it honoured such a row.
+
+    Only the four shapes above are recognised. The vendor's persisted schema is stricter in
+    other respects (for instance an entry ``source`` other than ``"allow-always"``), and
+    this deliberately does not re-implement it: ``False`` is "none of the four seen", never
+    "the vendor will load this row". Bounded by the same agent cap the grant scan uses.
+    """
+    agents = store.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    if "default" in agents:
+        return True
+    for agent in list(agents.values())[:_MAX_EXEC_APPROVALS_AGENTS]:
+        allowlist = agent.get("allowlist") if isinstance(agent, dict) else None
+        if not isinstance(allowlist, list):
+            continue
+        for entry in allowlist:
+            if isinstance(entry, str):
+                return True
+            if isinstance(entry, dict):
+                entry_id = entry.get("id")
+                if "commandText" in entry or not (isinstance(entry_id, str) and entry_id):
+                    return True
+    return False
+
+
+def _collect_exec_approvals_sqlite(home: Path, ctx: Context) -> None:
+    """Read the exec-approvals store OpenClaw keeps in the shared state database.
+
+    Current OpenClaw builds no longer use ``~/.openclaw/exec-approvals.json`` (the runtime
+    refuses exec approvals while that file still exists -- ``assertNoPendingLegacyExecApprovals``
+    -- until ``openclaw doctor --fix`` imports it): the document lives in ONE row of
+    ``state/openclaw.sqlite``, table ``exec_approvals_config``, ``config_key = 'current'``.
+    Grounded against the installed dist (2026.9.7, state schema v19), located by symbol in
+    ``src/infra/exec-approvals-sqlite.ts``: ``EXEC_APPROVALS_CONFIG_KEY = "current"``,
+    ``readExecApprovalsConfigRow`` (``SELECT raw_json ... WHERE config_key = 'current'``),
+    ``snapshotFromExecApprovalsRow`` (an absent row means EMPTY approvals) and
+    ``projectionValues`` (the count columns tally ALL allowlist entries, and the persisted
+    ``source`` is only ever ``"allow-always"`` or absent -- so the projection columns cannot
+    answer B172's "how many standing allow-always grants" question).
+
+    ``raw_json`` is therefore parsed, IN MEMORY, for its counts only: exactly one column of
+    exactly one row is selected (no ``SELECT *``; ``socket_path``, the other columns, every
+    ``auth_profile_*`` table and ``config_health_entries`` are never touched), the document
+    never lands on ``ctx``, and no error text embeds it.
+
+    Outcomes, each distinct (collapsing them is the lying-clean this package exists to avoid):
+
+    * DB or table absent (older build)  -> nothing set; the legacy-file reader is the
+      fallback and, with neither store, the check reports UNKNOWN.
+    * table present, no ``current`` row -> ``exec_approvals_sqlite_read`` + ``found``: a
+      verified-empty store (the vendor treats an absent row as empty approvals).
+    * row parsed                         -> ingested via the shared helper, tagged "sqlite".
+      A row whose entries are in the pre-2026.10.1 shape (no ``id``, a ``commandText``,
+      a bare string, or ``agents.default``) is counted exactly as before -- the grants are
+      real and persisted -- and ``exec_approvals_legacy_row_shape`` is set, because 2026.10.1
+      and later refuse to load such a row until the store is repaired (executed against the
+      installed 2026.10.2; see ``_exec_approvals_row_has_pre_10_1_shape``): those grants are
+      not in force until then, and 2026.9.9 honoured them.
+    * anything else (a view / virtual table / rootpage alias standing in for the table,
+      an unknown column set, a document over the byte cap, invalid JSON, ``version`` other
+      than 1, ``agents`` of the wrong type, an unreadable DB) -> ``found`` +
+      ``parse_error`` + ``exec_approvals_sqlite_unreadable``: present and NOT read.
+
+    Opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``) after the B-908
+    non-regular-path refusal, the same pattern as ``_collect_config_machine_state``, and
+    deliberately WITHOUT ``immutable=1`` (B-909; it would hide rows still resident in the
+    WAL). Like every reader on this DB, ``mode=ro`` on a WAL-mode database may create or
+    rewrite the ``-shm``/``-wal`` sidecars; that is a property of SQLite, not of this reader.
+    """
+    state_dir = home / "state"
+    capped: list = []
+    candidates = (
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100, capped=capped)
+        if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
+    )
+    db_path = next((p for p in candidates if p.name == "openclaw.sqlite"), None)
+    if db_path is None:
+        # A walk that stopped early is not the same fact as an empty state dir (GR#4).
+        if capped:
+            ctx.errors.append(
+                f"stopped listing '{state_dir}' after 100 entries without finding "
+                "openclaw.sqlite; the exec-approvals store in it was not read"
+            )
+        return
+
+    def _unreadable(why: str) -> None:
+        # Content-free by construction: `why` is a fixed phrase or an exception TYPE name.
+        ctx.errors.append(f"could not read exec_approvals_config from {db_path}: {why}")
+        ctx.exec_approvals_found = True
+        ctx.exec_approvals_parse_error = True
+        ctx.exec_approvals_sqlite_unreadable = True
+
+    raw = None
+    row = None
+    try:
+        _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
+        conn = _connect_state_db(db_path)
+        try:
+            # BEGIN before the schema check, held open across it AND the read below --
+            # the same TOCTOU closure as _collect_config_machine_state (B-977).
+            conn.execute("BEGIN")
+            conn.execute("PRAGMA query_only = 1")
+            kind = _trajectorystore._table_kind(conn, "exec_approvals_config")
+            if kind == "absent":
+                return  # older build: legacy file (or UNKNOWN) downstream
+            if kind != "table":
+                _unreadable(
+                    "the name did not resolve to a real table (found a view, virtual "
+                    "table, or other schema object instead)"
+                )
+                return
+            columns = {info[1] for info in conn.execute(
+                "PRAGMA table_info(exec_approvals_config)").fetchall()}
+            if not {"config_key", "raw_json"} <= columns:
+                _unreadable("the table does not have the expected columns")
+                return
+            row = conn.execute(
+                # ONE column of ONE row, bounded in BYTES (substr over a BLOB counts
+                # bytes; over TEXT it would count characters) and bound, not interpolated.
+                "SELECT substr(CAST(raw_json AS BLOB), 1, ?) FROM exec_approvals_config "
+                "WHERE config_key = ? LIMIT 1",
+                (_MAX_EXEC_APPROVALS_BYTES + 1, _EXEC_APPROVALS_SQLITE_KEY),
+            ).fetchone()
+            if row is not None:
+                raw = row[0]
+                if raw is None:
+                    _unreadable("the stored document is NULL")
+                    return
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        # A state DB predating the table is not a corrupt store -- the same quiet
+        # "absent" as the schema check above. Only a sqlite3 message is quoted (it names
+        # the file or the failure, never a row); anything else is reduced to its type.
+        if "no such table" not in str(exc).lower():
+            _unreadable(str(exc) if isinstance(exc, sqlite3.Error) else type(exc).__name__)
+        return
+
+    if row is None:
+        # The table exists and holds no `current` row: OpenClaw itself reads that as
+        # "empty approvals", so this is a verified-empty store, not an unread one.
+        ctx.exec_approvals_sqlite_read = True
+        ctx.exec_approvals_found = True
+        return
+    where = f"in state database '{db_path}'"
+    if len(raw) > _MAX_EXEC_APPROVALS_BYTES:
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
+            f"exec-approvals store {where} exceeded the "
+            f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap \u2014 content beyond the "
+            "cap was NOT scanned",
+        )
+        _unreadable("the stored document is over the size cap")
+        return
+    try:
+        shallow = _loads_shallow(bytes(raw).decode("utf-8", errors="replace"))
+        store = shallow.value
+    except (ValueError, RecursionError) as exc:
+        # JSONDecodeError's text is position-only, but only the type name is recorded.
+        _unreadable(f"the stored document is not valid JSON ({type(exc).__name__})")
+        return
+    version = store.get("version") if isinstance(store, dict) else None
+    if (
+        not isinstance(store, dict)
+        # the vendor schema is `version: literal(1)`; `true` is not 1 there
+        or ("version" in store and (isinstance(version, bool) or version != 1))
+        # `agents` is a record in the vendor schema: a wrong type is a malformed
+        # document, not "no agents" (which would be a false all-clear)
+        or ("agents" in store and not isinstance(store.get("agents"), dict))
+    ):
+        _unreadable("the stored document does not have the expected shape")
+        return
+    _ingest_exec_approvals_document(store, ctx, where, "sqlite")
+    ctx.exec_approvals_sqlite_read = True
+    if _exec_approvals_row_has_pre_10_1_shape(store):
+        ctx.exec_approvals_legacy_row_shape = True
+    if shallow.elided:
+        # The grants read stay (a WARN found in what WAS read stands); the store is also
+        # flagged as not read in full, so "no grant" can never be a clean verdict over it.
+        _unreadable(f"the stored document nests deeper than {_SHALLOW_JSON_DEPTH} levels; "
+                    "content below that depth was not read")
+
+
 def _collect_exec_approvals(home: Path, ctx: Context) -> None:
-    """B-236 (B172): read-only collection of the standing OpenClaw exec-approvals
-    store (~/.openclaw/exec-approvals.json) into ``ctx.exec_approvals_grants``.
+    """B-236 (B172): read-only collection of the LEGACY OpenClaw exec-approvals file
+    (~/.openclaw/exec-approvals.json) into ``ctx.exec_approvals_grants``. Current builds
+    keep the same document in the state database instead -- that successor is
+    ``_collect_exec_approvals_sqlite`` (run first), and both feed
+    ``_ingest_exec_approvals_document``. This file is still read whenever it exists: it
+    is the only store on older builds, and a leftover file beside a canonical row is a
+    pending grant that ``openclaw doctor --fix`` would import.
 
     Grounded against the installed dist (exec-approvals-BIKWP8_V.js): the file is a
     single top-level JSON object (written by OpenClaw itself via JSON.stringify --
-    never JSON5, so this reads it with plain ``json.loads``, not the config loader)
+    never JSON5, so this reads it with ``loads_bounded``, not the config loader)
     shaped ``{version, socket, defaults: {security, ask, askFallback, autoAllowSkills},
     agents: {<agentId>: {security, ask, askFallback, allowlist: [{pattern, argPattern?,
     source, id, ...}]}}}``. An ``agents.<id>.allowlist[]`` entry with
@@ -6461,12 +8094,14 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
     matching that helper's own symlink policy without walking the whole home tree just
     to find one top-level file.
 
-    ``ctx.exec_approvals_found`` stays False when the file is absent -- a consuming
+    ``ctx.exec_approvals_found`` stays False when NEITHER store exists -- a consuming
     check reports UNKNOWN, never a fake PASS (Golden Rule #4, the B-228 pattern).
     """
     target = home / "exec-approvals.json"
+    present = False
     try:
-        skip = target.is_symlink() or not target.is_file()
+        skip = pathprobe.is_symlink(target) or not pathprobe.is_file(target)
+        present = skip and (pathprobe.is_symlink(target) or pathprobe.exists(target))
     except OSError as exc:
         # B-303: same class of exposure as _safe_is_dir/_safe_is_file - a non-traversable
         # ancestor (typically the whole home) must degrade this to "not found" (->
@@ -6474,6 +8109,19 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
         ctx.errors.append(f"could not check '{target}': {exc}")
         skip = True
     if skip:
+        if present and ctx.exec_approvals_sqlite_read:
+            # Beside a state-database store that WAS read, a legacy path that exists but is
+            # not a regular file (a symlink, never followed) is a present-but-unread store:
+            # the runtime refuses exec approvals while that path exists, and Doctor would
+            # import whatever it points at. The state database's "no grant" must not stand
+            # alone as a clean bill. (With no state-database store, a skipped path keeps its
+            # historical meaning above: treated as absent.)
+            ctx.errors.append(
+                f"'{target}' exists but is not a regular file (never followed); the "
+                "legacy exec-approvals store was not read"
+            )
+            ctx.exec_approvals_found = True
+            ctx.exec_approvals_parse_error = True
         return
     try:
         with open(target, "rb") as fp:
@@ -6485,67 +8133,18 @@ def _collect_exec_approvals(home: Path, ctx: Context) -> None:
                 f"{_MAX_EXEC_APPROVALS_BYTES // 1_000_000}MB cap \u2014 content beyond the "
                 "cap was NOT scanned",
             )
-        store = json.loads(raw.decode("utf-8", errors="replace"))
+        shallow = _loads_shallow(raw.decode("utf-8", errors="replace"))
+        store = shallow.value
         if not isinstance(store, dict):
             raise ValueError("exec-approvals.json root is not a JSON object")
-        agents = store.get("agents")
-        if not isinstance(agents, dict):
-            agents = {}
-        ctx.exec_approvals_found = True
-        defaults = store.get("defaults")
-        if isinstance(defaults, dict):
-            ctx.exec_approvals_defaults = {
-                key: defaults.get(key) if isinstance(defaults.get(key), str) else None
-                for key in ("security", "ask")
-            }
-        # B-657: this cap had NO disclosure at all -- unlike the byte-size cap seven
-        # lines up, a store under the byte cap but with more than
-        # _MAX_EXEC_APPROVALS_AGENTS agents parsed fine, and every agent past the cap
-        # was silently never scanned for a standing "allow-always" grant.
-        if len(agents) > _MAX_EXEC_APPROVALS_AGENTS:
-            note_limit(
-                ctx.limit_hits, LIMIT_DOMAIN_APPROVALS,
-                f"exec-approvals store '{target}' has {len(agents)} agent(s) \u2014 only the "
-                f"first {_MAX_EXEC_APPROVALS_AGENTS} were scanned for standing grants",
-            )
-        for agent_id, agent in list(agents.items())[:_MAX_EXEC_APPROVALS_AGENTS]:
-            if not isinstance(agent, dict):
-                continue
-            allowlist = agent.get("allowlist")
-            allow_always_count = 0
-            # C-430: split the count by entry SHAPE, not just tallied. Grounded against
-            # the installed dist (exec-approvals-allowlist*.js's buildArgPatternFromArgv/
-            # buildScriptArgPatternFromArgv): both return `undefined` on every non-Windows
-            # platform BY DESIGN, so a POSIX "always allow" click persists an entry with no
-            # `argPattern` key at all - and the matcher (exec-command-resolution*.js) reads
-            # a missing `argPattern` as a wildcard over argv. That is a materially different
-            # standing grant from one WITH an `argPattern` (Windows, or a future OpenClaw
-            # release) - "any arguments to this binary, forever" vs "this exact argv only" -
-            # and the old single tally could not tell a reader which they were looking at.
-            # A present-but-falsy `argPattern` (`""`/`null`) is treated the same as absent:
-            # the matcher's own check is `if (!entry.argPattern)`, so JS falsy is the real
-            # boundary, not merely "is the key present".
-            binary_wide_count = 0
-            arg_restricted_count = 0
-            if isinstance(allowlist, list):
-                for e in allowlist:
-                    if not (isinstance(e, dict) and e.get("source") == "allow-always"):
-                        continue
-                    allow_always_count += 1
-                    if e.get("argPattern"):
-                        arg_restricted_count += 1
-                    else:
-                        binary_wide_count += 1
-            security = agent.get("security")
-            ask = agent.get("ask")
-            ctx.exec_approvals_grants.append({
-                "agent_id": agent_id if isinstance(agent_id, str) else str(agent_id),
-                "security": security if isinstance(security, str) else None,
-                "ask": ask if isinstance(ask, str) else None,
-                "allow_always_count": allow_always_count,
-                "binary_wide_count": binary_wide_count,
-                "arg_restricted_count": arg_restricted_count,
-            })
+        _ingest_exec_approvals_document(store, ctx, f"'{target}'", None)
+        if shallow.elided:
+            # Same shape as a store that is read in part: the grants found stand, and the
+            # store is flagged unread-in-full so an empty result is UNKNOWN, never PASS.
+            ctx.errors.append(f"could not read all of {target}: "
+                              + _elided_note("the document"))
+            ctx.exec_approvals_found = True
+            ctx.exec_approvals_parse_error = True
     except (OSError, ValueError) as exc:
         ctx.errors.append(f"could not parse {target}: {exc}")
         ctx.exec_approvals_found = True
@@ -6858,7 +8457,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -6867,7 +8466,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
     except sqlite3.Error as exc:
         # Cannot even open the file as a database -- a shared root cause (not sqlite,
         # unreadable, etc.), so both columns genuinely are unreadable together here.
@@ -7094,14 +8693,27 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_found = True
             ctx.plugin_index_parse_error = True
         else:
+            state_elided = 0
             try:
-                state_obj = json.loads(state_value_json)
+                shallow = _loads_shallow(state_value_json)
+                state_obj, state_elided = shallow.value, shallow.elided
             except (TypeError, ValueError) as exc:
                 ctx.errors.append(
                     "could not parse config_machine_state['plugins.installedIndex'] in "
                     f"{db_path}: {exc}"
                 )
                 state_obj = None
+            if state_elided:
+                # Every field this reader takes sits within a few levels of the root, so
+                # the padding hides none of them. It is recorded in ctx.limit_hits (no
+                # finding shows it); a document whose top level is not the expected object
+                # is the existing unusable case below.
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                    _elided_note(f"config_machine_state['plugins.installedIndex'] in '{db_path}'"),
+                )
+                ctx.plugin_trust_elided = True
+                ctx.plugin_index_elided = True
 
             revision = state_obj.get("revision") if isinstance(state_obj, dict) else None
             revision_is_number = (
@@ -7158,10 +8770,14 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                     # FALLBACK leg (grounded: installed-plugin-index-store-*.js:92
                     # -> installed-plugin-index-*.js:1214-1219) -- assemble the
                     # trust map from each plugin's own installRecord when the top-level
-                    # installRecords key is absent. This is what the runtime itself does;
+                    # installRecords key is absent. This is what the runtime itself did;
                     # inert on the grounding machine (0 of 61 plugins carry
-                    # installRecord), implemented anyway so this reader has no blind spot
-                    # the runtime does not have.
+                    # installRecord). C-686: NOT what OpenClaw 2026.10.2 does -- EXECUTED:
+                    # `parseInstalledPluginIndex` returns null (the whole index is discarded)
+                    # when the top-level `installRecords` key is absent, so on 2026.10.x this
+                    # leg can report a record the runtime ignores. Kept unchanged (no verdict
+                    # moves here; the record is still on disk), flagged for a build-aware
+                    # follow-up.
                     installs = {}
                     for p in plugins_list:
                         if not isinstance(p, dict):
@@ -7231,8 +8847,10 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             )
             raw = raw[:_MAX_PLUGIN_TRUST_BYTES]
 
+        installs_elided = 0
         try:
-            installs = json.loads(raw)
+            shallow = _loads_shallow(raw)
+            installs, installs_elided = shallow.value, shallow.elided
         except ValueError as exc:
             ctx.errors.append(f"could not parse install_records_json in {db_path}: {exc}")
             ctx.plugin_trust_found = True
@@ -7242,6 +8860,16 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_trust_found = True
             ctx.plugin_trust_parse_error = True
             installs = None
+        if installs_elided:
+            note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                       _elided_note(f"install_records_json in '{db_path}'"))
+            ctx.plugin_trust_elided = True
+            if isinstance(installs, dict) and not any(
+                    isinstance(r, dict) for r in installs.values()):
+                # Nothing usable was read: the same unreadable state a malformed one gets.
+                ctx.plugin_trust_found = True
+                ctx.plugin_trust_parse_error = True
+                installs = None
 
         if installs is not None:
             ctx.plugin_trust_found = True
@@ -7268,8 +8896,10 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             )
             raw2 = raw2[:_MAX_PLUGIN_INDEX_BYTES]
 
+        plugins_elided = 0
         try:
-            plugins = json.loads(raw2)
+            shallow = _loads_shallow(raw2)
+            plugins, plugins_elided = shallow.value, shallow.elided
         except ValueError as exc:
             ctx.errors.append(f"could not parse plugins_json in {db_path}: {exc}")
             ctx.plugin_index_found = True
@@ -7279,6 +8909,14 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
             ctx.plugin_index_found = True
             ctx.plugin_index_parse_error = True
             plugins = None
+        if plugins_elided:
+            note_limit(ctx.limit_hits, LIMIT_DOMAIN_PLUGIN,
+                       _elided_note(f"plugins_json in '{db_path}'"))
+            ctx.plugin_index_elided = True
+            if isinstance(plugins, list) and not any(isinstance(r, dict) for r in plugins):
+                ctx.plugin_index_found = True
+                ctx.plugin_index_parse_error = True
+                plugins = None
 
         if plugins is not None:
             ctx.plugin_index_found = True
@@ -7295,7 +8933,7 @@ def _collect_plugin_trust(home: Path, ctx: Context) -> None:
                 )
 
 
-def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
+def _parse_subagent_outcome(raw, elided_out: "list | None" = None) -> "tuple[dict | None, bool]":
     """Best-effort parse of one ``subagent_runs.outcome_json`` cell.
 
     Returns ``(outcome, ok)``. ``ok`` is False ONLY when *raw* is a non-empty string that
@@ -7305,21 +8943,28 @@ def _parse_subagent_outcome(raw) -> "tuple[dict | None, bool]":
     invalidates the whole row's disclosure - see ``_collect_subagent_runs``). A value that
     parses but is not a JSON object (bare ``null``/number/string) is also ``(None, True)``:
     syntactically valid, just no outcome fields to surface.
+
+    C-664: the cell is read with the shallow reader, so a row padded with deeply nested
+    JSON is still read (its fields sit near the top) and still counted. When *elided_out*
+    is given, the number of subtrees the reader cut short is appended to it.
     """
     if raw is None:
         return None, True
     if not isinstance(raw, str) or not raw.strip():
         return None, True
     try:
-        parsed = json.loads(raw)
+        shallow = _loads_shallow(raw)
     except ValueError:
         return None, False
+    parsed = shallow.value
+    if shallow.elided and elided_out is not None:
+        elided_out.append(shallow.elided)
     if isinstance(parsed, dict):
         return parsed, True
     return None, True
 
 
-def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
+def _parse_subagent_modern_payload(raw, elided_out: "list | None" = None) -> "tuple[dict, bool]":
     """B-709: parse one MODERN ``subagent_runs.payload_json`` cell (the consolidated blob
     that replaced the ``model``/``run_timeout_seconds``/``outcome_json``/``ended_reason``
     columns when the ``payload_json`` column is present) into a plain dict, for named-key
@@ -7345,9 +8990,12 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
     if not raw.strip():
         return {}, True
     try:
-        parsed = json.loads(raw)
+        shallow = _loads_shallow(raw)
     except ValueError:
         return {}, False
+    parsed = shallow.value
+    if shallow.elided and elided_out is not None:
+        elided_out.append(shallow.elided)
     if isinstance(parsed, dict):
         # A run whose `completionTarget` is "parent" is stored wrapped as
         # `{"parentCompletion": <record>}` (`bindSubagentRunRecord`) rather than as the flat
@@ -7362,6 +9010,24 @@ def _parse_subagent_modern_payload(raw) -> "tuple[dict, bool]":
             return wrapped, True
         return parsed, True
     return {}, True
+
+
+def _subagent_payload_text(fields: dict, key: str, *, cap: "int | None" = None) -> "str | None":
+    """C-690: one named string out of a MODERN subagent payload record, or ``None``.
+
+    ``agentDir`` / ``workspaceDir`` / ``spawnMode`` / ``task`` are written by the vendor's
+    serializer (``bindSubagentRunRecord``) but are optional - an undefined value is dropped
+    by ``JSON.stringify`` - so a missing key, a blank string or a non-string value is simply
+    "this row does not say" (``None``), never a fabricated empty value. ``cap`` truncates the
+    way the legacy ``task`` column is truncated, so nothing downstream holds an unbounded
+    blob.
+    """
+    value = fields.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if cap is not None and len(value) > cap:
+        return value[:cap] + "...(truncated)"
+    return value
 
 
 def _collect_subagent_runs(home: Path, ctx: Context) -> None:
@@ -7379,27 +9045,31 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     §28 for the full insert/retention grounding; the two facts that shape this collector:
 
     INSERT SEMANTICS (population was UNPROVEN at filing time - GR#4 required grounding
-    before shipping): a row is written SYNCHRONOUSLY at spawn time, before the subagent does
-    any work. ``subagent-registry-DexSZ4w1.js`` (the register path): ``params.runs.set(runId,
-    entry)`` followed immediately by ``params.persistOrThrow()`` (-> ``saveSubagentRegistryToSqlite``
-    -> an upsert into ``subagent_runs`` keyed on ``run_id``), with the newly-set entry rolled
-    back on a persist failure. So a row proves a spawn was REGISTERED - not necessarily that
-    it ran to completion; ``outcome_json`` is what distinguishes the two (absent/null while
-    the run is still in flight).
+    before shipping): a row is written when the spawn is REGISTERED - after the child turn
+    has been dispatched, not before it does any work. So a row proves a spawn was
+    REGISTERED - not necessarily that it ran to completion; the outcome is what
+    distinguishes the two (absent while the run is still in flight). Rows are committed
+    through the registry's own mutation path (``mutateSubagentRuns``); the older
+    whole-snapshot ``saveSubagentRegistryToSqlite`` replace this reader was first grounded
+    against no longer exists.
 
-    RETENTION IS SHORT - do not imply durable forensic history. The same module's periodic
-    sweep deletes a completed run's row via the whole-snapshot
-    ``deleteFrom("subagent_runs").where("run_id","not in", runIds)`` replace once
-    ``archiveAtMs`` (``now + agents.defaults.subagents.archiveAfterMinutes`` - default 60
-    MINUTES after the run was SPAWNED/REGISTERED (``resolveArchiveAfterMs``), NEVER
-    recomputed at completion - a long-running run's window can already be nearly spent
-    by the time it ends) has passed, or ~5 minutes after
-    cleanup completes for session-mode runs with no ``archiveAtMs`` at all
-    (``SESSION_RUN_TTL_MS = 5 * 60_000``). The one documented exception: a run registered
-    with ``cleanup:"keep"`` (non-session spawn mode) gets NO ``archiveAtMs`` and the sweep
-    skips it outright - kept until something else (e.g. the owning session's own lifecycle)
-    removes it. So: a populated table proves RECENT (or explicitly kept) activity, never a
-    complete history of every subagent ever spawned.
+    RETENTION - grounded by EXECUTING the vendor's own ``updateSubagentArchiveAtMs`` over
+    synthetic entries (``tests/test_c690_dist_retention_grounding.py`` re-does this on every
+    local run; nothing here is a reading of the source). ``archiveAtMs`` is the only removal
+    clock, and it is NOT set at registration (the registered entry carries
+    ``archiveAtMs: undefined``): that function is the single assignment site, and it runs
+    when a run COMPLETES (and at kill and at restore). It arms ``completedAt +
+    agents.defaults.subagents.archiveAfterMinutes`` (default 60 MINUTES) only for a run that
+    has ended AND either was spawned with ``cleanup:"delete"`` or is a collector run; a run
+    still in flight, a ``cleanup:"keep"`` run (the spawn tool's DEFAULT) and a session-mode
+    run get NO ``archiveAtMs``. The periodic sweep skips a row with no ``archiveAtMs`` when
+    it is a non-session ``cleanup:"keep"`` run (kept until something else, e.g. the owning
+    session's own lifecycle, removes it); a session-mode run with no ``archiveAtMs`` is
+    removed ~5 minutes after its cleanup completes (``SESSION_RUN_TTL_MS = 5 * 60_000``). So
+    the clock starts at COMPLETION, not at spawn, and a default-``keep`` spawn's row is never
+    swept: a populated table is NOT a complete history of every subagent ever spawned (a
+    finished ``delete`` run is gone an hour after it ended), but it is also stronger
+    evidence than "a short window" - never describe it as pruned within an hour of SPAWNING.
 
     WAL LAG: opened READ-ONLY (``file:...?mode=ro`` + ``PRAGMA query_only = 1``), the same
     pattern every other reader of this database uses. A reader connection sees the last
@@ -7442,16 +9112,22 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     created_at
     ===================  =========================================
 
-    ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` appear NOWHERE in that
-    canonical read - they are GONE, not moved (``task`` is literally the pre-v13 schema
-    marker in the migration gate, ``dist/openclaw-state-db-*.js:1900`` - the
-    ``workspace_attestations`` marker re-verified present in openclaw@2026.9.1, line
-    read on 2026.8.2). They are set
-    ``None`` on the modern path, and a consumer must not read that ``None`` as "no
-    workspace" - a ONE-TIME (per collection run, not per row) disclosure is emitted via
-    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` naming exactly which fields are
-    unavailable on this schema, so ``limit_hits_for(ctx, LIMIT_DOMAIN_AGENTS)`` lets a
-    consumer tell "no workspace was ever recorded" apart from "this schema cannot say".
+    ``agent_dir``, ``workspace_dir``, ``spawn_mode`` and ``task`` do not appear in that
+    canonical READ's alias list, but they are NOT gone: the vendor's serializer
+    (``bindSubagentRunRecord``, ``dist/subagent-registry.store.sqlite-*.mjs``) writes the
+    whole canonical record into ``payload_json``, so each lives at ``$.agentDir``,
+    ``$.workspaceDir``, ``$.spawnMode`` and ``$.task`` (under ``$.parentCompletion`` when the
+    completion target is the parent - the same unwrap the vendor's reader does, handled in
+    ``_parse_subagent_modern_payload``). Executed, not read: rows produced by that
+    serializer and read back through this collector carry all four. They were UNREAD, not
+    absent. Each is taken only when it is a string of the expected type (``task`` capped at
+    ``_MAX_SUBAGENT_TASK_CHARS`` like the legacy column); a row that lacks one - the key is
+    optional and ``JSON.stringify`` drops an undefined value - keeps ``None``, which B18
+    shows as ``?``. A ONE-TIME (per collection run, not per row) disclosure via
+    ``note_limit(ctx.limit_hits, LIMIT_DOMAIN_AGENTS, ...)`` is emitted ONLY when NONE of the
+    rows read carries any of the four (a data-driven statement about the rows, never a claim
+    about the schema), so ``limit_hits_for(ctx, LIMIT_DOMAIN_AGENTS)`` still lets a consumer
+    tell "no workspace was ever recorded" apart from "no row here could say".
 
     Which shape a given install has is decided by PROBING ``PRAGMA table_info(subagent_runs)``
     once and branching on COLUMN PRESENCE - never by trying one SELECT and catching
@@ -7466,11 +9142,11 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     already gets, with the columns actually seen recorded (never a guessed mapping).
 
     Named-key extraction only on the modern path (§8) - ``payload_json`` itself is never
-    stored or emitted whole, only the four keys above are pulled out of it.
+    stored or emitted whole, only the named keys above are pulled out of it.
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -7479,7 +9155,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             # B-709: probe the real column shape before picking a SELECT -- see the
@@ -7545,22 +9221,12 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     truncated = len(rows) > _MAX_SUBAGENT_RUNS
     rows = rows[:_MAX_SUBAGENT_RUNS]  # discard the probe row; scanned set stays capped
 
-    if modern and rows:
-        # B-709: the lost-field disclosure -- ONE per collection run (not per row), only on
-        # the modern path, only when at least one row was actually read. Wording matched as
-        # closely as the code allows to what other consumers of this schema-change expect.
-        note_limit(
-            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
-            f"subagent_runs in '{db_path}' uses the consolidated payload schema: "
-            "agent_dir, workspace_dir, spawn_mode and task are not present on this "
-            "state schema \u2014 NOT read",
-        )
-
     good: list[dict] = []
     bad_count = 0
+    elided_rows: list = []
     if modern:
         for child_session_key, created_at, payload_json in rows:
-            fields, ok = _parse_subagent_modern_payload(payload_json)
+            fields, ok = _parse_subagent_modern_payload(payload_json, elided_rows)
             if not ok:
                 # Whole payload unreadable -- there is nothing else on this row to fall
                 # back on (unlike the legacy columns, every extracted field lives inside
@@ -7580,11 +9246,12 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
             good.append({
                 "child_session_key": child_session_key,
                 "model": model,
-                "agent_dir": None,       # B-709: gone, not moved -- see docstring
-                "workspace_dir": None,   # B-709: gone, not moved -- see docstring
-                "spawn_mode": None,      # B-709: gone, not moved -- see docstring
+                # C-690: unread, not absent -- see docstring.
+                "agent_dir": _subagent_payload_text(fields, "agentDir"),
+                "workspace_dir": _subagent_payload_text(fields, "workspaceDir"),
+                "spawn_mode": _subagent_payload_text(fields, "spawnMode"),
                 "run_timeout_seconds": run_timeout_seconds,
-                "task": None,            # B-709: gone, not moved -- see docstring
+                "task": _subagent_payload_text(fields, "task", cap=_MAX_SUBAGENT_TASK_CHARS),
                 "outcome": outcome,
                 "ended_reason": ended_reason,
                 "created_at": created_at,
@@ -7592,7 +9259,7 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
     else:
         for (child_session_key, model, agent_dir, workspace_dir, spawn_mode,
              run_timeout_seconds, task, outcome_json, ended_reason, created_at) in rows:
-            outcome, ok = _parse_subagent_outcome(outcome_json)
+            outcome, ok = _parse_subagent_outcome(outcome_json, elided_rows)
             if not ok:
                 bad_count += 1
                 continue
@@ -7611,6 +9278,32 @@ def _collect_subagent_runs(home: Path, ctx: Context) -> None:
                 "ended_reason": ended_reason,
                 "created_at": created_at,
             })
+
+    if modern and good and not any(
+        run[key] is not None for run in good
+        for key in ("agent_dir", "workspace_dir", "spawn_mode", "task")
+    ):
+        # C-690: a statement about the ROWS, not about the schema -- the four fields are
+        # written by the vendor serializer, so a row set where none of them is present is
+        # worth saying out loud (B18 shows "?" for each), and one where any row carries
+        # them is not (a single row lacking one is just that row's "?").
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
+            f"subagent_runs in '{db_path}' uses the consolidated payload schema: none of the "
+            f"{len(good)} row(s) read carries agent_dir, workspace_dir, spawn_mode or task "
+            "in its payload_json \u2014 shown as unknown, not as empty",
+        )
+
+    ctx.subagent_runs_elided = len(elided_rows)
+    if elided_rows:
+        # The rows are read and counted (the fields B18 takes sit near the top of each), so
+        # the padding is recorded in ctx.limit_hits - the channel B18's not-applicable
+        # proof already reads - and counted in ctx.subagent_runs_elided, which B18's disk
+        # disclosure names in its `fix`, rather than dropping a row.
+        note_limit(
+            ctx.limit_hits, LIMIT_DOMAIN_AGENTS,
+            _elided_note(f"{len(elided_rows)} subagent_runs row(s) in '{db_path}'"),
+        )
 
     if not good and bad_count:
         # Every row's payload was unparseable -- nothing here can be asserted reliably
@@ -7676,7 +9369,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
     """
     state_dir = home / "state"
     sqlite_candidates = (
-        walk_dir_safely(state_dir, max_files=100)
+        _walk_named(state_dir, "openclaw.sqlite", max_files=100)
         if _safe_is_dir(state_dir, ctx, what=f"'{state_dir}'") else []
     )
     db_path = next((p for p in sqlite_candidates if p.name == "openclaw.sqlite"), None)
@@ -7685,7 +9378,7 @@ def _collect_audit_events(home: Path, ctx: Context) -> None:
 
     try:
         _trajectorystore._refuse_non_regular_sqlite_paths(db_path)
-        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn = _connect_state_db(db_path)
         try:
             conn.execute("PRAGMA query_only = 1")
             agg_row = conn.execute(
@@ -7809,11 +9502,11 @@ def openclaw_state_dir(env: "dict[str, str] | None" = None,
         return _expand_user_path(override, home_dir)
     new_dir = home_dir / OPENCLAW_NEW_STATE_DIRNAME
     try:
-        if new_dir.exists():
+        if pathprobe.exists(new_dir):
             return new_dir
         for legacy in OPENCLAW_LEGACY_STATE_DIRNAMES:
             legacy_dir = home_dir / legacy
-            if legacy_dir.exists():
+            if pathprobe.exists(legacy_dir):
                 return legacy_dir
     except OSError:
         pass
@@ -7836,11 +9529,11 @@ def resolve_config_in_home(home: Path) -> "tuple[Path, bool]":
     """
     canonical = home / OPENCLAW_CONFIG_FILENAME
     try:
-        if canonical.is_file():
+        if pathprobe.is_file(canonical):
             return canonical, True
         for name in OPENCLAW_LEGACY_CONFIG_FILENAMES:
             legacy = home / name
-            if legacy.is_file():
+            if pathprobe.is_file(legacy):
                 return legacy, True
     except OSError:
         pass
@@ -7878,7 +9571,7 @@ def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[P
     for name in (OPENCLAW_CONFIG_FILENAME,) + OPENCLAW_LEGACY_CONFIG_FILENAMES:
         cand = state_dir / name
         try:
-            if cand.exists():
+            if pathprobe.exists(cand):
                 if name != OPENCLAW_CONFIG_FILENAME:
                     return cand, f"a legacy {name} exists in the resolved state directory"
                 if state_override is not None:
@@ -7898,7 +9591,7 @@ def resolve_product_config_path(env: "dict[str, str] | None" = None) -> "tuple[P
         for name in (OPENCLAW_CONFIG_FILENAME,) + OPENCLAW_LEGACY_CONFIG_FILENAMES:
             cand = base / name
             try:
-                if cand.exists():
+                if pathprobe.exists(cand):
                     return cand, "an existing default config candidate"
             except OSError:
                 continue
@@ -8003,7 +9696,7 @@ def sandbox_sync_marker_present() -> bool:
         pass
     for base in bases:
         try:
-            if (base / "skills" / _SANDBOX_SYNC_MARKER).is_file():
+            if pathprobe.is_file(base / "skills" / _SANDBOX_SYNC_MARKER):
                 return True
         except OSError:
             continue
@@ -8178,7 +9871,7 @@ def _collect_global_dotenv(home: Path, ctx: Context) -> None:
     """
     for path in global_dotenv_paths(home):
         try:
-            if path.is_symlink() or not path.is_file():
+            if pathprobe.is_symlink(path) or not pathprobe.is_file(path):
                 continue
             with open(path, "rb") as fp:
                 raw, truncated = _read_with_limit(fp, _MAX_DOTENV_BYTES)
@@ -8401,7 +10094,7 @@ def _read_environment_file(spec: str, unit_path: Path, home: Path, ctx: Context)
     if not candidate.is_absolute():
         candidate = unit_path.parent / candidate
     try:
-        if candidate.is_symlink() or not candidate.is_file():
+        if pathprobe.is_symlink(candidate) or not pathprobe.is_file(candidate):
             return
         with open(candidate, "rb") as fp:
             raw, truncated = _read_with_limit(fp, _MAX_UNIT_BYTES)
@@ -8439,7 +10132,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     """
     units_dir = systemd_user_unit_dir(home)
     try:
-        units_dir_is_dir = units_dir.is_dir()
+        units_dir_is_dir = pathprobe.is_dir(units_dir)
     except OSError as exc:
         # B-303: an ancestor (e.g. a non-traversable home) can make even this existence
         # check raise. Distinct from "not installed" - record it the same way an
@@ -8453,7 +10146,7 @@ def _collect_systemd_unit_env(home: Path, ctx: Context) -> None:
     try:
         all_units = sorted(
             p for p in units_dir.iterdir()
-            if p.is_file() and not p.is_symlink() and p.suffix == ".service"
+            if pathprobe.is_file(p) and not pathprobe.is_symlink(p) and p.suffix == ".service"
         )
     except OSError as exc:
         ctx.errors.append(f"could not list {units_dir}: {exc}")
@@ -8750,7 +10443,7 @@ def _bootstrap_identity(f: Path) -> object:
 
 
 def collect(home: Path | str = "~/.openclaw") -> Context:
-    home = Path(home).expanduser()
+    home = pathprobe.expand_user(home)
     ctx = Context(home=home)
 
     cfg_path, cfg_found = resolve_config_in_home(home)
@@ -8829,7 +10522,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         # bootstrap checks' existing "ctx.bootstrap empty -> UNKNOWN" fallback fires
         # honestly instead of the process crashing.
         try:
-            wdir_is_dir = wdir.is_dir()
+            wdir_is_dir = pathprobe.is_dir(wdir)
         except OSError as exc:
             note_limit(
                 ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
@@ -8843,7 +10536,7 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
         for name in BOOTSTRAP_FILES:
             f = wdir / name
             try:
-                f_is_file = f.is_file()
+                f_is_file = pathprobe.is_file(f)
             except OSError as exc:
                 note_limit(
                     ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
@@ -8887,6 +10580,15 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
                     )
             except OSError as exc:
                 ctx.errors.append(f"could not read {f}: {exc}")
+                # C-716: recorded the way an unreadable workspace DIRECTORY is above, so a
+                # file that exists but cannot be opened (chmod 000) is a disclosed gap, not
+                # a silent absence. B6 reads this: with nothing else read it says the file
+                # could not be read; beside a readable clean file it degrades PASS (B-657).
+                note_limit(
+                    ctx.limit_hits, LIMIT_DOMAIN_BOOTSTRAP,
+                    f"could not read '{f}' ({exc.__class__.__name__}) \u2014 this bootstrap "
+                    "file was NOT scanned",
+                )
 
     _collect_global_dotenv(home, ctx)
     # Must precede _read_installed_skills: a bundled-skills-root relocation observed here
@@ -8897,11 +10599,15 @@ def collect(home: Path | str = "~/.openclaw") -> Context:
     _collect_auth_profile_store_presence(home, ctx)  # B-749: length-only, never the value
     _collect_agent_auth_profile_store_presence(home, ctx)  # B-845: same, per-agent DBs
     _collect_paired_devices_sqlite(home, ctx)  # B176: migrated devices/paired.json fallback
+    _collect_pending_pairings_sqlite(home, ctx)  # C-685 (B138): device_pairing_pending
     _collect_cron(home, ctx)
+    _collect_exec_approvals_sqlite(home, ctx)  # canonical store first: its tiers win
     _collect_exec_approvals(home, ctx)
     _collect_plugin_trust(home, ctx)
     _collect_capture_state(home, ctx)  # B-295: debug-proxy capture row counts (metadata only)
     _collect_update_runs(home, ctx)    # F-192: OpenClaw's own self-update ledger
+    _collect_restart_handoff(home, ctx)  # C-701: supervisor restart handoff, state-DB era
+    _collect_config_health(home, ctx)  # C-687: config-health record, state-DB era
     _collect_skill_library_state(home, ctx)  # B-725: shared skill-library reachability/integrity
     _collect_subagent_runs(home, ctx)  # B-296: subagent-spawn registry disclosure for B18
     _collect_audit_events(home, ctx)   # F-134 (DISK-1): runtime audit_events trail, --behavioral only

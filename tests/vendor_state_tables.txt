@@ -1,20 +1,34 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.9.6
-# state-schema-version: 18
-# generated: 2026-09-25
-# tables: 131
+# openclaw-version: 2026.10.3
+# state-schema-version: 20
+# generated: 2026-10-14
+# tables: 136
 #
-# source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
+# source-bundle: openclaw-state-db-legacy-backfills-BxTnDU05.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
 # What this is
 # ------------
-# Every table name the installed OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` declares -- the
-# vendor's whole state-SQLite surface, NOT the part this tree models. Its sibling
+# Every table name the installed OpenClaw declares for its STATE SQLite database
+# (state/openclaw.sqlite) -- the vendor's whole state-SQLite surface, NOT the part this tree
+# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the allowlisted
+# satellite constants below, each applied to the same database through the state-database
+# write path (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
 # state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
 # tables we read.
+#
+# Not covered: the per-agent database, the workboard store, the memory index, the debug-proxy
+# capture sidecar and the retired shapes (the explicit exclusions in
+# tests/test_state_schema_grounding.py). A name here means the vendor DECLARES a table, not
+# that a given database has it yet: many are created on first use.
+#
+# Satellite constants read (bundle it came from, tables it adds beyond the main constant):
+#   USER_PROFILES_SCHEMA_SQL  [user-profiles-internal-DRw5WRX7.mjs, 1 copy]
+#     adds: user_profile_emails, user_profiles
+#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [store-row-codec-C2EDm0ZJ.mjs, 1 copy]
+#     adds: worker_environment_session_attachments
 #
 # Why it exists
 # -------------
@@ -97,6 +111,7 @@ migration_sources
 native_hook_relay_bridges
 node_worker_launch_cleanup
 node_worker_launch_containers
+node_worker_launch_process_scopes
 node_worker_launches
 node_worker_prepared_workspaces
 node_worker_turns
@@ -138,9 +153,13 @@ task_delivery_state
 task_runs
 update_runs
 user_preferences
+user_profile_emails
+user_profile_identities
+user_profiles
 web_push_approval_deliveries
 web_push_subscriptions
 worker_environment_credentials
+worker_environment_session_attachments
 worker_environment_ssh_fallback_ports
 worker_environments
 worker_inference_turns

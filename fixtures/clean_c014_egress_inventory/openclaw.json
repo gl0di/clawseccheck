@@ -14,7 +14,8 @@
   "channels": {
     "slack": {
       "dmPolicy": "allowlist",
-      "groupPolicy": "allowlist"
+      "groupPolicy": "allowlist",
+      "allowBots": false
     }
   },
   "mcp": {

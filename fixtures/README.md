@@ -11,6 +11,9 @@ exact misconfigurations the auditor is meant to *detect in other people's setups
   `allowFrom: "*"`; `reliability/bad_b38_private_network/` sets
   `dangerouslyAllowPrivateNetwork: true`). The auditor flags these — that is the point.
 - `clean_*/` — configs that must produce **no** finding for the matching check.
+  One name over-claims: `reliability/clean_b33_version_patched/` is stamped 2026.2.14, so the
+  known-vulnerable-version check (B33) FAILs on it. It is clean for the other checks it is used
+  with, and a test pins the B33 FAIL. The name is kept as it is because fixtures feed manifests.
 - `home_safe/` and `home_vuln/` — whole-home reference layouts (safe vs. vulnerable).
 
 None of these values describe how ClawSecCheck runs. The skill is **stdlib-only, local-only,

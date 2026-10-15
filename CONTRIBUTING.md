@@ -9,7 +9,7 @@ rules that make contributions easy to accept — please read them first.
   Everything the tool reads and writes stays on the user's machine.
 - **Read-only by default.** The tool inspects; it never mutates the user's
   OpenClaw setup.
-- **Zero runtime dependencies.** Pure Python standard library, Python 3.9+.
+- **Zero runtime dependencies.** Pure Python standard library, Python 3.10+.
   `pytest`/`ruff` are dev-only tools, never imports.
 - **No secrets in source** — not in code, tests, or fixtures. Test values that
   must look like secrets are assembled at runtime from fragments.
@@ -33,8 +33,8 @@ ruff check .             # must be clean
 ```
 
 Tests are **offline and read-only**: no network, nothing written outside
-pytest's `tmp_path`. CI runs the suite on Python 3.9 and 3.12, plus
-markdownlint (`markdownlint-cli@0.44.0`) over the docs.
+pytest's `tmp_path`. CI runs the suite on Linux (Python 3.12 and 3.14) and macOS
+(Python 3.12), plus markdownlint (`markdownlint-cli@0.44.0`) over the docs.
 
 ### The two false-positive gates
 
@@ -98,7 +98,7 @@ check needs:
 
 ## Pull requests
 
-- Target `main`. CI (tests on 3.9/3.12, ruff, markdownlint, secret scan) must
+- Target `main`. CI (tests on Linux 3.12/3.14 and macOS 3.12, ruff, markdownlint, secret scan) must
   be green; review is required to merge.
 - **Two more CI checks, in a `commit-integrity` job, hard-fail a PR
   (`.github/workflows/ci.yml`) — know them before you push:**

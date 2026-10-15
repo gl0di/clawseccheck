@@ -410,7 +410,7 @@ def test_the_query_names_only_the_trajectory_table_and_binds_its_limit():
     # (busy_timeout, query_only) + 2 SELECT + 2 count(*) exclusion-disclosure
     # queries (round 3/4), no more. Each appears once in SOURCE even though called
     # from two places.
-    assert len(execute_line_nums) == 10, [lines[i] for i in execute_line_nums]
+    assert len(execute_line_nums) == 11, [lines[i] for i in execute_line_nums]  # C-699: +1 count
     # Each real call (the two SELECTs, and _table_kind's own query) is wrapped across a
     # few physical lines here (`conn.execute(\n    CONST, (...)\n).fetchall()`) -- a
     # single-LINE scan would miss a table name placed on the continuation line, so each

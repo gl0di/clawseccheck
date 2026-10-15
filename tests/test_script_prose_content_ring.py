@@ -97,10 +97,12 @@ def test_extract_script_prose_python_syntax_error_raises_coverage_incomplete():
     """B-377: a file that doesn't parse RAISES `ScriptProseCoverageIncomplete` --
     deliberately NOT the same `[]` a genuinely-docstring-free file returns, so
     "could not determine" is never silently indistinguishable from "nothing found"
-    (Golden Rule #4). The raise is caught by `checks.run_all`'s existing per-check
-    crash isolation (B-101), which degrades the calling check to one honest UNKNOWN
-    finding rather than either aborting the audit or reporting a confident empty
-    result -- see `ScriptProseCoverageIncomplete`'s own docstring in skillast.py."""
+    (Golden Rule #4). C-619: the raise is caught PER FILE by
+    `checks/_content.py::_script_prose_scan`, which records the file as unread so the
+    calling check (B66/B156) keeps its other evidence and reports UNKNOWN plus a
+    `coverage:` note when nothing else was found -- see
+    `tests/test_c619_unparseable_script_does_not_blind_b66_b156.py` and
+    `ScriptProseCoverageIncomplete`'s own docstring in skillast.py."""
     with pytest.raises(ScriptProseCoverageIncomplete):
         extract_script_prose("def f(:\n    pass\n", "py")
 

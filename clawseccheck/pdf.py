@@ -60,13 +60,15 @@ from .catalog import (
     WARN,
     Finding,
 )
-from .layers import LAYER_ORDER, describe_layer
+from .layers import LAYER_ORDER, describe_layer, layers_definition_sentence
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
-    _coverage_lines, _degraded_incomplete_clause, _EXPORT_FINDINGS_ONLY_NOTE,
+    _coverage_lines, _degraded_incomplete_clause, _logs_unexamined, _EXPORT_FINDINGS_ONLY_NOTE,
+    _grounding_gap_line,
     _EXPORT_RISK_INCLUDED_NOTE,
     _group_issues_by_subject, _mcp_inventory_lines,
     _plugins_inventory_lines, _redact_home_paths, _risk_chain_lines, _sanitize,
+    suppressed_notice_lines,
     _second_opinion_item_lines,
     _second_opinion_lines,
     _SEV_ORDER, _UNGRADED_CAP_TAIL, _skills_inventory_lines, _subject_summary_rows, _trifecta_ratio,
@@ -754,6 +756,7 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         )
         if missing_text:
             flow.wrapped(missing_text, size=9.5, color="#666666")
+        flow.wrapped(layers_definition_sentence(), size=9.5, color="#666666")
         flow.spacer(4.0)
 
     # C-423: the honesty invariant applies even on a graded run - a layer that ran
@@ -766,6 +769,12 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             f"Not fully covered: {'; '.join(score.not_checked)}",
             size=9.5, color="#b94a48",
         )
+
+    # C-615: the newer-than-grounded notice (C-571); ascii_only because this page is
+    # base-14/WinAnsi, and the shared line is still the only wording of it.
+    _gap = _grounding_gap_line(ctx, True)
+    if _gap:
+        flow.wrapped(_gap, size=9.5, color="#b94a48")
 
     degraded_n = getattr(score, "degraded_count", 0)
     if degraded_n:
@@ -806,6 +815,10 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
             text = f"{reason}{also} - {_UNGRADED_CAP_TAIL}"
         flow.wrapped(text, size=9.5, color="#b94a48")
 
+    # C-618: a suppressed finding that still counts (body stays out of `issues` above).
+    for line in suppressed_notice_lines(findings):
+        flow.wrapped(line, size=9.5, color="#b94a48")
+
     # B-761: this document's own scope, stated on its first page - the text report
     # additionally carries the "Highest-risk paths" attack-chain synthesis, the
     # capability graph, and "What you can do next" recommendations, and this PDF used
@@ -834,7 +847,8 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         flow.wrapped(_population, size=8.5, color="#666666")
 
     # -- Inventory by subject (summary table) -------------------------------------
-    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep,
+                                         logs_unexamined=_logs_unexamined(score))
     if summary_rows:
         flow.spacer(8.0)
         flow.line("Inventory by subject", size=12.5, bold=True, gap_after=6.0)

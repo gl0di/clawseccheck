@@ -140,7 +140,6 @@ to it). Read-only, offline, bounded. Never imports ``checks/`` or anything above
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import sqlite3
@@ -150,6 +149,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote as _urlquote
+from . import pathprobe
+from .configloader import loads_shallow
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -215,9 +216,10 @@ POINTER_SCHEMA = "openclaw-trajectory-pointer"
 TRAJECTORY_TABLE_NAME = "trajectory_runtime_events"
 
 # A literal, table-scoped SELECT. Never built by string formatting or interpolation --
-# grep for "SELECT" in this module's source: there are exactly six (this one,
+# grep for "SELECT" in this module's source: there are exactly seven (this one,
 # _SELECT_TRAJECTORY_EVENT_JSON below, the two _EXCLUDED_COUNT queries further below,
-# and _table_kind's two sqlite_master lookups), none built from a variable. This one
+# _table_kind's two sqlite_master lookups, and C-699's transcript COUNT in
+# _count_transcript_events), none built from a variable. This one
 # names only session_id/seq; event_json (the sensitive per-record payload) is never
 # selected here, and neither auth table's DATA is ever selected anywhere in this
 # module's source -- see _table_kind's docstring for why a literal table name in OUR
@@ -720,10 +722,15 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
     that a session existed) but never toward ``pointer_targets_missing`` -- an unreadable
     record is an honest "we don't know", not a claim its target is gone.
     """
+    # C-682: `pathprobe.walk_segments`, not `Path.glob` (the same answer on every Python
+    # for a searchable-but-not-listable directory). A directory that had to be listed and
+    # could not be makes the counts a lower bound: reported through `capped`.
+    unlistable: list = []
     try:
-        it = home.glob("agents/*/sessions/*.trajectory-path.json")
+        it = pathprobe.walk_segments(
+            home, ("agents", "*", "sessions", "*.trajectory-path.json"), errors=unlistable)
     except OSError:
-        return 0, 0, False
+        return 0, 0, True
     total = 0
     missing = 0
     capped = False
@@ -734,7 +741,9 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
                 break
             total += 1
             try:
-                rec = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                # C-664: a pointer file is small and its two fields are top-level; the
+                # shallow reader keeps a padded one readable (and never crashes on it).
+                rec = loads_shallow(p.read_text(encoding="utf-8", errors="replace")).value
             except (OSError, ValueError):
                 continue
             if not isinstance(rec, dict) or rec.get("traceSchema") != POINTER_SCHEMA:
@@ -743,13 +752,13 @@ def _pointer_files(home: Path) -> "tuple[int, int, bool]":
             if not isinstance(target, str) or not target.strip():
                 continue
             try:
-                if not Path(target).is_file():
+                if not pathprobe.is_file(Path(target)):
                     missing += 1
             except OSError:
                 continue
     except OSError:
-        pass
-    return total, missing, capped
+        capped = True
+    return total, missing, capped or bool(unlistable)
 
 
 def _archive_entries(home: Path) -> "tuple[int, bool]":
@@ -758,10 +767,12 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
     NAMES ONLY -- an archived sidecar's filename is disk metadata (the vendor doctor's
     own restore-tier naming convention), never its content.
     """
+    unlistable: list = []  # C-682: a directory that could not be listed makes `count` a lower bound
     try:
-        it = home.glob("agents/*/session-sqlite-import-archive/*")
+        it = pathprobe.walk_segments(
+            home, ("agents", "*", "session-sqlite-import-archive", "*"), errors=unlistable)
     except OSError:
-        return 0, False
+        return 0, True
     count = 0
     capped = False
     try:
@@ -773,8 +784,8 @@ def _archive_entries(home: Path) -> "tuple[int, bool]":
                 break
             count += 1
     except OSError:
-        pass
-    return count, capped
+        capped = True
+    return count, capped or bool(unlistable)
 
 
 def _sqlite_dbs(
@@ -793,16 +804,23 @@ def _sqlite_dbs(
     when some databases were never even opened. The default (``None``) keeps the
     original behaviour for existing callers.
     """
+    # C-682: `pathprobe.walk_segments`, not `Path.glob`. An unreadable `agent` directory still
+    # reports its store (absence is unproven) so the reader's open fails and is disclosed on
+    # every Python; an unlistable `agents` directory is counted in `dbs_unlistable`.
+    unlistable: list = []
     try:
-        dbs = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
+        dbs = sorted(pathprobe.walk_segments(
+            home, ("agents", "*", "agent", "openclaw-agent.sqlite"), errors=unlistable))
     except OSError:
         if stats is not None:
             stats["dbs_total"] = 0
             stats["dbs_capped"] = False
+            stats["dbs_unlistable"] = max(1, len(unlistable))
         return []
     if stats is not None:
         stats["dbs_total"] = len(dbs)
         stats["dbs_capped"] = len(dbs) > max_dbs
+        stats["dbs_unlistable"] = len(unlistable)
     return dbs[:max_dbs]
 
 
@@ -839,7 +857,8 @@ def sqlite_db_paths_capped(home) -> bool:
     if not isinstance(home, Path):
         return False
     try:
-        found = list(home.glob("agents/*/agent/openclaw-agent.sqlite"))
+        found = list(pathprobe.walk_segments(
+            home, ("agents", "*", "agent", "openclaw-agent.sqlite"), errors=[]))
     except OSError:
         return False
     return len(found) > _MAX_SQLITE_DBS
@@ -1011,6 +1030,107 @@ def _read_sqlite_db(db_path: Path) -> "tuple[list, bool, bool]":
     return pairs, capped, False
 
 
+# ---------------------------------------------------------------------------
+# C-699 (owner ruling, disclose only): the SESSION TRANSCRIPT table of the same per-agent
+# database. Live transcripts are rows of `transcript_events`, not `*.jsonl` files, so a
+# content scan of the files that still exist says nothing about them. This reader only
+# COUNTS: rows and distinct sessions. It never names event_json / event_zstd /
+# navigation_json (they can hold live OAuth material) and never reads a row's value.
+#
+# The count statement is a literal at the call site on purpose (unlike the trajectory
+# constants above): scripts/state_db_drift_gate.py extracts SELECTs from the argument of
+# execute(), so a literal here is judged against the live per-agent database (reader
+# declared in its PER_AGENT_DB_READERS) and a renamed `session_id` column would be
+# reported instead of silently counting nothing.
+#
+# The incognito database (`incognito-openclaw-agent.sqlite`) is deliberately NOT opened:
+# in the vendor's own code (grounded against 2026.10.2, openclaw-agent-db.paths) that
+# name is a reserved sentinel path keying an IN-MEMORY database, and the vendor refuses to
+# start incognito state when a file already exists there. There is no on-disk store to
+# count; B164 names it as not examined.
+# ---------------------------------------------------------------------------
+TRANSCRIPT_TABLE_NAME = "transcript_events"
+
+
+@dataclass(frozen=True)
+class TranscriptStoreSummary:
+    """Row/session COUNTS of the per-agent ``transcript_events`` tables under a home.
+
+    ``dbs_unreadable`` / ``dbs_beyond_cap`` / ``dbs_unlistable`` each make ``rows`` and
+    ``sessions`` a lower bound; :attr:`dbs_unexamined` is their sum, so a caller can never
+    mistake "could not look" for "zero". A database that predates the table is NOT
+    unexamined: it genuinely holds no transcript rows.
+    """
+
+    dbs_found: int = 0
+    dbs_counted: int = 0
+    dbs_unreadable: int = 0
+    dbs_beyond_cap: int = 0
+    dbs_unlistable: int = 0
+    rows: int = 0
+    sessions: int = 0
+
+    @property
+    def dbs_unexamined(self) -> int:
+        return self.dbs_unreadable + self.dbs_beyond_cap + self.dbs_unlistable
+
+
+def _count_transcript_events(db_path: Path) -> "tuple[int, int, bool]":
+    """``(rows, distinct_sessions, unreadable)`` for one per-agent database.
+
+    Opened through :func:`_open_and_verify_table` (read-only, FIFO-safe, refuses a VIEW /
+    virtual table / rootpage alias / generated column). An absent table is an honest
+    ``(0, 0, False)``; a refused or failing one is ``(0, 0, True)`` -- never a silent zero.
+    """
+    conn, _kind, unreadable = _open_and_verify_table(db_path, TRANSCRIPT_TABLE_NAME)
+    if conn is None:
+        return 0, 0, unreadable
+    try:
+        row = conn.execute(
+            "SELECT count(*), count(DISTINCT session_id) FROM transcript_events"
+        ).fetchone()
+    except sqlite3.Error:
+        conn.close()
+        return 0, 0, True
+    conn.close()
+    if (
+        not row
+        or len(row) < 2
+        or not all(isinstance(v, int) and v >= 0 for v in row[:2])
+    ):
+        return 0, 0, True
+    return row[0], row[1], False
+
+
+def transcript_store_summary(home) -> TranscriptStoreSummary:
+    """Count the SQLite session-transcript rows under *home* (C-699). Counts only; see the
+    comment block above. Bounded like :func:`corroborate` (``_MAX_SQLITE_DBS``) and never
+    raises: a non-``Path`` *home* gives the empty summary."""
+    if not isinstance(home, Path):
+        return TranscriptStoreSummary()
+    stats: dict = {}
+    dbs = _sqlite_dbs(home, stats=stats)
+    counted = unreadable = rows = sessions = 0
+    for db_path in dbs:
+        n_rows, n_sessions, bad = _count_transcript_events(db_path)
+        if bad:
+            unreadable += 1
+            continue
+        counted += 1
+        rows += n_rows
+        sessions += n_sessions
+    total = int(stats.get("dbs_total", len(dbs)))
+    return TranscriptStoreSummary(
+        dbs_found=total,
+        dbs_counted=counted,
+        dbs_unreadable=unreadable,
+        dbs_beyond_cap=max(0, total - len(dbs)),
+        dbs_unlistable=int(stats.get("dbs_unlistable", 0)),
+        rows=rows,
+        sessions=sessions,
+    )
+
+
 def _jsonl_session_seq_pairs(files: "list[Path]") -> "set":
     """``{(sessionId, seq)}`` read from live sidecars -- ONLY these two top-level fields,
     never ``data``/``type``/anything else in the record. Exists solely so SQLite rows
@@ -1028,7 +1148,7 @@ def _jsonl_session_seq_pairs(files: "list[Path]") -> "set":
                     if read > _MAX_JSONL_BYTES_PER_FILE_FOR_DEDUP:
                         break
                     try:
-                        rec = json.loads(line)
+                        rec = loads_shallow(line).value  # C-664: two top-level fields only
                     except ValueError:
                         continue
                     if not isinstance(rec, dict):
@@ -1517,10 +1637,16 @@ def _iter_db_tool_candidates(values: "list[str]", meta: dict):
         if len(raw) > _MAX_COMPILED_LINE_LEN:
             meta["truncated"] = True
             continue
+        # C-664: model-supplied content - read with the shallow reader, not a depth limit
+        # (see trajectory.py): the record is delivered unchanged and a row with an elided
+        # subtree is disclosed the way an oversized one is.
         try:
-            rec = json.loads(raw)
+            shallow = loads_shallow(raw)
         except ValueError:
             continue
+        rec = shallow.value
+        if shallow.elided:
+            meta["truncated"] = True
         if not isinstance(rec, dict):
             continue
         if rec.get("traceSchema") != _TRACE_SCHEMA:

@@ -51,7 +51,7 @@ is the interesting kind, and a single pass cannot see it.
 
 Local, read-only, offline. Nothing in the audited setup is written; native fold-in stays
 off for the same reason the fleet gate keeps it off -- a gate must not launch the audited
-software. Stdlib only, Python 3.9+.
+software. Stdlib only, Python 3.10+.
 """
 from __future__ import annotations
 

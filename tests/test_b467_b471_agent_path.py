@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from clawseccheck import canary
 from clawseccheck import audit, menu
 from clawseccheck.cli import main
 from clawseccheck.palette import render_palette
@@ -52,7 +53,7 @@ def _live_bundle(tmp_path: Path) -> str:
     # F-193: a real canary-token-shaped id, not "C1" (which is not a shape
     # canary.make_canary() can ever produce, so it is now rejected).
     p.write_text(json.dumps({"liveTest": {"seed": "abc123", "verdicts": [
-        {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",
+        {"tool": "canary", "id": canary.make_canary("abc123")["token"],
          "verdict": "VULNERABLE"}]}}), encoding="utf-8")
     return str(p)
 

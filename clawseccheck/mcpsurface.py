@@ -32,11 +32,12 @@ as "cannot give a confident PASS", never silently drop the excess (B-092).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import pathprobe
 from . import trajectory as _trajectory
+from .configloader import loads_shallow  # C-664: a dump is third-party content; no depth limit
 
 # Caps -- see the module docstring: every input here is attacker-influenced.
 _MAX_FILE_BYTES = 2_000_000
@@ -195,7 +196,7 @@ def from_manifest(path: "str | Path") -> "ToolSurface | None":
     Returns ``None`` if the file cannot be read, parsed, or matched to one of
     these shapes - never a guess.
     """
-    p = Path(str(path)).expanduser()
+    p = pathprobe.expand_user(str(path))
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -204,9 +205,10 @@ def from_manifest(path: "str | Path") -> "ToolSurface | None":
     if truncated_read:
         text = text[:_MAX_FILE_BYTES]
     try:
-        data = json.loads(text)
+        shallow = loads_shallow(text)
     except ValueError:
         return None
+    data = shallow.value
 
     server = p.stem
     tools: object = None
@@ -222,7 +224,9 @@ def from_manifest(path: "str | Path") -> "ToolSurface | None":
     if tools is None:
         return None
     surface = from_tool_defs(server, tools, source="manifest", completeness="full")
-    if surface is not None and truncated_read:
+    if surface is not None and (truncated_read or shallow.elided):
+        # C-664: a subtree below the depth this reader follows is a part of the dump that
+        # went unread, which the surface's "truncated" flag already says to every consumer.
         surface.truncated = True
     return surface
 
@@ -271,7 +275,7 @@ def from_trajectory(home: "str | Path", *, max_files: int | None = None,
     if max_bytes_per_file is not None:
         kwargs["max_bytes_per_file"] = max_bytes_per_file
     tool_dicts, meta = _trajectory.read_compiled_tool_descriptions(
-        Path(str(home)).expanduser(), **kwargs)
+        pathprobe.expand_user(str(home)), **kwargs)
     truncated = bool(meta.get("truncated"))
     by_server: dict = {}
     for entry in tool_dicts:
@@ -327,7 +331,7 @@ def from_probe_json(path: "str | Path") -> list:
     for the content ring to scan, by design; ``render_for_ring`` reflects that
     with an empty render rather than guessing from names alone.
     """
-    p = Path(str(path)).expanduser()
+    p = pathprobe.expand_user(str(path))
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -335,9 +339,10 @@ def from_probe_json(path: "str | Path") -> list:
     if len(text) > _MAX_FILE_BYTES:
         text = text[:_MAX_FILE_BYTES]
     try:
-        data = json.loads(text)
+        shallow = loads_shallow(text)
     except ValueError:
         return []
+    data = shallow.value
     if not isinstance(data, dict):
         return []
     names = data.get("tools")
@@ -346,7 +351,7 @@ def from_probe_json(path: "str | Path") -> list:
     servers_field = data.get("servers")
     known_servers = set(servers_field) if isinstance(servers_field, dict) else None
 
-    truncated = len(names) > _MAX_PROBE_NAMES
+    truncated = len(names) > _MAX_PROBE_NAMES or shallow.elided > 0  # C-664: unread depth
     by_server: dict = {}
     for raw in names[:_MAX_PROBE_NAMES]:
         if not isinstance(raw, str):

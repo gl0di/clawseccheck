@@ -186,20 +186,38 @@ def test_peragent_workspace_rw_evidence():
 
 
 # ---------------------------------------------------------------------------
-# clean per-agent (mode non-main) + safe defaults -> PASS
+# clean per-agent (mode all) + safe defaults -> PASS
 # ---------------------------------------------------------------------------
 
 def test_peragent_safe_mode_passes():
+    # C-641b: this used to use "non-main" and expect PASS. "non-main" sandboxes only an
+    # agent's NON-main sessions, so that agent's own main session runs on the host (vendor
+    # shouldSandboxSession) - the same lie as a defaults-level "non-main". Only "all" is a
+    # safe per-agent override now; "non-main" is pinned as a WARN just below.
     cfg = {
         "agents": {
             "defaults": {"sandbox": {"mode": "all"}},
             "list": [
-                {"name": "SafeAgent", "sandbox": {"mode": "non-main"}}
+                {"name": "SafeAgent", "sandbox": {"mode": "all"}}
             ],
         }
     }
     f = check_sandbox(_ctx(cfg))
     assert f.status == PASS
+
+
+def test_peragent_non_main_is_a_warn_not_a_pass():
+    cfg = {
+        "agents": {
+            "defaults": {"sandbox": {"mode": "all"}},
+            "list": [
+                {"name": "HalfSafeAgent", "sandbox": {"mode": "non-main"}}
+            ],
+        }
+    }
+    f = check_sandbox(_ctx(cfg))
+    assert f.status == "WARN", f"Expected WARN, got {f.status}: {f.detail}"
+    assert "HalfSafeAgent" in " ".join(f.evidence)
 
 
 # ---------------------------------------------------------------------------

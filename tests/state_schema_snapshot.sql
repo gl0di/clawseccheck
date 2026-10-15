@@ -1,9 +1,9 @@
 -- state_schema_snapshot.sql -- GENERATED. Do not hand-edit.
 --
--- openclaw-version: 2026.9.6
--- state-schema-version: 18
--- generated: 2026-09-26
--- tables: 11
+-- openclaw-version: 2026.10.3
+-- state-schema-version: 20
+-- generated: 2026-10-14
+-- tables: 15
 --
 -- What this is
 -- ------------
@@ -11,7 +11,7 @@
 -- OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL`, projected to the state-SQLite tables this tree
 -- declares in a test DDL or that clawseccheck/ reads.
 --
--- source-bundle: openclaw-state-db-read-connection-Beg0AZE7.mjs
+-- source-bundle: openclaw-state-db-legacy-backfills-BxTnDU05.mjs
 --   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. The bundle
 --   carrying this constant is build output and its name rotates -- 2026.9.1 moved it from
 --   openclaw-state-db-readonly-*.js to openclaw-state-db-cache-*.js while BOTH files still
@@ -106,6 +106,14 @@ CREATE TABLE IF NOT EXISTS capture_events (
   FOREIGN KEY (data_blob_id) REFERENCES capture_blobs(blob_id) ON DELETE SET NULL
 ) STRICT;
 
+CREATE TABLE IF NOT EXISTS config_health_entries (
+  config_path TEXT NOT NULL PRIMARY KEY,
+  last_known_good_json TEXT,
+  last_promoted_good_json TEXT,
+  last_observed_suspicious_signature TEXT,
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS config_machine_state (
   state_key TEXT NOT NULL PRIMARY KEY,
   value_json TEXT NOT NULL,
@@ -157,6 +165,47 @@ CREATE TABLE IF NOT EXISTS device_pairing_paired (
   approved_at_ms INTEGER NOT NULL,
   last_seen_at_ms INTEGER,
   last_seen_reason TEXT
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS diagnostic_events (
+  scope TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  sequence INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, event_key)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS exec_approvals_config (
+  config_key TEXT NOT NULL PRIMARY KEY,
+  raw_json TEXT NOT NULL,
+  socket_path TEXT,
+  has_socket_token INTEGER NOT NULL,
+  default_security TEXT,
+  default_ask TEXT,
+  default_ask_fallback TEXT,
+  auto_allow_skills INTEGER,
+  agent_count INTEGER NOT NULL,
+  allowlist_count INTEGER NOT NULL,
+  updated_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS gateway_restart_handoff (
+  handoff_key TEXT NOT NULL PRIMARY KEY,
+  kind TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  intent_id TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  process_instance_id TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  reason TEXT,
+  restart_trace_started_at INTEGER,
+  restart_trace_last_at INTEGER,
+  source TEXT NOT NULL,
+  restart_kind TEXT NOT NULL,
+  supervisor_mode TEXT NOT NULL,
+  updated_at_ms INTEGER NOT NULL
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS skill_library_entries (

@@ -29,11 +29,16 @@ from ._shared import (
     OUTBOUND_TOOL_HINTS,
     _LEG_KEYS,
     _TIER_NAME,
+    _ALLOW_BOTS_FLIPPED_CHANNELS,
+    _UNTRUSTED_INPUT_POLICIES,
     _agent_legs,
+    _allow_bots_default,
+    _channel_has_implicit_default_account,
     _channels,
     _channels_with_context_visibility_all,
     _config_unreadable,
     _cross_context_default,
+    _declared_dm_policy,
     _enabled_tools,
     _external_input_channels,
     _finding,
@@ -41,6 +46,7 @@ from ._shared import (
     _hint,
     _key_advice,
     _mention_gate_scopes,
+    _norm_group_policy,
     _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
@@ -1517,12 +1523,217 @@ def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
     )
 
 
+# The six channels whose bundled config schema declares ``allowBots`` (re-read against the
+# 2026.9.8 bundled channel metadata, the same walk the check's docstring describes): ClickClack,
+# Discord, Feishu, GoogleChat, Matrix, Slack. Only these get the schema-defaults reachability
+# reading below; any other channel keeps the raw ``_external_input_channels`` gate it always had,
+# because an ``allowBots`` key on a channel whose schema has none is not a vendor setting.
+_ALLOW_BOTS_SCHEMA_CHANNELS = ("clickclack", "discord", "feishu", "googlechat", "matrix", "slack")
+# What makes a stanza a RUNNING account, per channel, read from the same bundled metadata (the
+# credential properties, matching the ``channelEnvVars`` each plugin lists). Discord, GoogleChat
+# and Feishu are already in ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS`` / its Feishu branch and are read
+# through ``_channel_has_implicit_default_account``; the rest are listed here. A stanza with no
+# credential (``{}``, ``{"enabled": true}``, an empty token) cannot be running, so the defaults
+# reading must not count it. The env-var route (``$SLACK_BOT_TOKEN``) is not visible from the
+# config file: the same documented false negative as the implicit default account's.
+_ALLOW_BOTS_CREDENTIAL_KEYS = {
+    "clickclack": ("token", "tokenFile"),
+    "matrix": ("accessToken", "password"),
+    "slack": ("botToken", "appToken", "userToken"),
+}
+# ClickClack's schema has NO direct-message or group policy key (its only access key is
+# ``allowFrom``, documented as defaulting to ``["*"]``: "User-id allowlist for inbound DMs and
+# channel messages", docs/channels/clickclack.md, 2026.9.8). So "an absent dmPolicy is pairing"
+# is not the reason it is read as reachable; the reason is that, with a credential, the vendor's
+# own documented default admits every user. Read from the bundled docs, not an executed resolver.
+_ALLOW_BOTS_NO_POLICY_CHANNELS = ("clickclack",)
+# The per-conversation containers that name which groups/rooms/guilds/channels an allowlist
+# admits (``direct`` is a DM container and is deliberately not listed).
+_ALLOW_BOTS_GROUP_SCOPE_KEYS = ("groups", "rooms", "guilds", "channels")
+# The (channel, container) pairs whose ENTRY schema carries an ``enabled`` key (read from the
+# 2026.9.8 bundled channel metadata): Slack ``channels.*``, Matrix ``groups.*`` / ``rooms.*``,
+# GoogleChat ``groups.*``, Feishu ``groups.*``. Discord ``guilds.*`` (only its nested
+# ``channels.*`` has one) and ClickClack ``groups.*`` have none, so an entry there always counts.
+_ALLOW_BOTS_ENTRY_ENABLED = frozenset({
+    ("slack", "channels"), ("matrix", "groups"), ("matrix", "rooms"),
+    ("googlechat", "groups"), ("feishu", "groups"),
+})
+
+
+def _allow_bots_account_nodes(name: str, c: dict) -> list:
+    """The account nodes B372 judges for channel *name*: the resolved (merged) accounts,
+    plus the implicit default account when one is really running beside them.
+
+    A base node that carries a credential is a live implicit default account beside any
+    configured ``accounts`` (``_channel_has_implicit_default_account``). It is NOT a second
+    account when a configured account is itself named ``default``: the vendor's
+    ``listCombinedAccountIds`` collects the configured and implicit ids in a Set, so the two
+    are one account, whose config is the merged ``accounts.default`` node already in the
+    list (account-helpers-Bvg2s_8k.mjs, 2026.9.8). Only the EXACT id ``default`` is
+    treated as that account: whether a configured id is normalized first (``Default``, a
+    padded id) is a per-channel option that ships out of tree, and dropping the implicit
+    account on a wrong guess would turn a WARN into a PASS, so a variant keeps it. The same
+    caution keeps it when the configured ``default`` is disabled or not an object: that the
+    Set dedupe also takes the credential-carrying root down with a disabled ``default`` is
+    not confirmed, so those shapes read as they did before.
+    """
+    nodes = list(_resolved_channel_nodes(c))
+    accounts = c.get("accounts")
+    if not (isinstance(accounts, dict) and accounts):
+        return nodes
+    configured_default = accounts.get("default")
+    default_is_live_account = (
+        isinstance(configured_default, dict) and configured_default.get("enabled") is not False
+    )
+    if not default_is_live_account and _channel_has_implicit_default_account(name, c):
+        nodes.append({k: v for k, v in c.items() if k != "accounts"})
+    return nodes
+
+
+def _allow_bots_default_group_policy(cfg: dict):
+    """``channels.defaults.groupPolicy`` when it is a usable string, else ``None``.
+
+    The vendor's own default layer (``resolveDefaultGroupPolicy`` reads
+    ``cfg.channels.defaults.groupPolicy``). A non-string or empty value is not a policy
+    choice and reads as absent, so the node falls through to the vendor default
+    (``allowlist``), which ``_allow_bots_node_reachable`` counts only when the node lists a
+    group/room/guild/channel scope. That is NOT a reachable-by-default reading: with a closed
+    DM policy and no scope listed, a drifted defaults value leaves the node closed (PASS), as
+    the raw gate also read it. It is not UNKNOWN, deliberately, because the pre-C-655 verdict
+    for that shape was the same PASS.
+    """
+    defaults = _channels(cfg).get("defaults")
+    value = defaults.get("groupPolicy") if isinstance(defaults, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _allow_bots_node_has_credential(name: str, node: dict) -> bool:
+    """True when *node* carries a credential that makes the stanza a running account.
+
+    Same truthiness as ``_channel_has_implicit_default_account`` (a string counts after
+    ``.strip()``, any other non-``None`` value counts as-is). Channels with no entry in
+    ``_ALLOW_BOTS_CREDENTIAL_KEYS`` defer to that helper (Discord, GoogleChat, Feishu).
+    """
+    keys = _ALLOW_BOTS_CREDENTIAL_KEYS.get(name)
+    if keys is None:
+        return _channel_has_implicit_default_account(name, node)
+    for key in keys:
+        value = node.get(key)
+        if value.strip() if isinstance(value, str) else value is not None:
+            return True
+    return False
+
+
+def _allow_bots_has_group_scope(name: str, node: dict) -> bool:
+    """True when *node* lists at least one group/room/guild/channel an allowlist could admit.
+
+    An entry that writes ``enabled: false`` admits nothing and is skipped, but only where that
+    entry's schema carries an ``enabled`` key (``_ALLOW_BOTS_ENTRY_ENABLED``: Slack ``channels``,
+    Matrix ``groups``/``rooms``, GoogleChat and Feishu ``groups``). Discord ``guilds.*`` and
+    ClickClack ``groups.*`` have no such key, so an entry there always counts. A container in a
+    shape this audit does not model (a non-empty list or string) is counted: that it lists
+    nothing cannot be shown.
+    """
+    for key in _ALLOW_BOTS_GROUP_SCOPE_KEYS:
+        container = node.get(key)
+        if not container:
+            continue
+        if not isinstance(container, dict):
+            return True
+        skips_disabled = (name, key) in _ALLOW_BOTS_ENTRY_ENABLED
+        if any(
+            not (skips_disabled and isinstance(e, dict) and e.get("enabled") is False)
+            for e in container.values()
+        ):
+            return True
+    return False
+
+
+def _allow_bots_node_reachable(
+        name: str, node, default_group_policy, require_credential: bool = True) -> bool:
+    """Can a non-owner sender reach this one account node ONCE THE SCHEMA DEFAULTS ARE APPLIED?
+
+    The shared ``_external_input_channels`` reads the raw policies only, so a config that
+    omits both read as "no external input" (B-499 keeps it raw on purpose: 15 consumers). For
+    the six channels whose schema declares ``allowBots`` (``_ALLOW_BOTS_SCHEMA_CHANNELS``) B372
+    applies the defaults itself, the way ``_resolved_default_input_channels`` reads an absent
+    ``dmPolicy``, and ONLY for a stanza that holds a credential
+    (``_allow_bots_node_has_credential``):
+
+    * an absent ``dmPolicy`` is ``pairing`` (``_declared_dm_policy`` reads the nested forms too),
+      and open / allowlist / pairing admit outside senders. ClickClack has no policy key at all
+      (``_ALLOW_BOTS_NO_POLICY_CHANNELS``): with a credential it is read as reachable because its
+      documented ``allowFrom`` default is ``["*"]``, not because of a ``pairing`` default;
+    * an absent ``groupPolicy`` is ``channels.defaults.groupPolicy``, then ``allowlist``. A
+      defaulted ``allowlist`` admits only what it lists, so it counts only when the node lists
+      a group/room/guild/channel that is not disabled (``_allow_bots_has_group_scope``); any
+      other defaulted value is judged on its own;
+    * a policy this audit does not recognize (``"weird"``, a number) is not an admitting one
+      and reads as closed, exactly as the raw gate reads it -- with both surfaces closed that
+      stays PASS (the pre-C-655 verdict), not UNKNOWN.
+
+    ``require_credential=False`` answers the same question as if the stanza held a credential;
+    the caller uses it only to disclose that a stanza read PASS for lack of one.
+
+    A node is closed when ``enabled: false`` too. The raw gate is consulted first, so a shape it
+    already recognizes (an open wildcard group, any written policy) can only add to this
+    reading, never lose a finding; every channel outside the six keeps the raw gate alone.
+
+    This is the coarse "admits non-owner senders at all" question B371/B39 ask. It does not
+    model WHICH surface a bot-authored message arrives on; that residual is disclosed in the
+    finding's ``fix`` text.
+    """
+    if not isinstance(node, dict) or node.get("enabled") is False:
+        return False
+    if name in _external_input_channels({"channels": {name: node}}):
+        return True
+    if name not in _ALLOW_BOTS_SCHEMA_CHANNELS:
+        return False
+    if require_credential and not _allow_bots_node_has_credential(name, node):
+        return False
+    if name in _ALLOW_BOTS_NO_POLICY_CHANNELS:
+        return True
+    if (_declared_dm_policy(name, node) or "pairing") in _UNTRUSTED_INPUT_POLICIES:
+        return True
+    group_policy = node.get("groupPolicy")
+    if not (isinstance(group_policy, str) and group_policy):
+        group_policy = default_group_policy or "allowlist"
+        if group_policy == "allowlist":
+            return _allow_bots_has_group_scope(name, node)
+    return _norm_group_policy(name, group_policy) in _UNTRUSTED_INPUT_POLICIES
+
+
+def _allow_bots_credentialless_would_matter(
+        name: str, nodes: list, default_group_policy, default: str) -> bool:
+    """True when a stanza of an allowBots-schema channel reads as "not running" ONLY for lack of
+    a credential in the config, and would have produced a finding had it held one: an explicit
+    non-false ``allowBots`` on one of its scopes, or an unset root key on Discord/Slack whose
+    default is not "deny". Drives the PASS outcome's disclosure that a credential supplied
+    through the environment is not visible to this check.
+    """
+    if name not in _ALLOW_BOTS_SCHEMA_CHANNELS:
+        return False
+    for node in nodes:
+        if not _allow_bots_node_reachable(name, node, default_group_policy,
+                                          require_credential=False):
+            continue
+        for label, scope in _mention_gate_scopes(node):
+            ab = scope.get("allowBots")
+            if ab is None:
+                if not label and name in _ALLOW_BOTS_FLIPPED_CHANNELS and default != "deny":
+                    return True
+            elif ab is not False:
+                return True
+    return False
+
+
 def check_channel_allow_bots(ctx: Context) -> Finding:
     """B372 (C-525) - allowBots: whether an externally-reachable channel accepts
     messages authored by OTHER bot accounts as agent input. Grounded against the
     installed dist (openclaw@2026.9.3) the same way as B371 (see
     ``_mention_gate_scopes`` in ``_shared.py`` for the full trail): of the 27
-    bundled channel plugin schemas, five declare ``allowBots`` - ClickClack,
+    bundled channel plugin schemas, six declare ``allowBots`` (re-counted
+    against 2026.9.8's bundled metadata: exactly these) - ClickClack,
     Discord, Feishu, GoogleChat and Slack take a plain boolean at the channel
     root/account level (ClickClack and Slack ALSO at their nested groups/channels
     container); Matrix takes ``boolean | "mentions"`` at its groups/rooms
@@ -1536,18 +1747,63 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
     admits bot-authored content whenever the bot names the agent - a mention is
     not authentication - so it is treated the same as ``true`` here.
 
-    Scoped the same way as B371: only channels that admit non-owner senders at all
-    (``_external_input_channels``, the same gate B39/B361/B362/B371 use) are
-    considered, since a fully closed channel has no bot account to admit in the
-    first place.
+    Scoped like B371: only channels that admit non-owner senders at all are considered,
+    since a fully closed channel has no bot account to admit in the first place. C-655:
+    for the six channels whose schema declares ``allowBots`` that gate is read ONCE THE SCHEMA
+    DEFAULTS ARE APPLIED (``_allow_bots_node_reachable``) rather than through the raw
+    ``_external_input_channels`` alone -- an omitted ``dmPolicy`` is ``pairing``, an omitted
+    ``groupPolicy`` is ``channels.defaults.groupPolicy`` then ``allowlist`` (counted only when
+    the node lists a scope) -- and only for a stanza that holds a credential, because on a
+    minimal config (``{token, guilds}``) the raw gate saw nothing and both an unset key and an
+    explicit ``allowBots: true`` read PASS. The shared helper stays raw (B-499); the raw reading
+    is still consulted first and every other channel keeps it alone, so this can only add to
+    what the old gate found.
+
+    THE DEFAULT MOVED (2026.9.7). OpenClaw 2026.9.7 flipped ``channels.discord.allowBots``
+    and ``channels.slack.allowBots`` from default-false to default-TRUE: with the key
+    omitted, those two channels accept bot-authored messages (still subject to the existing
+    access and mention rules). Only an explicit ``false`` keeps them out. An unset key is
+    therefore resolved through ``_allow_bots_default`` (the B363/B351 three-way pattern):
+    ``"allow"`` counts as enabled, ``"deny"`` as not, and ``"unknown"`` -- the build could
+    not be determined -- is UNKNOWN, never PASS. This applies to the Discord and Slack
+    CHANNEL-ROOT scope of each resolved account only (``_ALLOW_BOTS_FLIPPED_CHANNELS``):
+    the nested guild/channel/group scopes state no default of their own, so they are
+    assumed to inherit from the root and are not evaluated for an unset key. Matrix,
+    ClickClack, Feishu and GoogleChat state no flipped default and keep the
+    explicit-value-only reading. GROUNDING LIMIT: the Discord and Slack channel resolvers
+    ship out-of-tree, so the flip rests on the vendor's own help hint and changelog (and the
+    2026.9.7 docs, which say the same), not on an executed resolver. The hint reads
+    ``(default: false)`` on every release whose bundle was read (2026.7.1-2, 8.1, 9.1, 9.3,
+    9.4, 9.5, 9.6) and ``(default: true)`` on 2026.9.7.
+
+    Unlike an explicit value, an UNSET key is judged per resolved account, on that account's
+    OWN reachability (its merged dmPolicy/groupPolicy/wildcard groups, ``enabled: false``
+    included): a closed account beside an open one adds nothing. A Discord base node that
+    carries a ``token`` while ``accounts`` is configured is a live implicit default account
+    (``_channel_has_implicit_default_account``); Slack has no such account. Both the explicit
+    and the unset scan walk that SAME node list (``_allow_bots_account_nodes``), so a root
+    ``allowBots: true`` beside an account that sets false reads like the same config with the
+    root key omitted; and the implicit node is dropped when a configured, enabled account is
+    itself named ``default`` (one account, not two).
+    Accepted residual (C-655 item 4): a DM-only config (``groupPolicy: "disabled"``) still
+    WARNs on an unset key. Nothing in the installed docs establishes which surface a
+    bot-authored message can arrive on and the resolvers ship out of tree, so a PASS there
+    would rest on an ungrounded platform claim; the limit is disclosed in ``fix``.
+    Left open, deliberately: the ``$DISCORD_BOT_TOKEN`` route to an implicit default account
+    is not visible from the config file (a false negative, the safe direction), and a nested
+    guild/channel scope that sets ``allowBots: false`` beside an unset root does not rescue
+    the root, because every other scope, DMs included, still inherits the root's default.
 
     WARN    - at least one externally-reachable channel/scope has
-              ``allowBots: true`` or ``allowBots: "mentions"``.
+              ``allowBots: true`` or ``allowBots: "mentions"``, or is a Discord/Slack
+              channel root that leaves it unset on a build whose default is true.
     PASS    - no externally-reachable channel/scope has allowBots enabled
               (including when no channel admits non-owner senders at all).
     UNKNOWN - the config was not read, ``channels`` is present but not an object,
-              or every scope was free of an enabled allowBots but at least one
-              scope set it to a value this audit does not recognize.
+              every scope was free of an enabled allowBots but at least one scope
+              set it to a value this audit does not recognize, or a Discord/Slack
+              channel root leaves it unset and the OpenClaw build (and so the
+              default) could not be determined.
     """
     unreadable = _config_unreadable("B372", ctx)
     if unreadable is not None:
@@ -1574,12 +1830,30 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
             config_field_paths={"channels"},
         )
     reachable = set(_external_input_channels(cfg))
+    default_group_policy = _allow_bots_default_group_policy(cfg)
+    default = _allow_bots_default(ctx)
     enabled: list = []
     drifted: list = []
+    undetermined: list = []
+    from_default: list = []
+    from_default_channels: list = []
+    credentialless = False
     for name, c in _channels(cfg).items():
-        if name == "defaults" or name not in reachable or not isinstance(c, dict):
+        if name == "defaults" or not isinstance(c, dict):
             continue
-        for node in _resolved_channel_nodes(c):
+        nodes = _allow_bots_account_nodes(name, c)
+        # The channel-wide gate: the raw one, or ANY account node reachable once the schema
+        # defaults are applied (a disabled channel is never reachable). The unset-key walk
+        # below narrows this to each node's own reachability.
+        if name not in reachable and not (
+            c.get("enabled") is not False
+            and any(_allow_bots_node_reachable(name, n, default_group_policy) for n in nodes)
+        ):
+            if c.get("enabled") is not False and _allow_bots_credentialless_would_matter(
+                    name, nodes, default_group_policy, default):
+                credentialless = True
+            continue
+        for node in nodes:
             for label, scope in _mention_gate_scopes(node):
                 prefix = f"{name}.{label}" if label else name
                 ab = scope.get("allowBots")
@@ -1589,39 +1863,122 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
                     enabled.append(f'{prefix}.allowBots="mentions"')
                 elif ab is not None and ab is not False:
                     drifted.append(f"{prefix}.allowBots")
+        if default == "deny" or name not in _ALLOW_BOTS_FLIPPED_CHANNELS:
+            continue
+        # An UNSET allowBots on a Discord/Slack account root, resolved through the build's
+        # default. Each account node is judged on its OWN reachability (the merged account
+        # policy, an account-level ``enabled: false`` included), not the channel-wide gate
+        # above: an unset key only matters where a sender can actually reach the account,
+        # and a closed account beside an open one must not add a finding. The node list is
+        # the one the explicit scan above walked (``_allow_bots_account_nodes``: the implicit
+        # Discord default account joins exactly when it is a separate, running account).
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("allowBots") is not None:
+                continue
+            if not _allow_bots_node_reachable(name, node, default_group_policy):
+                continue
+            if default == "allow":
+                entry = f"{name}.allowBots (unset, defaults to true on 2026.9.7+)"
+                enabled.append(entry)
+                from_default.append(entry)
+                from_default_channels.append(name)
+            else:
+                undetermined.append(f"{name}.allowBots (unset)")
     if enabled:
         evidence = sorted(dict.fromkeys(enabled))
-        return _finding(
-            "B372",
-            WARN,
+        detail = (
             f"{len(evidence)} channel scope(s) admit non-owner senders with "
             "allowBots enabled \u2014 messages authored by other bot accounts reach "
             "the agent as input, at whatever rate the bot account can generate "
-            "them.",
+            "them."
+        )
+        fix = (
             "Set allowBots to false for any group/room/channel that admits "
             "non-owner senders, unless accepting bot-authored input is a "
-            "deliberate integration.",
+            "deliberate integration."
+        )
+        if from_default:
+            detail += (
+                " On OpenClaw 2026.9.7 and later, Discord and Slack accept "
+                "bot-authored messages when allowBots is unset, so an unset "
+                "allowBots counts as enabled there."
+            )
+            # Name only the channel(s) that actually left the key unset: telling a
+            # Discord-only user to set channels.slack.allowBots would create an empty
+            # channels.slack block. ``fix`` is not fingerprint-hashed, so this text may
+            # change freely (``detail`` may not).
+            affected = " and ".join(
+                f"channels.{n}.allowBots"
+                for n in sorted(dict.fromkeys(from_default_channels)))
+            fix += (
+                " OpenClaw 2026.9.7 and later ACCEPT bot-authored messages on "
+                "Discord and Slack when allowBots is unset, where earlier builds "
+                f"ignored them: set {affected} to false explicitly (false is right on "
+                'every build; "mentions" still admits a bot that names the agent). '
+                "This audit counts an account as reachable when it holds a credential and "
+                "either its direct-message policy (pairing when omitted) or its group policy "
+                "admits outside senders (an omitted group policy counts only when the "
+                "account lists a group, room, guild or channel), and it does not model "
+                "which surface a bot-authored message can arrive on, so a "
+                "direct-message-only setup is flagged too."
+            )
+        return _finding(
+            "B372",
+            WARN,
+            detail,
+            fix,
             evidence=evidence[:8],
             config_field_paths={"channels.*.allowBots"},
         )
-    if drifted:
-        evidence = sorted(dict.fromkeys(drifted))
+    if drifted or undetermined:
+        drifted_ev = sorted(dict.fromkeys(drifted))
+        undetermined_ev = sorted(dict.fromkeys(undetermined))
+        details: list = []
+        fixes: list = []
+        if drifted_ev:
+            details.append(
+                f"{len(drifted_ev)} channel scope(s) set allowBots to a value this "
+                "audit does not recognize, so whether bot-authored input is "
+                "accepted there could not be determined."
+            )
+            fixes.append(
+                "Fix the listed field(s) in openclaw.json to a recognized value "
+                '(true, false, or "mentions"), then re-run the audit.'
+            )
+        if undetermined_ev:
+            details.append(
+                f"{len(undetermined_ev)} Discord/Slack channel scope(s) leave "
+                "allowBots unset and the OpenClaw build could not be determined, so "
+                "whether bot-authored input is accepted there could not be "
+                "established: the OpenClaw releases read (2026.7.1-2 through 2026.9.6) "
+                "ignore bot-authored messages when it is unset, 2026.9.7 and later "
+                "accept them."
+            )
+            fixes.append(
+                "Set allowBots explicitly on the listed channel(s) (false stops "
+                "bot-authored messages from triggering turns, and is right on every "
+                "build), or run the audit where the installed openclaw can be found "
+                "so the build is known."
+            )
         return _finding(
             "B372",
             UNKNOWN,
-            f"{len(evidence)} channel scope(s) set allowBots to a value this "
-            "audit does not recognize, so whether bot-authored input is "
-            "accepted there could not be determined.",
-            "Fix the listed field(s) in openclaw.json to a recognized value "
-            '(true, false, or "mentions"), then re-run the audit.',
-            evidence=evidence[:8],
+            " ".join(details),
+            " ".join(fixes),
+            evidence=(drifted_ev + undetermined_ev)[:8],
+            config_field_paths=(
+                {"channels.*.allowBots"} if undetermined_ev else None),
         )
     return _finding(
         "B372",
         PASS,
         "No externally-reachable channel accepts bot-authored input "
         "(allowBots).",
-        "Nothing to do.",
+        "Nothing to do." + (
+            " A stanza with no credential in the config is treated as not running; a "
+            "credential supplied through the environment is not visible to this check."
+            if credentialless else ""
+        ),
     )
 
 
@@ -1711,16 +2068,21 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
     agent_dir/workspace_dir/spawn_mode/outcome) is judged here - they are surfaced as-is.
 
     NARROWS, does not close: this reads recorded activity, never a durable audit trail.
-    ``subagent_runs`` rows are pruned well before they could serve as forensic history (the
-    default is ~60 minutes after the run was SPAWNED/REGISTERED, not after it completes -
-    ``archiveAtMs = now + archiveAfterMs`` is computed once at registration time
-    (``subagent-registry-DexSZ4w1.js:2238-2240``, and again at steer-restart/replace,
-    ``:2156-2158``) and never recomputed at completion, so a long-running subagent's
-    retention window can already be nearly spent by the time it finishes; see the
-    collector's own docstring and ``docs/research/openclaw-schema-recon.md`` §28), so a
-    populated table proves RECENT (or explicitly ``cleanup:"keep"``) activity - never "this
-    is every subagent ever spawned", and an EMPTY table is never proof no subagent has ever
-    run (retention, not absence).
+    Retention was measured by EXECUTING the installed build's own
+    ``updateSubagentArchiveAtMs`` (``tests/test_c690_dist_retention_grounding.py`` repeats it
+    on every local run): the removal clock starts when a run COMPLETES, not when it is
+    spawned, and only a run that was spawned with ``cleanup:"delete"`` (or a collector run)
+    gets one (default 60 minutes, ``agents.defaults.subagents.archiveAfterMinutes``). A
+    ``cleanup:"keep"`` spawn - the spawn tool's default - and a run still in flight get no
+    removal time and are never swept by that clock; a session-mode run is dropped ~5 minutes
+    after its cleanup completes. So a populated table proves activity that may well be old
+    (a ``keep`` spawn's row stays), an absent row proves nothing (a finished ``delete`` spawn
+    is gone an hour later), and an EMPTY table is never proof no subagent has ever run. The
+    retention rule is spelled out in the finding's ``fix``; ``detail`` only says the rows are
+    a working registry. ``detail`` was reworded (it used to claim spawns are pruned within an
+    hour of being SPAWNED, which is false), so the B18 disk-disclosure fingerprints moved -
+    they already varied with the spawn count and no fixture pins one. See the collector's own
+    docstring and ``docs/research/openclaw-schema-recon.md`` section 28.
 
     The subagent's own delegated ``task`` text is deliberately never echoed into evidence
     here (§8 - it is free-form content the agent was asked to act on, potentially sensitive);
@@ -1762,19 +2124,31 @@ def _disk_subagent_disclosure(ctx: Context) -> "Finding | None":
         "Config declares no subagent delegation, but the OpenClaw state database's "
         f"subagent_runs table records {n} spawn(s) that actually ran \u2014 config and disk "
         "disagree. This is a disclosure, not proof of an active misconfiguration: these "
-        "rows are pruned well before they could serve as durable forensic history (recorded "
-        "spawns are typically pruned within about an hour of being SPAWNED, not of "
-        "completing \u2014 a long-running spawn's retention window can already be nearly gone "
-        "by the time it finishes; sooner still for session-mode runs), so this may reflect "
-        "delegation that has since been removed "
-        "from config rather than a hidden capability that is still live.",
+        "rows are OpenClaw's working registry, not a durable forensic history (how long a "
+        "row is kept depends on how the spawn was started \u2014 see the advice below), so "
+        "this may reflect delegation that has since been removed from config rather than a "
+        "hidden capability that is still live.",
         "If subagent delegation is intentional, declare it explicitly under "
         "agents.subagents / agents.defaults.subagents / "
         f"{_key_advice(ctx, 'agents.list', 'agents.entries')} so the normal "
         "approval-gate check (this same B18) applies to it going forward. If it is not "
         "intentional, use the child_session_key values below to find out what spawned "
         "these runs before assuming the capability is gone \u2014 it may simply be unrecorded "
-        "by config, not absent.",
+        "by config, not absent. Retention: how long OpenClaw keeps these rows depends on "
+        "how the spawn was started. A spawn with cleanup 'delete' (or a collector run) is "
+        "removed "
+        "about 60 minutes after it COMPLETED (agents.defaults.subagents.archiveAfterMinutes, "
+        "counted from completion, not from the spawn, and never while the run is still in "
+        "flight); a spawn with the default cleanup 'keep' has no removal time and is not "
+        "swept by that clock; a session-mode run is dropped about 5 minutes after its "
+        "cleanup completes. So an old row can still be here and a finished 'delete' spawn "
+        "can already be gone \u2014 an empty or short table never proves that no subagent "
+        "ever ran."
+        + (
+            f" Note: {ctx.subagent_runs_elided} of these row(s) hold data nested deeper "
+            "than the audit reads, so content below that depth was never examined."
+            if ctx.subagent_runs_elided else ""
+        ),
         evidence=ev,
     )
 

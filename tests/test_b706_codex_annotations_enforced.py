@@ -165,9 +165,19 @@ def _dist_module():
     """B-728: `hits[0] if hits else None` answered "not installed" and "the bundle was
     renamed" with the same None, and the caller skipped on both. Now: skip only when
     OpenClaw is absent, fail (naming the symbol) when it is present and the anchor moved."""
+    # C-683: since OpenClaw 2026.10.1 TWO bundles mention this symbol, so the bare name is
+    # not an anchor. Measured on that dist:
+    #   mcp-codex-tool-approval-DQZI_si1.mjs:27  `function requiresMcpCodexToolApproval(params) {`
+    #     -- the DEFINITION, exported under minified aliases (`... as r`, line 40);
+    #   mcp-codex-tool-approval-DANhna8Z.mjs:1-2 a two-line barrel: `import { ... r as
+    #     requiresMcpCodexToolApproval ... } from "./mcp-codex-tool-approval-DQZI_si1.mjs";`
+    #     then `export { ..., requiresMcpCodexToolApproval, ... };` -- a re-export under the
+    #     real names, no body.
+    # The anchor is therefore the function DECLARATION, which only the definition carries,
+    # and `_alias_map` below keeps reading the aliases from that same file's export list.
     return dist_file("mcp-codex-tool-approval-*.js",
                      symbol="requiresMcpCodexToolApproval",
-                     contains="requiresMcpCodexToolApproval")
+                     contains="function requiresMcpCodexToolApproval(")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
@@ -767,8 +777,15 @@ def test_the_tool_filter_port_agrees_with_the_installed_dist(tmp_path):
     Ported by reading it once and then checked by running it, because the reachability gate
     that decides whether B333 speaks now rests on it.
     """
+    # C-683: two bundles mention `isMcpToolAllowed` on OpenClaw 2026.10.1. Measured:
+    #   mcp-tool-filter-BiXzv8v3.mjs:36  `function isMcpToolAllowed(toolFilter, toolName) {`
+    #     -- the DEFINITION (aliased `... as t`, line 41);
+    #   mcp-tool-filter-uld9UJsR.mjs:1-2 a barrel: `import { n as normalizeMcpToolFilter,
+    #     t as isMcpToolAllowed } from "./mcp-tool-filter-BiXzv8v3.mjs";` then
+    #     `export { isMcpToolAllowed, normalizeMcpToolFilter };` -- no body.
+    # So anchor on the declaration, which only the definition carries.
     module = dist_file("mcp-tool-filter-*.js", symbol="isMcpToolAllowed",
-                       contains="isMcpToolAllowed")
+                       contains="function isMcpToolAllowed(")
 
     work = tmp_path
     (work / "f.mjs").write_text(_FILTER_SCRIPT, encoding="utf-8")

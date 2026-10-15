@@ -4,7 +4,7 @@
 ``SKILL.md`` Step 1: the three modes plus a way into everything else, the rule
 that decides whether a run gets a grade at all, and two status nudges - when you
 last ran a check, and an offline hint if this build looks stale.
-Read-only, no network, pure stdlib (Python 3.9+).
+Read-only, no network, pure stdlib (Python 3.10+).
 
 ``render_menu()`` is pure and fully injectable (version, ages, staleness) so it is
 deterministic under test; ``cli.py`` wires the real local values in. English only -

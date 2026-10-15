@@ -143,8 +143,17 @@ def run_native_audit(openclaw_bin: str = "openclaw", timeout: int = 60,
     if trust is not None:
         must_skip, reason = trust
         if must_skip:
+            # C-705: finding C5 treats a group-writable directory whose group has no
+            # other members as a hygiene gap only; this skip does not look at group
+            # membership, so the two can disagree about the same path. Say so, instead
+            # of leaving the reader to wonder why C5 is quiet while the audit is skipped.
+            stricter = (
+                " This is stricter than finding C5, which tolerates a group-writable "
+                "directory whose group has no other members: a group-writable path is "
+                "never executed here."
+                if reason == "group/world-writable install path" else "")
             return NativeResult("skipped", note=(
-                f"openclaw at {os.path.realpath(exe)} not run: {reason}. "
+                f"openclaw at {os.path.realpath(exe)} not run: {reason}.{stricter} "
                 "Restore owner-only perms on the binary/dir, or run from a trusted PATH, "
                 "to include the built-in audit."))
         # B-774: the install-path trust check does not apply on this platform (see

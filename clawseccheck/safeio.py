@@ -29,6 +29,7 @@ import os
 import posixpath
 import tempfile
 from pathlib import Path
+from . import pathprobe
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
@@ -41,7 +42,7 @@ def secure_dir(path: Path) -> None:
     plain ``mkdir(parents=True)`` + later ``chmod`` leaves open.
     """
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.is_symlink():
+    if pathprobe.is_symlink(path):
         raise OSError(f"refusing to use symlinked directory: {path}")
     try:  # tighten in case the dir pre-existed with looser perms (POSIX only)
         path.chmod(0o700)
@@ -101,7 +102,7 @@ def secure_write_bytes(path: Path, data: bytes) -> None:
     # OSError rather than a silent write. (os.replace below is the hard backstop - it never
     # writes *through* a symlink even if one is planted after this check, so the victim is
     # safe regardless; this check just keeps the loud, tested refusal for the common case.)
-    if path.is_symlink():
+    if pathprobe.is_symlink(path):
         raise OSError(f"refusing to write through symlinked target: {path}")
     parent = path.parent
     fd, tmp_name = tempfile.mkstemp(dir=parent, prefix="." + path.name + ".", suffix=".tmp")
@@ -136,8 +137,13 @@ def secure_write_bytes(path: Path, data: bytes) -> None:
 
 
 def secure_write_text(path: Path, data: str) -> None:
-    """Atomically overwrite *path* with *data* (UTF-8) - see `secure_write_bytes`."""
-    secure_write_bytes(path, data.encode("utf-8"))
+    """Atomically overwrite *path* with *data* (UTF-8) - see `secure_write_bytes`.
+
+    A lone surrogate - how a file name that is not valid UTF-8 reaches a report - is
+    written as the escape ``\\udcff`` (what ``--json`` shows for the same byte) rather
+    than raising and losing the whole file.
+    """
+    secure_write_bytes(path, data.encode("utf-8", errors="backslashreplace"))
 
 
 def secure_append_text(path: Path, data: str) -> None:
@@ -367,8 +373,11 @@ def walk_dir_safely(
     Default `None` keeps the previous behaviour for every existing caller, so opting in is
     per-call-site - the same additive discipline as `skips` and `capped`.
     """
+    # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises
+    # RuntimeError on 3.12 (crashing the caller) and returns on 3.14; the walk below then
+    # reports the unlistable root through `unreadable_dirs`, the same on every interpreter.
     try:
-        root = base_dir.resolve()
+        root = Path(os.path.realpath(base_dir))
     except OSError:
         return []
 
@@ -450,7 +459,7 @@ def walk_dir_safely(
             if exclude_vcs and any(vcs in p.parts for vcs in _VCS_DIR_NAMES):
                 continue
             try:
-                is_link = p.is_symlink()
+                is_link = pathprobe.is_symlink(p)
             except OSError as exc:
                 # B-551: `os.walk` succeeded here - `opendir` needs only `r`, which a `0444`
                 # directory grants - so `onerror` never fired and the `unreadable_dirs`
@@ -509,3 +518,109 @@ def walk_dir_safely(
             out.append(p)
     _flush_unlistable()
     return out
+
+
+# ---------------------------------------------------------------------------
+# Reading a file the USER named (an input flag), as opposed to our own store.
+# ---------------------------------------------------------------------------
+
+#: Upper bound for :func:`read_user_file` when the caller names none. Far above any
+#: legitimate verdicts / attestation / proposals / baseline file, far below "read a
+#: sparse or endless file into memory".
+USER_FILE_MAX_BYTES = 64 * 1024 * 1024
+
+_NOT_REGULAR_REASON = "not a regular file"
+
+
+class NotARegularFile(OSError):
+    """A user-named path resolves to something other than a regular file.
+
+    A FIFO, socket or device, once the symlink is followed. ``strerror`` is the reason
+    text the callers print ("not a regular file"). A directory raises
+    ``IsADirectoryError`` instead, so the wording callers already have for it is kept.
+    """
+
+
+class UserFileTooLarge(OSError):
+    """A user-named regular file is larger than the caller's bound."""
+
+
+def _refuse_non_regular(st_mode: int, path) -> None:
+    """Raise the right ``OSError`` when *st_mode* is not a regular file's."""
+    import errno  # noqa: PLC0415
+    import stat  # noqa: PLC0415
+    if stat.S_ISREG(st_mode):
+        return
+    if stat.S_ISDIR(st_mode):
+        raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR), os.fspath(path))
+    raise NotARegularFile(errno.EINVAL, _NOT_REGULAR_REASON, os.fspath(path))
+
+
+def open_user_file(path):
+    """Open a user-named file for binary reading, or raise an ``OSError``. Never blocks.
+
+    A path an operator types on the command line can be a named pipe, and an ordinary
+    ``open()`` of a FIFO with no writer waits for one forever. So: ``stat`` first (it
+    follows symlinks, so a link to a FIFO is refused too), then ``open`` with
+    ``O_NONBLOCK`` (a FIFO then opens at once instead of waiting), then ``fstat`` the
+    DESCRIPTOR - a file swapped for a FIFO between the two calls is caught there and
+    never read. ``O_NOCTTY`` keeps a terminal device from becoming ours.
+
+    Only a regular file is returned. A directory raises ``IsADirectoryError``, a
+    FIFO / socket / device raises :class:`NotARegularFile`; a missing path raises
+    ``FileNotFoundError`` as ``open`` does. The returned object is a plain blocking
+    binary reader (the caller closes it, or uses it as a context manager); wrap it in
+    ``io.TextIOWrapper`` to stream text.
+    """
+    _refuse_non_regular(os.stat(path).st_mode, path)
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        _refuse_non_regular(os.fstat(fd).st_mode, path)
+        if hasattr(os, "set_blocking"):
+            try:
+                os.set_blocking(fd, True)
+            except OSError:
+                pass
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_user_file(path, max_bytes: int = USER_FILE_MAX_BYTES) -> bytes:
+    """The bytes of a user-named regular file, bounded; ``OSError`` for anything else.
+
+    The one reader for an input flag's file (see :func:`open_user_file` for what is
+    refused and why it cannot block). A file longer than *max_bytes* raises
+    :class:`UserFileTooLarge` rather than being cut short - a truncated verdicts or
+    baseline file would parse as something it is not. The caller decodes: a decode
+    error is its own, existing "corrupt / not valid" path.
+    """
+    import errno  # noqa: PLC0415
+    with open_user_file(path) as fh:
+        size = os.fstat(fh.fileno()).st_size
+        if size > max_bytes:
+            raise UserFileTooLarge(
+                errno.EFBIG, f"larger than the {max_bytes}-byte limit", os.fspath(path))
+        data = fh.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise UserFileTooLarge(
+            errno.EFBIG, f"larger than the {max_bytes}-byte limit", os.fspath(path))
+    return data
+
+
+def read_user_text(path, *, errors: str = "strict", max_bytes: int = USER_FILE_MAX_BYTES) -> str:
+    """:func:`read_user_file` decoded as UTF-8, with ``Path.read_text``'s newline handling.
+
+    A drop-in for ``Path(path).read_text(encoding="utf-8", errors=errors)`` at a site that
+    reads a file the user named: same text for a regular file (``\\r\\n`` and ``\\r`` read
+    as ``\\n``), but a FIFO / socket / device / oversized file raises ``OSError`` instead
+    of blocking or filling memory. With the default ``errors="strict"`` undecodable bytes
+    raise ``UnicodeDecodeError`` exactly as ``read_text`` does; the caller owns that case.
+    """
+    text = read_user_file(path, max_bytes).decode("utf-8", errors)
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text

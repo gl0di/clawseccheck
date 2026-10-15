@@ -47,11 +47,14 @@ import sys
 from dataclasses import replace as dc_replace
 from pathlib import Path
 
+from .. import pathprobe
 from ..baseline import fingerprint
 from ..catalog import ATTESTED, FAIL, MEDIUM, UNKNOWN, WARN, Finding
+from ..configloader import ELIDED, loads_shallow
 from ..sar import _VERDICT_VALUES
 
 from ._builder import (
+    _ABSTAIN_VERDICT,
     _VERDICT_SCHEMA,
     _attach_corroboration,
     _emit_json,
@@ -138,6 +141,16 @@ def _note_nothing_applied(raw, reason: str, *, hint: str = _VERDICT_CONTRACT_HIN
 
 
 def _parse_verdicts(raw: str) -> dict:
+    """The ``{(finding_id, target): {...}}`` map of usable verdicts, see
+    :func:`_parse_verdicts_with_abstentions` (the single parse funnel).
+
+    The map never contains an ABSTAIN: that answer is "no verdict for this item", so every
+    consumer that looks an item up in the map already treats it as unreviewed.
+    """
+    return _parse_verdicts_with_abstentions(raw)[0]
+
+
+def _parse_verdicts_with_abstentions(raw: str) -> "tuple[dict, frozenset]":
     """Defensively parse ``--judged``'s untrusted input JSON into a
     ``{(finding_id, target): {"verdict": ..., "votes": ...}}`` map.
 
@@ -166,19 +179,33 @@ def _parse_verdicts(raw: str) -> dict:
     it is deliberately scoped to entries the SAME parse call actually sees -- it
     cannot make two wholly separate invocations of an external judge agree with each
     other; nothing offline and stdlib-only can compel that.
+
+    C-712: returns ``(verdicts, abstained)``. ``abstained`` is the set of ``(finding_id,
+    target)`` keys whose ONLY submitted answer was ``ABSTAIN`` ("the packet gave me nothing
+    to decide from"). An ABSTAIN is a usable answer, so it never trips the B-330 "0 usable"
+    complaint, but it is not a verdict: it is never stored in ``verdicts``, so it can neither
+    raise nor lower anything and never reads as reviewed. Because it is simply not stored, an
+    ABSTAIN beside a real verdict for the same key - in either array order - cannot hide or
+    change that verdict (the key is also excluded from ``abstained``: it HAS a verdict). The
+    exact string only: ``abstain`` is an unknown verdict like any other and is dropped.
     """
     if not isinstance(raw, str) or len(raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
         _note_nothing_applied(
             raw, f"it is not text, or exceeds the {_MAX_VERDICTS_BYTES} byte bound")
-        return {}
+        return {}, frozenset()
+    # C-664: the payload is model output a hostile skill can steer, so a depth limit would
+    # be an evasion (one padded key would drop every verdict beside it). Read it shallow:
+    # whatever the fields below need sits within a few levels and is read as `json.loads`
+    # reads it; a subtree below the reader's depth is the opaque ELIDED, never a dict or a
+    # list, so a field that IS that deep falls out as the unusable shape it would be anyway.
     try:
-        data = json.loads(raw)
+        data = loads_shallow(raw).value
     except ValueError:
         _note_nothing_applied(raw, "it is not valid JSON")
-        return {}
+        return {}, frozenset()
     if not isinstance(data, dict):
         _note_nothing_applied(raw, "its top-level value is not a JSON object")
-        return {}
+        return {}, frozenset()
     entries = data.get("verdicts")
     if not isinstance(entries, list):
         # B-597: this used to say "no top-level 'verdicts' array". Which level is "top"
@@ -189,14 +216,39 @@ def _parse_verdicts(raw: str) -> dict:
         # shape). Naming no level at all is true for both callers and teaches neither
         # mistake; the hint that follows still gives the entry contract.
         _note_nothing_applied(raw, 'it has no "verdicts" array')
-        return {}
+        return {}, frozenset()
+    def _unelided(node):
+        # `votes` is echoed into the emitted artifacts, and an ELIDED marker is not JSON:
+        # a subtree the reader did not follow goes out as null. The tally reads it as the
+        # non-number it already is for a nested list (no vote count), as before.
+        if node is ELIDED:
+            return None
+        if isinstance(node, dict):
+            return {k: _unelided(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_unelided(v) for v in node]
+        return node
+
     out: dict = {}
+    abstain_keys: set = set()
+    rejected_keys: set = set()
+    abstain_entries = 0
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         fid, target = entry.get("finding_id"), entry.get("target")
         verdict = entry.get("verdict")
-        if not (isinstance(fid, str) and isinstance(target, str) and verdict in _VALID_VERDICTS):
+        if (isinstance(fid, str) and isinstance(target, str)
+                and isinstance(verdict, str) and verdict == _ABSTAIN_VERDICT):
+            abstain_keys.add((fid, target))
+            abstain_entries += 1
+            continue
+        # A verdict that is a list or an object (hashing it is a TypeError) is as unusable as
+        # a verdict that names no known value; C-664 found it by padding the field.
+        if not (isinstance(fid, str) and isinstance(target, str)
+                and isinstance(verdict, str) and verdict in _VALID_VERDICTS):
+            if isinstance(fid, str) and isinstance(target, str):
+                rejected_keys.add((fid, target))
             continue
         key = (fid, target)
         existing = out.get(key)
@@ -208,12 +260,30 @@ def _parse_verdicts(raw: str) -> dict:
         if existing is not None and _VERDICT_RANK[verdict] < _VERDICT_RANK[existing["verdict"]]:
             continue
         votes = entry.get("votes")
-        out[key] = {"verdict": verdict, "votes": votes if isinstance(votes, dict) else None}
+        out[key] = {"verdict": verdict, "votes": _unelided(votes) if isinstance(votes, dict) else None}
     # An explicitly empty "verdicts": [] IS "no verdicts submitted" -- say nothing.
     # Entries that were submitted and all rejected is the case worth shouting about.
-    if entries and not out:
-        _note_nothing_applied(raw, f"0 of {len(entries)} submitted entries were usable")
-    return out
+    # An item that ALSO drew an unusable answer (a mis-cased DANGEROUS, say) is not shown as
+    # "the judge abstained": something else was said about it and lost, so it reads as not
+    # reviewed, the same as before ABSTAIN existed.
+    abstained = frozenset(abstain_keys - set(out) - rejected_keys)
+    # An ABSTAIN entry is "no entry", so it is left out of BOTH sides of the count: one
+    # ABSTAIN beside three mis-cased verdicts must still say that 0 of those 3 were usable.
+    answered = len(entries) - abstain_entries
+    if answered and not out:
+        _note_nothing_applied(raw, f"0 of {answered} submitted entries were usable")
+    unanswered = abstain_keys - set(out)
+    if unanswered:
+        # Counted per (finding_id, target) pair as SUBMITTED: this parser never sees the
+        # packet, so it cannot say how many of them are real packet items (the --full
+        # adjudication phase can, and counts only those). An ABSTAIN beside a usable
+        # verdict for the same item is moot and not counted. Worded per item: other
+        # entries in the same file may well have been applied.
+        _note(f"{len(unanswered)} {_ABSTAIN_VERDICT} answer(s) submitted for an item with no "
+              "verdict of its own - each is treated exactly like no entry for that item (it "
+              "is not reviewed, raised or lowered by it); every other entry in the file is "
+              "read as usual.")
+    return out, abstained
 
 
 def _vote_tally(verdict: str, votes) -> "tuple[int, int]":
@@ -228,6 +298,9 @@ def _vote_tally(verdict: str, votes) -> "tuple[int, int]":
     if not isinstance(votes, dict):
         return 0, 0
     try:
+        # Every key counts toward the total, an ABSTAIN one included: one DANGEROUS and
+        # two ABSTAIN is disclosed as 1/3, so the reader sees how few lenses stood behind
+        # the verdict instead of a split-free line that reads as unanimous.
         total = sum(int(v) for v in votes.values())
         hit = int(votes.get(verdict, 0))
     except (TypeError, ValueError):
@@ -235,34 +308,90 @@ def _vote_tally(verdict: str, votes) -> "tuple[int, int]":
     return (hit, total) if total > 0 else (0, 0)
 
 
-def _annotate(engine_disposition: str, entry: dict | None) -> str:
+def _votes_exclude_verdict(verdict: str, votes) -> bool:
+    """C-724: True when *votes* tallies at least one vote but none for *verdict* itself
+    (``DANGEROUS`` beside ``{"SAFE": 3}``). A ``0/3`` there reads as a lone dissenting
+    lens or as a split; what was submitted is a verdict its own votes do not back, and
+    the line says so instead of counting."""
+    hit, total = _vote_tally(verdict, votes)
+    return bool(total) and hit == 0
+
+
+def _panel_split_text(verdict: str, votes) -> str:
+    """The ``detail`` suffix for a vet verdict whose panel did not agree unanimously, or
+    ``""``. Unchanged for every tally that has a vote for *verdict*; C-724: when none of
+    the submitted votes is for it, the suffix says that instead of ``0/N``."""
+    hit, total = _vote_tally(verdict, votes)
+    if not total or hit >= total:
+        return ""
+    if hit == 0:
+        return f" (the submitted votes do not include it: {total} under other labels)"
+    return f" (panel split: {hit}/{total} {verdict})"
+
+
+def _annotate(engine_disposition: str, entry: dict | None, abstained: bool = False) -> str:
     """Plain-language re-rank line for one packet item, e.g. "engine: WARN
     ... judges: 3/3 DANGEROUS -> treat as high priority". ``entry`` is None
-    when no verdict was submitted for this item.
+    when no verdict was submitted for this item; ``abstained`` says the judge
+    answered ABSTAIN for it (C-712), which is still "no verdict" but not "nobody looked".
     """
     if entry is None:
+        if abstained:
+            return "judge abstained (could not decide from the packet) \u00b7 not reviewed"
         return "not yet reviewed by a judge"
     verdict = entry["verdict"]
     hit, total = _vote_tally(verdict, entry.get("votes"))
-    judges_desc = f"judges: {hit}/{total} {verdict}" if total else f"judge: {verdict}"
+    if _votes_exclude_verdict(verdict, entry.get("votes")):
+        # C-724: the verdict and its priority are unchanged; only the tally is not shown
+        # as "0/N", which reads as a lone dissenting judge rather than a mismatch.
+        judges_desc = f"judge: {verdict} (the submitted votes do not include it: {total} under other labels)"
+    else:
+        judges_desc = f"judges: {hit}/{total} {verdict}" if total else f"judge: {verdict}"
     priority = _PRIORITY_BY_VERDICT.get(verdict, "worth a closer look")
     return f"engine: {engine_disposition} · {judges_desc} \u2192 {priority}"
 
 
-def _second_opinion(ctx, findings, verdicts_map: dict) -> list[dict]:
+def _note_unmatched_entries(verdicts_map: dict, abstained, packet_keys) -> None:
+    """C-724: say, once, how many submitted entries matched no packet item.
+
+    A well-formed entry whose ``finding_id`` is unknown, whose ``target`` is wrong, or whose
+    id is a FAIL and so was never offered, is dropped when it is looked up - and with one
+    other usable entry beside it nothing said so. Counted per ``(finding_id, target)`` pair
+    as submitted (an ABSTAIN for a non-packet item included), reported as a number only:
+    the ids and targets are the submitter's text and are never echoed. What is applied is
+    unchanged."""
+    unmatched = (set(verdicts_map) | set(abstained)) - set(packet_keys)
+    if not unmatched:
+        return
+    n = len(unmatched)
+    _note(f"{n} submitted (finding_id, target) pair{'' if n == 1 else 's'} matched no item in "
+          "the judge packet (an unknown finding_id, a target that is not the packet item's "
+          "own, or a finding the audit already decided) and had no effect; every entry that "
+          "does match was applied as usual.")
+
+
+def _second_opinion(ctx, findings, verdicts_map: dict,
+                    abstained: "frozenset | set" = frozenset()) -> list[dict]:
     """One row per current judge-packet item, annotated with any submitted
     verdict. Items nobody judged yet still appear, marked unreviewed -- the
     panel shows the whole borderline band, not just what came back judged.
+    An item the judge ABSTAINED on (C-712) keeps ``judge_verdict`` None - it is
+    unreviewed - and only its annotation says why.
     """
     items = []
-    for item in build_judge_packet(ctx, findings):
+    packet = build_judge_packet(ctx, findings)
+    _note_unmatched_entries(verdicts_map, abstained,
+                            {(item["finding_id"], item["target"]) for item in packet})
+    for item in packet:
         entry = verdicts_map.get((item["finding_id"], item["target"]))
         items.append({
             "finding_id": item["finding_id"],
             "target": item["target"],
             "engine_disposition": item["engine_disposition"],
             "judge_verdict": entry["verdict"] if entry else None,
-            "annotation": _annotate(item["engine_disposition"], entry),
+            "annotation": _annotate(
+                item["engine_disposition"], entry,
+                (item["finding_id"], item["target"]) in abstained),
         })
     return items
 
@@ -280,7 +409,8 @@ def render_judged_json(ctx, findings, score, *, verdicts_raw: str, risk=None) ->
     from ..report import render_json  # noqa: PLC0415 -- lazy import mirrors sar.py's precedent
 
     base = json.loads(render_json(findings, score, risk=risk, ctx=ctx))
-    base["secondOpinion"] = _second_opinion(ctx, findings, _parse_verdicts(verdicts_raw))
+    verdicts_map, abstained = _parse_verdicts_with_abstentions(verdicts_raw)
+    base["secondOpinion"] = _second_opinion(ctx, findings, verdicts_map, abstained)
     return _emit_json(base, sort_keys=False)
 
 
@@ -527,8 +657,10 @@ def _vet_run_fingerprint(target: str) -> str:
     within one flow, which this feature was never meant to detect anyway (a
     static scanner only ever describes one moment-in-time state).
     """
+    import os  # noqa: PLC0415
     try:
-        resolved = str(Path(target).expanduser().resolve())
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+        resolved = os.path.realpath(pathprobe.expand_user(target))
     except OSError:
         resolved = str(target)
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()[:16]
@@ -544,8 +676,11 @@ def _verdicts_fingerprint_matches(verdicts_raw, expected_fingerprint: str) -> bo
     """
     if not isinstance(verdicts_raw, str) or len(verdicts_raw.encode("utf-8", "surrogatepass")) > _MAX_VERDICTS_BYTES:
         return False
+    # C-664: model-supplied content - a depth limit would be an evasion (an unrelated padded
+    # key would void a payload that names the right fingerprint), so read it shallow; the
+    # fingerprint sits at the top level, and an ELIDED marker never equals a string.
     try:
-        data = json.loads(verdicts_raw)
+        data = loads_shallow(verdicts_raw).value
     except ValueError:
         return False
     if not isinstance(data, dict):
@@ -632,8 +767,7 @@ def _escalate_finding(f, verdicts_map: dict):
     new_status = _escalated_status(f.status, verdict)
     if new_status is None:
         return f
-    hit, total = _vote_tally(verdict, entry.get("votes"))
-    split = f" (panel split: {hit}/{total} {verdict})" if total and hit < total else ""
+    split = _panel_split_text(verdict, entry.get("votes"))
     return dc_replace(
         f, status=new_status,
         detail=f"[escalated by host-agent judge: {verdict}{split}] {f.detail}",
@@ -662,7 +796,11 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
     stale verdicts file replayed against a later, unrelated run).
     """
     if _verdicts_fingerprint_matches(verdicts_raw, _vet_run_fingerprint(target)):
-        verdicts_map = _parse_verdicts(verdicts_raw)
+        verdicts_map, abstained = _parse_verdicts_with_abstentions(verdicts_raw)
+        if verdicts_map or abstained:
+            _note_unmatched_entries(verdicts_map, abstained, {
+                (item["finding_id"], item["target"])
+                for item in build_vet_judge_packet(engine_output, target)})
     else:
         # B-330: this rejection bypasses _parse_verdicts entirely, so it needs its own
         # diagnostic -- a whole verdicts file discarded on a fingerprint mismatch was
@@ -808,8 +946,7 @@ def _vet_attest_new_findings(target_name: str, verdicts_map: dict) -> list:
         status = _VET_ATTEST_NEW_FINDING_STATUS.get(verdict) if isinstance(verdict, str) else None
         if status is None:
             continue
-        hit, total = _vote_tally(verdict, entry.get("votes"))
-        split = f" (panel split: {hit}/{total} {verdict})" if total and hit < total else ""
+        split = _panel_split_text(verdict, entry.get("votes"))
         out.append(Finding(
             fid, _VET_ATTEST_TITLES[fid], MEDIUM, status,
             f"[host-agent pre-install attestation, verdict {verdict}{split}] "

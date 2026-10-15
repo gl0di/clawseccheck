@@ -4,8 +4,8 @@
 #    uv pip compile --universal --python-version 3.9 --generate-hashes --no-header \
 #      -o .github/tools/requirements-ci.txt .github/tools/requirements-ci.in
 #
-# --universal with --python-version 3.9 matters: CI's test matrix runs Python 3.9 AND
-# 3.12, and a lock resolved on 3.12 alone pinned iniconfig==2.3.0 (Requires-Python
+# --universal with --python-version 3.9 matters: CI's test matrix runs Python 3.9, 3.12
+# AND 3.14, and a lock resolved on 3.12 alone pinned iniconfig==2.3.0 (Requires-Python
 # >=3.10) and omitted pytest's 3.9-only deps (exceptiongroup, tomli), so the 3.9 leg
 # could not install at all. The environment markers below select the right pin per
 # interpreter; every line is still hash-pinned for --require-hashes.

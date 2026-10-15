@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
 
+from . import pathprobe
 from .locking import journal_lock
 from .monitorstore import (
     SCHEMA_VERSION,
@@ -38,6 +38,7 @@ from .monitorstore import (
     _last_chain_hash,
     _rotate_journal,
     _schema_ok,
+    _unused_run_id,
 )
 from .safeio import secure_append_text, secure_dir
 
@@ -55,7 +56,7 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
     id ('ts') on success, or None on write failure - never raises, same contract as
     runstore.save_run."""
     ts = when if when is not None else datetime.now().isoformat(timespec="seconds")
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     base = {
         "ts": ts,
         "version": str(version) if version else None,
@@ -66,6 +67,7 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
         secure_dir(p.parent)
         with journal_lock(p):
             prev_hash = _last_chain_hash(p)
+            ts = base["ts"] = _unused_run_id(p, ts, "sbom")
             row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
             secure_append_text(p, json.dumps(row) + "\n")
             _rotate_journal(p, max_lines=_SBOM_RUNS_MAX_LINES, keep=_SBOM_RUNS_KEEP)
@@ -75,9 +77,10 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
 
 
 def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
-    """Return the stored run whose 'ts' == run_id, last-write-wins on collision."""
-    p = Path(path).expanduser()
-    if not p.is_file():
+    """Return the stored run whose 'ts' == run_id. Ids are unique from 4.4.0 on (see
+    runstore.load_run); in an older file with a duplicate, the last write wins."""
+    p = pathprobe.expand_user(path)
+    if not pathprobe.is_file(p):
         return None
     match = None
     try:
@@ -90,8 +93,8 @@ def load_sbom_run(run_id: str, path: str = DEFAULT_SBOM_RUNS) -> "dict | None":
 
 
 def list_sbom_run_ids(path: str = DEFAULT_SBOM_RUNS) -> "list[str]":
-    p = Path(path).expanduser()
-    if not p.is_file():
+    p = pathprobe.expand_user(path)
+    if not pathprobe.is_file(p):
         return []
     try:
         return [e["ts"] for e in _iter_jsonl(p)

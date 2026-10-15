@@ -46,6 +46,7 @@ Offline; every subprocess call reads only files this test controls under `tmp_pa
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -71,6 +72,23 @@ def _copy_install_tree(dest: Path) -> Path:
     )
     shutil.copy2(_REPO / "audit.py", dest / "audit.py")
     return dest
+
+
+def _child_env() -> dict:
+    """The environment every child here runs under: the caller's, minus the two variables
+    that change where (or whether) CPython writes bytecode.
+
+    These tests measure what the SHIPPED code does about bytecode, so the child must start
+    from "bytecode is written, next to the source" and let the code under test change that.
+    Inheriting `PYTHONDONTWRITEBYTECODE` (a desktop shell commonly exports it) silently
+    answers the question for the code: the `-m` measurement below reads zero `.pyc` files and
+    fails, and the two `audit.py` tests pass without the shim's guard having done anything.
+    `PYTHONPYCACHEPREFIX` would redirect the `.pyc` files out of the install tree altogether.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    env.pop("PYTHONPYCACHEPREFIX", None)
+    return env
 
 
 def _pyc_files(root: Path) -> set:
@@ -108,7 +126,7 @@ def test_audit_shim_version_leaves_the_install_tree_byte_identical(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "audit.py", "--version"],
-        cwd=install, capture_output=True, text=True, timeout=60,
+        cwd=install, env=_child_env(), capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
 
@@ -130,7 +148,7 @@ def test_full_audit_run_leaves_the_install_tree_byte_identical(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "audit.py", "--home", str(_HOME_SAFE), "--no-deptree", "--no-host"],
-        cwd=install, capture_output=True, text=True, timeout=120,
+        cwd=install, env=_child_env(), capture_output=True, text=True, timeout=120,
     )
     assert result.returncode in (0, 1), result.stderr  # 0/1 are both "ran to completion"
 
@@ -167,7 +185,7 @@ def test_m_flag_cannot_be_fully_guarded_from_inside_the_package(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--version"],
-        cwd=install, capture_output=True, text=True, timeout=60,
+        cwd=install, env=_child_env(), capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
 

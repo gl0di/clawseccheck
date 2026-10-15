@@ -30,12 +30,18 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import io
 import json
 import re
 from pathlib import Path
 
+from . import pathprobe
+from .configloader import ELIDED, loads_bounded, loads_shallow
 from .locking import journal_lock
-from .safeio import secure_append_text, secure_dir, secure_write_text
+from .safeio import (
+    NotARegularFile, open_user_file, read_user_text, secure_append_text, secure_dir,
+    secure_write_text,
+)
 
 DEFAULT_STATE = "~/.clawseccheck/state.json"
 DEFAULT_EVENTS = "~/.clawseccheck/events.jsonl"
@@ -83,6 +89,58 @@ def _chain_hash(prev_hash: str, entry: dict) -> str:
     canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"))
     raw = (prev_hash + canonical).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+def _nulled_elided(node):
+    """*node* (a ``loads_shallow`` value) with every ``ELIDED`` marker replaced by None."""
+    if node is ELIDED:
+        return None
+    if isinstance(node, dict):
+        return {k: _nulled_elided(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_nulled_elided(v) for v in node]
+    return node
+
+
+def _iter_jsonl_marked(p: Path, *, skipped: "list | None" = None):
+    """:func:`_iter_jsonl`'s reader, yielding ``(entry, lossy)`` pairs.
+
+    *lossy* is True for a line this tool did not write in full: one nested deeper than the
+    shallow reader follows, so a subtree of it was NOT read, or one that cannot be read at
+    all because of its depth. The tool's own entries are shallow, so such a line is padding
+    that somebody added. *entry* is the dict (its unread subtrees None), or None where no
+    entry could be read; that placeholder is still yielded, in its place in the sequence,
+    so the caller's entry numbers stay the ones it reports. A line that is not valid JSON
+    (``JSONDecodeError``: the truncated tail of an append that died) or is valid JSON that
+    is not an object, and is not lossy, is skipped exactly as before.
+    """
+    # open_user_file: a FIFO named as the journal is an OSError, not a wait for a writer.
+    with io.TextIOWrapper(open_user_file(p), encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                shallow = loads_shallow(line)
+            except json.JSONDecodeError:
+                if skipped is not None:
+                    skipped.append(line)
+                continue
+            except ValueError:
+                # C-664: not a syntax error but a line the reader cannot follow at all
+                # (JSONNestingError), or a number past the interpreter's digit limit.
+                if skipped is not None:
+                    skipped.append(line)
+                yield None, True
+                continue
+            entry = shallow.value
+            if isinstance(entry, dict):
+                yield (_nulled_elided(entry) if shallow.elided else entry), bool(shallow.elided)
+                continue
+            if skipped is not None:
+                skipped.append(line)
+            if shallow.elided:
+                yield None, True
+
+
 def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     """Stream-parse a JSONL file, yielding one dict per well-formed non-blank line.
 
@@ -97,6 +155,13 @@ def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     (skipped, same as any other malformed line) instead of raising
     ``UnicodeDecodeError`` and permanently wedging every future invocation.
 
+    C-664: a line is read with the shallow reader, never refused for its depth. A line
+    nested past the reader's depth still yields its entry (every subtree below that depth
+    is None, so the entry stays JSON-serialisable); a deep line no entry can be read from
+    is skipped here. ``verify_chain`` and ``_rotate_journal`` are the readers that must
+    not shrug at either: they go through ``_iter_jsonl_marked`` instead (a break at that
+    entry; a journal left unrotated).
+
     C-250: when *skipped* (a list) is given, every non-blank line that could NOT be
     turned into a usable entry (a JSON-decode error, or valid JSON that isn't a dict -
     e.g. a tail-truncated final line from a write that died mid-append) is appended to
@@ -106,21 +171,9 @@ def _iter_jsonl(p: Path, *, skipped: "list | None" = None):
     the identical bare ``OK``. Same opt-in out-param idiom ``_snapshot_memory_files``'s
     ``capped`` already uses: a caller that does not ask for it sees no behaviour change.
     """
-    with p.open("r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                if skipped is not None:
-                    skipped.append(line)
-                continue
-            if isinstance(entry, dict):
-                yield entry
-            elif skipped is not None:
-                skipped.append(line)
+    for entry, _lossy in _iter_jsonl_marked(p, skipped=skipped):
+        if entry is not None:
+            yield entry
 # The machine-readable causes `verify_chain` reports through its `cause` out-param when it
 # returns the third outcome. Same vocabulary shape as `_verify_baseline`'s `_why`, and for
 # the same reason: the CLI has to pick between sentences that say opposite things, and
@@ -140,6 +193,8 @@ def verify_chain(events_path: "str | Path",
     - ``(True, "OK...")``  - there is a chain here and it is intact. Also covers a
       journal whose entries all lack a 'chain_hash' (legacy graceful mode): that is a
       real chain with unverifiable rows, and the count is disclosed in the message.
+      The legacy carve-out is a PREFIX: unchained rows are tolerated only before the
+      first chained row; after it they are BROKEN (C-624).
     - ``(False, "broken at entry N")`` - there is a chain here and it does not hold.
     - ``(None, ...)`` - there is **no chain here to verify**: the file is absent, empty,
       holds no parseable entry at all, or could not be read.
@@ -175,13 +230,18 @@ def verify_chain(events_path: "str | Path",
     applies: unknown-schema entries (C-167), entries present but not chain-verified
     (legacy, no 'chain_hash' field - reconciles SECURITY_MODEL.md's "whole-file legacy
     carve-out" description with what this always did per-entry: a JOURNAL MIXING legacy
-    and chained entries discloses only the legacy COUNT, not "the whole file is legacy"),
+    and chained entries (legacy rows first) discloses only the legacy COUNT, not "the
+    whole file is legacy"),
     and unparseable lines skipped entirely (see `_iter_jsonl`'s `skipped` out-param) - so
     "OK (1 unknown-schema entry present)" (the pre-existing wording, unchanged when it is
     the only note) can now read "OK (1 unknown-schema entry present; 2 entries not
     chain-verified (legacy, no chain_hash); 1 unparseable line skipped)".
 
-    Returns (False, "broken at entry N") on the first mismatch.
+    Returns (False, "broken at entry N") on the first mismatch, or on the first line this
+    tool did not write in full (C-664: nested deeper than the shallow reader follows, or
+    too deep to read at all - any such line is a break, never a skipped line), or (False,
+    "unchained entry N follows a chained entry - not legacy") on the first unchained row
+    after a chained one (C-624).
     Never raises - an IO error yields the third outcome (``None``), not a pass: saying
     "OK" about a file that could not be opened is the same lie as saying it about one that
     is not there.
@@ -204,16 +264,16 @@ def verify_chain(events_path: "str | Path",
         return _no_chain(CHAIN_BAD_PATH, f"no chain here \u2014 this path cannot be resolved "
                                          f"({exc})")
     try:
-        if not p.is_file():
+        if not pathprobe.is_file(p):
             # "It does not exist" and "it is not a regular file" are different facts, and
             # asserting the first about a directory, a FIFO or a dangling symlink repeats
             # the very mistake this function was fixed for: naming a cause the evidence
             # does not establish. Order matters - exists() follows the link, so a dangling
             # symlink is False there and True at is_symlink().
-            if p.exists():
+            if pathprobe.exists(p):
                 return _no_chain(CHAIN_NOT_A_FILE,
                                  "no chain here \u2014 the path is not a regular file")
-            if p.is_symlink():
+            if pathprobe.is_symlink(p):
                 # Deliberately not "its target does not exist": exists() is also False for
                 # a symlink LOOP, whose target does exist - it is the link. Claim only
                 # what was established, which is that following it does not reach a file.
@@ -222,7 +282,9 @@ def verify_chain(events_path: "str | Path",
                                  "resolve to a readable file")
             return _no_chain(CHAIN_ABSENT, "no chain here \u2014 the file does not exist")
         _skipped: "list[str]" = []
-        entries = list(_iter_jsonl(p, skipped=_skipped))
+        # C-664: marked, because a line this tool did not write in full (padded deeper than
+        # the reader follows) is a break in a tamper-evident chain, not a line to skip.
+        entries = list(_iter_jsonl_marked(p, skipped=_skipped))
     except OSError as exc:
         # A malformed path is not an unreadable store. ENAMETOOLONG / ENOTDIR / ELOOP say
         # the string cannot name a file at all, and routing them to "unreadable" produced
@@ -250,7 +312,12 @@ def verify_chain(events_path: "str | Path",
     prev_hash = ""
     unknown_schema = 0
     unchained = 0
-    for idx, entry in enumerate(entries):
+    seen_chained = False  # C-624: legacy rows are a PREFIX only
+    for idx, (entry, lossy) in enumerate(entries):
+        if lossy:
+            # C-664: its unread part cannot be authenticated, and the entry's own hash
+            # was taken over a document without that padding.
+            return False, f"broken at entry {idx}"
         # Count lines the loaders would skip (C-167): present + authenticated here,
         # but hidden from load_events()/history.load() by the unknown-schema policy.
         if not _schema_ok(entry):
@@ -258,10 +325,17 @@ def verify_chain(events_path: "str | Path",
 
         stored = entry.get("chain_hash")
         if stored is None:
+            if seen_chained:
+                # C-624: no writer of this journal leaves an unchained row after a
+                # chained one (record_events / history.record always chain;
+                # _rotate_journal re-chains every survivor). It is a forged or
+                # inserted row, or a row whose chain_hash was stripped.
+                return False, f"unchained entry {idx} follows a chained entry - not legacy"
             # Legacy entry - skip chain verification for this entry, carry prev_hash.
             # C-250: counted, not just silently tolerated - see the docstring above.
             unchained += 1
             continue
+        seen_chained = True
 
         # Recompute over the entry *without* the chain_hash field
         base = {k: v for k, v in entry.items() if k != "chain_hash"}
@@ -392,15 +466,26 @@ def _rotate_journal(p: Path, max_lines: int = _JOURNAL_MAX_LINES,
     local-file honesty this module cannot promise past a rotation boundary anywhere
     else (see the re-genesis note above) - not a new gap.
 
+    C-664: a journal holding a line this tool did not write in full (see
+    ``_iter_jsonl_marked``) is not rotated at all: it stays byte-identical and keeps
+    verifying as BROKEN, rather than being re-chained into one that verifies OK.
+
     Must be called from inside the caller's ``journal_lock`` critical section
     (immediately after an append) - it does not take the lock itself.
     Never raises: any OSError during read/rewrite is swallowed, leaving the
     file as last known good (an unrotated, still-valid, still-growing journal).
     """
     try:
-        if not p.is_file():
+        if not pathprobe.is_file(p):
             return
-        entries = list(_iter_jsonl(p))
+        rows = list(_iter_jsonl_marked(p))
+        if any(lossy for _entry, lossy in rows):
+            # C-664: a line this tool did not write in full (padded deeper than the shallow
+            # reader follows, or too deep to read at all). Re-chaining the survivors would
+            # drop or rewrite it and leave a journal that verifies OK, erasing the break
+            # verify_chain reports - so the file is left as it is, not rotated.
+            return
+        entries = [entry for entry, _lossy in rows]
         if len(entries) <= max_lines:
             return  # no-op - file untouched, byte-identical
 
@@ -471,19 +556,20 @@ def read_baseline(path: str | Path = DEFAULT_STATE) -> "tuple[str, dict | None]"
     What it does close is the *corruption* half: a baseline that is present but unusable can
     no longer masquerade as either a healthy first run or a clean comparison.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     # `exists()` follows symlinks, so a broken symlink reports False - check the link
     # itself too, or a planted dangling symlink at the state path reads as "first run".
-    if not p.exists() and not p.is_symlink():
+    if not pathprobe.exists(p) and not pathprobe.is_symlink(p):
         return BASELINE_ABSENT, None
     try:
-        raw = p.read_text(encoding="utf-8")
-    except OSError:
-        # Unreadable (perms), a directory, a dangling symlink: present but unusable.
+        raw = read_user_text(p)
+    except (OSError, UnicodeDecodeError):
+        # Unreadable (perms), a directory, a dangling symlink, a FIFO, bytes that are not
+        # UTF-8: present but unusable.
         return BASELINE_CORRUPT, None
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
+        payload = loads_bounded(raw)
+    except ValueError:  # C-664: JSONDecodeError and "nested too deeply" alike
         return BASELINE_CORRUPT, None
     if not isinstance(payload, dict) or not payload:
         # Non-dict payloads are what crashed diff() with an AttributeError at
@@ -502,7 +588,7 @@ def load_state(path: str | Path = DEFAULT_STATE) -> dict | None:
     """
     return read_baseline(path)[1]
 def save_state(path: str | Path, snap: dict) -> None:
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     # Symlink-safe: create the dir 0700 and refuse to follow a symlinked target,
     # so a planted symlink can never turn this write into an arbitrary-file clobber.
     # state.json itself is unauthenticated -- no hash chain, unlike history.jsonl/
@@ -583,15 +669,15 @@ def baseline_reference(path: str | Path = DEFAULT_STATE) -> "tuple[str, str]":
     file a later `--verify-baseline` will re-read, and a short write that left it truncated
     fails to parse here instead of matching.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     try:
-        raw = p.read_text(encoding="utf-8", errors="replace")
+        raw = read_user_text(p, errors="replace")
     except FileNotFoundError:
         return "", "absent"
     except OSError:
         return "", "unreadable"
     try:
-        snap = json.loads(raw)
+        snap = loads_bounded(raw)
     except ValueError:
         return "", "unreadable"
     value = snapshot_reference(snap)
@@ -615,7 +701,9 @@ def _state_path_digest(path: "str | Path") -> str:
     the path to exist, so a ``--state`` that has never been saved still gets a stable
     identity rather than raising.
     """
-    resolved = str(Path(path).expanduser().resolve())
+    import os  # noqa: PLC0415
+    # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+    resolved = os.path.realpath(pathprobe.expand_user(path))
     return hashlib.sha256(resolved.encode("utf-8", "replace")).hexdigest()
 
 
@@ -691,8 +779,8 @@ def witnessed_reference_for_state(state_path: "str | Path" = DEFAULT_STATE,
     Entries are append-only and therefore already in file order; the LAST matching
     line encountered is the most recent witness, which is what this returns.
     """
-    p = Path(events_path).expanduser()
-    if not p.is_file():
+    p = pathprobe.expand_user(events_path)
+    if not pathprobe.is_file(p):
         return None, "no_witness"
     marker = f"(state {_state_path_digest(state_path)[:_STATE_DIGEST_CHARS]})"
     found = None
@@ -736,7 +824,13 @@ def _last_chain_hash(p: Path) -> str:
     whole file into one big list-of-lines, so memory stays flat on a large file;
     only the running "last chain_hash seen so far" is retained.
     """
-    if not p.is_file():
+    if not pathprobe.is_file(p):
+        # Absent is a first write. Present but not a regular file (a FIFO, a socket, a
+        # device) is not: the append that follows would wait forever for a reader, so
+        # every writer's own `except OSError` reports it instead. A directory keeps the
+        # error the append itself raises.
+        if pathprobe.exists(p) and not pathprobe.is_dir(p):
+            raise NotARegularFile(errno.EINVAL, "not a regular file", str(p))
         return ""
     last = ""
     try:
@@ -747,6 +841,26 @@ def _last_chain_hash(p: Path) -> str:
     except OSError:
         return ""
     return last
+
+
+def _unused_run_id(p: Path, ts: str, kind: str) -> str:
+    """*ts*, or *ts* with ``-2``, ``-3``, ... appended when a stored *kind* row already
+    carries it: two runs saved within the same second used to print the same id, and the
+    first could no longer be loaded by it. Call it under the journal lock."""
+    taken = set()
+    if pathprobe.is_file(p):
+        try:
+            taken = {str(e.get("ts")) for e in _iter_jsonl(p) if _schema_ok(e) and kind in e}
+        except OSError:
+            taken = set()
+    if ts not in taken:
+        return ts
+    n = 2
+    while f"{ts}-{n}" in taken:
+        n += 1
+    return f"{ts}-{n}"
+
+
 def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
                   when: str | None = None) -> "str | None":
     """Append each drift alert to a local, owner-only event journal (a timeline of
@@ -764,9 +878,10 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
     responsible for not consuming the event when this returns non-None (see cli.py).
 
     Each entry carries a 'chain_hash' field: sha256(prev_chain_hash + canonical_json)
-    so the journal is tamper-evident. Existing entries without 'chain_hash' are treated
-    as the chain genesis (backward compatible). Each entry also carries '_schema'
-    (C-162) INSIDE the hashed payload, so it is itself tamper-evident.
+    so the journal is tamper-evident. A legacy prefix of entries without 'chain_hash' is
+    tolerated (backward compatible); an unchained entry AFTER a chained one is BROKEN
+    (C-624). Each entry also carries '_schema' (C-162) INSIDE the hashed payload, so it
+    is itself tamper-evident.
 
     B-108: the read-last-hash->append critical section runs under an advisory
     ``journal_lock`` so two concurrent monitor runs can't both read the same prev
@@ -791,7 +906,7 @@ def record_events(alerts, path: str | Path = DEFAULT_EVENTS,
         return None
     if when is None:
         when = _now_iso()
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     try:  # symlink-safe append; never RAISE from the event journal - report instead
         secure_dir(p.parent)
         with journal_lock(p):
@@ -874,7 +989,7 @@ def load_events_with_problem(
     3.12 for a stat-inaccessible path) and why classifying "did this fail" is split
     from "should this be shown" (the latter is cli.py's ``_explicit_paths`` call).
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     out: list[dict] = []
     try:
         # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())

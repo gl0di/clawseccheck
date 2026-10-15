@@ -15,13 +15,16 @@ Capability mapping
 ``"vet_mcp"``
     Covers ``--vet-mcp`` (MCP supply-chain vetting).  14-day threshold.
 
-Local-only. No network. Pure stdlib. Python 3.9+.
+Local-only. No network. Pure stdlib. Python 3.10+.
 """
 from __future__ import annotations
 
 import json
 from datetime import date
 from pathlib import Path
+
+from . import pathprobe
+from .configloader import loads_bounded
 
 DEFAULT_COVERAGE = "~/.clawseccheck/coverage.json"
 
@@ -57,10 +60,10 @@ def _ledger_path(home: str | None = None, path: str | None = None) -> Path:
     coverage that did not happen.
     """
     if path is not None:
-        return Path(path).expanduser()
+        return pathprobe.expand_user(path)
     if home is not None:
         return Path(home) / ".clawseccheck" / "coverage.json"
-    return Path(DEFAULT_COVERAGE).expanduser()
+    return pathprobe.expand_user(DEFAULT_COVERAGE)
 
 
 def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str, str]:
@@ -82,7 +85,7 @@ def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str
     """
     p = _ledger_path(home, path)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = loads_bounded(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(data, dict):

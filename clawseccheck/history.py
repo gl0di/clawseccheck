@@ -11,9 +11,9 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from pathlib import Path
 
 from . import brand
+from . import pathprobe
 from .locking import journal_lock
 from .monitor import (
     RAW_DEGRADED, RAW_HELD, SCHEMA_VERSION, _chain_hash, _iter_jsonl, _last_chain_hash,
@@ -154,7 +154,7 @@ def record(score, path: str = DEFAULT_HISTORY, when: str | None = None, *,
         date = when[:10]
         ts = when if "T" in when else f"{when}T00:00:00"
 
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     # B-509: a run whose five-layer check was incomplete carries no grade, and this is
     # the last writer that used to republish one anyway - the report withheld the letter
     # while the journal recorded it, so --trend read the phantom back as a real point.
@@ -280,7 +280,9 @@ def verify(path: str = DEFAULT_HISTORY,
 
     Delegates to monitor.verify_chain (same generic entry-agnostic algorithm), and so
     has the same THREE outcomes (B-589): (True, "OK...") for a chain that holds - including
-    a legacy file whose rows carry no 'chain_hash', whose count is disclosed -
+    a legacy file whose rows carry no 'chain_hash', whose count is disclosed; legacy is
+    a leading prefix only, and a later unchained row returns
+    (False, "unchained entry N follows a chained entry - not legacy") (C-624) -
     (False, "broken at entry N") on the first tampered/reordered/deleted entry, and
     (None, ...) when there is no chain here to verify at all: absent, empty, holding no
     parseable row, or unreadable.
@@ -356,7 +358,7 @@ def load_with_problem(path: str = DEFAULT_HISTORY) -> "tuple[HistoryRows, OSErro
     ``_explicit_paths`` - an absence at the default location is a genuine first run and
     must stay silent; this function reports what happened, not what it means.
     """
-    p = Path(path).expanduser()
+    p = pathprobe.expand_user(path)
     rows = HistoryRows()
     try:
         # C-164: stream line-by-line via _iter_jsonl (not read_text().splitlines())

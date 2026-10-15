@@ -121,13 +121,16 @@ def test_existing_but_unanalysable_target_still_gets_the_dossier(tmp_path, capsy
 
     If this ever starts returning 2, the fix collapsed "you mistyped" into "I looked and
     could not tell" -- the exact conflation B-680 was filed against, pointed the other
-    way.
+    way. It returns 1, not 0: the dossier it prints says CAUTION, and a CAUTION must not
+    pass an `--vet ... || fail` install gate (this pinned 0 until the exit code was made
+    to follow the verdict word).
     """
     empty = tmp_path / "empty"
     empty.mkdir()
     rc = main([flag, str(empty)])
     captured = capsys.readouterr()
-    assert rc == 0
+    assert rc == 1
+    assert "CAUTION" in captured.out
     assert "RISK DOSSIER" in captured.out
     assert "UNKNOWN" in captured.out
 

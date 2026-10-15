@@ -127,6 +127,7 @@ from pathlib import Path
 
 from . import canary, multiturn, trajectorystore
 from .checks import _CRED_RE, _EXFIL_RE, _SECRET_PATH_RE, correlation_indicators
+from .configloader import ELIDED, SHALLOW_JSON_DEPTH, loads_shallow
 from .ledger import load_ledger
 from .logsafe import redact
 from .scanbudget import limits_for
@@ -138,6 +139,84 @@ from .trajectory import (
     find_trajectory_files,
     resolve_explicit_file,
 )
+
+
+_JSON_ESCAPE = re.compile(
+    r"\\(?:u([dD][89abAB][0-9a-fA-F]{2})\\u([dD][c-fC-F][0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|(.))",
+    re.S)
+_SIMPLE_ESCAPES = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "/": "/",
+                   '"': '"', "\\": "\\"}
+_JSON_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[\[\]{}:,]|[^\s"\[\]{}:,]+', re.S)
+
+
+def _unescape_json(m: "re.Match") -> str:
+    """One JSON escape as `json.dumps(..., ensure_ascii=False)` would write the character:
+    ``\\u002e`` and ``\\/`` become ``.`` and ``/``; a quote, backslash or control character
+    keeps its escape (so a decoded newline cannot break a ``[^\\n]{0,60}`` proximity)."""
+    high, low, bmp, simple = m.groups()
+    if high:
+        char = chr(0x10000 + ((int(high, 16) - 0xD800) << 10) + (int(low, 16) - 0xDC00))
+    elif bmp:
+        char = chr(int(bmp, 16))
+    else:
+        char = _SIMPLE_ESCAPES.get(simple)
+        if char is None:
+            return m.group(0)
+    return json.dumps(char, ensure_ascii=False)[1:-1]
+
+
+def deep_line_spans(line: str, bound: int = SHALLOW_JSON_DEPTH) -> "list[str]":
+    """The text of every array/object of the valid-JSON *line* that opens deeper than *bound*
+    (the subtrees ``loads_shallow`` elides), in document order, one string each. Inside one
+    subtree, whitespace outside strings is reduced to the ``", "`` / ``": "`` of ``json.dumps`` and JSON escapes
+    are decoded (a quote, backslash or control character keeps its escape), so neither padding
+    nor an escape hides a string from a pattern that would have matched it in an unbounded
+    dump. Not normalised: numbers are kept as written, and a duplicate key is NOT resolved
+    (both are in the text), so a shadowed first key inside a span is read - stricter than dev."""
+    spans: "list[str]" = []
+    parts: "list[str] | None" = None
+    depth = 0
+    for m in _JSON_TOKEN.finditer(line):
+        tok = m.group()
+        if tok == "[" or tok == "{":
+            depth += 1
+            if depth == bound + 1:
+                parts = []
+        if depth > bound and parts is not None:
+            parts.append(tok + " " if tok == "," or tok == ":" else tok)
+        if tok == "]" or tok == "}":
+            if depth == bound + 1 and parts is not None:
+                spans.append(_JSON_ESCAPE.sub(_unescape_json, "".join(parts)))
+                parts = None
+            depth -= 1
+    return spans
+
+
+def deep_line_text(line: str, bound: int = SHALLOW_JSON_DEPTH) -> str:
+    """:func:`deep_line_spans` joined with a single space (never a newline, which would end a
+    ``[^\\n]{0,60}`` proximity arm of ``_CRED_RE``)."""
+    return " ".join(deep_line_spans(line, bound))
+
+
+def _holds_elided(value) -> bool:
+    """True when the ELIDED marker sits anywhere inside *value* (iterative: no recursion)."""
+    todo = [value]
+    while todo:
+        node = todo.pop()
+        if node is ELIDED:
+            return True
+        if isinstance(node, dict):
+            todo.extend(node.values())
+        elif isinstance(node, list):
+            todo.extend(node)
+    return False
+
+
+def _elided_as_null(_marker):
+    """``json.dumps`` hook (C-664): the only value a shallow-read record holds that JSON
+    cannot encode is the ELIDED marker; it dumps as ``null`` and never raises."""
+    return None
+
 
 # _SECRET_PATH_RE moved to checks/_shared.py (F-124/E-044 layer-fix): logscan.py (a
 # Layer-1 leaf, same shelf as this module's dependencies) needs it too and must not
@@ -281,8 +360,12 @@ _MAX_CRED_MATCHES_PER_BLOB = 256
 # goes stale behind the next channel OpenClaw adds. The context-token gate is a
 # channel-agnostic replacement for that same specificity, and is now the ONLY thing this
 # anchor's precision depends on.
+# C-730: linear time. The suffix is made of class characters, so a match is always one
+# maximal run of `[\w.-]` from its first character to the run's last suffix occurrence;
+# the lookbehind lets only that start position try instead of every position in the run
+# (which scanned to the run's end each time). Same spans, no groups.
 _OPENCLAW_CRED_STORE_RE = re.compile(
-    r"[\w.-]*-(?:allowFrom|pairing)\.json\b",
+    r"(?<![\w.-])[\w.-]*-(?:allowFrom|pairing)\.json\b",
     re.I,
 )
 # B-573 part (3): the OpenClaw context-token gate `_OPENCLAW_CRED_STORE_RE` needs - see
@@ -445,8 +528,14 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                     saw_ours = True
                 if '"tool.call"' not in line:
                     continue
+                # C-664: model-supplied content (tool-call arguments) - read with the
+                # shallow reader, not a depth limit, so a padded key does not stop the rest
+                # of the call being read. The record is delivered unchanged; a line with an
+                # elided subtree is counted as deep (INCOMPLETE) and, only when the
+                # arguments themselves hold the marker, the text of the elided subtrees is
+                # appended to the arguments blob (below), with the residuals named there.
                 try:
-                    rec = json.loads(line)
+                    shallow = loads_shallow(line)
                 except ValueError:
                     # B-574: a line shaped like a tool.call that failed to parse at
                     # all (e.g. truncated mid-write) is an unreadable RECORD, not an
@@ -454,6 +543,9 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                     # mistaken for "the file legitimately had none".
                     yield ("__unreadable__", "")
                     continue
+                rec = shallow.value
+                if shallow.elided:
+                    yield ("__deep__", "")
                 if not isinstance(rec, dict) or rec.get("traceSchema") != _TRACE_SCHEMA:
                     # B-574: valid JSON, but not one of our records - most commonly a
                     # DIFFERENT tracer's `.jsonl` (a user with several agent tools
@@ -473,7 +565,19 @@ def _iter_tool_calls(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                 if not (isinstance(name, str) and name.strip()):
                     continue
                 args = data.get("arguments")
-                blob = json.dumps(args, ensure_ascii=False) if args is not None else ""
+                blob = (json.dumps(args, ensure_ascii=False, default=_elided_as_null)
+                        if args is not None else "")
+                if shallow.elided and _holds_elided(args):
+                    # The arguments themselves reach below the bound, where only the line's
+                    # own text holds them: append the text of the elided subtrees after the
+                    # dump, one space (never a newline) between pieces. Accepted residual: a
+                    # `[^\n]{0,N}` proximity pattern (Cookies..Chrome) whose two halves
+                    # straddle the bound is not matched - the dump holds one half and the
+                    # appended text the other, farther apart than in an unbounded dump. The
+                    # line is flagged partly read (`__deep__`), so the report carries the
+                    # INCOMPLETE note. An elided part elsewhere in the record (result,
+                    # metadata) means the arguments were read in full: no text is appended.
+                    blob += " " + deep_line_text(line)
                 yield (name.strip(), blob)
             else:
                 # B-574 (widened): loop ran to completion (no `__truncated__` break).
@@ -552,6 +656,10 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
         "unknown_version": False,
         "truncated": False,
         "unreadable": False,
+        # C-664: a line nested deeper than the shallow reader follows (a part of it was
+        # read as text, not structure) - a different reason a read is partial from
+        # `unreadable`, which says invalid JSON or a foreign tracer.
+        "deep_lines": False,
         # B-683: the EXPLICIT path could not be opened at all - distinct from
         # "unreadable", which is about individual LINES inside a file we did open.
         "path_unreadable": False,
@@ -602,6 +710,9 @@ def _analyze_scan(ctx, *, explicit_path: str | None = None) -> dict:
                 continue
             if name == "__unreadable__":
                 result["unreadable"] = True
+                continue
+            if name == "__deep__":
+                result["deep_lines"] = True
                 continue
             result["tool_calls"] += 1
             result["verbs"].add(name)
@@ -783,10 +894,16 @@ def _iter_selftest_texts(path: Path, *, max_bytes: int = _MAX_BYTES_PER_FILE):
                     break
                 if '"prompt.submitted"' not in line and '"model.completed"' not in line:
                     continue
+                # C-664: model-supplied content - shallow reader; the two text fields read
+                # below sit at fixed shallow paths, so the record is delivered unchanged and
+                # a line with an elided subtree is only disclosed (not read in full).
                 try:
-                    rec = json.loads(line)
+                    shallow = loads_shallow(line)
                 except ValueError:
                     continue
+                rec = shallow.value
+                if shallow.elided:
+                    yield ("__deep__", "")
                 if not isinstance(rec, dict) or rec.get("traceSchema") != _TRACE_SCHEMA:
                     continue
                 if rec.get("schemaVersion") != _SCHEMA_VERSION:
@@ -862,6 +979,7 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
         "files_scanned": 0,
         "unknown_version": False,
         "truncated": False,
+        "deep_lines": False,  # C-664, see `_analyze_scan`
         "files_total": 0,
         "files_capped": False,
         "sources": {
@@ -920,6 +1038,9 @@ def self_test_corroboration(home, *, explicit_path: str | None = None,
                 continue
             if rec_type == "__truncated__":
                 result["truncated"] = True
+                continue
+            if rec_type == "__deep__":
+                result["deep_lines"] = True
                 continue
             for name, prefix, markers in _SELFTEST_SOURCES:
                 if prefix not in text:
@@ -1000,6 +1121,10 @@ def render_self_test_corroboration(home, *, explicit_path: str | None = None,
     if r["truncated"]:
         lines.append(f"  {q} A trajectory file exceeded the per-file scan cap \u2014 "
                      "corroboration is INCOMPLETE (treat as UNKNOWN).")
+    if r["deep_lines"]:
+        lines.append(f"  {q} Some trajectory lines nest deeper than {SHALLOW_JSON_DEPTH} "
+                     "levels and were only partly read \u2014 corroboration is INCOMPLETE "
+                     "(treat as UNKNOWN).")
     if r["files_capped"]:
         lines.append(
             f"  {q} Scanned the {r['files_scanned']} most recent of {r['files_total']} "
@@ -1144,6 +1269,10 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
         lines.append(f"  {q} Some trajectory lines could not be read as this format \u2014 "
                      "invalid JSON, or a different tool's traceSchema \u2014 results are "
                      "INCOMPLETE (treat as UNKNOWN, not authoritative).")
+    if r["deep_lines"]:
+        lines.append(f"  {q} Some trajectory lines nest deeper than {SHALLOW_JSON_DEPTH} levels "
+                     "and were only partly read as structure \u2014 results are INCOMPLETE "
+                     "(treat as UNKNOWN, not authoritative).")
     if r["truncated"]:
         lines.append(f"  {q} A trajectory file exceeded the per-file scan cap \u2014 the "
                      "unscanned remainder was never analyzed. Results are INCOMPLETE "

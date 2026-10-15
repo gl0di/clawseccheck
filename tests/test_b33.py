@@ -10,6 +10,12 @@ Logic under test (check_known_vulns + _parse_version):
            the finding in one upgrade.
 - PASS     when the parsed version is past all known advisory fixes.
 
+C-649: the table now also holds every published core advisory up to 2026.9.2, a row may
+carry a lower bound / exact-build restriction (side tables) and an extended-stable build
+follows its own rule. Those, the subject-version rule (installed build vs config stamp) and
+the per-build verdict table are pinned in tests/test_c649_advisory_batch.py; this file keeps
+the older, row-by-row assertions, re-grounded on the new newest boundary (2026.9.2).
+
 Confirmed advisories seeded in _KNOWN_ADVISORIES:
   GHSA-g8p2-7wf7-98mq — OpenClaw/clawdbot <= 2026.1.28 vulnerable,
   fixed in 2026.1.29.  No CVE assigned.
@@ -167,12 +173,12 @@ def test_b33_fail_names_ghsa_not_cve():
 
 def test_b33_fail_names_fixed_version():
     """B-332: FAIL fix text must mention the HIGHEST fixed version across every
-    matched advisory (2026.6.6, CVE-2026-62195's fix) — not just the first table
-    row's fixed version (2026.1.29) — since only the highest actually clears the
-    finding in a single upgrade."""
+    matched advisory (2026.9.2, GHSA-5x6q-wg56-rxg8's fix; was 2026.6.6 before the
+    C-649 batch) — not just the first table row's fixed version (2026.1.29) — since
+    only the highest actually clears the finding in a single upgrade."""
     result = check_known_vulns(_ver_ctx("2026.1.28"))
     assert result.status == FAIL
-    assert "2026.6.6" in result.fix
+    assert "2026.9.2" in result.fix
     assert "2026.1.29" not in result.fix
 
 
@@ -210,8 +216,9 @@ def test_b33_root_alias_affected_version_fails():
 
 
 def test_b33_root_alias_safe_version_passes():
-    """Root-level lastTouchedVersion past all known-advisory fixes -> PASS."""
-    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.6.6"})).status == PASS
+    """Root-level lastTouchedVersion past all known-advisory fixes -> PASS (2026.9.2 is
+    the newest boundary in the table; this was 2026.6.6 before the C-649 batch)."""
+    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.9.2"})).status == PASS
 
 
 def test_b33_meta_takes_precedence_over_root_alias():
@@ -257,9 +264,9 @@ def test_b33_version_much_newer_passes():
 
 def test_b33_pass_detail_includes_version():
     """PASS detail should mention the installed version string."""
-    result = check_known_vulns(_ver_ctx("2026.6.6"))
+    result = check_known_vulns(_ver_ctx("2026.9.2"))
     assert result.status == PASS
-    assert "2026.6.6" in result.detail
+    assert "2026.9.2" in result.detail
 
 
 @pytest.mark.parametrize("version_str,expected_status", [
@@ -268,7 +275,8 @@ def test_b33_pass_detail_includes_version():
     ("2026.1.29", FAIL),  # fixed for GHSA-g8p2/-mc68 but now in GHSA-g6q9/-cv7m range
     ("2026.2.9",  FAIL),  # still <= 2026.2.13 -> hits GHSA-g6q9-8fvw-f7rf / GHSA-cv7m-c9jx-vg7q
     ("2026.2.14", FAIL),  # fixed for the original 4 but now hits an E-059 addition
-    ("2026.6.6",  PASS),  # past every advisory in the table, including E-059's newest
+    ("2026.6.6",  FAIL),  # past the E-059 sweep's newest row, but inside the C-649 batch
+    ("2026.9.2",  PASS),  # past every advisory in the table, including the batch's newest
     ("nightly",   UNKNOWN),
     (None,        UNKNOWN),
 ])
@@ -297,12 +305,13 @@ def test_b33_ghsa_mc68_docker_sandbox_injection_fails_at_boundary():
 def test_b33_ghsa_g6q9_gateway_ssrf_fails_at_2026_2_0():
     """2026.2.0 <= 2026.2.13 -> FAIL, naming GHSA-g6q9-8fvw-f7rf (Gateway SSRF) among
     the matched advisories. B-332: `fix` targets the HIGHEST fixed version across ALL
-    matches (2026.6.6), not GHSA-g6q9's own fixed version (2026.2.14) — upgrading only
-    to 2026.2.14 would still leave every later advisory in the table unfixed."""
+    matches (2026.9.2 since C-649; it was 2026.6.6), not GHSA-g6q9's own fixed version
+    (2026.2.14) — upgrading only to 2026.2.14 would still leave every later advisory in
+    the table unfixed."""
     result = check_known_vulns(_ver_ctx("2026.2.0"))
     assert result.status == FAIL
     assert "GHSA-g6q9-8fvw-f7rf" in result.detail
-    assert "2026.6.6" in result.fix
+    assert "2026.9.2" in result.fix
 
 
 def test_b33_ghsa_g6q9_boundary_2026_2_13_fails():
@@ -336,20 +345,25 @@ def test_b33_ghsa_g6q9_fixed_version_2026_2_14_fixed_but_not_past_e059_additions
     assert result.status == FAIL
 
 
-def test_b33_version_2026_6_6_passes_all_advisories():
-    """Past every known advisory fix, including the E-059 sweep's newest
-    (CVE-2026-62195, fixed 2026.6.6) -> PASS."""
-    result = check_known_vulns(_ver_ctx("2026.6.6"))
+def test_b33_version_2026_9_2_passes_all_advisories():
+    """Past every known advisory fix, including the newest row's
+    (GHSA-5x6q-wg56-rxg8, fixed 2026.9.2) -> PASS. 2026.6.6 used to be the table's
+    ceiling (CVE-2026-62195); the C-649 batch moved it, see the next test."""
+    result = check_known_vulns(_ver_ctx("2026.9.2"))
     assert result.status == PASS
 
 
-def test_b33_known_advisories_table_has_twenty_five_entries():
+def test_b33_known_advisories_table_has_ninety_five_entries():
     """The ClawRadar sweep 2026-07-22 appended 19 fetch-confirmed advisories to
     the existing 4 -> 23. The 2026-07-31 sweep added 2 more, each verified against
     osv.dev before landing (CVE-2026-27488 cron-webhook SSRF, last affected 2026.2.17;
-    CVE-2026-62223 device-pair authorization bypass, fixed 2026.5.18) -> 25 total."""
+    CVE-2026-62223 device-pair authorization bypass, fixed 2026.5.18) -> 25 total.
+    The 2026-10-05 sweep of the vendor repository's own advisory endpoint added every
+    published core advisory reaching 2026.6.6 or later: 70 more (9 fixed in
+    2026.6.8/2026.6.9, 19 in 2026.7.1, 40 in 2026.8.1, 1 in 2026.8.2, 1 in 2026.9.2)
+    -> 95 total."""
     from clawseccheck.checks import _KNOWN_ADVISORIES
-    assert len(_KNOWN_ADVISORIES) == 25
+    assert len(_KNOWN_ADVISORIES) == 95
 
 
 def test_b33_does_not_add_unverified_cve_2026_25593():
@@ -364,24 +378,30 @@ def test_b33_does_not_add_unverified_cve_2026_25593():
 # ---------------------------------------------------------------------------
 # B-264: hyphenated correction-release version pin (e.g. "2026.7.1-2", observed
 # live in ~/.npm-global's package.json and the real ~/.openclaw/openclaw.json
-# lastTouchedVersion). No _KNOWN_ADVISORIES entry currently shares a base tuple
-# with a correction release, so this is a latent-guard pin, not a behavior change:
-# it documents today's (correct) PASS and the boundary shape a future advisory
-# must not collide with (see the correction-release warning above the
-# _KNOWN_ADVISORIES table in clawseccheck/checks/_lifecycle.py).
+# lastTouchedVersion). It was a latent-guard pin while no _KNOWN_ADVISORIES entry
+# shared a base tuple with a correction release. C-649: the guard went red exactly as
+# its docstring said it would - an advisory now covers <= 2026.7.x, one of them
+# (GHSA-356g-m7rx-7pm3, range `= 2026.7.1-2`) naming the correction release itself - and
+# the answer was the comparator change the warning above the _KNOWN_ADVISORIES table
+# asks for (an exact-build side table), not a bumped version literal.
 # ---------------------------------------------------------------------------
 
-def test_b33_correction_release_suffix_passes_current_table():
-    """"2026.7.1-2" is past every current advisory fix -> PASS (no live FP).
+def test_b33_correction_release_family_is_split_only_by_the_exact_build_row(monkeypatch):
+    """"2026.7.1", "2026.7.1-1" and "2026.7.1-2" all FAIL against the current table, and
+    the ONLY thing that tells them apart is the one exact-build row: the base and the
+    first correction share an id set, the second adds GHSA-356g-m7rx-7pm3 and nothing
+    else. Any other difference would mean a row splits the family without the
+    comparator support that makes it sound (see the warning above _KNOWN_ADVISORIES)."""
+    from clawseccheck.checks import _lifecycle
 
-    ⚠️ If a future advisory legitimately covers <= 2026.7.x this WILL go red. Do NOT
-    simply bump the version literal to make it pass — that silently discards the guard.
-    A red here means the new advisory's boundary may split a correction-release family;
-    re-read the warning above _KNOWN_ADVISORIES and pick a boundary that does not, or
-    change the comparator.
-    """
-    result = check_known_vulns(_ver_ctx("2026.7.1-2"))
-    assert result.status == PASS
+    monkeypatch.setattr(_lifecycle, "_B33_EVIDENCE_CAP", 10_000)  # show every id
+    base = check_known_vulns(_ver_ctx("2026.7.1"))
+    first = check_known_vulns(_ver_ctx("2026.7.1-1"))
+    second = check_known_vulns(_ver_ctx("2026.7.1-2"))
+    assert base.status == first.status == second.status == FAIL
+    assert set(base.evidence) == set(first.evidence)
+    assert set(second.evidence) - set(base.evidence) == {"GHSA-356g-m7rx-7pm3"}
+    assert set(base.evidence) < set(second.evidence)
 
 
 def test_b33_correction_release_at_vulnerable_boundary_fails():
@@ -393,11 +413,13 @@ def test_b33_correction_release_at_vulnerable_boundary_fails():
 
 
 def test_b33_correction_release_past_boundary_passes():
-    """"2026.6.6-2" truncates to (2026, 6, 6), past all known-advisory fixes
-    (including the E-059 sweep's newest) -> PASS, same as its base "2026.6.6"."""
-    result = check_known_vulns(_ver_ctx("2026.6.6-2"))
+    """"2026.9.2-2" truncates to (2026, 9, 2), past all known-advisory fixes
+    (including the newest row's, fixed 2026.9.2) -> PASS, same as its base "2026.9.2".
+    (2026.9.2 has no real correction release; the shape is what is pinned. This was
+    "2026.6.6-2" before the C-649 batch moved the table's ceiling.)"""
+    result = check_known_vulns(_ver_ctx("2026.9.2-2"))
     assert result.status == PASS
-    assert result.status == check_known_vulns(_ver_ctx("2026.6.6")).status
+    assert result.status == check_known_vulns(_ver_ctx("2026.9.2")).status
 
 
 # ---------------------------------------------------------------------------
@@ -453,11 +475,16 @@ def test_b33_e059_advisory_boundary_version_fails(ident, max_vuln, fixed_ver):
     assert result.status == FAIL
 
 
-def test_b33_e059_version_past_the_last_advisory_passes():
-    """2026.6.6 (CVE-2026-62195's own fix) is the highest boundary in the table
-    -> PASS, since nothing later can still match."""
+def test_b33_e059_version_past_the_last_e059_advisory_clears_that_row(monkeypatch):
+    """2026.6.6 is CVE-2026-62195's own fix: that row no longer names it. It was the
+    highest boundary in the table (-> PASS) until the C-649 batch added rows fixed in
+    2026.6.8 and later, so the overall verdict is now FAIL for a different reason."""
+    from clawseccheck.checks import _lifecycle
+
+    monkeypatch.setattr(_lifecycle, "_B33_EVIDENCE_CAP", 10_000)  # show every id
     result = check_known_vulns(_ver_ctx("2026.6.6"))
-    assert result.status == PASS
+    assert result.status == FAIL
+    assert "CVE-2026-62195" not in result.evidence
 
 
 def test_b33_e059_version_before_the_last_advisory_fails():
@@ -512,7 +539,7 @@ def test_b33_treadmill_closed_in_one_step():
         (fixed_ver for _ghsa, _max_vuln, fixed_ver, _desc in matched),
         key=lambda v: _parse_version(v),
     )
-    assert highest_fixed == "2026.6.6"
+    assert highest_fixed == "2026.9.2"  # was 2026.6.6 before the C-649 batch
     assert highest_fixed in oldest.fix
 
     result = check_known_vulns(_ver_ctx(highest_fixed))
@@ -522,14 +549,23 @@ def test_b33_treadmill_closed_in_one_step():
 def test_b33_evidence_contains_every_matched_advisory_or_shows_truncation():
     """evidence must contain every applicable advisory id, or an explicit
     "showing N of M" note in detail when the evidence cap truncates the list."""
-    from clawseccheck.checks import _KNOWN_ADVISORIES
+    from clawseccheck.checks import _KNOWN_ADVISORIES, _lifecycle
+
+    _ADVISORY_FIRST_VULNERABLE = _lifecycle._ADVISORY_FIRST_VULNERABLE
 
     result = check_known_vulns(_ver_ctx("2026.1.28"))
     assert result.status == FAIL
 
-    matched_ids = [ghsa for ghsa, max_vuln, _fv, _d in _KNOWN_ADVISORIES if (2026, 1, 28) <= max_vuln]
+    # C-649: a row whose published range has a lower bound above this build does not
+    # apply to it, so it is not named (and not counted) even though its upper bound
+    # reaches it. 2026.1.28 sits below every such lower bound.
+    matched_ids = [
+        ghsa for ghsa, max_vuln, _fv, _d in _KNOWN_ADVISORIES
+        if (2026, 1, 28) <= max_vuln
+        and _ADVISORY_FIRST_VULNERABLE.get(ghsa, (2026, 1, 28)) <= (2026, 1, 28)
+    ]
     total = len(matched_ids)
-    assert total == len(_KNOWN_ADVISORIES)
+    assert total == len(_KNOWN_ADVISORIES) - len(_ADVISORY_FIRST_VULNERABLE)
 
     if total > len(result.evidence):
         # Truncated: every id actually shown must be a real match, and detail must
@@ -545,21 +581,25 @@ def test_b33_evidence_contains_every_matched_advisory_or_shows_truncation():
 
 
 def test_b33_evidence_not_truncated_for_small_match_set():
-    """A version matching only one advisory must not trigger truncation wording."""
-    result = check_known_vulns(_ver_ctx("2026.6.5"))
+    """A version matching only one advisory must not trigger truncation wording.
+    2026.9.1 matches exactly the newest row (2026.6.5 matched exactly CVE-2026-62195
+    until the C-649 batch)."""
+    result = check_known_vulns(_ver_ctx("2026.9.1"))
     assert result.status == FAIL
-    assert result.evidence == ["CVE-2026-62195"]
+    assert result.evidence == ["GHSA-5x6q-wg56-rxg8"]
     assert "showing" not in result.detail
 
 
-def test_b33_per_row_boundary_advisory_not_named_at_own_fixed_version():
+def test_b33_per_row_boundary_advisory_not_named_at_own_fixed_version(monkeypatch):
     """Per-row boundary correctness (verified in the B-332 report; now pinned as a
     regression test): for every row in the table, the advisory id must NOT appear in
     the check's output once the installed version reaches that row's own
     fixed_version_str — 0 leaks, regardless of whether OTHER (later) advisories still
-    make the overall verdict FAIL."""
-    from clawseccheck.checks import _KNOWN_ADVISORIES
+    make the overall verdict FAIL. (C-649: the evidence cap is lifted so a leaked id
+    past the first 20 cannot hide behind the "showing N of M" truncation.)"""
+    from clawseccheck.checks import _KNOWN_ADVISORIES, _lifecycle
 
+    monkeypatch.setattr(_lifecycle, "_B33_EVIDENCE_CAP", 10_000)
     for ghsa, _max_vuln, fixed_ver, _desc in _KNOWN_ADVISORIES:
         result = check_known_vulns(_ver_ctx(fixed_ver))
         assert ghsa not in result.detail, (

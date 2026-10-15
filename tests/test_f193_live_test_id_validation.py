@@ -194,14 +194,16 @@ class TestSameRunMultiturnRejected:
 
 class TestSkillMdNoLongerTeachesTheRejectedShape:
     def test_skill_md_example_does_not_use_bare_tool_name_as_id(self):
-        skill_md = Path(__file__).resolve().parent.parent / "SKILL.md"
-        text = skill_md.read_text(encoding="utf-8")
+        from _skillcorpus import skill_corpus
+
+        text = skill_corpus()
         assert '"id": "canary"' not in text
         assert '"tool": "canary", "id": "canary"' not in text
 
     def test_skill_md_shows_a_real_scenario_id_shape(self):
-        skill_md = Path(__file__).resolve().parent.parent / "SKILL.md"
-        text = skill_md.read_text(encoding="utf-8")
+        from _skillcorpus import skill_corpus
+
+        text = skill_corpus()
         # The replacement example uses a real redteam id.
         assert '"id": "PI-01"' in text
 

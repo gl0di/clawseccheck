@@ -8,6 +8,7 @@ crash. Offline, read-only of the tmp_path sandbox, stdlib only.
 """
 from __future__ import annotations
 
+
 import pytest
 
 from clawseccheck.catalog import UNKNOWN
@@ -44,11 +45,20 @@ def test_legitimate_include_dag_still_loads(tmp_path):
     assert cfg["tools"]["web"]["fetch"]["enabled"] is True
 
 
-def test_deep_plugin_manifest_degrades_to_unknown(tmp_path):
-    # A deeply-nested plugin manifest makes loads_json5 raise RecursionError (not ValueError);
-    # vet_plugin must catch it and return UNKNOWN, not abort the whole vet (C-135).
+@pytest.mark.parametrize("depth", [500, 20_000, 100_000])
+def test_deep_plugin_manifest_degrades_to_unknown(tmp_path, depth):
+    # A deeply-nested plugin manifest used to make loads_json5 raise RecursionError (not
+    # ValueError); vet_plugin must catch it and return UNKNOWN, not abort the whole vet
+    # (C-135). The three depths used to cover three outcomes the interpreters disagreed
+    # about (500 parses everywhere, 20,000 on 3.14 only, 100,000 on none), with the reason
+    # decided by what json.loads did HERE: "not a JSON object" where it parsed, "could not
+    # parse" where it did not. C-664 (slice C3a): the manifest is read by the shallow reader,
+    # which follows any depth, so the reason is the same on every interpreter - a list is not
+    # an object - and the verdict is still the honest UNKNOWN. The "could not parse" degrade
+    # arm is pinned deterministically by test_c648_deep_json_is_not_a_crash.
+    text = "[" * depth + "]" * depth
     root = tmp_path / "plug"
-    _write(root / "openclaw.plugin.json", "[" * 20000 + "]" * 20000)
+    _write(root / "openclaw.plugin.json", text)
     f = vet_plugin(root)
     assert f.status == UNKNOWN
-    assert "could not parse" in f.detail.lower()
+    assert "not a json object" in f.detail.lower()

@@ -21,7 +21,9 @@ are minified (``resolveConfiguredToolPolicies as t``), so neither is a stable ha
 symbol is located by the line that DECLARES it (``function resolveConfiguredToolPolicies(``)
 and must be declared in exactly one bundle — a coin toss between two is a failure, never a
 first-match (``_distgrounding.dist_file``'s rule, restated here for content rather than
-filename). The two symbols the resolver IMPORTS (``resolveAgentConfig``,
+filename). The one exclusion is ``_distgrounding.SEALED_BUNDLES``: an updater-recovery
+snapshot that inlines the whole codebase is a copy of every declaration, not a declaration
+site (see there). The two symbols the resolver IMPORTS (``resolveAgentConfig``,
 ``hasAgentRosterProperty``) are taken from the resolver's own import clause instead, because
 ``resolveAgentConfig`` really is declared in two unrelated bundles and only one is the copy
 the resolver runs. Each located bundle is then copied to a scratch directory with two mechanical
@@ -61,7 +63,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from _distgrounding import require_dist
+from _distgrounding import SEALED_BUNDLES, require_dist
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
@@ -137,6 +139,8 @@ def _scan(dist: Path) -> dict:
         rxs[role] = (symbol, re.compile(pattern.encode(), re.M))
     found = {role: [] for role in _MODULES}
     for path in sorted(list(dist.glob("*.mjs")) + list(dist.glob("*.js"))):
+        if path.name in SEALED_BUNDLES:
+            continue  # a dependency-closure copy of every declaration, never the site itself
         data = path.read_bytes()
         for role, (symbol, rx) in rxs.items():
             # A substring test first: an anchored multi-line regex over 70 MB is ~25x slower.

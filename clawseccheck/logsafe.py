@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import pathprobe
 from .checks import SECRET_KEY_RE, SECRET_PATTERNS
 from .safeio import secure_append_text
 
@@ -145,7 +146,14 @@ def redact(text: str | None) -> str:
 # B-073: any URL-shaped substring (scheme://...) so embedded credentials
 # (userinfo, query tokens, path segments) can be found and stripped even when
 # they appear inside a larger command string rather than as a bare URL value.
-_URL_SHAPE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+")
+#
+# C-730: linear time. The old `[A-Za-z][A-Za-z0-9+.-]*://...` tried from every letter of a
+# long run of scheme characters and scanned to the run's end each time. A match always began
+# at the run's FIRST LETTER, so: only the run's first character may start (lookbehind), group 1
+# takes the run's leading digits and `+.-`, and group 2 is exactly what the old pattern matched.
+# `redact_urls_in_text` puts group 1 back unchanged.
+_URL_SHAPE_RE = re.compile(
+    r"(?<![A-Za-z0-9+.-])([0-9+.-]*)([A-Za-z][A-Za-z0-9+.-]*://[^\s'\"]+)")
 
 
 def sanitize_url_host_only(url: str) -> str:
@@ -181,7 +189,7 @@ def redact_urls_in_text(text: str) -> str:
     """
     if not text:
         return text or ""
-    return _URL_SHAPE_RE.sub(lambda m: sanitize_url_host_only(m.group(0)), text)
+    return _URL_SHAPE_RE.sub(lambda m: m.group(1) + sanitize_url_host_only(m.group(2)), text)
 
 
 def _replace_secret_pattern(m: re.Match) -> str:  # type: ignore[type-arg]
@@ -248,11 +256,24 @@ class _SecureFileHandler(logging.Handler):
         super().__init__()
         self.path = Path(path)
         self.terminator = "\n"
+        self._given_up = False
 
     def emit(self, record: logging.LogRecord) -> None:
+        if self._given_up:
+            return
         try:
             msg = self.format(record)
-            secure_append_text(self.path.expanduser(), msg + self.terminator)
+            secure_append_text(pathprobe.expand_user(self.path), msg + self.terminator)
+        except OSError as exc:
+            # C-721: a path that cannot be opened (missing directory, no permission, a
+            # symlink target) is the user's input, not a logging bug. One plain line, then
+            # the file sink is dropped for the rest of the run; the stderr sink and the
+            # audit carry on, and the exit code is untouched.
+            self._given_up = True
+            shown = "".join(c if c.isprintable() else "?" for c in str(self.path))
+            reason = exc.strerror or type(exc).__name__
+            print(f"clawseccheck: the log file {shown} could not be opened ({reason}); "
+                  "continuing without it.", file=sys.stderr)
         except Exception:  # pragma: no cover - safety net; logging should never raise
             self.handleError(record)
 

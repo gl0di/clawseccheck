@@ -22,7 +22,7 @@ English-only. Read-only. Pure stdlib.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -32,8 +32,17 @@ from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, FAIL_WEIGHT_STATUSES, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _key_advice,
+    _doctor_refuses_retired_formats,
+    _legacy_ssrf_alias_fact,
+    _legacy_ssrf_alias_order,
+    _legacy_ssrf_alias_startup_blocked,
+    _LEGACY_SSRF_ALIAS_1010_INERT,
+    _LEGACY_SSRF_ALIAS_970_FACT,
     _b62_actual_families,
     _b62_extract_declaration,
+    _credential_is_plaintext,
+    _empty_fallback_template,
+    _env_default_operator,
     _credential_store_state,
     _enabled_tools,
     _EVENT_HOOK_PATH_RE,
@@ -53,6 +62,14 @@ from .checks import (
     _sandbox_browser_enabled,
     _sandbox_has_writable_bind,
     SENSITIVE_TOOL_HINTS,
+)
+from .checks._shared import (  # C-681
+    _BIND_TEMPLATE_RE,
+    _cfg_with_bind,
+    _effective_gateway_bind,
+    _is_bind_template,
+    _js_trim,
+    parse_bind_host,
 )
 from .collector import Context, agent_roster, dig
 from .scanbudget import limits_for
@@ -430,6 +447,13 @@ def _has_untrusted_ingress(tools: list[str], cfg: dict) -> bool:
 
 def _sandbox_off(cfg: dict) -> bool:
     """True when sandbox is explicitly off OR completely absent alongside exec tools."""
+    # Documented limitation, pinned by tests/test_c656_risk03_non_main_documented_limit.py:
+    # only "off"/absent count as no sandbox here, so "non-main" - which B4 WARNs on because
+    # the agent's own main session stays on the host - does NOT open RISK-03. Aligning the
+    # two was tried and dropped: it added a RISK-03 on clean fixtures (home_safe and 17
+    # clean_* ones) and on the dev machine, although a per-peer session.dmScope routes
+    # channel DMs into sandboxed (non-main) sessions. Making this dmScope-aware would hide
+    # real exposure (groupScope "main", per-binding dmScope, sessionToolsVisibility "all").
     mode = dig(cfg, "agents.defaults.sandbox.mode")
     return mode == "off" or mode is None
 
@@ -543,7 +567,8 @@ def _fs_writes_contained(cfg: dict) -> bool:
       docstring for why this does NOT need to replicate OpenClaw's own
       path-blocklist validation to stay sound.
     * **FP2 fixed -- ``scope: "shared"`` discards a per-agent ``docker.binds``.**
-      Reproduced: under ``scope: "shared"`` (or legacy ``perSession: false``),
+      Reproduced: under ``scope: "shared"`` (or legacy ``perSession: false``, which only
+      2026.9.6 and earlier honour -- see ``_resolve_sandbox_scope``),
       ``resolveSandboxDockerConfig`` never reads this agent's own ``sandbox.docker``
       at all, so a per-agent bind that would otherwise defeat containment is inert.
       See ``_resolve_sandbox_scope``. Only the per-agent BINDS leg is scope-gated --
@@ -693,8 +718,12 @@ def _resolve_sandbox_backend(sandbox: dict, fallback: str) -> str:
 
 
 def _resolve_exec_host(agent_tools: dict, fallback: str) -> str:
-    """Mirrors resolveExecHost (dist/exec-filesystem-policy-CTlB-k7U.js:11):
-    ``params.agentExec?.host ?? params.globalExec?.host ?? "auto"``.
+    """Mirrors resolveExecHost (dist/exec-filesystem-policy-CTlB-k7U.js:11 on 2026.9.x):
+    ``params.agentExec?.host ?? params.globalExec?.host ?? "auto"``. On openclaw@2026.10.2
+    (read 2026-10-12) ``resolveExecHost`` / ``normalizeExecHost`` no longer exist as functions:
+    the same expression is inlined into ``collectExecFilesystemPolicyDriftHits`` as
+    ``context.tools?.exec?.host ?? globalExec?.host ?? "auto"``
+    (exec-filesystem-policy-B2SaVS0R.mjs:31).
 
     Field path is the top-level ``tools.exec.host`` globally / ``agents.list[N]
     .tools.exec.host`` per agent -- NOT under ``.sandbox`` at all. See
@@ -704,7 +733,10 @@ def _resolve_exec_host(agent_tools: dict, fallback: str) -> str:
     KNOWN LIMIT (documented, not fixed here -- C-135 round 4 follow-up): the REAL
     exec-target resolution chain has more links than this function models --
     ``execOverrides?.host ?? sessionEntry?.execHost ?? agentExec?.host ??
-    globalExec?.host ?? "auto"`` (dist/exec-defaults-BLH0Yltk.js:27) -- and an
+    globalExec?.host ?? "auto"`` (dist/exec-defaults-BLH0Yltk.js:27 on 2026.9.x; on
+    openclaw@2026.10.2 exec-defaults-C2wD2D4U.mjs:22 reads
+    ``execOverrides?.host ?? normalizeExecTarget(sessionEntry?.execHost) ?? agentExec?.host
+    ?? globalExec?.host ?? "auto"``) -- and an
     ``elevatedRequested`` exec is forced to ``"gateway"`` regardless of the
     resolved default. So a config reading ``host: "auto"`` here can still route an
     elevated exec off the sandbox at runtime; this function cannot see that from
@@ -761,14 +793,24 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
     `allowPrivateNetwork` alias (checks/_egress.py) -- resolveBrowserSsrFPolicy
     (config-Dc3xLSSD.mjs:117-130) folds it into dangerouslyAllowPrivateNetwork before the
     browser ever uses the policy. The canonical schema rejects the legacy key outright,
-    but the real boot path auto-repairs an invalid config IN MEMORY on every startup
-    (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255) via the same
-    migration `openclaw doctor` uses, without writing it back to disk in that step (a
-    later preflight step may, 2026.9.5 -- see B38) -- so a raw config setting ONLY the
-    legacy key is a live, silent bypass on every boot, not something gated behind a
-    doctor run the operator may never have done. See B38's own grounding comment
+    but THROUGH 2026.9.6 the real boot path auto-repaired an invalid config IN MEMORY on
+    every startup (resolveStartupConfigSnapshot, wired at pre-bootstrap-Da_13P9b.mjs:255)
+    via the same migration `openclaw doctor` uses, without writing it back to disk in
+    that step (a later preflight step may, 2026.9.5 -- see B38) -- so a raw config setting
+    ONLY the legacy key was a live, silent bypass on every boot, not something gated
+    behind a doctor run the operator may never have done. See B38's own grounding comment
     (checks/_egress.py) for the full chain. Mirrored here so a raw
-    config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38. A
+    config setting ONLY the legacy key still drives RISK-05/RISK-15, not just B38.
+
+    C-645 (2026-09-30): 2026.9.7 REMOVED that startup self-heal. On 2026.9.7 and later the
+    gateway does not start with the legacy key present, and `openclaw doctor --fix` would
+    migrate a true value into dangerouslyAllowPrivateNetwork -- so the chain is one Doctor
+    run from live rather than live today. Dave ruled to KEEP the trigger (the verdict here
+    is unchanged) and make the WORDING version-aware: RISK-05 / RISK-15 keep their original
+    text on every build but 2026.9.7+, where `_legacy_ssrf_alias_startup_blocked` selects
+    the corrected sentences (shared with B38 via `_LEGACY_SSRF_ALIAS_970_FACT`; C-686: from
+    2026.10.1 via `_LEGACY_SSRF_ALIAS_1010_FACT`, because Doctor refuses the key there and
+    "one Doctor run from live" no longer holds). A
     nested `network.allowPrivateNetwork`/
     `network.dangerouslyAllowPrivateNetwork` shape also exists in the installed dist
     (isPrivateNetworkOptInEnabled, ssrf-policy-bu9unXwu.mjs) but is CHANNEL-scoped only
@@ -781,6 +823,69 @@ def _browser_ssrf(findings: list[Finding], cfg: dict) -> bool:
         dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
         or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
     )
+
+
+# C-645: the sentence RISK-05 / RISK-15 use in place of "the browser is allowed to reach
+# private addresses" when the trigger is the retired alias on a build that no longer starts
+# with it. Built once from the text B38 uses (`_LEGACY_SSRF_ALIAS_970_FACT`), so the three
+# cannot disagree.
+_LEGACY_SSRF_ALIAS_970_LEAD = (
+    "The browser SSRF policy sets the retired browser.ssrfPolicy.allowPrivateNetwork key to "
+    f"true (B38). {_LEGACY_SSRF_ALIAS_970_FACT}."
+)
+
+
+def _legacy_ssrf_alias_lead(ctx: Context, cfg: dict) -> str:
+    """C-686: the lead sentence by the installed build. ``_LEGACY_SSRF_ALIAS_970_LEAD`` (the
+    2026.9.7-2026.9.9 text) stays byte-identical for those builds; an installed 2026.10.1 or
+    later gets the sentence that says Doctor refuses the key instead of migrating it, and --
+    when the canonical flag is not also ``true`` -- that the installed browser ignores the
+    alias on its own (EXECUTED, ``_LEGACY_SSRF_ALIAS_1010_INERT``)."""
+    lead = ("The browser SSRF policy sets the retired browser.ssrfPolicy.allowPrivateNetwork "
+            f"key to true (B38). {_legacy_ssrf_alias_fact(ctx)}.")
+    if (_doctor_refuses_retired_formats(ctx)
+            and dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is not True):
+        inert = _LEGACY_SSRF_ALIAS_1010_INERT
+        lead += f" {inert[0].upper()}{inert[1:]}."
+    return lead
+
+
+def _reword_legacy_ssrf_alias(path: RiskPath, ctx: Context, cfg: dict, *, lead: str,
+                              why_marker: str, fix_marker: str = "") -> RiskPath:
+    """RISK-05 / RISK-15 wording on OpenClaw 2026.9.7 and later when the legacy alias is set.
+
+    The trigger is untouched (Dave, 2026-09-30, C-645: keep the chain) -- this only swaps the
+    LEAD of ``why`` (everything before ``why_marker``) and adds the "remove the key BEFORE
+    running Doctor" step to ``fix`` (before ``fix_marker`` when given). It is a post-hoc
+    rewrite of the ordinary ``RiskPath`` rather than a second literal or an in-place
+    conditional, for two reasons: the tail of each text stays single-sourced in the rule,
+    and ``scripts/gen_checks_docs.py`` reads the rule's own literals, so the generated
+    ``docs/CHECKS.md`` keeps showing the reader-independent text.
+
+    A marker that has drifted out of the literal fails CLOSED and loud in the output: the
+    original text is kept whole behind the corrected lead, never silently dropped. The
+    markers are pinned by ``tests/test_c645_legacy_ssrf_alias_wording.py``.
+
+    Every build that is not KNOWN to be 2026.9.7+ (older, unknown, pre-release) gets the
+    original ``path`` back untouched.
+    """
+    if not _legacy_ssrf_alias_startup_blocked(ctx, cfg):
+        return path
+    _head, sep, tail = path.why.partition(why_marker)
+    why = f"{lead}{sep}{tail}" if sep else f"{lead} {path.why}"
+    order = _legacy_ssrf_alias_order(ctx)
+    if fix_marker:
+        fix_head, fix_sep, fix_tail = path.fix.partition(fix_marker)
+    else:
+        fix_head, fix_sep, fix_tail = path.fix, "", ""
+    fix = f"{fix_head} {order}{fix_sep}{fix_tail}" if fix_sep else f"{path.fix} {order}"
+    return replace(path, why=why, fix=fix)
+
+
+# The stretch of each rule's own ``why`` / ``fix`` that follows the part being reworded.
+_R05_WHY_MARKER = " A prompt-injection payload in a web page"
+_R15_WHY_MARKER = " A prompt-injection in an untrusted message"
+_R15_FIX_MARKER = " Breaking either leg breaks the chain."
 
 
 def _control_plane_exposed(findings: list[Finding], cfg: dict) -> bool:
@@ -1057,7 +1162,7 @@ def _rule_browser_ssrf_secrets(ctx: Context, findings: list[Finding],
         return None
     if not _has_sensitive_data(tools, ctx):
         return None
-    return RiskPath(
+    path = RiskPath(
         id="RISK-05",
         severity=HIGH,
         title="Browser SSRF to private network + secrets reachable",
@@ -1076,6 +1181,13 @@ def _rule_browser_ssrf_secrets(ctx: Context, findings: list[Finding],
             "Move credentials out of the agent's reach, or gate browser tool "
             "invocations behind human approval."
         ),
+    )
+    # C-645: on 2026.9.7+ a legacy-alias trigger is not live today (the gateway will not
+    # start with the key); every other build gets `path` back untouched.
+    return _reword_legacy_ssrf_alias(
+        path, ctx, cfg,
+        lead=f"{_legacy_ssrf_alias_lead(ctx, cfg)} The agent also has access to sensitive credentials.",
+        why_marker=_R05_WHY_MARKER,
     )
 
 
@@ -1521,8 +1633,20 @@ def _rule_sandbox_cred_controlplane(ctx: Context, findings: list[Finding],
     bind_label = _host_reaching_bind(cfg)
     if not bind_label:
         return None
-    if not dig(cfg, "gateway.auth.password"):
-        return None
+    # C-646: the chain's premise is B1's "plaintext gateway.auth.password", so it must use
+    # the SAME predicate B1 does - a SecretRef (`${GW_PW}`, the object form) holds nothing
+    # for the agent to read out of openclaw.json, and B1 no longer FAILs it either. `cfg`
+    # is passed for the same reason as in B1: a reference to a variable that openclaw.json's
+    # own env block defines in plaintext is still a plaintext credential.
+    # The build gate is B1's too: on an OpenClaw with no `:-` default operator (before
+    # 2026.9.7) a whole-value `${NAME:-}` is passed through verbatim, so the text in
+    # openclaw.json IS the password and B1 FAILs it. On an unseen build B1 is UNKNOWN and
+    # this chain stays silent, as it does for any premise it cannot establish.
+    _gw_pw = dig(cfg, "gateway.auth.password")
+    if not _credential_is_plaintext(_gw_pw, cfg=cfg):
+        if not (_empty_fallback_template(_gw_pw, secret_input=True) is not None
+                and _env_default_operator(ctx) == "no"):
+            return None
     return RiskPath(
         id="RISK-16",
         severity=HIGH,
@@ -1577,7 +1701,7 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
         dig(cfg, "browser.ssrfPolicy.dangerouslyAllowPrivateNetwork") is True
         or dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
     )
-    return RiskPath(
+    path = RiskPath(
         id="RISK-15",
         severity=HIGH,
         title="Untrusted context + browser SSRF to private network = metadata/credential exfil",
@@ -1643,6 +1767,16 @@ def _rule_injection_browser_ssrf(ctx: Context, findings: list[Finding],
             )
             + " Breaking either leg breaks the chain."
         ),
+    )
+    # C-645: as in RISK-05 -- on 2026.9.7+ the legacy alias is one Doctor run from live, not
+    # live today; every other build gets `path` back untouched.
+    return _reword_legacy_ssrf_alias(
+        path, ctx, cfg,
+        lead=("A channel exposes full untrusted context to the agent "
+              "(channels.<p>.contextVisibility='all', B26). "
+              f"{_legacy_ssrf_alias_lead(ctx, cfg)}"),
+        why_marker=_R15_WHY_MARKER,
+        fix_marker=_R15_FIX_MARKER,
     )
 
 
@@ -1868,7 +2002,27 @@ def _rule_hooks_session_key_takeover(ctx: Context, cfg: dict) -> RiskPath | None
     arms = [label for kind, label in _R20_ARMS.items() if kind in kinds]
     if not arms:
         return None
-    exposure = _gateway_remote_exposure_reason(cfg)
+    # C-681 (C-653 b): a WHOLE-VALUE templated ``gateway.bind`` (``${VAR}`` /
+    # ``${VAR:-default}`` and nothing else) is resolved by the one shared rule - the value the
+    # audit can SEE for the variable, else a non-loopback ``:-default`` - and then read
+    # exactly as the literal it stands for. Where it cannot be resolved the bind is unknown,
+    # and this module's rule is that UNKNOWN inputs yield no chain (the same stance as
+    # ``bind=auto``): the template text is never read as proof of remote exposure. The
+    # tailscale serve/funnel leg does not depend on the bind and still applies, so the bind
+    # is neutralised to ``auto`` (no bind-derived claim) rather than the whole check skipped.
+    # A template EMBEDDED in a literal host (``0.0.0.0:${GW_PORT}``, ``lan${X}``) keeps the
+    # earlier reading - its literal host part is visible and is not made unknown by the
+    # variable - so it chains with its own text as the label; one whose host part is itself a
+    # variable (``${A}${B}``, ``${A}:8080``, bare ``$A``) is undecidable and yields no chain.
+    raw_bind = dig(cfg, "gateway.bind", "")
+    bind_cfg = cfg  # a literal bind, or an embedded template: read untouched, as before
+    if isinstance(raw_bind, str) and _is_bind_template(raw_bind):
+        if _BIND_TEMPLATE_RE.fullmatch(_js_trim(raw_bind)):
+            bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, raw_bind)
+            bind_cfg = _cfg_with_bind(cfg, "auto" if bind_unres else bind_raw)
+        elif parse_bind_host(raw_bind).startswith("$"):
+            bind_cfg = _cfg_with_bind(cfg, "auto")
+    exposure = _gateway_remote_exposure_reason(bind_cfg)
     if exposure is None:
         return None
 
@@ -2028,7 +2182,8 @@ def _rule_open_group_proven_blast(ctx: Context, cfg: dict) -> RiskPath | None:
     2. the trajectory log contains a ``tool.call`` whose session was opened from a
        GROUP or CHANNEL surface on THAT SAME channel (``EXTERNAL_ORIGIN_KINDS`` - the
        same bucket OpenClaw's own ``sessionKey.includes(":group:") ||
-       includes(":channel:")`` discriminator uses, status-message-CQq9FqoB.js:445);
+       includes(":channel:")`` discriminator uses, status-message-CQq9FqoB.js:445 on 2026.9.x; the
+       same test is at status-message-D8z66EwB.mjs:390 on openclaw@2026.10.2, read 2026-10-12);
     3. that verb classifies EXEC / DESTRUCTIVE / MAILBOX_CONFIG (see
        ``_R21_BLAST_CLASSES`` on why EGRESS is excluded).
 

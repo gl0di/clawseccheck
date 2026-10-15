@@ -1185,7 +1185,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B172 - Standing exec-approvals.json allow-always grant (uninventoried persisted authority)
+### B172 - Standing exec-approvals allow-always grant (uninventoried persisted authority)
 
 - Severity: MEDIUM
 - Block: hardening
@@ -1193,7 +1193,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: HIGH
 - OWASP: none
-- What it checks: Standing exec-approvals.json allow-always grant (uninventoried persisted authority)
+- What it checks: Standing exec-approvals allow-always grant (uninventoried persisted authority)
 - Remediation:
   - none
 
@@ -2015,7 +2015,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
-### B138 - Dangling high-scope pending device pairing (devices/pending.json)
+### B138 - Dangling high-scope pending device pairing (device_pairing_pending / devices/pending.json)
 
 - Severity: MEDIUM
 - Block: advisory
@@ -2023,7 +2023,7 @@ Advisory checks are recorded for coverage but are not scored.
 - Scored: no
 - Confidence: MEDIUM
 - OWASP: LLM06 Excessive Agency
-- What it checks: Dangling high-scope pending device pairing (devices/pending.json)
+- What it checks: Dangling high-scope pending device pairing (device_pairing_pending / devices/pending.json)
 - Remediation:
   - none
 

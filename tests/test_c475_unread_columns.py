@@ -37,7 +37,9 @@ def _tables_we_read():
     """table -> the union of columns our SELECTs name, straight from source."""
     gate = _gate()
     union: dict = {}
-    for statements in gate.expected_reads(PKG_ROOT).values():
+    for reader, statements in gate.expected_reads(PKG_ROOT).items():
+        if reader in gate.PER_AGENT_DB_READERS:
+            continue  # reads a per-agent database, not the state database this helper builds
         for stmt in statements:
             union.setdefault(stmt["table"], set()).update(stmt["columns"])
     return union

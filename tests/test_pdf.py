@@ -137,7 +137,13 @@ def test_suppressed_findings_are_excluded():
     f.suppressed = True
     data = render_pdf([f], compute([f]))
     if _HAS_PDFTOTEXT:
-        assert "B1" not in _pdftotext(data)
+        text = " ".join(_pdftotext(data).split())
+        # The body stays out of the PDF ...
+        assert "Title for B1" not in text
+        assert "detail text" not in text
+        # ... but C-618: a suppressed HIGH FAIL still counts, and the page says so.
+        assert ("WARNING: a HIGH finding (B1) is suppressed via .clawseccheckignore"
+                in text)
 
 
 # ---------------------------------------------------------------------------

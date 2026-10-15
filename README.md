@@ -11,19 +11,19 @@
   <a href="https://github.com/gl0di/clawseccheck/releases"><img src="https://img.shields.io/github/v/tag/gl0di/clawseccheck?label=version&color=E34234&labelColor=2b2b2b" alt="version"></a>
   <a href="https://github.com/gl0di/clawseccheck/actions/workflows/ci.yml"><img src="https://github.com/gl0di/clawseccheck/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://clawhub.ai/gl0di/skills/clawseccheck"><img src="https://img.shields.io/badge/ClawHub-clawseccheck-FF6B47?labelColor=2b2b2b" alt="ClawHub"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-E8A33D?labelColor=2b2b2b" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/python-3.10%2B-E8A33D?labelColor=2b2b2b" alt="Python 3.10+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-E34234?labelColor=2b2b2b" alt="License: MIT"></a>
 </p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/stats-dark.svg">
-    <img src="docs/assets/stats-light.svg" alt="229 security checks · 26 attack-chain detectors · 30,613 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.9.6 verified" width="900">
+    <img src="docs/assets/stats-light.svg" alt="229 security checks · 26 attack-chain detectors · 39,187 automated tests · 0 dependencies · 0 network calls · OpenClaw 2026.10.3 verified" width="900">
   </picture>
 </p>
 
 <p align="center">
-  <sub>Verified against <b>OpenClaw 2026.9.6</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.9+ · <a href="#-compatibility">details</a></sub>
+  <sub>Verified against <b>OpenClaw 2026.10.3</b> on <b>Linux</b> · also reads the pre-2026.8.1 config shapes · Python 3.10+ · <a href="#-compatibility">details</a></sub>
 </p>
 
 ---
@@ -194,8 +194,8 @@ is submitted back:
 | 4 | Agent self-report | **no** - the agent has to answer | `--ask` -> fill it in -> `--attest <file>` |
 | 5 | Live behaviour test | **no** - pokes the running agent | run `--canary` / `--dryrun` / `--redteam` / `--multiturn`, have your agent judge the result, then feed the verdict back with `--judged-bundle <file>` |
 
-**A grade is issued only when all five ran.** Short of that there is no number
-at all - you get findings, led by the most urgent one in words, plus a line
+**A grade is issued only when all five ran.** Short of that no security score or
+grade is printed - you get findings, led by the most urgent one in words, plus a line
 naming which layers didn't run. Concretely: a bare run leaves 3 of 5 untouched
 (the installed sweep, the self-report, the live test); `--full` closes one of
 those - the installed sweep - and leaves 2 of 5 (self-report, live test);
@@ -246,7 +246,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   of credential-stealing skills, "check before install" matters: ask it to vet
   any skill, plugin, or MCP server **before** you enable it.
 - **Honest by design.** A grade is issued only when all five audit layers ran -
-  short of that, no number at all, just findings and a line naming what
+  short of that, no security score or grade is printed, just findings and a line naming what
   didn't run. What it can't determine is reported as `UNKNOWN`, never quietly
   counted as safe, and every mode ends by naming what it did not check: no
   mode ever prints "clear" about a subject it never looked at. An open
@@ -260,7 +260,7 @@ tool" that make an attack trivial. Full list: **[check catalog](docs/CHECKS.md)*
   capabilities - plus a documented zero-false-positive-FAIL release
   discipline: an alarm reaching you is a specific, reproducible, test-pinned
   condition in your own config, not a keyword match dressed up as a scan.
-- **Built like it matters.** 30,613 automated tests run on every change, a
+- **Built like it matters.** 39,187 automated tests run on every change, a
   false alarm is treated as a release-blocking bug, and every release is
   cryptographically signed.
 - **Free and readable.** MIT-licensed, pure Python standard library, zero
@@ -282,7 +282,7 @@ and `--pdf` **given with no path** puts the report in `<home>/media/outbound/`,
 which is the one directory OpenClaw always lets its own read tool open, so the
 file can be attached into your chat. It writes there only if that directory
 already exists and is writable - it is never created - and falls back to
-`~/.clawseccheck/report.pdf` otherwise. Name a path (`--pdf report.pdf`) and it
+`~/.clawseccheck/report.pdf` (`<DIR>/report.pdf` under `--data-dir DIR`) otherwise. Name a path (`--pdf report.pdf`) and it
 goes exactly there instead. Neither touches your OpenClaw config.
 
 The widest read that reaches **outside** your OpenClaw home is on by default: to
@@ -404,7 +404,7 @@ false FAIL here is a hard blocker and not a tuning preference. See the
 [security model](SECURITY_MODEL.md) for the complete capability surface, and
 [`docs/IOC_DATA.md`](docs/IOC_DATA.md) for the IOC dataset's provenance policy.
 
-**A second worked example, from ClawHub's own listing scan (v4.0.1, 2026-09-08).**
+**A second worked example, from ClawHub's own listing scan (2026-09-08).**
 Its "hardcoded secret" and "disabled TLS verification" findings are the same
 point-3-adjacent shape as above, aimed at different lines: the flagged
 "secret" is `checks/_content.py`'s `_URL_AUTH_QUERY_PARAM_NAME_RE` - a regex
@@ -427,7 +427,7 @@ regression test pins that the value never reaches a finding, a log, or disk.
 <details>
 <summary><b>&#x2699;&#xFE0F; For terminal users: CLI, JSON, SARIF, CI gates</b></summary>
 
-ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.9+).
+ClawSecCheck is also a full standalone CLI (zero dependencies, Python 3.10+).
 Nothing above replaced this: the three conversational modes sit on top of the
 same CI/power surface, they didn't shrink it. One flag did go in 4.0.0 -
 `--fail-under <score>`, because a default run no longer carries a score to
@@ -484,11 +484,11 @@ not the same claim as "we ran it".
 
 | | |
 |---|---|
-| **Verified against a running install** | **OpenClaw 2026.9.6.** The schema snapshots this repo ships - `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt`, `tests/dm_policy_shape_manifest.txt` - are generated from an installed 2026.9.6 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` (a frozen ledger of pre-existing citation debt) is stamped and enforced the same way: its stamp must equal the installed build, and it is re-recorded as a deliberate act after each upgrade's citations have been re-grounded, never to absorb a new stale citation. |
+| **Verified against a running install** | **OpenClaw 2026.10.3.** The schema snapshots this repo ships - `tests/dist_verified_paths.txt`, `tests/state_schema_snapshot.sql`, `tests/vendor_state_tables.txt`, `tests/dm_policy_shape_manifest.txt` - are generated from an installed 2026.10.3 and each carries that version in its header. The state-schema snapshot's stamp is enforced: on a machine with OpenClaw installed, the suite re-derives the schema and fails if the stamp does not match the running build. `tests/dist_citation_baseline.txt` (a frozen ledger of pre-existing citation debt) is stamped and enforced the same way: its stamp must equal the installed build, and it is re-recorded as a deliberate act after each upgrade's citations have been re-grounded, never to absorb a new stale citation. |
 | **Read by the code, each measured against a running install while it was written** | **2026.7.1-2, 2026.8.1, 2026.8.2** - the three builds that moved settings the audit reads. Every moved key is read in *both* spellings: the agent roster as `agents.list` *and* `agents.entries`, the gateway command lists under their old and new parents, and the three settings 2026.8.1 moved out of `openclaw.json` into OpenClaw's machine-owned store. An older or not-yet-migrated config is read, not silently skipped. |
 | **On anything else** | The audit still runs. This is deliberately *not* a claim of a contiguous supported range: the builds between the measured points (2026.7.2 - 2026.8.0) were never run against, so the tool treats a config it cannot date as undated - it names **both** key spellings in its fix advice rather than guessing which one your build accepts, and a key whose home this build does not have is reported as retired or `UNKNOWN`, never resolved to nothing and given a verdict anyway. |
 
-**Operating systems.** CI runs the full suite on **Linux** (Python 3.9 and 3.12) and
+**Operating systems.** CI runs the full suite on **Linux** (Python 3.12 and 3.14) and
 **macOS** (Python 3.12) for every push. **Windows** runs the read-only audit and is
 advertised in the skill manifest, but it has **no CI job** and two protections degrade
 there: ClawSecCheck's own `~/.clawseccheck/` store is not owner-restricted (file modes are

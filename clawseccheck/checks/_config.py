@@ -8,8 +8,10 @@ import ipaddress
 import os
 import re
 from pathlib import Path
+from .. import pathprobe
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
+from .. import retiredformats as _retiredformats
 from .. import sockets as _sockets
 from .. import toolgrant as _toolgrant
 from ..catalog import (
@@ -53,14 +55,20 @@ from ._content import (
     _secrecy_credential_or_encoding_anchor,
 )
 from ._shared import (
+    _RETIRED_CONFIG_KEYS,
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
     _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
     _c015_has_secret,
+    _c015_md_credential_list_hit,
+    _c015_text_without_managed_github_ids,
+    _vendor_secret_slot_paths,
     _canonical_ipv4,
     _channel_has_implicit_default_account,
     _channels,
+    _config_env_block_entries,  # C-653
     _config_unreadable,
+    _credential_is_plaintext,  # C-646
     _credential_store_state,
     _detail_path,
     _dir_replaceable_by_others,
@@ -71,16 +79,29 @@ from ._shared import (
     _file_readable_by_others,
     _finding,
     _gateway_remote_exposure_reason,
+    _has_env_template,  # C-646
+    _effective_gateway_bind,  # C-653
+    _env_default_template,  # C-681
+    _cfg_with_bind,  # C-653
+    _reference_env_names,  # C-646
+    _empty_fallback_template,  # C-646
+    _env_default_operator,  # C-646
+    _env_block_defines_plaintext,  # C-653
+    _ENV_TEMPLATE_NAME_RE,  # C-653
     _hint,
     _hooks_session_key_exposures,
     INPUT_TOOL_HINTS,
     _is_posix,
+    _is_secret_ref_object,  # C-667
     _is_secret_reference,  # noqa: F401 - re-exported for existing importers
+    _js_trim,  # C-653
     _LEG_KEYS,
     LOOPBACK,
     _mcp_leg_contributions,
     _node_commands,
     _norm_group_policy,
+    _doctor_refuses_retired_formats,  # C-686
+    _doctor_whole_config_hedge,  # C-686
     _numeric_version,
     _open_channels,
     _bind_mentions_docker_sock,
@@ -98,12 +119,16 @@ from ._shared import (
     _resolved_channel_nodes,
     _resolved_default_input_channels,
     _sandbox_docker_binds,
+    _SECRET_INPUT_STRING_REF_RE,  # C-653
+    _SECRET_REFERENCE_RE,  # C-653
     _secret_paths,
     SECRET_KEY_RE,
     SECRET_PATTERNS,
     SENSITIVE_TOOL_HINTS,
+    _startup_repair_removed,
     _substituted_dm_policy_channels,
     _surface_absent,
+    _terminal_default,
     _trifecta_leg_sources,
     _trifecta_legs,
     _username_safe_path,
@@ -207,10 +232,37 @@ def _b32_normalize_tools(raw) -> set:
 _C015_MAX_BYTES = 200_000
 # B-513: how many matching files the finding lists before it says "+N more".
 # Named rather than inline so the disclosure below cannot drift from the slice.
-_C015_MAX_EVIDENCE = 12
+_C015_MAX_EVIDENCE = 11
 
 
 _C015_MAX_SCAN_FILES = 500
+
+# C-700: the walk is alphabetical, so a bulk tree that sorts early (agents/, then npm/,
+# sandboxes/, logs/) used to spend the whole _C015_MAX_SCAN_FILES budget before the walk
+# ever reached workspace/ - measured on a real home: 500 files scanned, none under
+# workspace/, which held a plaintext password note. The scan now runs in passes over the
+# SAME total bound, most important first, each under its own sub-budget:
+#   1. the home's own root-level files and the dirs that hold credentials and agent work
+#      (credentials, identity, devices, workspace, workspace-<agentId>);
+#   2. the config/state backups (backups, .config-backups) - listed apart from pass 1 so a
+#      big backups/ cannot starve credentials/ or workspace/ just by sorting before them;
+#   3. every other top-level dir, with what is left.
+# The sub-budgets are smaller than the total, so an earlier pass can never take the later
+# passes' whole share - but a sub-budget is a protection, not a smaller bound: whatever the
+# passes leave unspent is handed back to the capped passes in the same importance order (a
+# top-up walk), so the home is never scanned less than a single 500-file walk would have.
+_C015_PRIORITY_MAX_FILES = 300
+_C015_BACKUP_MAX_FILES = 50
+_C015_PRIORITY_DIRS = frozenset({"credentials", "identity", "devices", "workspace"})
+_C015_PRIORITY_DIR_PREFIX = "workspace-"  # per-agent workspaces: workspace-<agentId>
+_C015_BACKUP_DIRS = frozenset({"backups", ".config-backups"})
+
+
+def _c015_dir_tier(name: str) -> int:
+    """Which pass reads the top-level dir *name*: 0 = priority roots, 1 = backups, 2 = the rest."""
+    if name in _C015_PRIORITY_DIRS or name.startswith(_C015_PRIORITY_DIR_PREFIX):
+        return 0
+    return 1 if name in _C015_BACKUP_DIRS else 2
 
 
 _C015_TEXT_EXTS = {
@@ -583,12 +635,19 @@ def _c015_is_generated_plugin_model_catalog(parts: tuple, text: str) -> bool:
         return False
     if parts[-4] != "agent" or parts[-3] != "plugins":
         return False
-    import json as _json
+    from ..configloader import loads_shallow as _loads_shallow
 
     try:
-        parsed = _json.loads(text)
+        shallow = _loads_shallow(text)
     except ValueError:
         return False
+    # C-680 (C-664): a plugin-written file read to 64 levels. The marker is a top-level key,
+    # but this answer EXEMPTS the whole file from the secret scan, and a file with an unread
+    # subtree is not one OpenClaw generated (a real catalog is a few levels deep): it is
+    # scanned like any other. A deep document no longer ends the check in RecursionError.
+    if shallow.elided:
+        return False
+    parsed = shallow.value
     return isinstance(parsed, dict) and parsed.get("generatedBy") == (
         "openclaw-plugin-model-catalog-v1"
     )
@@ -620,6 +679,7 @@ def _c015_candidate_files(
     capped: list | None = None,
     unreadable: list | None = None,
     unreadable_dirs: list | None = None,
+    unreached: list | None = None,
 ) -> list[Path]:
     """*unreadable*, when given, collects the SKILL_DIRS skip-root(s) whose existence
     could not be confirmed (B-913: a `chmod 000` ancestor - e.g. the workspace dir or
@@ -627,8 +687,25 @@ def _c015_candidate_files(
     uncaught). Computed ONCE up front (skip_roots is a handful of fixed candidates)
     rather than per candidate file, both for cost and so a single unreadable root is
     recorded once, not once per file examined.
+
+    C-700: passes over one total budget (_C015_MAX_SCAN_FILES), most important first, each
+    under its own sub-budget: the home's root files and the credential/workspace dirs
+    (tier 0, _C015_PRIORITY_MAX_FILES), then the backups (tier 1, _C015_BACKUP_MAX_FILES), then
+    every other top-level dir with what is left. If a pass stopped at its sub-budget while the
+    others left budget unspent, the capped passes are walked again in the same order with the
+    unspent budget added, so the total never exceeds _C015_MAX_SCAN_FILES and a file the
+    single 500-file walk reached is never dropped. *capped* gets one sentinel when a pass
+    stopped early (always with the whole budget spent); *unreached*, when given, collects the
+    top-level directories the walk really left files behind in or never reached, most
+    important pass first (``"agents/"`` for one it stopped inside, ``"npm/"`` for one it never
+    reached, ``"(home root files)"`` if the root-level files themselves were cut short). A
+    pass that filled its cap exactly names nothing.
     """
-    skip_roots = [(ctx.home / rel).resolve() for rel in SKILL_DIRS]
+    # C-658: `Path.resolve()` raises RuntimeError for a symlink loop on 3.9-3.12 (an unhandled
+    # crash that capped the whole audit) and returns the path on 3.14. `os.path.realpath` does
+    # not raise in non-strict mode on any interpreter. A loop then fails the `_safe_is_dir`
+    # probe below (ELOOP reads as "not there"), so it is not a skip root and the scan goes on.
+    skip_roots = [Path(os.path.realpath(ctx.home / rel)) for rel in SKILL_DIRS]
     skill_dir_parts = tuple(Path(rel).parts for rel in SKILL_DIRS)
 
     skip_roots_existing: list[Path] = []
@@ -639,10 +716,20 @@ def _c015_candidate_files(
         elif unreadable is not None and len(ctx.errors) > errs_before:
             unreadable.append(str(root))
 
-    def _prune(rel_parts: tuple) -> bool:
+    def _excluded(rel_parts: tuple) -> bool:
         if _c015_is_codex_plugin_doc_cache(rel_parts):
             return True
         return any(rel_parts[: len(root)] == root for root in skill_dir_parts)
+
+    def _prune_for(tier: int):
+        """prune_dir for the pass that reads the top-level dirs of *tier* (and no others)."""
+
+        def _prune(rel_parts: tuple) -> bool:
+            if len(rel_parts) == 1 and _c015_dir_tier(rel_parts[0]) != tier:
+                return True
+            return _excluded(rel_parts)
+
+        return _prune
 
     def _keep_file(path: Path) -> bool:
         if not _safe_is_file(path, ctx, what=f"'{path}'"):
@@ -665,15 +752,94 @@ def _c015_candidate_files(
             or name in BOOTSTRAP_FILES
         )
 
-    return walk_dir_safely(
-        ctx.home,
-        max_files=_C015_MAX_SCAN_FILES,
-        exclude_pycache=True,
-        prune_dir=_prune,
-        keep_file=_keep_file,
-        capped=capped,
-        unreadable_dirs=unreadable_dirs,
-    )
+    def _keep_below_root(path: Path) -> bool:
+        # the home's own root-level files belong to the first pass; the later passes
+        # walk the root again only to reach their own top-level dirs
+        return path.parent != Path(ctx.home) and _keep_file(path)
+
+    def _walk(prune, keep, cap: int, gaps: list):
+        """Up to *cap* files, plus the first file the walk found beyond them (or None).
+
+        One file of lookahead: a pass that filled its cap EXACTLY lost nothing, and only the
+        file left behind says which top-level dir really lost files."""
+        # `capped=` is passed so the truncation is recorded the way every capped walk records
+        # it (tests/test_paired_call_sites.py); the decision below uses the lookahead file
+        # instead, which is the stronger signal: a walk that ends on exactly cap + 1 files
+        # holds a file beyond the cap even though nothing was left to stop it.
+        cap_hit: list = []
+        got = walk_dir_safely(
+            ctx.home,
+            max_files=cap + 1,
+            exclude_pycache=True,
+            prune_dir=prune,
+            keep_file=keep,
+            capped=cap_hit,
+            unreadable_dirs=gaps,
+        )
+        if len(got) > cap:
+            return got[:cap], got[cap]
+        return got, None
+
+    def _is_listed_dir(p: Path) -> bool:
+        try:
+            return not pathprobe.is_symlink(p) and pathprobe.is_dir(p)
+        except OSError:
+            return True  # cannot classify it: name it rather than drop it
+
+    def _left_behind(first_left: Path, pruned) -> list[str]:
+        """Top-level dirs a pass that left *first_left* behind did not finish: the dir that
+        file sits in (only part of it was read) and every later dir (never reached)."""
+        try:
+            parts = first_left.relative_to(ctx.home).parts
+        except ValueError:
+            return []
+        try:
+            names = sorted(os.listdir(ctx.home))
+        except OSError:
+            names = []
+        todo = [n for n in names if not pruned((n,)) and _is_listed_dir(ctx.home / n)]
+        if len(parts) == 1:  # a root-level file: every dir of this pass is still ahead
+            return ["(home root files)"] + [f"{n}/" for n in todo]
+        return [f"{parts[0]}/"] + [f"{n}/" for n in todo if n > parts[0]]
+
+    gaps: list = []
+    prunes = [_prune_for(tier) for tier in range(3)]
+    keeps = [_keep_file, _keep_below_root, _keep_below_root]
+    # sub-budget per pass; the last one is simply whatever is left of the total
+    sub_budgets = [_C015_PRIORITY_MAX_FILES, _C015_BACKUP_MAX_FILES, _C015_MAX_SCAN_FILES]
+    got: list = []  # per pass: [files, first file left behind or None]
+    used = 0
+    for tier, sub in enumerate(sub_budgets):
+        files, left = _walk(prunes[tier], keeps[tier], max(min(sub, _C015_MAX_SCAN_FILES - used), 0), gaps)
+        got.append([files, left])
+        used += len(files)
+    # Top-up: a sub-budget that tripped while the total budget was still unspent (the other
+    # passes did not use their share) must not drop a file the 500-file bound had room for.
+    # The capped passes get the spare budget in importance order; the walk is deterministic,
+    # so each pass's first result is a prefix of its topped-up one.
+    spare = _C015_MAX_SCAN_FILES - used
+    for tier, (files, left) in enumerate(got):
+        if spare <= 0:
+            break
+        if left is None:
+            continue
+        more, more_left = _walk(prunes[tier], keeps[tier], len(files) + spare, gaps)
+        spare -= len(more) - len(files)
+        got[tier] = [more, more_left]
+    # A pass that is still capped here used up the spare budget, so a report of "capped"
+    # below always means len(result) == _C015_MAX_SCAN_FILES.
+    if capped is not None and any(left is not None for _, left in got):
+        capped.append(True)
+    if unreached is not None:
+        for tier, (_, left) in enumerate(got):
+            if left is not None:
+                unreached.extend(_left_behind(left, prunes[tier]))
+    if unreadable_dirs is not None:
+        # the passes all list the home root, so a root-level failure is reported by each
+        for gap in gaps:
+            if gap not in unreadable_dirs:
+                unreadable_dirs.append(gap)
+    return [path for files, _ in got for path in files]
 
 
 def _capabilities_attested(ctx: Context) -> bool:
@@ -1006,7 +1172,9 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
         # hard FAIL.
         #
         # 1. NO SCOPE GATE. Under `sandbox.scope: "shared"` (at either level, or the legacy
-        #    `perSession: false`) OpenClaw DISCARDS this agent's whole `sandbox.docker` --
+        #    `perSession: false` -- 2026.9.6 and earlier only, C-645: 2026.9.7's resolver
+        #    ignores `perSession`, see `_resolve_sandbox_scope`) OpenClaw DISCARDS this
+        #    agent's whole `sandbox.docker` --
         #    BOTH its `network` and its `binds` -- so neither reaches a container. Executed
         #    against openclaw@2026.8.2 rather than read -- `resolveSandboxConfigForAgent`,
         #    dist/config-*.js:
@@ -1082,6 +1250,28 @@ def _peragent_sandbox_evidence(cfg: dict) -> list:
     return out
 
 
+def _peragent_non_main_agents(cfg: dict) -> list:
+    """Evidence lines for named agents whose OWN ``sandbox.mode`` is ``"non-main"`` (C-641b).
+
+    A per-agent mode wins over the defaults (``resolveSandboxConfigForAgent``:
+    ``mode: agentSandbox?.mode ?? agent?.mode ?? "off"``), and ``"non-main"`` sandboxes only
+    an agent's NON-main sessions, so that agent's own main session runs on the host even
+    when ``agents.defaults.sandbox.mode`` is ``"all"``. Deliberately NOT part of
+    ``_peragent_sandbox_evidence``: that list is an unambiguous-misconfig FAIL, while
+    ``"non-main"`` is B4's WARN tier (same as the defaults-level ``"non-main"``). Reads both
+    roster shapes through ``agent_roster``. Empty when no agent sets it.
+    """
+    out = []
+    for _agent in agent_roster(cfg):
+        sb = _agent.entry.get("sandbox")
+        if isinstance(sb, dict) and sb.get("mode") == "non-main":
+            name = _agent.entry.get("name") or _agent.id or "<unnamed>"
+            out.append(
+                f"agent '{name}': sandbox.mode=non-main (its own main session runs on the host)"
+            )
+    return out
+
+
 # B-233 round 3 (C-135): world-open / near-catch-all PUBLIC CIDRs (e.g. 0.0.0.0/0,
 # ::/0, 0.0.0.0/1) are NOT a genuine trust boundary - every source IP matches, so the
 # trusted-proxy identity header stays attacker-spoofable by anyone. Grounded against
@@ -1097,7 +1287,8 @@ _MIN_IPV4_PREFIXLEN = 8
 _MIN_IPV6_PREFIXLEN = 16
 
 # Do NOT use ``ipaddress.*Network.is_private`` here - its meaning changed across the
-# Python versions we support (3.9+). On older interpreters it was computed as
+# Python versions this project has supported (measured: 3.9.25 old, 3.12.3 and 3.14.4
+# new). On older interpreters it was computed as
 # "network address is private AND broadcast address is private", which makes
 # ``0.0.0.0/0`` report is_private=True (0.0.0.0 falls in 0.0.0.0/8 and
 # 255.255.255.255 is itself special-cased), and likewise ``0.0.0.0/1`` (broadcast
@@ -1239,7 +1430,8 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
         )
 
     # WARN: gateway is network-exposed and control-plane tools are not denied
-    bind = parse_bind_host(gw.get("bind", ""))
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, gw.get("bind", ""))
+    bind = parse_bind_host(bind_raw)
     auth_mode = dig(cfg, "gateway.auth.mode")
     is_exposed = (
         bind and bind not in LOOPBACK and bind not in {"", "loopback"}
@@ -1263,6 +1455,17 @@ def check_control_plane_mutation(ctx: Context) -> Finding:
             evidence=[warn_detail],
         )
 
+    if bind_unres and cp_not_denied:
+        return _finding(
+            "B32",
+            UNKNOWN,
+            f"{bind_unres}, so whether the gateway is network-exposed is unknown, and "
+            "control-plane tools are not explicitly in gateway.tools.deny.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment; or add the control-plane tools to "
+            "gateway.tools.deny, which makes the bind irrelevant.",
+            config_field_paths={"gateway.bind"},
+        )
     denied_preview = sorted(_B32_CONTROL_PLANE_TOOLS & deny_set)
     pass_detail = (
         "Control-plane tools are not re-enabled via gateway.tools.allow"
@@ -1380,12 +1583,35 @@ def check_controlui_origins(ctx: Context) -> Finding:
 _GATEWAY_ENV_CREDENTIAL_VARS = ("OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD")
 
 
-def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
+def _gateway_env_source_label(source, home) -> str:
+    """Where a persistent environment value was read, as it may appear in a message: the
+    artifact path redacted by ``_detail_path`` (B-856), or a generic phrase when the
+    collector recorded no source. The one rendering for `_gateway_env_credential` and
+    `_gateway_token_env_evidence`.
+    """
+    return _detail_path(source, home) if source else "an environment file"
+
+
+def _is_reference_shaped_value(secret: str) -> bool:
+    """C-672 / C-681: is an environment-supplied value itself a ``${NAME}`` / ``$NAME``
+    template or a retired ``secretref-env:`` / ``__env__:`` marker? Such a value is a
+    pointer's text, not a credential, so it is no evidence of strength (the env-block leg
+    weighs it as weak the same way, `_gateway_token_env_block_strength`)."""
+    return _SECRET_REFERENCE_RE.fullmatch(_js_trim(secret)) is not None
+
+
+def _gateway_env_credential(
+    ctx: Context, *, skip_reference_shaped: bool = False
+) -> "tuple[str | None, str | None]":
     """An env-supplied gateway credential observed in a persistent artifact.
 
     Returns ``(value, source)`` or ``(None, None)``. The value is returned only so the
     caller can test presence - it is a secret and must never reach a message, evidence
     entry, or log (§8).
+
+    ``skip_reference_shaped`` (C-681): a value of 24+ characters that is itself a ``${NAME}``
+    template or a retired marker is skipped (the next variable is tried) instead of returned.
+    Only B2 asks for it; B41 and B80 keep reading presence as before.
 
     ``source`` IS meant to reach evidence/detail (every caller names it so the operator
     knows where to go fix the setting), so it is redacted here, once, for all three
@@ -1399,11 +1625,291 @@ def _gateway_env_credential(ctx: Context) -> "tuple[str | None, str | None]":
     for var in _GATEWAY_ENV_CREDENTIAL_VARS:
         value, source = persistent_env_evidence(ctx, var)
         if value is not None and value.strip():
-            return value, _detail_path(source, ctx.home) if source else "an environment file"
+            # C-681 (B2 only): a LONG value that is itself a template / marker is no
+            # credential - B2 would otherwise call it a strong one and clear the exposure.
+            # A short one stays (it is then reported as the short secret it is).
+            if (
+                skip_reference_shaped
+                and len(value.strip()) >= 24
+                and _is_reference_shaped_value(value)
+            ):
+                continue
+            return value, _gateway_env_source_label(source, ctx.home)
     return None, None
 
 
-def _gateway_config_token(cfg: dict, auth_mode) -> "tuple[str | None, bool]":
+# C-667: what `_gateway_config_token` returns as "the credential" for a SecretRef object. A
+# fixed string, so nothing of the object (its id, its provider) can ride along into a message.
+# It is a marker that a reference is configured, not a value: its length means nothing.
+_GATEWAY_TOKEN_OBJECT_PLACEHOLDER = "<SecretRef object>"
+
+
+# C-681 (owner ruling): the one caveat B2 gives a gateway token that is a reference nothing
+# visible resolves, and the advice that goes with it. Worded once so every cell that carries
+# it carries the same text - a string reference (`${ID}` / `$ID`, whatever the length of the
+# name) and a SecretRef object of any source (the id, provider and source stay out).
+_B2_REF_STR_NOTE = (
+    "gateway.auth.token is an environment reference, so its length and strength cannot be "
+    "read from the config and were not evaluated"
+)
+_B2_REF_STR_FIX = (
+    "Check in the gateway's environment that the variable gateway.auth.token points at "
+    "holds a secret of at least 24 characters"
+)
+_B2_REF_OBJ_NOTE = (
+    "gateway.auth.token is a secret reference, so the length and strength of the secret "
+    "behind it cannot be read from the config and were not evaluated"
+)
+_B2_REF_OBJ_FIX = (
+    "Check, where the reference is resolved (the gateway's environment, the secret store, "
+    "a file or a command), that the secret gateway.auth.token points at holds at least 24 "
+    "characters"
+)
+
+
+def _b2_dflt_fix(name: str) -> str:
+    """C-681: B2's advice for a short unseen ``${NAME:-default}`` gateway token."""
+    return (
+        f"Set {name} to a secret of at least 24 characters in the gateway's own environment, "
+        "or replace the short fallback in gateway.auth.token with a token of at least 24 "
+        "characters (or drop the fallback)"
+    )
+
+
+def _gateway_token_default_applied(value, cfg, ctx):
+    """C-681. A whole-value ``${ID:-default}`` string (default not empty or blank) at the
+    gateway token, as the build understands it: OpenClaw 2026.9.7+ substitutes the variable
+    when it is set and non-empty, else the default text verbatim (``substituteString``).
+
+    Returns the plain reference ``${ID}`` when the audit can SEE a value for ``ID`` (the
+    config's own env block, or the gateway's persistent environment) - so it is measured
+    exactly like any reference - else the default text, measured as a literal token. Any
+    other value, and any build that is not known to understand ``:-`` (an older one reads the
+    whole text as the token; an unseen one is unknown, and only ``"yes"`` is acted on here,
+    as in `_gateway_token_form`), is returned untouched. ``${ID:-}`` is not a default
+    template: it keeps its reference reading.
+    """
+    parsed = _env_default_template(value)
+    if parsed is None or _env_default_operator(ctx) != "yes":
+        return value
+    name, default = parsed
+    return "${" + name + "}" if _gateway_env_value_visible(name, cfg, ctx) else default
+
+
+def _gateway_env_value_visible(name, cfg, ctx) -> bool:
+    """C-681: can the audit SEE a value for variable *name* - in the gateway's persistent
+    environment (a unit, a dotenv file) or in the config's own env block? Not the process
+    environment of the gateway, which a static audit cannot read."""
+    seen, _src = persistent_env_evidence(ctx, name)
+    return (isinstance(seen, str) and bool(seen.strip())) or _env_block_defines_plaintext(
+        _config_env_block_entries(cfg), name
+    )
+
+
+def _gateway_token_unseen_default(cfg, ctx) -> "str | None":
+    """C-681. The variable NAME of a configured whole-value ``${NAME:-default}`` gateway token
+    whose default is in effect on the audited build (2026.9.7+) but whose variable the audit
+    cannot see anywhere, else ``None``. The default then applies only if the gateway's own
+    environment leaves NAME unset or empty, which this audit cannot read - so the token is
+    either that default or a secret of unknown strength."""
+    parsed = _env_default_template(_gateway_token_raw(cfg))
+    if parsed is None or _env_default_operator(ctx) != "yes":
+        return None
+    return None if _gateway_env_value_visible(parsed[0], cfg, ctx) else parsed[0]
+
+
+def _gateway_token_raw(cfg, ctx=None):
+    """The raw value B2 and B80 read as "the gateway token": ``gateway.auth.token``, else the
+    legacy ``gateway.token``, in that order (B-312). The one reader, so the order cannot
+    drift between the two checks and `_gateway_config_token`.
+
+    C-667: the legacy root key is returned ONLY when it holds a string. OpenClaw 2026.9.8
+    has no ``gateway.token`` (``GatewayConfigSchema`` is a strictObject without it, and the
+    vendor logs that the key "is ignored"), so a SecretRef object there is not configured
+    auth and must keep the "no token" verdict it always had - while a string there keeps the
+    older reading this project already gives it. Dropping a non-string legacy value changes
+    nothing else: every consumer of this value already treated a non-string as "no token".
+    A truthy value at ``gateway.auth.token`` is returned whatever its type, so a malformed
+    one at the first key is never skipped in favour of a well-formed one at the second.
+
+    C-681: with *ctx*, a whole-value ``${ID:-default}`` is returned as the value it stands
+    for (`_gateway_token_default_applied`); without *ctx* the build is unseen and the text is
+    returned as configured.
+    """
+    auth_token = dig(cfg, "gateway.auth.token")
+    if auth_token:
+        return _gateway_token_default_applied(auth_token, cfg, ctx)
+    legacy = dig(cfg, "gateway.token")
+    return _gateway_token_default_applied(legacy, cfg, ctx) if isinstance(legacy, str) else None
+
+
+def _gateway_token_form(value, ctx=None) -> str:
+    """How OpenClaw reads the value of ``gateway.auth.token`` (and the legacy
+    ``gateway.token`` string); *value* is what `_gateway_token_raw` returned.
+
+    C-653. ``"reference"``: a whole-value ``${ID}`` / ``$ID`` - the string shapes the
+    ``gateway.auth.password`` path counts (`_SECRET_INPUT_STRING_REF_RE`) - or a whole-value
+    ``${ID:-}`` on a build that understands the ``:-`` operator. The credential is then
+    whatever the gateway's environment holds, so neither its length nor its strength can be
+    read from the config. ``"marker"``: a whole-value retired ``secretref-env:ID`` /
+    ``__env__:ID`` string - NOT a reference at this key (the vendor parses it only in doctor
+    migration), so the marker text itself is the token in effect: public and guessable.
+    ``"literal"``: anything else. Trimmed the way the vendor trims (`_js_trim`), never a
+    substring match, so material appended to a shape stays a literal.
+
+    C-667: a WELL-FORMED SecretRef OBJECT (`_is_secret_ref_object`, the same grammar B1 uses
+    at ``gateway.auth.password``) is ``"reference"`` too - the vendor types this key
+    ``string | SecretRef{source, provider, id}`` and reads both spellings as one
+    configuration. Every ``source`` is a reference here, ``exec`` included: the running
+    gateway resolves an exec reference for this key at startup by the same path as env /
+    file / store (OpenClaw 2026.9.8 ``resolve-*.mjs``, no carve-out; only the service
+    installer and ``openclaw doctor`` skip it). This function says only THAT the value is a
+    reference; what the secret behind it is worth is a separate question that only an
+    ``env`` source can be asked (`_gateway_token_env_block_strength`,
+    `_gateway_token_env_evidence`) - a store / file / exec reference is resolved by
+    its provider and is opaque to this audit. An object reference that cannot be resolved
+    makes the gateway refuse to start - the key is registered fail-closed - so it never
+    yields an unauthenticated listener (read from the 2026.9.8 code, not executed; an unset
+    ``${ID}`` string is a different case that this reading does not cover). The legacy two-key ``{source, id}`` spelling counts as a reference
+    because the shared grammar accepts it, although it is only a runtime coercion: the
+    2026.9.8 schema rejects a file that contains it and the gateway then does not start, so
+    this reading can never describe a listener that runs unauthenticated. A malformed object
+    (a missing id, an unknown source, an extra key, a wrong type, a list, a nested object)
+    is a ``"literal"``: nothing of it is trusted, and the caller keeps today's no-token
+    verdict. The legacy ``gateway.token`` key never reaches here as an object
+    (`_gateway_token_raw`).
+
+    The empty-fallback ``${ID:-}`` is gated on the installed build through
+    ``_env_default_operator``, the predicate B1 uses at ``gateway.auth.password`` - but only
+    its ``"yes"`` answer is acted on here. ``"yes"`` is the answer that CLEARS a credential
+    (see that function), so ``"no"`` (an older build uses the text itself as the token) and
+    ``"unknown"`` (an unseen build) both leave ``${ID:-}`` a ``"literal"`` and the verdict
+    the plain-literal one. B1 turns ``"unknown"`` into an UNKNOWN of its own, which here
+    would be cleaner than the literal reading B2 gave before. *ctx* is optional: without it
+    the build is unseen.
+    """
+    if _is_secret_ref_object(value):
+        return "reference"
+    if not isinstance(value, str):
+        return "literal"
+    text = _js_trim(value)
+    if _SECRET_INPUT_STRING_REF_RE.fullmatch(text):
+        if (
+            _empty_fallback_template(value, secret_input=True) is not None
+            and _env_default_operator(ctx) != "yes"
+        ):
+            return "literal"
+        return "reference"
+    if _SECRET_REFERENCE_RE.fullmatch(text):
+        return "marker"
+    return "literal"
+
+
+def _gateway_token_env_block_strength(value, cfg) -> "str | None":
+    """C-653. For a whole-value reference at the gateway token: what the config's OWN env
+    block (``env.vars.NAME`` or a flat ``env.NAME``) says about the variable it names.
+
+    ``"weak"``: the block defines it and some resolved value is under 24 characters or is a
+    retired marker / ``$NAME`` shorthand string. ``"long"``: the block defines it and every
+    resolved value is 24+ characters. ``None``: the block does not define it (the value comes
+    from the process environment).
+
+    C-667: a SecretRef OBJECT is asked only when its ``source`` is ``env``. A ``store``,
+    ``file`` or ``exec`` reference is resolved by its own provider (OpenClaw's secret store, a
+    file, a command) and never from the environment or from the env block of openclaw.json,
+    so an entry the block happens to hold under the same name is not its value: ``None``.
+    (C-681: `_reference_env_names` now names a variable only for an ``env`` object, so B1
+    does not judge a ``store`` reference by the env block either; the check here is kept.)
+
+    A value found here is NEVER proof that the token is strong. OpenClaw 2026.9.8
+    (``config-env-vars``) lets the process environment win over a config env value, drops a
+    config value that itself contains a ``${...}`` reference instead of injecting it, and
+    compares env keys case-sensitively - while this lookup case-folds and follows chains, so
+    it can find a value the gateway never uses. That is why ``"long"`` only ever becomes an
+    UNKNOWN (never a PASS), and why folding is safe on the weak side: it can only find MORE
+    short values, and a short one keeps the FAIL.
+
+    The definition test is B1's own, unchanged (`_env_block_defines_plaintext`, the helper
+    `_credential_is_plaintext` calls for ``gateway.auth.password``): same names, case
+    folding, chain following, blank values ignored. The length question reuses that helper
+    too, over the same entries with every plaintext value of 24+ characters left out, so a
+    chain is walked by one piece of code only.
+    """
+    if isinstance(value, dict) and value.get("source") != "env":
+        return None
+    names = _reference_env_names(value, secret_input=True)
+    if not names:
+        return None
+    entries = _config_env_block_entries(cfg)
+    if not any(_env_block_defines_plaintext(entries, n) for n in names):
+        return None
+    weak_only = {
+        key: [
+            v
+            for v in values
+            if _ENV_TEMPLATE_NAME_RE.fullmatch(_js_trim(v))
+            or _SECRET_REFERENCE_RE.fullmatch(_js_trim(v))
+            or len(v.strip()) < 24
+        ]
+        for key, values in entries.items()
+    }
+    return "weak" if any(_env_block_defines_plaintext(weak_only, n) for n in names) else "long"
+
+
+def _gateway_token_env_evidence(value, ctx) -> "tuple[str, str, str] | None":
+    """C-667. For an ``env``-source SecretRef OBJECT at the gateway token: what the audit can
+    see of the variable it names in the gateway's PERSISTENT environment (a systemd unit's
+    ``Environment=`` / ``EnvironmentFile=``, then the global dotenv files -
+    `persistent_env_evidence`, the lookup the environment leg uses for its fixed names).
+
+    C-672: a whole-value ``${ID}`` / ``$ID`` STRING reference (`_gateway_token_form` says
+    ``"reference"``) is asked the same way - the vendor reads both spellings as one
+    configuration, and the variable is the same environment variable.
+
+    Returns ``(variable name, "short" | "long", source label)``, or ``None`` when *value* is
+    not a well-formed ``env`` object or a string reference, *ctx* is missing, or no
+    persistent artifact carries the variable (then its strength is unknown, not strong). Only
+    the LENGTH of the value is ever read, after ``strip()`` and against the same 24-character
+    bar as the other legs; the value is a secret and never leaves this function. The variable
+    NAME is an identifier both grammars validate (`_SECRET_REF_ENV_ID`), so it may be named
+    in a message; the provider never is. The source label is redacted by
+    `_gateway_env_source_label`.
+
+    A ``store``, ``file`` or ``exec`` object returns ``None`` without any lookup: those
+    references are resolved by their providers, never from the environment, so an
+    environment value of the same name says nothing about them. The gateway resolves an
+    ``env`` reference from its own process environment, which is what a service unit or
+    dotenv file supplies - os.environ of the auditing shell is deliberately not consulted
+    (see `persistent_env_evidence`).
+    """
+    if ctx is None:
+        return None
+    if isinstance(value, dict):
+        if not _is_secret_ref_object(value) or value.get("source") != "env":
+            return None
+        name = value["id"]
+    elif _gateway_token_form(value, ctx) == "reference":
+        names = _reference_env_names(value, secret_input=True)
+        if not names:
+            return None
+        name = names[0]
+    else:
+        return None
+    secret, source = persistent_env_evidence(ctx, name)
+    if secret is None or not secret.strip():
+        return None
+    kind = "short" if len(secret.strip()) < 24 else "long"
+    if kind == "long" and _is_reference_shaped_value(secret):
+        # C-672: a long persistent value that is itself a `${NAME}` template or a retired
+        # marker is not a credential (the env-block leg weighs it as weak the same way,
+        # `_gateway_token_env_block_strength`), so it is no evidence of strength: the cell
+        # keeps the verdict it had with nothing found. C-681: the object form and the
+        # fixed-name leg (`_gateway_env_credential`, B2) make this test too.
+        return None
+    return name, kind, _gateway_env_source_label(source, ctx.home)
+
+
+def _gateway_config_token(cfg: dict, auth_mode, ctx=None) -> "tuple[str | None, bool]":
     """The config-supplied gateway credential OpenClaw derives ``auth.mode`` from.
 
     B-312: `resolveGatewayAuth` derives `mode="token"` from `gateway.auth.token` /
@@ -1420,15 +1926,62 @@ def _gateway_config_token(cfg: dict, auth_mode) -> "tuple[str | None, bool]":
     env leg and as B2's own token-length clause (`hasSharedSecret` accepts ANY non-empty
     value - no minimum length exists in the dist - so only length is a signal; the value
     itself must never reach a message, evidence entry, fix string, or log, §8).
+
+    C-667: a well-formed SecretRef OBJECT at ``gateway.auth.token`` (`_gateway_token_form`)
+    is a credential set by reference, so it is ``strong`` here like a ``${ID}`` string:
+    whatever the object's source, this function measures nothing about the secret behind it.
+    ``token`` is then the fixed placeholder ``_GATEWAY_TOKEN_OBJECT_PLACEHOLDER``, never any
+    part of the object: callers only ask whether it is ``None``, and the id and provider are
+    not text that may be echoed where a token value would not be. A malformed object, and an
+    object at the legacy ``gateway.token`` key, are ``(None, False)`` - no credential. B80
+    stops here and so reads every well-formed object as a credential; B2 goes on and asks
+    where the audit can see the strength of an ``env`` object's secret
+    (`_gateway_token_env_evidence`), because only B2 reports a short one.
+
+    C-653: a whole-value ``${ID}`` reference counts as ``strong`` whatever its text length -
+    the length of the variable NAME says nothing about the secret behind it, and B2 and B80
+    must read the same input the same way (a short reference used to be "no credential" here
+    while B2 FAILed it). This holds for a reference the config's own env block defines too,
+    whatever the value there: B80 is never made cleaner than it was, and B2 (not B80) is the
+    check that reports a short env value (`_gateway_token_env_block_strength`). *ctx* is the audited context: a
+    ``${ID:-}`` is a reference only on a build that understands ``:-``
+    (`_gateway_token_form`). A retired ``secretref-env:`` / ``__env__:`` marker is an ordinary
+    literal here: its text length decides, exactly as for any other literal token.
     """
-    token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
-    token = (
-        token.strip()
-        if auth_mode is None and isinstance(token, str) and token.strip()
-        else None
+    raw = _gateway_token_raw(cfg, ctx)
+    if auth_mode is None and isinstance(raw, str) and raw.strip():
+        token = raw.strip()
+    elif (
+        auth_mode is None
+        and isinstance(raw, dict)
+        and _gateway_token_form(raw, ctx) == "reference"
+    ):
+        # C-667: a well-formed SecretRef object (the string form was handled above).
+        token = _GATEWAY_TOKEN_OBJECT_PLACEHOLDER
+    else:
+        token = None
+    # C-681: a `${ID:-default}` whose variable is unseen is a credential of unknown strength
+    # (the default is used only while ID is unset or empty), so B80 reads it as one.
+    strong = token is not None and (
+        len(token) >= 24
+        or _gateway_token_form(raw, ctx) == "reference"
+        or _gateway_token_unseen_default(cfg, ctx) is not None
     )
-    strong = token is not None and len(token) >= 24
     return token, strong
+
+
+def _gateway_token_configured(cfg: dict, ctx=None) -> bool:
+    """C-681: is a gateway credential configured in the config, by the SAME reading B2 and
+    B80 give it? ``_gateway_config_token``'s answer with no ``auth.mode`` in play (that
+    argument only withholds the token from the mode-derivation caller; the credential is
+    there either way). A well-formed string, ``${ID}`` reference or SecretRef object counts;
+    a malformed object, a list, a number, a bool, an empty or whitespace string, and any
+    non-string at the legacy ``gateway.token`` key do not. The inventory readers (B41, the
+    credential surface map) used a bare truthiness test and disagreed with B2 on exactly
+    those shapes. *ctx* may be a partial stub: it is consulted only for the ``${ID:-}``
+    build gate.
+    """
+    return _gateway_config_token(cfg, None, ctx)[0] is not None
 
 
 def check_credential_blast_radius(ctx: Context) -> Finding:
@@ -1458,7 +2011,9 @@ def check_credential_blast_radius(ctx: Context) -> Finding:
 
     # --- inventory credential surface ---
     profiles = dig(cfg, "auth.profiles") or {}
-    has_gateway_token = bool(dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token"))
+    # C-681: B2's own reading of "a gateway credential is configured" (a malformed object, a
+    # list, a bool or a blank string is none), not bare truthiness.
+    has_gateway_token = _gateway_token_configured(cfg, ctx)
     # B-290 (ENV-4): the gateway credential does not have to be in the config at all.
     # resolveGatewayCredentialsFromValues (credentials-DesN22Ui.js:32-33) reads
     # OPENCLAW_GATEWAY_TOKEN / OPENCLAW_GATEWAY_PASSWORD straight from the environment, so
@@ -1746,6 +2301,21 @@ def check_config_externally_managed(ctx: Context) -> Finding:
     )
 
 
+def _retired_finder_present(ctx) -> "_retiredformats.RetiredFormats | None":
+    """OpenClaw's own retired-format finder over ``ctx.config``, or ``None``.
+
+    ``None`` means "nothing named" ONLY when the installed build is inside the window the
+    port was validated on (``retiredformats.in_window``); outside it the caller must not read
+    ``None`` as "the finder was applied and found nothing" -- it was not applied at all.
+    Reads ONLY ``ctx.installed_dist_version``, like ``_retired_keys_present``.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    cfg = getattr(ctx, "config", None)
+    if not _retiredformats.in_window(installed) or not isinstance(cfg, dict):
+        return None
+    return _retiredformats.find_retired(cfg)
+
+
 def check_retired_config_keys_invalid(ctx: Context) -> Finding:
     """B382 - openclaw.json still holds a key the installed OpenClaw build removed.
 
@@ -1754,6 +2324,25 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
     `openclaw doctor --fix` runs. It asserts nothing about the gateway, about the setting
     being in force, or about other findings being unreliable. Names are reported, never
     values. Gated on the INSTALLED build only (see ``_retired_keys_present``).
+
+    Only the ``fix`` advice says anything about WHO repairs the file, and it is version-aware
+    (C-645): through 2026.9.6 the gateway's boot-time self-heal repaired a legacy file in
+    memory (except behind an ``$include``), so the advice hedges on ``$include``; from
+    2026.9.7 startup repairs nothing and only Doctor does (``_startup_repair_removed``), so
+    the advice says that instead. That sentence lives in ``fix`` and never in ``detail``:
+    ``baseline.fingerprint()`` hashes ``detail``, and this note must not orphan a user's
+    ``.clawseccheckignore`` entry.
+
+    C-689: two sources are unioned (a path both name is reported once, as a table row). The
+    hand table (``_RETIRED_CONFIG_KEYS``) holds keys MEASURED against a build's root schema;
+    on a build inside the port's window (``retiredformats.in_window``) OpenClaw's own
+    retired-format finder is added. Its hits include 33 ``channels.*`` keys the root schema
+    passes through and the bundled channel schemas reject; they are WARN like the root rows,
+    because Doctor and ``openclaw update`` refuse the config the same way. A finder row says
+    "retired on the installed build" and the vendor's own ``bridgeVersion`` (the release it
+    tells the user to install to migrate); the sentence about WHO refuses lives in ``detail``
+    only for finder rows, so a table-only finding's ``detail`` (and its fingerprint) is
+    byte-identical to what it was.
 
     WARN    - one or more retired keys are present and the installed build rejects them.
     UNKNOWN - no config was read (or it was unreadable).
@@ -1785,28 +2374,114 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
             pass_confidence="no_signal",
         )
     found = _retired_keys_present(ctx)
-    if not found:
+    finder = _retired_finder_present(ctx)
+    in_window = _retiredformats.in_window(_numeric_version(installed))
+    table_paths = {path for path, _repl in found}
+    finder_only = list(dict.fromkeys(p for p in (finder.paths if finder else ())
+                                     if p not in table_paths))
+    if not found and not finder_only:
+        if in_window:
+            return _finding(
+                "B382",
+                PASS,
+                # C-671: say what was checked. The table lists the retired keys that were
+                # measured, not every key the vendor ever removed, so "holds no removed key"
+                # would read as a completeness claim this check cannot make. C-689: inside
+                # the finder's window the PASS also says the vendor's own list was applied.
+                f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired "
+                f"config keys this check tracks, and OpenClaw {installed}'s own "
+                "retired-format finder names nothing in it.",
+                "No action needed. The list covers only the retired keys that were measured, "
+                "not every key OpenClaw has removed; `openclaw config validate` is the full "
+                "test of the file against the installed build.",
+            )
+        window = "-".join(".".join(str(n) for n in v)
+                          for v in (_retiredformats.ORACLE_MIN, _retiredformats.ORACLE_MAX))
+        # C-689: outside the finder's window the vendor's own list was NOT consulted, and a
+        # clean-reading PASS would claim more than was checked. The caveat is in `detail`
+        # (the list renderer never shows `fix`) and the PASS carries no signal; a PASS has no
+        # ignore fingerprint to orphan.
         return _finding(
             "B382",
             PASS,
-            f"The file audited holds no key that OpenClaw {installed} removed.",
-            "No action needed.",
+            f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired config "
+            "keys this check tracks. OpenClaw's own retired-format list was NOT checked: it "
+            f"is ported only for {window} and this build is {installed}.",
+            "No action needed for the keys this check tracks. The list covers only the "
+            "retired keys that were measured, not every key OpenClaw has removed; "
+            "`openclaw config validate` is the full test of the file against the installed "
+            "build.",
+            pass_confidence="no_signal",
         )
     notes = [f"{key} ({'replaced by ' + repl if repl else 'removed'})" for key, repl in found]
+    notes += [f"{path} (retired on the installed build)" for path in finder_only]
     shown = "; ".join(notes[:6])
     extra = f" (+{len(notes) - 6} more)" if len(notes) > 6 else ""
-    return _finding(
-        "B382",
-        WARN,
-        f"The file audited still contains {len(found)} key(s) that OpenClaw {installed} "
-        "removed, so its strict config schema rejects the file: `openclaw config validate` "
-        "and CLI commands that load it report it invalid until the keys are migrated. "
-        f"{shown}{extra}",
-        "Run `openclaw doctor --fix` (it migrates or removes them), or delete the keys by "
-        "hand. A config that uses $include may be refused automatic repair, so run the "
-        "command explicitly.",
-        evidence=[key for key, _repl in found],
-    )
+    evidence = [key for key, _repl in found] + finder_only
+    if finder_only:
+        # Finder rows: the consequence the vendor attaches (Doctor, `openclaw update`).
+        # The 33 channel-level keys the root schema accepts are in here too -- the finder,
+        # not the root schema, is what makes Doctor and update refuse them.
+        total, named = len(notes), len(finder_only)
+        table_clause = (
+            f"{len(found)} of them left the strict config schema, which rejects the file: "
+            "`openclaw config validate` and CLI commands that load it report it invalid. "
+            if found else "")
+        detail = (
+            f"The file audited still contains {total} {'key' if total == 1 else 'keys'} that "
+            f"OpenClaw {installed} retired or removed. {table_clause}{named} "
+            f"{'is' if named == 1 else 'are'} named by OpenClaw's own retired-format finder "
+            f"(retired on the installed build; bridge release {finder.bridge_version}): "
+            "Doctor and `openclaw update` refuse this config until "
+            f"{'it is' if named == 1 else 'they are'} removed. {shown}{extra}")
+    else:
+        detail = (
+            f"The file audited still contains {len(found)} key(s) that OpenClaw {installed} "
+            "removed, so its strict config schema rejects the file: `openclaw config validate` "
+            "and CLI commands that load it report it invalid until the keys are migrated. "
+            f"{shown}{extra}")
+    if finder is not None:
+        # The installed Doctor refuses the whole config once the finder names anything, so
+        # `openclaw doctor --fix` cannot migrate the table rows either: do not advise it.
+        # The bridge-release route is the vendor's own and is offered only for the keys the
+        # vendor's list names (whether that bridge ever migrated a table-only key is
+        # unverified).
+        fix = (
+            "Delete the retired keys listed above by hand. For the keys the vendor's list "
+            f"names, the vendor's own route is to install OpenClaw {finder.bridge_version}, "
+            "run `openclaw doctor --fix` there, then upgrade to latest. On the installed "
+            "build Doctor and `openclaw update` refuse a config that holds them, so "
+            "`openclaw doctor --fix` cannot migrate it. Run `openclaw doctor` afterwards to "
+            "confirm the config is accepted.")
+    else:
+        fix = "Run `openclaw doctor --fix` (it migrates or removes them), or delete the keys by " \
+            "hand. " + (
+            # C-645: 2026.9.7 dropped the startup repair, so nothing fixes the file behind
+            # the user's back any more; the $include caveat is now about Doctor's own
+            # automatic preflight repair (`canPlanAutomaticConfigRepair` from 2026.10.1,
+            # `admitAutomaticConfigRepairSnapshot` before).
+            "OpenClaw 2026.9.7 and later does not repair a legacy config at startup "
+            "(only Doctor does), so a restart will not fix the file. Doctor's automatic "
+            "preflight repair may decline a config that uses $include, so run the "
+            "command explicitly and re-check with `openclaw config validate`."
+            if _startup_repair_removed(ctx) else
+            "A config that uses $include may be refused automatic repair, so run the "
+            "command explicitly."
+        )
+        if _doctor_refuses_retired_formats(ctx) and not in_window:
+            # C-686: from 2026.10.1 Doctor and `openclaw update` STOP on a config that holds a
+            # key from the vendor's retired list. Inside the port's window the finder was
+            # asked and named none of these rows, so the advice above stands (EXECUTED on
+            # 2026.10.2: `applyLegacyDoctorMigrations` migrates or removes each table row).
+            # Outside it the finder was NOT asked, so the advice is hedged, never withdrawn.
+            fix += (
+                " OpenClaw 2026.10.1 and later also stops Doctor and `openclaw update` on a "
+                "config that holds a key from its own retired list, and this build is outside "
+                "the range ClawSecCheck checked that list on: if `openclaw doctor --fix` "
+                "stops with a message that names a release to install first, follow it, or "
+                "delete the keys by hand."
+            )
+    return _finding("B382", WARN, detail, fix, evidence=evidence)
 
 
 def check_dangerous_overrides(ctx: Context) -> Finding:
@@ -1854,6 +2529,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
     # original FAIL (Golden Rule #4 - do not drop a real finding for a build we did
     # not see).
     device_auth_note = ""
+    # C-686: fix-only whole-config caveat for the "doctor --fix removes the stale line" note.
+    device_auth_fix_hedge = ""
     if dig(cfg, "gateway.controlUi.dangerouslyDisableDeviceAuth"):
         if _device_auth_knob(ctx) == "retired":
             device_auth_note = (
@@ -1862,6 +2539,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
                 "and grants nothing; Control UI browsers pair through the normal "
                 "device flow instead. `openclaw doctor --fix` removes the stale line."
             )
+            if _doctor_refuses_retired_formats(ctx):
+                device_auth_fix_hedge = f" {_doctor_whole_config_hedge(ctx)}"
         else:
             fails.append(
                 "gateway.controlUi.dangerouslyDisableDeviceAuth \u2014 control-plane: "
@@ -1973,7 +2652,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "Replace the wildcard with an explicit, scoped allowlist \u2014 e.g. "
             "commands.ownerAllowFrom to your own channel-native ID(s), or "
             "gateway.nodes.pairing.autoApproveCidrs to a specific host/private range. "
-            "Never leave either as an unscoped wildcard.",
+            "Never leave either as an unscoped wildcard." + device_auth_fix_hedge,
             evidence=wildcard_fails + fails + warns,
             severity=CRITICAL,
         )
@@ -1985,7 +2664,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "auth bypass are active (see evidence)." + device_auth_note,
             "Disable these unless a specific, temporary break-glass need requires one \u2014 each "
             "opens sandbox escape or control-plane authentication bypass. Restore the safe "
-            "default (set to false / remove).",
+            "default (set to false / remove)." + device_auth_fix_hedge,
             evidence=fails + warns,
         )
     if warns:
@@ -1995,7 +2674,7 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
             "One or more dangerous break-glass override flag(s) are enabled (see "
             "evidence)." + device_auth_note,
             "Review each \u2014 OpenClaw documents these as 'keep disabled' break-glass toggles. "
-            "Turn off any you do not actively need.",
+            "Turn off any you do not actively need." + device_auth_fix_hedge,
             evidence=warns,
         )
     return _finding(
@@ -2004,7 +2683,8 @@ def check_dangerous_overrides(ctx: Context) -> Finding:
         "None of the break-glass override flags checked here are enabled (browser "
         "SSRF's dangerouslyAllowPrivateNetwork is B38's subject, not B48's -- see "
         "B38)." + device_auth_note,
-        "Keep these break-glass toggles off unless an incident temporarily requires one.",
+        "Keep these break-glass toggles off unless an incident temporarily requires one."
+        + device_auth_fix_hedge,
         pass_confidence="verified",
     )
 
@@ -2855,6 +3535,7 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     cfg = ctx.config
     evidence: list[str] = []
     extra_dirs_hit = False
+    installs_elided = False
 
     if dig(cfg, "hooks.enabled") is True:
         evidence.append(
@@ -2901,6 +3582,10 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
             evidence.append(
                 f"hooks.internal.installs \u2014 {len(installs)} internal hook install(s) registered"
             )
+        # C-680: the stored value was cut short by the depth limit (padding is not an
+        # install record). Evidence found above stands; only a clean PASS is unsound.
+        installs_elided = "hooks.internal.installs" in (
+            getattr(ctx, "config_machine_state_elided", None) or ())
 
         extra_dirs = dig(cfg, "hooks.internal.load.extraDirs")
         if isinstance(extra_dirs, list):
@@ -2931,6 +3616,19 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
     for _kind, _line in _hooks_session_key_exposures(cfg):
         evidence.append(_line)
 
+    if not evidence and installs_elided:
+        return _finding(
+            "B179",
+            UNKNOWN,
+            "No hooks.enabled flag or hooks.internal load surface was found in what the "
+            "audit reads \u2014 but the hooks.internal.installs value in OpenClaw's state "
+            "database nests deeper than the audit reads, so that content was never "
+            "examined. A clean bill of health cannot be given over it.",
+            "Remove the deeply nested padding from the hooks.internal.installs entry of the "
+            "config_machine_state table in ~/.openclaw/state/openclaw.sqlite so all of it "
+            "can be read, then re-run the audit.",
+            engine_degraded=True,
+        )
     if not evidence:
         return _finding(
             "B179",
@@ -2968,7 +3666,117 @@ def check_hooks_enable_toggles(ctx: Context) -> Finding:
             "hooks.mappings[].allowUnsafeExternalContent (B48), and hook-template "
             "content scanning (B169) already cover the higher-risk adjacent settings."
         )
+    if installs_elided:
+        fix += (
+            " Note: the hooks.internal.installs value in the state database nests deeper "
+            "than the audit reads, so content below that depth was never examined."
+        )
     return _finding("B179", WARN, detail, fix, evidence)
+
+
+# B2/B80: the oldest release whose `gateway run` PRE-FLIGHT was read. Before anything else is
+# started (and before `ensureGatewayStartupAuth` could generate a runtime token) the command
+# computes `hasSharedSecret = mode "token" && a token is configured || mode "password" && a
+# password is configured` and, when the resolved bind host is not loopback and the mode is not
+# "trusted-proxy", exits 78 with "Refusing to bind gateway to <bind> without auth." (dist/run-*.mjs;
+# on 2026.9.6 the same condition sits in `shouldBlockGatewayBindWithoutExplicitAuth`). The
+# generated runtime token only applies on a loopback bind. Read in 2026.9.6, 9.7, 9.8, 9.9, 10.1
+# and 10.2 (the condition is textually the same in all six) and RUN on 2026.10.2: a "lan" bind
+# with no mode, with `auth: {}` or with `auth: {mode: "token"}` and no token exits 78; with
+# `gateway.mode` unset the start is blocked even earlier ("existing config is missing
+# gateway.mode"). No earlier tarball was available, so older builds are UNMEASURED and keep
+# the answers they always had.
+_B2_BIND_PREFLIGHT_READ_MIN = (2026, 9, 6)
+
+
+def _gateway_bind_preflight(ctx) -> str:
+    """Does the INSTALLED OpenClaw's pre-flight refuse a non-loopback bind with no configured
+    token or password? ``"refuses"`` / ``"unknown"``.
+
+    Two answers on purpose: nothing read says an older build behaves otherwise or the same,
+    so an unknown build keeps today's answers. Only ``installed_dist_version`` decides - the
+    build whose start command runs. The config's own ``meta.lastTouchedVersion`` stamp is
+    deliberately NOT a fallback: it names a build that once SAVED the file, not the one that
+    serves it, and this answer lowers a CRITICAL FAIL. No installed version, an unparseable
+    one, a pre-release (``-beta.1``) and a string that is not a calendar release
+    (``YYYY.M.P``, three or more numeric parts) are all ``"unknown"``.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None and len(installed) >= 3 and installed >= _B2_BIND_PREFLIGHT_READ_MIN:
+        return "refuses"
+    return "unknown"
+
+
+def _gateway_refused_bind_shape(cfg: dict, ctx, *, mode_token: bool) -> bool:
+    """Is this EXACTLY a shape on which the real `gateway run` was run and exits 78 because a
+    non-loopback bind has no configured token or password? A whitelist, not "no credential
+    found": every other config keeps its old verdict.
+
+    Run on 2026.10.2: ``bind: "lan"`` with ``gateway.mode`` local ("Refusing to bind gateway
+    to lan without auth.") or unset ("existing config is missing gateway.mode"; the refusal
+    reason differs, the start is refused either way), an ``auth`` block that is absent or holds
+    ONLY ``mode`` (absent for the no-mode cell, ``"token"`` for the other), and nothing else
+    that changes the outcome:
+
+    * any token or password anywhere - ``gateway.auth.*``, ``gateway.remote.token`` /
+      ``.password`` (the pre-flight resolves it and the gateway STARTS), the legacy
+      ``gateway.token`` (rejected by the schema), or an OPENCLAW_GATEWAY_TOKEN / _PASSWORD in a
+      persistent artifact (never this process's environment) - disqualifies;
+    * ``gateway.tailscale.mode`` other than absent / "off" (serve and funnel need other binds
+      or modes and are refused at config validation);
+    * ``gateway.mode`` other than absent / "local"; any ``gateway.remote`` content;
+    * a ``trustedProxy`` block or mode, ``allowTailscale``, ``rateLimit`` (the auth block holds
+      only ``mode``, so these are excluded rather than assumed harmless).
+    """
+    gw = cfg.get("gateway") if isinstance(cfg, dict) else None
+    if not isinstance(gw, dict) or gw.get("bind") != "lan" or "token" in gw:
+        return False
+    if gw.get("mode") not in (None, "local"):
+        return False
+    auth_obj = gw.get("auth")
+    if auth_obj is not None:
+        if not isinstance(auth_obj, dict) or not set(auth_obj) <= {"mode"}:
+            return False
+    want = "token" if mode_token else None
+    if (auth_obj or {}).get("mode") != want:
+        return False
+    tailscale = gw.get("tailscale")
+    if tailscale is not None and (
+        not isinstance(tailscale, dict) or tailscale.get("mode") not in (None, "off")
+    ):
+        return False
+    if gw.get("remote") not in (None, {}):
+        return False
+    return _gateway_env_credential(ctx)[0] is None
+
+
+def _b2_refused_bind_note(cfg: dict, bind: str, mode_clause: str) -> str:
+    """The one sentence both no-credential cells share (mode absent, mode "token" with no
+    token), so the two equivalent configs cannot be worded apart. It states what was read and
+    run - the start is refused - and hedges what cannot be seen: a token or password supplied
+    by the gateway's environment or by start-up flags. With ``gateway.mode`` unset the refusal
+    reason is a different one, so the exit message is quoted only when the mode is set."""
+    refusal = (
+        " (it exits with 'Refusing to bind gateway to lan without auth')"
+        if isinstance(cfg.get("gateway"), dict) and cfg["gateway"].get("mode") == "local"
+        else ""
+    )
+    return (
+        f"gateway.bind={bind} is non-loopback and {mode_clause}. OpenClaw 2026.9.6 and later "
+        "refuse to start the gateway with this configuration: a non-loopback bind needs a "
+        f"configured token or password{refusal}, so this is a configuration error rather "
+        "than an exposure - unless an environment or start-up flag this audit cannot see "
+        "supplies a token or password"
+    )
+
+
+_B2_REFUSED_BIND_FIX = (
+    "Set gateway.auth.token (a SecretRef, or a ${...} environment reference to a secret of at "
+    "least 24 characters) or gateway.auth.password with gateway.auth.mode=password, or bind "
+    "the gateway to loopback (where OpenClaw generates a runtime token at each start). "
+    "Limit: a token or password supplied outside the config (the gateway's own environment, "
+    "or --token / --password) is not visible to this audit and lets the gateway start"
+)
 
 
 def check_gateway(ctx: Context) -> Finding:
@@ -2982,8 +3790,95 @@ def check_gateway(ctx: Context) -> Finding:
     # B-290: clauses that are worth DISCLOSING but are not proof of a misconfiguration.
     # They never escalate the status; they only add a WARN when nothing FAIL-worthy fired.
     soft_ev: list[str] = []
-    bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-646: the three enum-typed reads below (`gateway.bind`, `gateway.auth.mode`,
+    # `gateway.tailscale.mode`) can carry a `${VAR:-default}` env-substitution template
+    # (OpenClaw 2026.9.7 added the `:-` fallback; `${VAR}` itself is older). The
+    # template is filled in from the GATEWAY'S environment, so its text is not the value
+    # in effect - `${X:-loopback}` is not a non-loopback host, and `${M:-none}` is not
+    # an authenticated mode. Reading it as a literal manufactured a FAIL on a loopback
+    # bind and could hide an unauthenticated one. A templated read is skipped by the
+    # legs that depend on it and, when it would have decided the verdict, the whole
+    # check is UNKNOWN (never PASS) - see `_b2_unresolved` below.
+    bind_raw = dig(cfg, "gateway.bind", "")
+    bind_tpl = _has_env_template(bind_raw)
+    bind = "" if bind_tpl else parse_bind_host(bind_raw)
     auth = dig(cfg, "gateway.auth.mode")
+    auth_tpl = _has_env_template(auth)
+    ts_tpl = _has_env_template(dig(cfg, "gateway.tailscale.mode"))
+    # C-653: the TEXT of gateway.auth.token is read as one of three forms (see
+    # `_gateway_token_form`). The reference reading below applies only where the token IS
+    # the credential in effect - mode exactly "token", or no mode (OpenClaw then derives
+    # "token" from it). Under any other mode (password, none, trusted-proxy, an unrecognised
+    # string, a templated one) a token is a leftover key and every verdict stays what it was.
+    # C-667: a well-formed SecretRef OBJECT at gateway.auth.token is the "reference" form too,
+    # whatever its source; a malformed one, or one at the legacy gateway.token key, is not.
+    # C-681: a `${ID:-default}` token is read as the value it stands for only where the token
+    # is the credential in effect; under any other mode it stays the text it always was.
+    _b2_tok_text = _gateway_token_raw(cfg, ctx if auth in (None, "token") else None)
+    _b2_tok_form = _gateway_token_form(_b2_tok_text, ctx)
+    _b2_tok_in_effect = auth in (None, "token")
+    # A reference whose variable the config's own env block defines: a short (or marker)
+    # value keeps the FAIL, a long one is UNKNOWN - never a PASS, since the gateway may not
+    # use that value. An undefined one stays an opaque reference (UNKNOWN).
+    _b2_tok_env = (
+        _gateway_token_env_block_strength(_b2_tok_text, cfg)
+        if _b2_tok_form == "reference" and _b2_tok_in_effect
+        else None
+    )
+    # C-667: an env-source SecretRef OBJECT is also looked up where the audit can see its
+    # variable - the gateway's persistent environment - unless the env block already said
+    # "weak" (then that FAIL stands and the lookup adds nothing). C-672: a whole-value `${ID}`
+    # / `$ID` STRING reference is looked up the same way, whatever the length of the variable
+    # name. A short value there is a FAIL of its own, and it is read even when the env block
+    # holds a long value for the same name: the process environment wins over a config env
+    # value (see `_gateway_token_env_block_strength`), so the short one is what the gateway
+    # uses. A long one changes no verdict. Nothing found at all is UNKNOWN with the "not evaluated"
+    # caveat for a string or object reference alike (C-681, owner ruling: an unmeasured credential
+    # is never a PASS), and the no-mode object disclosure below says it in both fields because it
+    # otherwise reads as a verified authenticated gateway. One whose variable a long value IS
+    # found for loses the caveat (its detail text changes, so a fingerprint of that finding
+    # changes with it).
+    _b2_tok_ref_env = (
+        _gateway_token_env_evidence(_b2_tok_text, ctx)
+        if _b2_tok_form == "reference" and _b2_tok_in_effect and _b2_tok_env != "weak"
+        else None
+    )
+    _b2_tok_ref_short = _b2_tok_ref_env is not None and _b2_tok_ref_env[1] == "short"
+    # C-681 (owner ruling): a reference that is the credential in effect and that nothing
+    # visible resolves - not the config's env block, not a systemd / dotenv value. Its strength
+    # is unmeasured, so it is never a PASS (UNKNOWN with the "not evaluated" caveat, below).
+    _b2_tok_unmeasured = (
+        _b2_tok_form == "reference"
+        and _b2_tok_in_effect
+        and _b2_tok_env is None
+        and _b2_tok_ref_env is None
+    )
+    _b2_tok_obj_opaque = isinstance(_b2_tok_text, dict) and _b2_tok_unmeasured
+    _b2_tok_obj_said = False
+    _b2_tok_ref_skipped = False
+    # C-681: a `${ID:-default}` token on a 2026.9.7+ build whose variable the audit cannot see
+    # and whose default is short and non-empty. The default is used only while the gateway's
+    # own environment leaves ID unset or empty, which this audit cannot read, so it is a WARN
+    # of its own - never the FAIL a short literal gets, never a silent pass. Name only.
+    _b2_tok_dflt = (
+        _gateway_token_unseen_default(cfg, ctx)
+        if _b2_tok_in_effect and isinstance(_b2_tok_text, str) and 0 < len(_b2_tok_text) < 24
+        else None
+    )
+    _b2_tok_dflt_said = False
+    # A templated value matters only where the verdict would branch on it: the bind decides
+    # exposure only for a mode that does not itself authenticate (none / absent /
+    # trusted-proxy, or an auth mode that is itself undeterminable); the auth mode decides
+    # only where the bind may be off-loopback; Tailscale funnel exposes the gateway on its
+    # own, whatever the bind.
+    _b2_refused_bind_held = ""
+    _b2_unresolved = []
+    if bind_tpl and (auth in (None, "none", "trusted-proxy") or auth_tpl):
+        _b2_unresolved.append("gateway.bind")
+    if auth_tpl and (bind_tpl or (bind and bind not in LOOPBACK)):
+        _b2_unresolved.append("gateway.auth.mode")
+    if ts_tpl:
+        _b2_unresolved.append("gateway.tailscale.mode")
     if bind and bind not in LOOPBACK and auth in (None, "none"):
         # B-290 (ENV-4): `auth is None` - i.e. gateway.auth.mode absent or null - is
         # EXACTLY the condition under which resolveGatewayAuth derives the mode from an
@@ -2991,6 +3886,19 @@ def check_gateway(ctx: Context) -> Finding:
         # (authConfig.mode)`). So when a persistent artifact carries
         # OPENCLAW_GATEWAY_TOKEN/_PASSWORD, this bind is authenticated and the FAIL was a
         # false positive on a correctly secured host.
+        #
+        # Bundle names cited in this block (auth-resolve-NyPBrh8F.js, server-runtime-config-
+        # r5ejxORO.js, auth-B27MflKU.js, audit-UjVvFwCi.js) are 2026.7.x-9.x builds and no longer
+        # exist. Re-read on openclaw@2026.10.2 (2026-10-12): the mode derivation is
+        # `finalizeResolvedGatewayAuth`, auth-resolve-q8YYhgR6.mjs:22-23 (`mode =
+        # authOverride?.mode ?? authConfig.mode ?? (password ? "password" : "token")` - an
+        # absent mode is token, or password when a password is present); the bind guard is
+        # `assertGatewayRuntimeSecurityConfig`, server-runtime-config-DOMQs_gF.mjs:54,64
+        # (`hasSharedSecret`, a non-empty token/password for that mode); the missing-credential
+        # rejection is `assertGatewayAuthConfigured`, auth-BB5XWQP-.mjs:37-52; and OpenClaw's own
+        # length bar is audit-McsNcemT.mjs:268-269 (`value.length < 24` -> checkId
+        # `gateway.${credential}_too_short`, i.e. `gateway.token_too_short`; the rule id is
+        # built from a template there, which is why a plain grep for it finds nothing).
         #
         # `auth == "none"` is deliberately NOT softened: "none" is truthy in the dist, so
         # the mode stays "none", `hasSharedSecret` stays false, and
@@ -3005,9 +3913,20 @@ def check_gateway(ctx: Context) -> Finding:
         # only ever consulted when no config token exists (mirrors the dist's own
         # precedence). Left OUT of ENV-4/B-290 deliberately (config-only, no env
         # component); closed here with its own triage.
-        _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, auth)
+        _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, auth, ctx)
+        if _b2_tok_dflt is not None:
+            _cfg_token_strong = False  # a short default of unknown standing, said below
+        if _b2_tok_env == "weak" or _b2_tok_ref_short:
+            # C-653 (c) outcome 1: a short (or marker) value in the env block is the short
+            # credential below, exactly as before. B80 keeps reading the reference as a
+            # credential (never cleaner than it was); B2 is the check that reports this.
+            # C-667: the same for a short value an env-source object's variable has in the
+            # gateway's persistent environment.
+            _cfg_token_strong = False
         _env_cred, _env_cred_src = (
-            _gateway_env_credential(ctx) if auth is None and _cfg_token is None else (None, None)
+            _gateway_env_credential(ctx, skip_reference_shaped=True)
+            if auth is None and _cfg_token is None
+            else (None, None)
         )
         # C-135 (independent adversarial pass on B-290): presence alone is NOT enough to
         # clear this FAIL, and softening on truthiness made the scanner lie. The bind guard
@@ -3031,7 +3950,12 @@ def check_gateway(ctx: Context) -> Finding:
         # leg (B-312) for the identical reason - a sub-24-char config token binds and
         # listens exactly like a sub-24-char env token.
         _env_cred_strong = _env_cred is not None and len(_env_cred.strip()) >= 24
-        if _cfg_token is not None and _cfg_token_strong:
+        if _cfg_token is not None and _cfg_token_strong and _b2_tok_form == "marker":
+            # C-653: no "authenticated" disclosure for a retired marker - it is a public
+            # literal, not a credential of unknown strength. The token clause below
+            # reports it (WARN).
+            pass
+        elif _cfg_token is not None and _cfg_token_strong:
             soft_ev.append(
                 f"gateway.bind={bind} is non-loopback and the config sets no "
                 f"gateway.auth.mode, but gateway.auth.token is set \u2014 OpenClaw derives "
@@ -3043,6 +3967,39 @@ def check_gateway(ctx: Context) -> Finding:
                 "explicit gateway.auth.mode is intentional. Setting gateway.auth.mode "
                 "explicitly makes the posture readable from the config alone"
             )
+            if _b2_tok_obj_opaque:
+                # C-667: a reference object whose secret the audit could not find anywhere.
+                # Same caveat the string reference carries when its text is short, worded for
+                # a reference of any source (the provider, the id and the source stay out).
+                _b2_tok_obj_said = True
+                soft_ev.append(_B2_REF_OBJ_NOTE)
+                fixes.append(_B2_REF_OBJ_FIX)
+        elif _cfg_token is not None and _b2_tok_ref_short:
+            # C-667: an env-source object whose variable the gateway's persistent environment
+            # sets to a short value - the environment leg's sentence, for a token that is a
+            # reference to it. (An env block that already said "weak" takes the branch below.)
+            _obj_var, _, _obj_src = _b2_tok_ref_env
+            ev.append(
+                f"gateway.bind={bind} is non-loopback and the only gateway credential is "
+                f"gateway.auth.token, a reference to the environment variable {_obj_var} "
+                f"whose value is an environment-supplied secret shorter than 24 chars "
+                f"({_obj_src}) \u2014 OpenClaw binds and listens on it, so the gateway is "
+                "world-reachable behind a guessable secret"
+            )
+            fixes.append(
+                "Replace the environment-supplied gateway credential with one of at least "
+                "24 characters, or bind the gateway to loopback"
+            )
+        elif _cfg_token is not None and _b2_tok_dflt is not None:
+            _b2_tok_dflt_said = True
+            soft_ev.append(
+                f"gateway.bind={bind} is non-loopback and the only gateway credential is "
+                f"gateway.auth.token, a ${{{_b2_tok_dflt}:-...}} template whose short "
+                f"({len(_b2_tok_text)} chars) fallback OpenClaw uses whenever {_b2_tok_dflt} "
+                "is unset or empty - this audit cannot see the gateway's environment, so it "
+                f"cannot tell whether {_b2_tok_dflt} supplies a stronger secret"
+            )
+            fixes.append(_b2_dflt_fix(_b2_tok_dflt))
         elif _cfg_token is not None:
             ev.append(
                 f"gateway.bind={bind} is non-loopback and the only gateway credential is "
@@ -3077,12 +4034,62 @@ def check_gateway(ctx: Context) -> Finding:
                 "Replace the environment-supplied gateway credential with one of at least "
                 "24 characters, or bind the gateway to loopback"
             )
+        elif (
+            auth is None
+            and _gateway_bind_preflight(ctx) == "refuses"
+            and _gateway_refused_bind_shape(cfg, ctx, mode_token=False)
+        ):
+            # Owner ruling (Dave, 2026-10-12): on a build whose `gateway run` pre-flight was
+            # read (`_B2_BIND_PREFLIGHT_READ_MIN`), the one run shape - a "lan" bind with no
+            # mode and no credential anywhere - is REFUSED at start-up, so "exposed" is
+            # false; the same refusal as mode "token" with no token (below), which answers the
+            # same. A WARN, never a PASS: the config is wrong. Any other shape never reaches
+            # this branch.
+            soft_ev.append(
+                _b2_refused_bind_note(
+                    cfg, bind, "the config sets no gateway.auth.mode and no credential"
+                )
+            )
+            fixes.append(_B2_REFUSED_BIND_FIX)
+        elif auth is None:
+            # No mode, no usable gateway token. The sentence is reworded (no "exposed", no
+            # Python literal) - the owner's ruling covers the FAIL text of this cell - and
+            # the status is what it always was.
+            ev.append(
+                f"gateway.bind={bind or '?'} is non-loopback, no gateway.auth.mode is set "
+                "and no usable gateway token is configured"
+            )
+            fixes.append(
+                "Bind the gateway to loopback or require auth "
+                "(gateway.auth.mode=token, token >=24 chars)"
+            )
         else:
+            # Explicit mode "none": the vendor REFUSES to bind a non-loopback address with it
+            # (`assertGatewayRuntimeSecurityConfig`), so the config is wrong on every build.
+            # The detail is byte-identical to what it always was (a fingerprint hashes it).
             ev.append(f"gateway.bind={bind or '?'} exposed with auth.mode={auth}")
             fixes.append(
                 "Bind the gateway to loopback or require auth "
                 "(gateway.auth.mode=token, token >=24 chars)"
             )
+    elif (
+        auth == "token"
+        and bind
+        and bind not in LOOPBACK
+        and _gateway_bind_preflight(ctx) == "refuses"
+        and _gateway_refused_bind_shape(cfg, ctx, mode_token=True)
+    ):
+        # The same refusal as the no-mode cell above (run: mode "token" with no token and a
+        # lan bind exits 78), so the same WARN. On a build whose pre-flight was not read this
+        # stays the PASS it has always been.
+        # Held back, like `retired_insecure_auth` below: where another leg already FAILs this
+        # config (an open channel, funnel, ...) its `detail` must stay what it was - a
+        # fingerprint hashes it - so the note rides in `fix` there and in `detail` only when
+        # it is the whole finding.
+        _b2_refused_bind_held = _b2_refused_bind_note(
+            cfg, bind, "gateway.auth.mode is token but no token is configured"
+        )
+        fixes.append(_B2_REFUSED_BIND_FIX)
     # gateway.http.no_auth does NOT exist in OpenClaw schema (auth is enforced by default)
     # C-471: `gateway.controlUi.allowInsecureAuth` was REMOVED in OpenClaw 2026.8.1, and
     # the removal is fail-SAFE - unusual enough to state, because the usual shape is the
@@ -3123,10 +4130,84 @@ def check_gateway(ctx: Context) -> Finding:
         fixes.append("Set gateway.tailscale.mode to 'serve' or 'off' (not 'funnel')")
     # gateway.auth_no_rate_limit does NOT exist in OpenClaw schema
     # Rate limiting is configured via gateway.auth.rateLimit (optional object)
-    token = dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token")
-    if isinstance(token, str) and 0 < len(token) < 24:
+    token = _b2_tok_text
+    _marker_fix = (
+        "Replace the retired marker in gateway.auth.token with a ${ID} environment "
+        "reference (for example ${OPENCLAW_GATEWAY_TOKEN}) so OpenClaw substitutes the "
+        "environment value, or with a literal token of at least 24 characters"
+    )
+    if _b2_tok_env == "weak":
+        # C-653 (c) outcome 1: the variable is defined in openclaw.json's own env block and
+        # a resolved value is short (or a retired marker): the same FAIL, same detail, a
+        # short literal token gets - whatever the length of the reference text.
         ev.append("gateway auth token shorter than 24 chars")
         fixes.append("Use a gateway auth token of at least 24 characters")
+        fixes.append(
+            "gateway.auth.token is a ${...} reference whose value openclaw.json's own env "
+            "block (env.vars or env) defines, so the secret sits in the file - move it to "
+            "the gateway's own environment"
+        )
+    elif _b2_tok_ref_short:
+        # C-667: an env-source object whose variable the gateway's persistent environment sets
+        # to a short value: the token-length clause a short literal gets, whatever the bind,
+        # plus the fix that names the variable (the value itself never appears).
+        _obj_var, _, _obj_src = _b2_tok_ref_env
+        ev.append("gateway auth token shorter than 24 chars")
+        fixes.append("Use a gateway auth token of at least 24 characters")
+        fixes.append(
+            f"gateway.auth.token is a reference to the environment variable {_obj_var}, "
+            f"whose environment-supplied value ({_obj_src}) is shorter than 24 characters - "
+            "set a secret of at least 24 characters there"
+        )
+    elif _b2_tok_env == "long":
+        # C-653 (c) outcome 2: defined with a long value. Not cleared: the gateway may not
+        # use that value (see `_gateway_token_env_block_strength`), so no PASS is given.
+        _b2_tok_ref_skipped = True
+    elif isinstance(token, str) and 0 < len(token) < 24:
+        if _b2_tok_form == "reference" and _b2_tok_in_effect:
+            # C-653 (c): the length of a `${ID}` reference is the length of the variable
+            # NAME, not of the secret. Skipped, never a verdict; said so below - unless
+            # C-672 found the variable's value (a long one; a short one took the branch
+            # above), which is then measured and needs no caveat, as for an object.
+            _b2_tok_ref_skipped = _b2_tok_ref_env is None
+        elif _b2_tok_dflt is not None:
+            if not _b2_tok_dflt_said:
+                soft_ev.append(
+                    f"gateway.auth.token is a ${{{_b2_tok_dflt}:-...}} template whose short "
+                    f"({len(token)} chars) fallback OpenClaw uses whenever {_b2_tok_dflt} is "
+                    "unset or empty - this audit cannot see the gateway's environment, so it "
+                    f"cannot tell whether {_b2_tok_dflt} supplies a stronger secret"
+                )
+                fixes.append(_b2_dflt_fix(_b2_tok_dflt))
+            if _b2_tok_form == "marker":
+                fixes.append(_marker_fix)
+        else:
+            ev.append("gateway auth token shorter than 24 chars")
+            fixes.append("Use a gateway auth token of at least 24 characters")
+            if _b2_tok_form == "marker":
+                fixes.append(_marker_fix)
+    elif _b2_tok_form == "marker" and (_b2_tok_in_effect or auth_tpl):
+        # C-653 (a): OpenClaw reads a retired marker at gateway.auth.token as a plain string,
+        # so the marker text itself is the gateway token. Reported as WARN rather than FAIL
+        # because B2 already passes other long guessable literal tokens, so a FAIL would be
+        # stricter than the existing rule for the same weakness written differently. (A
+        # templated mode may resolve to "token", so it is treated as possibly in effect.)
+        _marker_is = (
+            "the marker text itself is the gateway token"
+            if _b2_tok_in_effect
+            else "if gateway.auth.mode resolves to 'token' the marker text itself is the "
+            "gateway token"
+        )
+        soft_ev.append(
+            "gateway.auth.token holds a retired secretref-env:/__env__: marker string "
+            "\u2014 at this key it is not resolved as an environment reference, so "
+            f"{_marker_is}, a public and guessable value rather than a secret taken from "
+            "the environment"
+        )
+        fixes.append(_marker_fix)
+        if auth_tpl and "gateway.auth.mode" not in _b2_unresolved:
+            # the template note the non-loopback variant already carries
+            _b2_unresolved.append("gateway.auth.mode")
     # B-233: trusted-proxy auth is only as strong as the identity header it trusts. On a
     # non-loopback bind, without requiredHeaders/allowUsers genuinely constraining that
     # header, any direct network caller can self-declare identity - a spoofable full
@@ -3160,17 +4241,100 @@ def check_gateway(ctx: Context) -> Finding:
         ev.append(f"channel '{name}' has an open dm/group policy (anyone can command it)")
     if open_ch:
         fixes.append("Set every open channel's dmPolicy/groupPolicy to 'allowlist'")
+    if _b2_refused_bind_held:
+        if ev:
+            fixes.append(_b2_refused_bind_held)
+        else:
+            soft_ev.append(_b2_refused_bind_held)
     if (ev or soft_ev) and retired_insecure_auth:
         soft_ev.append(retired_insecure_auth)
+        # C-686: the note above says Doctor removes the key -- true per key, but on a build
+        # whose Doctor refuses the whole config while any retired key is present it may not
+        # get that far. FIX only: `soft_ev` is the detail, which a fingerprint hashes.
+        if _doctor_refuses_retired_formats(ctx):
+            fixes.append(_doctor_whole_config_hedge(ctx))
+    # C-646: say plainly which templated reads were NOT evaluated, so a FAIL/WARN raised by
+    # an independent leg does not read as a complete assessment. Never raises the status.
+    if _b2_unresolved:
+        _b2_tpl_note = (
+            f"{', '.join(_b2_unresolved)} "
+            + (
+                "carry ${...} environment templates"
+                if len(_b2_unresolved) > 1
+                else "carries a ${...} environment template"
+            )
+            + " that OpenClaw fills in at load from the gateway's environment or from this "
+            "config's own env block, so the value in effect cannot be read from the config "
+            "and the checks that depend on it were not evaluated"
+        )
+        _b2_tpl_fix = (
+            "Write the value literally in openclaw.json (or verify it in the gateway's "
+            "environment) so the exposure can be read from the config"
+        )
+    else:
+        _b2_tpl_note = _b2_tpl_fix = ""
+    if _b2_tok_ref_skipped:
+        # C-653 (c): the reference's own wording - the "write it literally" advice above
+        # would tell the user to put the secret in the file.
+        if _b2_tok_env == "long":
+            _b2_tok_note = (
+                "gateway.auth.token is a ${...} reference whose variable openclaw.json's own "
+                "env block defines with a long value, but the value the gateway actually uses "
+                "cannot be read from the config, so no PASS is given: the process environment "
+                "overrides a config env value, a config value that itself contains a ${...} "
+                "reference is not injected, and env keys are case-sensitive"
+            )
+            _b2_tok_fix = (
+                "Check in the gateway's environment which value gateway.auth.token resolves "
+                "to (at least 24 characters), and take the secret out of openclaw.json's env "
+                "block - supply it from the gateway's own environment instead"
+            )
+        else:
+            _b2_tok_note = _B2_REF_STR_NOTE
+            _b2_tok_fix = _B2_REF_STR_FIX
+        _b2_tpl_note = "; ".join(n for n in (_b2_tpl_note, _b2_tok_note) if n)
+        _b2_tpl_fix = "; ".join(n for n in (_b2_tpl_fix, _b2_tok_fix) if n)
+    # C-681 (owner ruling): every other unmeasured reference - a long-named `${ID}` string
+    # (its TEXT passed the length bar), an object under an explicit mode or on loopback - gets
+    # the same caveat. It is the whole answer (UNKNOWN) only where nothing else was found; on a
+    # finding that existed before it rides in `fix` alone, because a fingerprint hashes `detail`.
+    # The no-mode non-loopback object already said it in both fields (`_b2_tok_obj_said`).
+    _b2_tok_new_note = _b2_tok_new_fix = ""
+    if _b2_tok_unmeasured and not _b2_tok_ref_skipped and not _b2_tok_obj_said:
+        if isinstance(_b2_tok_text, dict):
+            _b2_tok_new_note, _b2_tok_new_fix = _B2_REF_OBJ_NOTE, _B2_REF_OBJ_FIX
+        else:
+            _b2_tok_new_note, _b2_tok_new_fix = _B2_REF_STR_NOTE, _B2_REF_STR_FIX
     if ev:
         _insecure_auth_only = ev == ["gateway.controlUi.allowInsecureAuth enabled"]
         sev = WARN if _insecure_auth_only else FAIL
         # soft_ev rides along in the detail so the report still says WHY the exposed bind
         # was not counted, but it can never raise the status - every escalation still
         # comes from `ev`.
+        if _b2_tpl_note:
+            soft_ev.append(_b2_tpl_note)
+            fixes.append(_b2_tpl_fix)
+        if _b2_tok_new_fix:
+            fixes.append(_b2_tok_new_fix)
         return _finding("B2", sev, "; ".join(ev + soft_ev), "; ".join(fixes), ev + soft_ev)
     if soft_ev:
+        if _b2_tpl_note:
+            soft_ev.append(_b2_tpl_note)
+            fixes.append(_b2_tpl_fix)
+        if _b2_tok_new_fix:
+            fixes.append(_b2_tok_new_fix)
         return _finding("B2", WARN, "; ".join(soft_ev), "; ".join(fixes), soft_ev)
+    if _b2_tpl_note:
+        return _finding(
+            "B2",
+            UNKNOWN,
+            "Cannot assess the gateway: " + _b2_tpl_note,
+            "; ".join(n for n in (_b2_tpl_fix, _b2_tok_new_fix) if n),
+        )
+    if _b2_tok_new_note:
+        return _finding(
+            "B2", UNKNOWN, "Cannot assess the gateway: " + _b2_tok_new_note, _b2_tok_new_fix
+        )
     if not cfg:
         return _finding(
             "B2",
@@ -3276,6 +4440,13 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
     concern, and is treated the same as no credential at all here. Only the
     credential's LENGTH is read; the value never reaches evidence, detail, fix, or a
     log (§8).
+
+    C-667: a well-formed SecretRef object at ``gateway.auth.token`` is a credential here
+    whatever its source and whatever the secret behind it is worth - this check measures
+    nothing about a reference (see `_gateway_config_token`), so it stays WARN for an
+    unthrottled exposed bind even in the one case B2 FAILs, a short value an ``env`` object's
+    variable has in the gateway's persistent environment. The same posture as for a ``${ID}``
+    string reference whose variable the config's own env block defines short.
     """
     unreadable = _config_unreadable("B80", ctx)
     if unreadable is not None:
@@ -3294,12 +4465,15 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     cfg = ctx.config
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    bind_host = parse_bind_host(bind_raw)
+    _b80_bind_is = "the bind is non-loopback" if not bind_unres else "the bind is a ${...} template"
     # Loopback is checked before mode/credential resolution: a loopback bind is not
     # exposed to remote brute-force regardless of auth mode, so it must never need an
     # env-credential read to resolve - that would manufacture a spurious UNKNOWN on the
-    # common, already-safe case.
-    if bind_host in LOOPBACK:
+    # common, already-safe case. An unresolved bind is not known to be loopback.
+    if bind_host in LOOPBACK and not bind_unres:
         return _finding(
             "B80",
             PASS,
@@ -3309,12 +4483,24 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
         )
     mode = dig(cfg, "gateway.auth.mode")
     cred_src = None
+    refused_bind = False
     if mode is None:
         # B-312 parity: config wins over environment (config-first, identical to B2)
         # - a config-supplied token is only ever superseded by looking at the
         # environment when NO config token exists at all.
-        _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, mode)
-        if _cfg_token is not None and _cfg_token_strong:
+        _cfg_token, _cfg_token_strong = _gateway_config_token(cfg, mode, ctx)
+        if _gateway_bind_preflight(ctx) == "refuses" and _gateway_refused_bind_shape(
+            cfg, ctx, mode_token=False
+        ):
+            # C-693 parity with B2: the one run shape on a build whose pre-flight was read ->
+            # the start is refused unless the environment supplies a token or password, the
+            # same state as `gateway.auth.mode: "token"` with no token (which reaches the WARN
+            # below). Whatever an unseen environment adds is a token or password too, so this
+            # no longer waits for env evidence it cannot get.
+            mode = "token"
+            cred_src = "a token or password the gateway's environment may supply"
+            refused_bind = True
+        elif _cfg_token is not None and _cfg_token_strong:
             mode = "token"
             cred_src = "a config-supplied gateway.auth.token"
         elif _cfg_token is None:
@@ -3332,7 +4518,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                 return _finding(
                     "B80",
                     UNKNOWN,
-                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    f"gateway.auth.mode is not set in config, {_b80_bind_is}, and no "
                     "usable environment-supplied gateway credential was found in the systemd "
                     "unit(s) or global dotenv file(s) that were read \u2014 but at least one of "
                     "them exceeded the collector's byte cap, so a credential past the cut "
@@ -3348,7 +4534,7 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
                 return _finding(
                     "B80",
                     UNKNOWN,
-                    "gateway.auth.mode is not set in config, the bind is non-loopback, and no "
+                    f"gateway.auth.mode is not set in config, {_b80_bind_is}, and no "
                     "systemd user unit or global dotenv file was readable to check for an "
                     "environment-supplied gateway credential \u2014 cannot determine whether the "
                     "auth endpoint is brute-forceable.",
@@ -3382,14 +4568,31 @@ def check_gateway_rate_limit(ctx: Context) -> Finding:
             "Gateway auth has rate limiting configured (gateway.auth.rateLimit).",
             "Keep gateway.auth.rateLimit aligned with the exposure of the gateway.",
         )
-    evidence = (
-        [f"gateway.auth.mode={mode!r}"]
-        if cred_src is None
-        else [
+    if bind_unres:
+        return _finding(
+            "B80",
+            UNKNOWN,
+            f"{bind_unres}; the gateway authenticates with a token/password and has no "
+            "gateway.auth.rateLimit, so it is brute-forceable if the bind is non-loopback.",
+            "Write gateway.bind literally in openclaw.json, or verify its value in the "
+            "gateway's environment; configure gateway.auth.rateLimit to make the bind "
+            "irrelevant.",
+            config_field_paths={"gateway.bind"},
+        )
+    if refused_bind:
+        mode_evidence = [
+            "gateway.auth.mode is not set in config; OpenClaw 2026.9.6 and later refuse to "
+            "start this gateway (a non-loopback bind needs a configured token or password) "
+            "unless an environment or start-up flag this audit cannot see supplies one"
+        ]
+    elif cred_src is None:
+        mode_evidence = [f"gateway.auth.mode={mode!r}"]
+    else:
+        mode_evidence = [
             f"gateway.auth.mode is not set in config, but {cred_src} authenticates the "
             "gateway"
         ]
-    ) + [
+    evidence = mode_evidence + [
         f"gateway.bind host={bind_host!r} (non-loopback)",
         "gateway.auth.rateLimit is not set",
     ]
@@ -3745,6 +4948,48 @@ def check_sandbox(ctx: Context) -> Finding:
             )
         return _finding("B4", UNKNOWN, "No exec tools and no sandbox config \u2014 not applicable.", "\u2014",
                         config_field_paths={"agents.defaults.sandbox.mode"})
+    if mode == "non-main":
+        # C-641: 'non-main' sandboxes only an agent's NON-main sessions; its own main
+        # session (where an operator usually works) runs exec tooling on the host
+        # (vendor shouldSandboxSession: sessionKey !== mainSessionKey). Say the config
+        # property, never "this session is unsandboxed" - which session is running has no
+        # static answer (B-712, toolpolicy._sandbox_confines -> None).
+        return _finding(
+            "B4",
+            WARN,
+            "agents.defaults.sandbox.mode is 'non-main': only an agent's non-main sessions "
+            "are sandboxed, so its own main session still runs exec tooling directly on the "
+            "host, allowing a prompt-injected message in that session to run commands with "
+            "host access.",
+            "Set agents.defaults.sandbox.mode to 'all' so the main session is sandboxed "
+            "too, and configure agents.defaults.sandbox.docker for network isolation. "
+            "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
+            "this WARN does not by itself open that chain.",
+            evidence=["agents.defaults.sandbox.mode=non-main"],
+            config_field_paths={"agents.defaults.sandbox.mode"},
+        )
+    non_main_agents = _peragent_non_main_agents(cfg)
+    if non_main_agents:
+        # C-641b: the defaults are not 'non-main' (that returned above), but a NAMED agent
+        # sets it for itself. That agent's own main session runs exec tooling on the host,
+        # so "Execution is sandboxed." would be the same lie one level down. A WARN, never a
+        # FAIL, and placed after every FAIL branch. Defaults unset/'off' are unchanged
+        # (they returned above); this fires when the defaults leave the agents inheriting
+        # a sandbox ('all'), which is the case the PASS below used to cover.
+        return _finding(
+            "B4",
+            WARN,
+            "one or more named agents override the sandbox mode with 'non-main' (see "
+            "evidence): that mode sandboxes only an agent's non-main sessions, so the "
+            "agent's own main session still runs exec tooling directly on the host, "
+            "allowing a prompt-injected message in that session to run commands with host "
+            "access.",
+            "Set sandbox.mode to 'all' on each agent named in the evidence, or remove that "
+            "per-agent sandbox.mode so the agent inherits agents.defaults.sandbox.mode. "
+            "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
+            "this WARN does not by itself open that chain.",
+            non_main_agents,
+        )
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
 
 
@@ -3763,6 +5008,8 @@ def check_sandbox(ctx: Context) -> Finding:
 #       Docker-compatible engine and never falls back to host execution."
 #     "nodeHost.workerRuns.containerImage": "Optional Node 24.16+ or 26.1+ image for
 #       container-isolated workers (default: \"node:24.19.0-slim\")."
+#     (verbatim as of 2026.9.5; the default image is NOT stable across releases -- see
+#     `_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD` below for the measured history.)
 #
 #   dist/zod-schema-DN2u5FdA.mjs:576-580 (the actual schema, `NodeHostWorkerRunsSchema`):
 #     enabled: boolean().optional()
@@ -3788,6 +5035,80 @@ def check_sandbox(ctx: Context) -> Finding:
 # on this host" previously had no line naming it at all. The WARN branch below fires only
 # once the feature is actually opted into (`enabled: true`); it is disclosure of a real,
 # active surface, not a complaint about a default nobody touched.
+# C-645 (2026-09-30): the vendor's DEFAULT container image is not a constant. MEASURED by
+# reading `DEFAULT_NODE_WORKER_CONTAINER_IMAGE` out of every release tarball in the local
+# npm cache (`npm pack openclaw@<ver> --offline`, streamed through `tar -xzO`, nothing
+# installed) and out of the installed 2026.9.7 dist. Builds read, and what each declares:
+#     2026.8.1  2026.8.2  2026.9.1  2026.9.2   node:22-slim   ("Optional Node 22+ image ...")
+#     2026.9.3  2026.9.4  2026.9.5  2026.9.6   node:24.19.0-slim
+#     2026.9.7  2026.9.8  2026.9.9  2026.10.1  2026.10.2  2026.10.3   node:24.21.0-slim
+#                          ("Optional Node 24.16+ or 26.1+ image ...")
+# (2026.9.8 was read out of the installed dist and 2026.9.9 out of its npm-cached release
+# tarball, on 2026-10-09; both declare the same constant and the same help text as 2026.9.7.
+# 2026.10.1 was read out of the installed dist on 2026-10-11:
+#   dist/startup-state-readiness-DmC3_8HF.mjs:4736
+#     const DEFAULT_NODE_WORKER_CONTAINER_IMAGE = "node:24.21.0-slim";
+#   dist/schema-wLxTLL31.mjs:909 -- same "Node 24.16+ or 26.1+" help text and same default,
+#     with a second sentence about digest-pinned/private-registry images (that sentence is
+#     not new in 2026.10.1: the 2026.9.9 release tarball's schema bundle carries it in the
+#     same "nodeHost.workerRuns.containerImage" description, read 2026-10-12); the `isolation`
+#     enum ("none"/"container"), its default and the `containerImage` schema
+#     (dist/zod-schema.root-support-B_04-6fB.mjs:147-152) are unchanged, and the worker
+#     still falls back to the constant only when no image is configured (:4951).
+# 2026.10.2 was read out of the installed dist on 2026-10-12 (bundle names rotated, claims
+# re-read there): dist/startup-state-readiness-Bt_Aiic9.mjs:4753 declares the same constant
+#   with the same value, and the fallback is still taken only when no image is configured
+#   (:4968); dist/schema-Bc7Xr5WK.mjs:909 carries the same help text; the `isolation` enum and
+#   the `containerImage` schema (dist/zod-schema.root-support-B_04-6fB.mjs:147-152) are
+#   unchanged.
+# 2026.10.3 was read out of its release tarball, byte-identical to the installed dist, on
+#   2026-10-14: dist/startup-state-readiness-BLk-8-KT.mjs:4753 declares the same constant with
+#   the same value, the fallback is still taken only when no image is configured (:4968),
+#   dist/schema-Ba9IyB8v.mjs:909 carries the same help text, and the `isolation` enum and the
+#   `containerImage` schema (dist/zod-schema.root-support-B_04-6fB.mjs:147-152) are unchanged.)
+# The literal `node:24.19.0-slim` this check used to print unconditionally was therefore
+# already wrong on 2026.8.1-2026.9.2 and became wrong again on 2026.9.7; it will drift again
+# every few releases. So the image is looked up by the INSTALLED build, EXACT match only:
+# a build nobody read -- an unknown or pre-release version, a release between two measured
+# ones, one before the feature shipped (2026.8.1) or newer than the last row -- gets NO
+# literal at all, because naming an image for it would state a fact about a build we did
+# not see (Golden Rule #4). Extending the table is one row per re-baseline;
+# `tests/test_b391_nodehost_workerruns_isolation.py` re-asks the installed dist (local-only)
+# so a new default is caught then instead of being printed stale.
+_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
+    (2026, 8, 1): "node:22-slim",
+    (2026, 8, 2): "node:22-slim",
+    (2026, 9, 1): "node:22-slim",
+    (2026, 9, 2): "node:22-slim",
+    (2026, 9, 3): "node:24.19.0-slim",
+    (2026, 9, 4): "node:24.19.0-slim",
+    (2026, 9, 5): "node:24.19.0-slim",
+    (2026, 9, 6): "node:24.19.0-slim",
+    (2026, 9, 7): "node:24.21.0-slim",
+    (2026, 9, 8): "node:24.21.0-slim",
+    (2026, 9, 9): "node:24.21.0-slim",
+    (2026, 10, 1): "node:24.21.0-slim",
+    (2026, 10, 2): "node:24.21.0-slim",
+    (2026, 10, 3): "node:24.21.0-slim",
+}
+
+
+def _node_worker_default_image(ctx: Context) -> "str | None":
+    """The vendor's default worker container image for the INSTALLED build, or ``None``.
+
+    ``None`` -- never a guess -- unless the installed build is EXACTLY one whose default was
+    read (``_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD``): an unknown or unorderable version, a
+    pre-release, a build between two measured ones, or one newer than the table all return
+    ``None``. Reads ONLY ``ctx.installed_dist_version``: the default is resolved by the
+    build that starts the worker, not by the build that last saved the config, so
+    ``meta.lastTouchedVersion`` is deliberately not consulted.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is None:
+        return None
+    return _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD.get(installed)
+
+
 def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
     """B391 - nodeHost.workerRuns execution-isolation disclosure, beside B4 (sandbox).
 
@@ -3827,20 +5148,31 @@ def check_nodehost_workerruns_isolation(ctx: Context) -> Finding:
             "B391",
             PASS,
             "nodeHost.workerRuns.enabled is not set to true (the vendor default), so "
-            "this node does not host worker sessions dispatched by a paired Gateway \u2014 "
-            "the isolation setting is moot.",
+            "this config does not enable hosting of worker sessions dispatched by a "
+            "paired Gateway \u2014 the isolation setting is moot unless the node process "
+            "is started with --session-host or --ephemeral, which a config-only audit "
+            "cannot see.",
             "No action needed unless you intend this node to host sessions for other "
-            "nodes; if you do enable it, review nodeHost.workerRuns.isolation first.",
+            "nodes; if you do enable it, review nodeHost.workerRuns.isolation first. "
+            "If this host runs 'openclaw node run' or 'openclaw connect' yourself, check "
+            "that its command line (or the node service unit) carries neither "
+            "--session-host nor --ephemeral.",
             config_field_paths={"nodeHost.workerRuns.enabled"},
         )
     isolation = dig(cfg, "nodeHost.workerRuns.isolation")
     if isolation == "container":
         container_image = dig(cfg, "nodeHost.workerRuns.containerImage")
-        image = (
-            container_image
-            if isinstance(container_image, str) and container_image.strip()
-            else "node:24.19.0-slim (vendor default)"
-        )
+        if isinstance(container_image, str) and container_image.strip():
+            image = container_image
+        else:
+            # C-645: the default is per build (see `_NODE_WORKER_DEFAULT_IMAGE_BY_BUILD`), so it is
+            # named only when the installed build's default was measured.
+            default_image = _node_worker_default_image(ctx)
+            image = (
+                f"{default_image} (vendor default on OpenClaw {ctx.installed_dist_version})"
+                if default_image
+                else "OpenClaw's own default image for the installed build"
+            )
         return _finding(
             "B391",
             PASS,
@@ -3999,10 +5331,67 @@ def check_secrets(ctx: Context) -> Finding:
     ev = []
     # gateway.auth.password / hooks.token in config are flagged by the native audit too
     # (gateway.password top-level does not exist; password lives at gateway.auth.password)
-    if dig(cfg, "gateway.auth.password"):
-        ev.append("gateway.auth.password set in config")
-    if dig(cfg, "hooks.token"):
-        ev.append("hooks.token set in config")
+    #
+    # C-646: "set in config" is a claim that a PLAINTEXT credential sits in the file, so a
+    # SecretRef (`${GW_PW}`, `${GW_PW:-}`, `$GW_PW`, or the `{source, provider, id}` object)
+    # must not raise it - a reference is exactly the remedy this check recommends. Any
+    # non-empty value that is not a whole-value reference still does, at any length, so a
+    # look-alike never reads as a reference (see `_credential_is_plaintext`). The two paths
+    # differ in vendor type: `gateway.auth.password` is a SecretInput, `hooks.token` a
+    # plain string that only `${...}` env substitution can point elsewhere.
+    #
+    # C-646 (C-135 round 2): a reference is NOT clean when this same config defines the
+    # variable it names in plaintext (`env.vars.GW_PW` / flat `env.GW_PW` - OpenClaw applies
+    # the config's env block before `${...}` substitution), so `cfg` is passed and the
+    # detail text stays the base wording (`.clawseccheckignore` fingerprints hash `detail`);
+    # the explanation goes in `fix`.
+    #
+    # C-646 (C-135 round 2): the retired `secretref-env:NAME` / `__env__:NAME` string markers
+    # are NOT references at runtime (2026.9.7 `types.secrets-*.mjs`: "parsed only by doctor
+    # migration"; `auth-resolve-*.mjs` then uses the marker text itself as the password), so
+    # they keep the base FAIL on both paths; the `fix` says why, since a reader who wrote
+    # one believes it is a SecretRef. Only `detail` is fingerprinted, so the hint is free.
+    _b1_via_env_block = False
+    _b1_retired_marker = False
+    # C-646: the PLAIN whole-value `${NAME}` reference at `hooks.token`, exactly as
+    # configured (trimmed); the empty-fallback `${NAME:-}` form is not recorded here.
+    _b1_hooks_plain_ref: "str | None" = None
+    # C-646 (build gate): a whole-value EMPTY-fallback `${NAME:-}` at either path is a
+    # reference only on an OpenClaw that understands the `:-` operator (2026.9.7+). On an
+    # older build the text is passed through verbatim and IS the credential. The shape
+    # predicates stay build-independent (they ask "is a secret held in the file"); this is
+    # the one place the build decides, via `_env_default_operator`: "yes" is today's
+    # reference reading (PASS, nothing recorded), "no" is the plaintext FAIL with the SAME
+    # detail (fingerprint-stable; the build note goes in `fix`), "unknown" is an UNKNOWN
+    # (below) unless something in B1 FAILs, which always wins.
+    _b1_no_default_op = False
+    _b1_ef_unknown: "list[tuple[str, str]]" = []
+    for _b1_path, _b1_secret_input, _b1_label in (
+        ("gateway.auth.password", True, "gateway.auth.password set in config"),
+        ("hooks.token", False, "hooks.token set in config"),
+    ):
+        _b1_val = dig(cfg, _b1_path)
+        # the whole-value empty-fallback template as configured, or None
+        _b1_ef_ref = _empty_fallback_template(_b1_val, secret_input=_b1_secret_input)
+        _b1_ef_build = _env_default_operator(ctx) if _b1_ef_ref is not None else "yes"
+        if _b1_ef_build == "no":
+            _b1_no_default_op = True
+        if _credential_is_plaintext(_b1_val, secret_input=_b1_secret_input, cfg=cfg):
+            ev.append(_b1_label)
+            if not _credential_is_plaintext(_b1_val, secret_input=_b1_secret_input):
+                _b1_via_env_block = True
+            elif isinstance(_b1_val, str) and _b1_val.strip().startswith(
+                ("secretref-env:", "__env__:")
+            ):
+                _b1_retired_marker = True
+        elif _b1_ef_build == "no":
+            ev.append(_b1_label)
+        elif _b1_ef_build == "unknown":
+            _b1_ef_unknown.append((_b1_path, _b1_ef_ref))
+        elif not _b1_secret_input and isinstance(_b1_val, str):
+            for _b1_name in _reference_env_names(_b1_val, secret_input=False):
+                if "${" + _b1_name + "}" in _b1_val:  # the plain form: no `:-` operator
+                    _b1_hooks_plain_ref = "${" + _b1_name + "}"
     # secrets anywhere in the config are only a real risk if the file is readable by others
     secret_paths = _secret_paths(cfg)
     if secret_paths and _perms_loose(ctx):
@@ -4021,15 +5410,31 @@ def check_secrets(ctx: Context) -> Finding:
         # resolved) so the copy-pasted chmod acts on the config this run diagnosed,
         # not a different home on a machine that has several.
         _b1_cfg = ctx.config_path or (ctx.home / "openclaw.json")
-        return _finding(
-            "B1",
-            FAIL,
-            "; ".join(ev),
+        _b1_fix = (
             "Move secrets to `openclaw secrets configure` / env vars, never into "
             f"bootstrap files; `chmod 600 {_b1_cfg}` and `chmod 700 {ctx.home}` so "
-            "config-stored tokens are not readable by others.",
-            ev,
+            "config-stored tokens are not readable by others."
         )
+        if _b1_via_env_block:
+            _b1_fix += (
+                " A ${NAME} reference does not help while openclaw.json's own env block "
+                "(env.vars.NAME or env.NAME) holds that value in plaintext - remove the "
+                "entry and supply NAME from the gateway's own environment instead."
+            )
+        if _b1_retired_marker:
+            _b1_fix += (
+                " A secretref-env: / __env__: string is a retired marker that OpenClaw "
+                "2026.9.7 reads as the literal value, not a reference (only its doctor "
+                "migration rewrites it) - replace it with ${NAME} or, for "
+                "gateway.auth.password, a {source, provider, id} SecretRef object."
+            )
+        if _b1_no_default_op:
+            _b1_fix += (
+                " This OpenClaw build does not understand the ${NAME:-} fallback form, "
+                "which OpenClaw 2026.9.7 introduced, so it uses the text itself as the "
+                "credential."
+            )
+        return _finding("B1", FAIL, "; ".join(ev), _b1_fix, ev)
     # B-228: openclaw.json present but unparseable/unreadable - bootstrap-file secrets
     # (checked above, config-independent) still legitimately FAILed if present, but a
     # clean verdict at this point is only trustworthy if the config itself was actually
@@ -4076,6 +5481,68 @@ def check_secrets(ctx: Context) -> Finding:
             "Run the audit on the host where ~/.openclaw lives.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
+    # C-646 (C-135 rounds 3-4): `hooks.token` is a PLAIN string in the vendor schema, and
+    # OpenClaw 2026.9.7 leaves a `${NAME}` whose variable is UNSET or empty in the gateway's
+    # environment as its own literal text (`resolveConfigForRead` passes an `onMissing` that
+    # only warns, `io.read-helpers-*.mjs`; `substituteString` keeps the token,
+    # `redact-*.mjs`; `resolveHooksConfig` reads `cfg.hooks.token` verbatim with no
+    # unresolved-path gate, `hooks-*.mjs` - the vendor's own audit DOES gate on that fact,
+    # `audit.nondeep.runtime-*.mjs`). The text `${NAME}` is then the live bearer token: a
+    # public, guessable string, and nothing else in this audit flags it. (`gateway.auth.
+    # password` is not affected: a whole-value reference there is parsed as a SecretRef
+    # and fails closed.)
+    #
+    # THE RULE: a whole-value PLAIN `${NAME}` at `hooks.token` (no fallback operator) with
+    # no other B1 FAIL is UNKNOWN, always - not PASS (the token may be a literal) and not
+    # FAIL (nothing proves it is). There is no environment lookup of any kind, and the
+    # answer is the same whether `hooks.enabled` is true, false or absent: whether NAME is
+    # set is a fact about the environment of the GATEWAY PROCESS, which a static scan
+    # cannot see. An evidence model over systemd unit and dotenv files was tried (round 3)
+    # and retracted (round 4 found six ways to read a file as defining the variable while
+    # the literal was still the live token): enumerating the ways a file can "define" a
+    # variable is a list that failed once per surface it forgot. The EMPTY-FALLBACK form
+    # `${NAME:-}` is a reference (PASS) on 2026.9.7 and later: measured there, an unset variable then
+    # substitutes to the empty string and `resolveHooksConfig` throws "hooks.enabled
+    # requires hooks.token", so no literal token ever exists. A FAIL anywhere in B1 (this
+    # point is reached only with `ev` empty) wins over this UNKNOWN. The disclosure lives
+    # in `fix`, never `detail` (`baseline.fingerprint()` hashes `detail`).
+    #
+    # C-646 (build gate): a whole-value EMPTY-fallback `${NAME:-}` at either credential
+    # path, with the installed build undeterminable (`_env_default_operator` == "unknown"),
+    # is UNKNOWN the same way: 2026.9.7 and later read it as an environment reference, an
+    # earlier build uses the text itself as the credential. When the plain `hooks.token`
+    # UNKNOWN also applies, ONE finding names both; the single-cause texts are unchanged.
+    if _b1_hooks_plain_ref is not None or _b1_ef_unknown:
+        _b1_details = []
+        _b1_fixes = []
+        if _b1_hooks_plain_ref is not None:
+            _b1_nm = _b1_hooks_plain_ref[2:-1]
+            _b1_details.append(
+                "hooks.token is the reference " + _b1_hooks_plain_ref + ", and this audit "
+                "cannot see the environment the gateway runs with, so it cannot confirm "
+                "that the variable is set."
+            )
+            _b1_fixes.append(
+                "Confirm " + _b1_nm + " is set to a non-empty value in the environment the "
+                "gateway process runs with. On OpenClaw 2026.9.7, when hooks are enabled and "
+                "the variable is unset or empty, the gateway logs a warning and uses the "
+                "reference text itself as the hooks bearer token. Writing the empty-fallback "
+                "form ${" + _b1_nm + ":-} instead makes OpenClaw 2026.9.7 refuse to enable "
+                "hooks when the variable is unset, rather than fall back to the literal text."
+            )
+        if _b1_ef_unknown:
+            _b1_details.append(
+                " and ".join(p + " is the reference " + r for p, r in _b1_ef_unknown)
+                + ", and the installed OpenClaw build could not be determined, so this "
+                "audit cannot tell whether that form is read as an environment reference."
+            )
+            _b1_fixes.append(
+                "OpenClaw 2026.9.7 and later read the ${NAME:-} form as an environment "
+                "reference; earlier builds do not understand it and use the text itself as "
+                "the credential. Run the audit where the installed openclaw can be found, "
+                "so the build is known."
+            )
+        return _finding("B1", UNKNOWN, " ".join(_b1_details), " ".join(_b1_fixes))
     note = ""
     pc = "verified"
     if secret_paths:
@@ -4101,8 +5568,18 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
     capped: list = []
     unreadable_skip_roots: list = []
     unreadable_dirs: list = []
-    candidates = _c015_candidate_files(ctx, capped, unreadable_skip_roots, unreadable_dirs)
+    unreached: list = []
+    candidates = _c015_candidate_files(
+        ctx, capped, unreadable_skip_roots, unreadable_dirs, unreached
+    )
     scan_capped = bool(capped)
+    # C-700: which top-level dirs the stopped pass did not finish. Goes in `fix`, never in
+    # `detail` - baseline.fingerprint() hashes `detail`, and the cap sentence there is unchanged.
+    unreached_note = (
+        " Not fully covered by this scan: " + ", ".join(dict.fromkeys(unreached)) + "."
+        if scan_capped and unreached
+        else ""
+    )
     gap_count = len(unreadable_dirs)
     if not candidates:
         return _finding(
@@ -4113,16 +5590,31 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
         )
 
     hits = []
+    unread_files: list[str] = []  # C-727: in scope, present, and not readable
     for path in candidates:
         try:
             if path.stat().st_size > _C015_MAX_BYTES:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            unread_files.append(_detail_path(path, ctx.home))
             continue
         if _c015_is_generated_plugin_model_catalog(path.parts, text):
             continue
-        if _c015_has_secret(text):
+        # C-688/C-691: the config file is also read as a PARSED document - a vendor-sensitive
+        # slot the text patterns cannot place (TLS key, auth value, env/header maps), and the
+        # managed GitHub profile id (`ghp_` + 32 hex at `tools.github.profileId`), which is a
+        # directory name, not a token, and is removed from the text before the scan.
+        _c015_is_cfg = path == (ctx.config_path or (ctx.home / "openclaw.json"))
+        if _c015_is_cfg:
+            text_scanned = _c015_text_without_managed_github_ids(text, ctx.config)
+        else:
+            text_scanned = text
+        if (
+            _c015_has_secret(text_scanned)
+            or _c015_md_credential_list_hit(text_scanned)
+            or (_c015_is_cfg and _vendor_secret_slot_paths(ctx.config))
+        ):
             try:
                 rel = path.relative_to(ctx.home)
             except ValueError:
@@ -4183,7 +5675,8 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             "C015",
             WARN,
             detail,
-            "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens.",
+            "Move plaintext secrets into `openclaw secrets configure` or narrowly-scoped environment variables, and keep bootstrap/config files free of inline tokens."
+            f"{unreached_note}",
             evidence=shown,
         )
 
@@ -4208,6 +5701,26 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             "Run as a user that can traverse the listed path(s), or fix their "
             "permissions, then re-run.",
         )
+
+    # C-727: a file the scan was meant to read and could not is a coverage gap of the same
+    # kind (cf. B176 "present but unreadable - cannot evaluate"); a WARN above stands. The
+    # `detail` of every other outcome is unchanged; this one only exists for such a home.
+    unread_fix = ""
+    if unread_files:
+        shown = ", ".join(unread_files[:6]) + (
+            f" (+{len(unread_files) - 6} more)" if len(unread_files) > 6 else "")
+        unread_fix = (f" {len(unread_files)} file(s) in scope could not be read ({shown}); "
+                      "make them readable by the user running this audit and re-run.")
+        if not (scan_capped or gap_count):
+            return _finding(
+                "C015",
+                UNKNOWN,
+                f"Scanned {len(candidates) - len(unread_files)} home file(s), but "
+                f"{len(unread_files)} file(s) in scope could not be read ({shown}) \u2014 no "
+                "plaintext secret-shaped values in what was scanned, but coverage is incomplete.",
+                "Make the listed file(s) readable by the user running this audit (check their "
+                "permissions, or run the audit as the account that owns them), then re-run.",
+            )
 
     if scan_capped or gap_count:
         # GR#4/B-228 family: a coverage gap must never roll up to a confident "scanned
@@ -4238,14 +5751,19 @@ def check_secrets_at_rest_home(ctx: Context) -> Finding:
             f"Scanned {len(candidates)} home file(s); the scan " + " and ".join(reasons)
             + " before the home was fully covered \u2014 no plaintext secret-shaped values in"
             " what was scanned, but coverage is incomplete.",
-            "Re-run against a narrower home, or manually review any credentials/, "
-            "identity/, devices/, and workspace/ content not covered by this scan."
+            "Re-run against a narrower home, or manually review "
+            + (
+                f"the part of the home this scan did not reach.{unreached_note}"
+                if unreached_note
+                else "any credentials/, identity/, devices/, and workspace/ content not "
+                "covered by this scan."
+            )
             + (
                 " A skipped subdirectory is normally owned by you \u2014 chmod it back to a"
                 " searchable mode and re-run to cover it."
                 if gap_count
                 else ""
-            ),
+            ) + unread_fix,
         )
     return _finding(
         "C015",
@@ -4405,14 +5923,22 @@ def check_redactor_blind_secret_paths(ctx: Context) -> Finding:
         "Move the value to `openclaw secrets configure` (a SecretRef indirection), "
         "or to a path OpenClaw's redactor does recognize (a key name containing "
         "password/secret/token/apiKey) \u2014 never a bare Authorization/bearer/key field "
-        "or a plural token array.",
+        "or a plural token array. Scope of the sentence above, per key (measured by "
+        "executing OpenClaw 2026.10.2's structured-field log redactor): config-get output "
+        "masks none of these paths; in trajectory and other structured logs a bare "
+        "Authorization or key field IS masked, like a token field, but only down to its "
+        "first six and last four characters, while a bearer field and a plural token "
+        "array are left in clear, and a plain `key=...` text line is not masked at all. "
+        "Whether a relayed message channel masks any of them was not verified.",
         evidence=paths,
     )
 
 
 def check_tls(ctx: Context) -> Finding:
     cfg = ctx.config
-    bind = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    bind = parse_bind_host(bind_raw)
     # Real path: gateway.tls.enabled (bool, default false)
     # gateway.tls as a bare boolean and gateway.https do NOT exist in OpenClaw schema
     tls = dig(cfg, "gateway.tls.enabled")
@@ -4425,6 +5951,8 @@ def check_tls(ctx: Context) -> Finding:
         ev.append(
             f"openclaw.json is group/world-readable ({oct(ctx.config_mode)[-3:]}) \u2014 at-rest risk"
         )
+    if ev and bind_unres and not tls:
+        ev.append(f"{bind_unres}; the transport leg was not evaluated")
     if ev:
         # B-759: see B1's own comment above - named against the audited home, not a
         # hardcoded `~/.openclaw`.
@@ -4483,6 +6011,15 @@ def check_tls(ctx: Context) -> Finding:
             "could not be determined.",
             "Run the audit on the host where ~/.openclaw lives.",
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    if bind_unres and not tls:
+        return _finding(
+            "B11",
+            UNKNOWN,
+            f"{bind_unres}, so whether the gateway binds beyond loopback is unknown.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment, so the transport can be assessed.",
+            config_field_paths={"gateway.bind"},
         )
     return _finding(
         "B11",
@@ -4692,6 +6229,29 @@ def check_trifecta(ctx: Context) -> Finding:
             and agent_auth_store_length is not None
             and agent_auth_store_length > _AUTH_PROFILE_STORE_EMPTY_BYTES
         )
+        # ACCEPTED (B-845 item 4, Dave, 2026-09-30): the two database-store hedges above
+        # (`auth_store_present`, `agent_auth_store_present`) deliberately do NOT consult
+        # `reach` or read-confinement. A1 therefore stays WARN on a CONFINED config
+        # (tools.fs.workspaceOnly=true) whenever any auth-profile store holds more than
+        # the empty shell - even a keyRef-only store with no secret at rest. Why:
+        #   1. The on-disk path raises the leg from credential CONTENT with no
+        #      confinement test (`_trifecta_leg_sources`, checks/_shared.py). Gating the
+        #      database hedges on `reach` would make the two credential locations
+        #      disagree about the same secret.
+        #   2. tools.fs.workspaceOnly confines the FILE tools only. It does not prove the
+        #      credentials are unreachable (an exec or browser tool can still read the
+        #      database).
+        #   3. Gating on `reach` would restore a clean PASS with the leg OFF on every
+        #      confined config, which is exactly the B-749 defect this hedge exists to
+        #      remove.
+        # Known cost: a near-permanent A1 WARN on confined configs that hold any provider
+        # profile. Measured once (n=1): the fleet machine, shared store 2123 bytes on a
+        # confined config; the fleet-wide rate is unmeasured. Resolution paths: attest the
+        # tool inventory (`_capabilities_attested`, silences this whole hedge), or a
+        # .clawseccheckignore entry. No verdict change; pinned by
+        # `test_the_hedge_fires_on_a_confined_config_by_design` in
+        # tests/test_b749_auth_profile_store_presence.py, so honouring `reach` later has
+        # to be a deliberate decision (it would need a C-135 pass and the fleet FP gate).
         # B-845 (round 3, 2026-09-23): a C-135 review found the capped flag was read
         # ONLY inside the `agent_auth_store_present` sentence below -- so a home with
         # MORE agent databases than the sweep's own cap allows, where none of the
@@ -4870,12 +6430,27 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
             # NOT mean the surface is off.)
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
-    if mode == "trusted-proxy" and bind_host not in LOOPBACK:
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    bind_host = parse_bind_host(bind_raw)
+
+    def _b70_unknown(what: str) -> Finding:
+        return _finding(
+            "B70",
+            UNKNOWN,
+            f"{bind_unres}, so whether {what} is unknown.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment.",
+            config_field_paths={"gateway.bind"},
+        )
+
+    if mode == "trusted-proxy" and (bind_unres or bind_host not in LOOPBACK):
         required_headers = dig(cfg, "gateway.auth.trustedProxy.requiredHeaders")
         allow_users = dig(cfg, "gateway.auth.trustedProxy.allowUsers")
         trusted_proxies_ok = _trusted_proxies_ok(dig(cfg, "gateway.trustedProxies"))
         if not required_headers and not allow_users and not trusted_proxies_ok:
+            if bind_unres:
+                return _b70_unknown("the trusted-proxy identity header is spoofable by a direct caller")
             user_header = dig(cfg, "gateway.auth.trustedProxy.userHeader") or "x-forwarded-user"
             # B-315: was FAIL. B70 belongs to the B68-B73 block, whose catalog comment
             # documents the group as "WARN-only ... zero false-positive FAILs on real
@@ -4901,7 +6476,9 @@ def check_trustedproxy_loopback(ctx: Context) -> Finding:
                     "gateway.trustedProxies not set",
                 ],
             )
-    if allow_loopback is True and bind_host not in LOOPBACK:
+    if allow_loopback is True and (bind_unres or bind_host not in LOOPBACK):
+        if bind_unres:
+            return _b70_unknown("the trusted-proxy header can be forged")
         return _finding(
             "B70",
             WARN,
@@ -5337,7 +6914,19 @@ def check_effective_bind(ctx: Context) -> Finding:
             "Fix `gateway` to be a config object, or remove the key.",
         )
 
-    bind_raw = dig(cfg, "gateway.bind", "")
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host
+    # to look up a socket for); a resolved one is read exactly as the literal it stands for.
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    if bind_unres:
+        return _finding(
+            "B340",
+            UNKNOWN,
+            f"{bind_unres} \u2014 nothing to corroborate against the actual listening socket.",
+            "Write gateway.bind literally in openclaw.json, or verify its value in the "
+            "gateway's environment, so this check can state what is actually declared.",
+            config_field_paths={"gateway.bind"},
+        )
+    cfg = _cfg_with_bind(cfg, bind_raw)
     declared_class = _declared_bind_class(cfg)
     if declared_class == "ambiguous":
         return _finding(
@@ -5955,7 +7544,7 @@ def check_desktop_host_password_file(ctx: Context) -> Finding:
         )
     pw_path = Path(raw_path)
     try:
-        exists = pw_path.is_file()
+        exists = pathprobe.is_file(pw_path)
     except OSError:
         exists = False
     if not exists:
@@ -6322,7 +7911,7 @@ def check_shell_env_fallback(ctx: Context) -> Finding:
     )
 
 
-def _b323_is_literal_path_override(key: object, value: object) -> bool:
+def _b323_is_literal_path_override(key: object, value: object, default_operator: bool = False) -> bool:
     """True if *key* normalizes to PATH and *value* is a literal, non-empty string.
 
     "Literal" excludes a value containing a genuine, unresolved ``${ALL_CAPS}``
@@ -6339,7 +7928,7 @@ def _b323_is_literal_path_override(key: object, value: object) -> bool:
         return False
     if not isinstance(value, str) or not value.strip():
         return False
-    return not _b323_contains_env_var_reference(value)
+    return not _b323_contains_env_var_reference(value, default_operator)
 
 
 def check_env_vars_path_override(ctx: Context) -> Finding:
@@ -6401,16 +7990,19 @@ def check_env_vars_path_override(ctx: Context) -> Finding:
 
     env_cfg = ctx.config.get("env") if isinstance(ctx.config, dict) else None
     hits: "list[str]" = []
+    # C-691: `${NAME:-default}` is a reference only on a build that understands the `:-`
+    # operator (2026.9.7+); on an older or undetermined build it is a literal value.
+    _b323_default_op = _env_default_operator(ctx) == "yes"
     if isinstance(env_cfg, dict):
         vars_block = env_cfg.get("vars")
         if isinstance(vars_block, dict):
             for key, value in vars_block.items():
-                if _b323_is_literal_path_override(key, value):
+                if _b323_is_literal_path_override(key, value, _b323_default_op):
                     hits.append(f"env.vars.{key}={value!r}")
         for key, value in env_cfg.items():
             if key in ("shellEnv", "vars"):
                 continue
-            if _b323_is_literal_path_override(key, value):
+            if _b323_is_literal_path_override(key, value, _b323_default_op):
                 hits.append(f"env.{key}={value!r}")
 
     if hits:
@@ -6445,76 +8037,189 @@ def check_env_vars_path_override(ctx: Context) -> Finding:
 _B350_ABSENT = object()
 
 
+# Advice for BOTH B350 WARN branches. It lives in `fix`, never `detail`: `detail` is hashed
+# by baseline.fingerprint() and this text is free to improve.
+_B350_WARN_FIX = (
+    "Set gateway.terminal.enabled to false unless an operator shell is genuinely "
+    "needed - on OpenClaw 2026.8.1 and later the terminal is ON unless the key is "
+    "explicitly false. It is offered to admin-scope clients only. If it is needed, keep "
+    "the gateway on loopback (or behind your own authenticated tunnel) and confirm the "
+    "agents it can target run with sandbox.mode 'all' - OpenClaw refuses the terminal for "
+    "fully-sandboxed agents, which is the one mitigation this audit cannot verify for you. "
+    "Limit: this check does not read gateway.mode, so on a client-only host "
+    "(gateway.mode 'remote') that serves no terminal itself the finding over-reports; "
+    "setting the key to false clears it either way."
+)
+
+
+def _b350_reach_and_shell(
+    cfg: dict, unset_bind_unresolved: bool = False, ctx=None
+) -> "tuple[str, str]":
+    """The two sentences both B350 WARN branches (explicit true, and unset on a default-ON
+    build) are built from: how far the shell reaches, and which interpreter it launches.
+
+    One helper so the branches cannot drift apart. The explicit-true detail is hashed by
+    ``baseline.fingerprint()``, so these strings must stay byte-identical to what that
+    branch always emitted - including its long-standing reading of an UNSET bind as
+    loopback (``LOOPBACK`` contains ``""``). ``unset_bind_unresolved`` is the default-ON
+    branch's opt-out from that reading: there the whole surface is present only because of a
+    vendor default, and the schema help for ``gateway.bind`` does not state what an unset
+    bind means, so an unset bind is described as "cannot be resolved" (the over-reporting
+    direction) rather than as a proven loopback.
+    """
+    # C-653: a templated bind is resolved by the one shared rule or is not established.
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    cfg = _cfg_with_bind(cfg, bind_raw) if not bind_unres else cfg
+    bind_host = parse_bind_host(bind_raw)
+    if bind_unres:
+        reach = f"{bind_unres}, so whether the shell is reachable off-host is not established here"
+    elif bind_host in LOOPBACK and not (unset_bind_unresolved and bind_host == ""):
+        reach = (
+            "the gateway is bound to loopback, so the shell is reachable only from this "
+            "host"
+        )
+    else:
+        reason = _gateway_remote_exposure_reason(cfg)
+        if reason:
+            reach = f"the gateway is reachable beyond loopback ({reason}), so the shell is too"
+        else:
+            reach = (
+                "the gateway bind cannot be resolved from config alone, so whether the "
+                "shell is reachable off-host is not established here"
+            )
+
+    shell = dig(cfg, "gateway.terminal.shell")
+    which = (
+        f"it launches the pinned interpreter {shell!r}"
+        if isinstance(shell, str) and shell.strip()
+        else "it launches the host login shell ($SHELL), since gateway.terminal.shell is unset"
+    )
+    return reach, which
+
+
 def check_gateway_operator_terminal(ctx: Context) -> Finding:
     """B350 - the operator terminal: a PTY-backed shell served to Control UI and mobile.
 
-    Grounded against the INSTALLED dist (openclaw@2026.7.1-2), not the recon, and
-    independently re-verified against the RUNTIME rather than the schema alone.
+    Grounded against the INSTALLED dist (openclaw@2026.9.7, 2026-09-30), the cached npm
+    tarballs of twenty releases (2026.6.9 - 2026.9.7), and an executed node call on the vendor's own
+    gate function - not the recon, and not memory. Re-read on the installed openclaw@2026.9.8
+    and on the 2026.9.9 release package on 2026-10-09 (code read; the node call was not
+    repeated): the gate function is the same file and its readers sit where cited below.
 
     SHAPE. ``gateway.terminal`` is ``{enabled?: boolean, shell?: string,
-    detachedSessionTimeoutSeconds?: number}`` - object only, ``$strict``, with no boolean
-    shorthand (plugin-sdk/config-schema.d.ts:4499-4503, and the runtime zod builder at
-    zod-schema-O9ml_nmo.js:1365-1369, which wraps no ``union([boolean(), object()])``).
-    That is the OPPOSITE of ``tools.codeMode``, which really is boolean-or-object, so the
-    two must not be read with the same helper.
+    detachedSessionTimeoutSeconds?: number}`` - a ``strictObject`` with no boolean
+    shorthand (2026.9.8: ``zod-schema-b5tlDVBo.mjs:1055-1069``; 2026.7.1-2:
+    plugin-sdk/config-schema.d.ts:4499-4503). That is the OPPOSITE of ``tools.codeMode``,
+    which really is boolean-or-object, so the two must not be read with the same helper.
 
-    DEFAULT. There is no zod ``.default(false)`` - ``enabled`` is a bare
-    ``boolean().optional()``. The false default is FUNCTIONAL, enforced by strict equality
-    at three independent runtime sites: launch-BmPwk1y9.js:103, launch-BmPwk1y9.js:154 and
-    server.impl-qYPVZMND.js:1002 all test ``=== true``. That is why this check tests
-    ``is not True`` rather than truthiness: it matches the vendor's own gate exactly, so a
-    truthy non-bool is not "on" here for the same reason it is not "on" there.
+    DEFAULT - BUILD-DEPENDENT (C-640). An UNSET ``enabled`` is OFF on the older releases
+    and ON on the newer ones; the two gates, verbatim:
 
-    NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the 4,896-line declaration,
-    under top-level ``gateway`` - absent from ``agents``, ``agents.list``,
-    ``agents.profiles`` and ``presets``, and read at runtime from the single source
-    ``config.gateway?.terminal`` (launch-BmPwk1y9.js:88-107). The contrast is the evidence
-    that this is deliberate rather than an omission: ``codeMode`` IS defined both
-    top-level and per-agent, so the schema author wires per-agent overrides where they are
-    intended and did not here.
+      2026.7.1, 7.1-2, 7.33-7.35: launch-*.js:109,120 ``enabled !== true`` and :154
+          ``=== true``; server.impl-*.js:1002 and control-ui-*.js:699 ``=== true``;
+          schema help "when true (default: false)". Unset = OFF.
+      2026.8.1, 8.2, 9.1 - 9.9: ``enabled-BSjeiWpO.mjs:3`` (the same file in 9.7, 9.8, 9.9)
+          ``config?.gateway?.terminal?.enabled !== false``. The gateway's readers go
+          through that one function (2026.9.8: ``control-ui-Dep1rXpY.mjs:773``,
+          ``server-start-BkBmUb8t.mjs:7322``, ``launch-DWYZq3xK.mjs:101,112``); one more
+          reader, the Anthropic session-catalog registration
+          (``session-catalog-registration-D3EOZX8C.mjs:94``), inlines the same ``!== false``
+          predicate. Schema help ``schema-NqC6_AOV.mjs:425`` "(default: true) ... set false
+          to opt out". Unset = ON. (9.8 read from the installed dist and 9.9 from its
+          release package on 2026-10-09: same code at the same lines.)
+      2026.6.9 - 6.34: no ``gateway.terminal`` string anywhere in dist (feature absent).
+
+    Executed, not just read: node on the 9.7 ``isTerminalConfigEnabled`` returns true for
+    undefined, ``{}``, ``{gateway: {}}``, ``{gateway: {terminal: {}}}``, ``enabled: true``,
+    ``enabled: "false"`` (a string), ``enabled: null`` and ``terminal: false`` (a bare
+    boolean), and false ONLY for a real boolean ``enabled: false``. That is why this check
+    reads ``enabled`` as ``is False`` / ``is True`` and treats every other value, including
+    a non-bool, as UNSET: it matches the vendor's own gate on both sides.
+
+    WHICH BUILD FLIPPED IT: not attributable. The flip lies in (2026.7.35, 2026.8.1]. The
+    releases strictly between them (2026.7.36 and later, any 2026.8.0) were never cached, so
+    the exact build is UNMEASURED, and the 2026.8.1 CHANGELOG has no line announcing a
+    default change (only "Shared conversation terminals" / "Native catalog terminals"
+    feature bullets). 2026.7.2 - 7.32 were not cached either, and they are NOT assumed
+    off: the two cached 2026.7.2 PRE-releases (beta.5, beta.7) already carry ``!== false``
+    (unset = ON) while the stable 7.33 - 7.35 read off again, so the default was not
+    monotonic (owner ruling 2026-09-30: UNKNOWN for that span). A pre-release version
+    string orders as None in ``_terminal_default`` and answers UNKNOWN. The build fork
+    lives in ``_terminal_default`` (``_shared.py``), which says "off" only for the measured
+    stable builds (7.1 and 7.33 - 7.35) and answers UNKNOWN for every unmeasured one rather
+    than guessing a side.
+
+    NO SECOND LOCATION. ``terminal`` occurs exactly ONCE in the declaration, under
+    top-level ``gateway`` - absent from ``agents``, ``agents.list``, ``agents.profiles`` and
+    ``presets``, and read at runtime from the single source ``config.gateway?.terminal``
+    (``launch-DWYZq3xK.mjs:97``, 2026.9.8). The contrast is the evidence that this is deliberate
+    rather than an omission: ``codeMode`` IS defined both top-level and per-agent, so the
+    schema author wires per-agent overrides where they are intended and did not here.
 
     ``.shell`` pins the interpreter; unset, the runtime resolves ``$SHELL`` as a login
     shell (``-l``), falling back to ``cmd.exe`` on win32 and to ``/bin/bash -l`` when
-    ``$SHELL`` is itself unset (launch-BmPwk1y9.js:9-30).
+    ``$SHELL`` is itself unset (``resolveTerminalShell``, ``launch-DWYZq3xK.mjs``).
 
-    PASS - ``gateway.terminal.enabled`` is absent or not true. That is the shipped
-           default, and it is what every config on this machine's fleet carries today.
-    WARN - it is true. The detail names the REACH: whether the gateway is proven
-           reachable beyond loopback, proven loopback-only, or not resolvable from a
-           config file alone.
+    PASS - ``enabled`` is a real boolean false (on every build), OR it is unset and the
+           build is inside the measured default-OFF span (2026.7.1 - 2026.7.35).
+    WARN - ``enabled`` is a real boolean true (on every build), OR it is unset and the build
+           is 2026.8.1 or later (an installed version, or a ``meta.lastTouchedVersion``
+           stamp - a stamp only ever proves "on"). The detail names the REACH: whether the
+           gateway is proven reachable beyond loopback, proven loopback-only, or not
+           resolvable from a config file alone. A config with NO gateway block takes the
+           unset path too: the terminal is a gateway feature that defaults on. On this
+           default-ON branch an UNSET bind (no gateway block, or no ``gateway.bind``) is
+           described as "cannot be resolved from config alone" (the over-reporting
+           direction; no "default bind is loopback" claim is made). The explicit-true
+           branch keeps its older reading of an unset bind as loopback, byte for byte.
+    UNKNOWN - ``enabled`` is unset and the build is not determinable (no installed dist and
+           no stamp at 2026.8.1 or later, an unmeasured 2026.7.36 - 2026.8.0 build, a
+           feature-absent build, an unparseable version). Never PASS: "we could not see the
+           build" is not "the build leaves it off".
 
     WHY THE VERDICT DOES NOT BRANCH ON THE BIND. ``_gateway_remote_exposure_reason``
     returns ``None`` for BOTH "proven loopback" and "no claim possible" (the ``auto``
     profile, and ``custom`` with an unresolvable host - see its docstring, which is
     deliberate and correct). Deciding WHETHER to report on that value would therefore
     turn an unresolvable bind into a silent PASS, which is the fail-open shape this
-    project keeps finding. Turning the terminal on is the owner's explicit act and is
-    reportable on its own; the bind only changes how urgent it is, so it belongs in the
-    detail. The reach sentence is built from ``parse_bind_host``/``LOOPBACK`` first so
-    that a proven-loopback bind is described as such rather than lumped in with the
+    project keeps finding. Having the terminal on - by the owner's act or by the vendor
+    default - is reportable on its own; the bind only changes how urgent it is, so it
+    belongs in the detail. The reach sentence is built from ``parse_bind_host``/``LOOPBACK``
+    first so that a proven-loopback bind is described as such rather than lumped in with the
     unresolvable case.
 
     WHY THE SANDBOX MITIGATION IS NAMED RATHER THAN COMPUTED. The refusal is real and
     verified in code, not just prose: ``resolveTerminalLaunch`` returns
     ``{ok: false, block: {kind: "sandboxed"}}`` when
     ``resolveSandboxConfigForAgent(config, agentId).mode === "all"``
-    (launch-BmPwk1y9.js:55-62), whose own comment calls it fail-closed. But it is
-    PER-AGENT and resolved at launch, so claiming it statically means proving EVERY agent
+    (``launch-DWYZq3xK.mjs:56-59`` on 2026.9.8), whose own comment calls it fail-closed. But it
+    is PER-AGENT and resolved at launch, so claiming it statically means proving EVERY agent
     is fully sandboxed - including agents added after this audit ran - and a wrong proof
     in either direction is worse than naming the condition. The fix text names it so the
     owner can check the one thing this reader cannot.
 
-    DECLARED LIMITS, both in the over-reporting direction, so neither can hide a real
-    exposure. (1) A config with ``enabled: true`` whose only reachable agents all run
-    ``sandbox.mode: "all"`` still WARNs here, per the paragraph above. (2) There is a
-    transient state this reader cannot see at all: ``createTerminalLaunchPolicy`` keeps
-    ``terminalDisabledUntilRestart`` / ``terminalDisabledUntilCommit`` windows
-    (launch-BmPwk1y9.js:80-179) in which a snapshot showing ``enabled: true`` is
-    functionally disabled until the gateway restarts or commits. A single static config
-    snapshot has no way to observe that, and the honest consequence is a WARN that is
-    momentarily early rather than a silence that is wrong.
+    DECLARED LIMITS, all in the over-reporting direction, so none can hide a real
+    exposure. (1) A config whose terminal is on (explicitly or by default) and whose only
+    reachable agents all run ``sandbox.mode: "all"`` still WARNs here, per the paragraph
+    above. (2) There is a transient state this reader cannot see at all:
+    ``createTerminalLaunchPolicy`` (``launch-DWYZq3xK.mjs:81`` on 2026.9.8, "fail-closed terminal
+    admission across deferred config restarts") keeps ``restartRestrictions`` /
+    ``commitRestrictions`` windows (``:88-112``) in which a snapshot showing the terminal
+    on can be functionally disabled until the gateway restarts or commits. A single static
+    config snapshot has no way to observe that, and the honest consequence is a WARN that
+    is momentarily early rather than a silence that is wrong.
+    (3) ``gateway.mode: "remote"`` (schema help ``schema-NqC6_AOV.mjs:415`` on 2026.9.8: the host
+    "connects through remote transport") is NOT special-cased, the same residual
+    ``check_gateway_portal_reach`` names: no check reads ``gateway.mode``, and standing the WARN
+    down on it would be a silencer needing its own grounding. On a client-only host that
+    serves no terminal the WARN over-reports; the fix text names this. The default-on branch
+    multiplies how often it is met, which is why it is disclosed there.
+    (4) A ``meta.lastTouchedVersion`` stamp of 2026.8.1 or later with no readable installed
+    dist while the RUNNING gateway is an older build is a false WARN (the stamp proves an
+    8.1+ build once saved the config, not what runs now) - the B363-class residual.
 
-    Never FAILs. This is a configured-capability disclosure, not a proven compromise; a
+    Never FAILs and never CRITICAL. Default enablement alone is not an authentication
+    failure; this is a configured-capability disclosure, not a proven compromise, and a
     FAIL tier would need its own independent C-135 pass against real configs first.
 
     WHY ``.shell`` IS INTERPOLATED VERBATIM (§8). It is an absolute path and it reaches a
@@ -6536,7 +8241,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
     # written. `_config_unreadable` only covers "openclaw.json present and unparseable";
     # on a host with NO openclaw.json at all, `config_parse_error` is False and
     # `ctx.config` is `{}` (see `_surface_absent`'s docstring), so falling straight
-    # through would report "the terminal is not enabled" about a config nobody read. A
+    # through would report a verdict about a config nobody read. A
     # malformed `gateway` value (null, a list, a number) is the same hazard by another
     # route -- every dig() below would silently degrade to its default. Both take the
     # B32 precedent: UNKNOWN, with not_applicable set ONLY when the config locus was
@@ -6551,22 +8256,7 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
             not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
         )
     gw = cfg.get("gateway", _B350_ABSENT)
-    if gw is _B350_ABSENT:
-        # A config that WAS read and simply carries no gateway block. The terminal
-        # cannot be on: `enabled` defaults to false and the vendor gates the feature on
-        # `gateway?.terminal?.enabled === true`, which an absent block cannot satisfy.
-        # This is a real PASS, not an absence of knowledge -- and saying otherwise would
-        # be inconsistent with `{"gateway": {}}`, which reaches the ordinary PASS below
-        # while encoding the identical fact. Measured: 72 of the 651 fixture homes are
-        # this shape, so the distinction is not hypothetical.
-        return _finding(
-            "B350",
-            PASS,
-            "No gateway block is configured, so no operator terminal is served.",
-            "Nothing to do; if you later add a gateway block, leave "
-            "gateway.terminal.enabled off unless you need an operator shell.",
-        )
-    if not isinstance(gw, dict):
+    if gw is not _B350_ABSENT and not isinstance(gw, dict):
         # Present but malformed (null, a list, a number, a bare string). Every dig()
         # below would degrade to its default without raising, which is indistinguishable
         # from "terminal simply not configured" -- a verdict over ground never read.
@@ -6579,50 +8269,65 @@ def check_gateway_operator_terminal(ctx: Context) -> Finding:
             "Fix the gateway block in openclaw.json so it is a JSON object, then re-run "
             "the audit.",
         )
+    # Only a real boolean counts, matching the vendor's `enabled !== false` / `=== true`
+    # gates exactly: on 2026.8.1+ the string "false", null and a bare `terminal: false` are
+    # all ON (executed on 2026.9.7), and on <= 2026.7.35 the string "true" is off. Anything
+    # else -- including a non-dict `terminal` -- is UNSET. An absent gateway block digs to
+    # None as well, so it is unset by the same path.
     enabled = dig(cfg, "gateway.terminal.enabled")
-    if enabled is not True:
+    if enabled is False:
         return _finding(
             "B350",
             PASS,
-            "The gateway operator terminal is not enabled (gateway.terminal.enabled is "
-            "absent or not true), so no browser- or mobile-reachable shell is served.",
-            "Keep it off unless you specifically need an operator shell; it is off by "
-            "default.",
+            "The gateway operator terminal is explicitly disabled "
+            "(gateway.terminal.enabled is false), so no browser- or mobile-reachable "
+            "shell is served.",
+            "Keep it off unless you specifically need an operator shell.",
+        )
+    if enabled is True:
+        reach, which = _b350_reach_and_shell(cfg, ctx=ctx)
+        # `detail` is hashed by baseline.fingerprint(): do not edit this string.
+        return _finding(
+            "B350",
+            WARN,
+            f"gateway.terminal.enabled is true: OpenClaw serves a PTY-backed shell running "
+            f"with the gateway process environment to Control UI and mobile clients, and "
+            f"{which}. Right now {reach}.",
+            _B350_WARN_FIX,
         )
 
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
-    if bind_host in LOOPBACK:
-        reach = (
-            "the gateway is bound to loopback, so the shell is reachable only from this "
-            "host"
+    default = _terminal_default(ctx)
+    if default == "off":
+        return _finding(
+            "B350",
+            PASS,
+            "gateway.terminal.enabled is unset, and this OpenClaw build (2026.7.1 - "
+            "2026.7.35) defaults it to off, so no browser- or mobile-reachable shell is "
+            "served.",
+            "Set gateway.terminal.enabled to false explicitly before upgrading: OpenClaw "
+            "2026.8.1 and later turn the operator terminal ON when the key is unset.",
         )
-    else:
-        reason = _gateway_remote_exposure_reason(cfg)
-        if reason:
-            reach = f"the gateway is reachable beyond loopback ({reason}), so the shell is too"
-        else:
-            reach = (
-                "the gateway bind cannot be resolved from config alone, so whether the "
-                "shell is reachable off-host is not established here"
-            )
-
-    shell = dig(cfg, "gateway.terminal.shell")
-    which = (
-        f"it launches the pinned interpreter {shell!r}"
-        if isinstance(shell, str) and shell.strip()
-        else "it launches the host login shell ($SHELL), since gateway.terminal.shell is unset"
-    )
+    if default == "on":
+        reach, which = _b350_reach_and_shell(cfg, unset_bind_unresolved=True, ctx=ctx)
+        return _finding(
+            "B350",
+            WARN,
+            f"gateway.terminal.enabled is unset and this OpenClaw build (2026.8.1 and "
+            f"later) defaults it to true: OpenClaw serves a PTY-backed shell running with "
+            f"the gateway process environment to admin-scope Control UI and mobile "
+            f"clients, and {which}. Right now {reach}.",
+            _B350_WARN_FIX,
+        )
     return _finding(
         "B350",
-        WARN,
-        f"gateway.terminal.enabled is true: OpenClaw serves a PTY-backed shell running "
-        f"with the gateway process environment to Control UI and mobile clients, and "
-        f"{which}. Right now {reach}.",
-        "Set gateway.terminal.enabled to false unless an operator shell is genuinely "
-        "needed. If it is needed, keep the gateway on loopback (or behind your own "
-        "authenticated tunnel) and confirm the agents it can target run with "
-        "sandbox.mode 'all' - OpenClaw refuses the terminal for fully-sandboxed agents, "
-        "which is the one mitigation this audit cannot verify for you.",
+        UNKNOWN,
+        "gateway.terminal.enabled is unset and the OpenClaw build could not be "
+        "determined, so whether the operator terminal is served could not be "
+        "established: OpenClaw releases up to 2026.7.35 leave it off when it is unset, "
+        "2026.8.1 and later turn it on.",
+        "Set gateway.terminal.enabled explicitly (false is right on every build), or run "
+        "the audit where the installed openclaw can be found so the build is known.",
+        config_field_paths={"gateway.terminal.enabled"},
     )
 
 
@@ -6828,22 +8533,25 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
 # facts, and `dig()`/`.get()` collapse them to the same default without it.
 _B397_ABSENT = object()
 
-# Grounded against the installed dist (openclaw@2026.9.6, 2026-09-26): the `port` doc
-# comment in `GatewayConfigSchema`, "Single multiplexed port for Gateway WS + HTTP
-# (default: 18789)" (zod-schema-B-u3AXjg.mjs:964), and the literal fallback in the
-# schema's own superRefine, `gateway.port ?? 18789` (zod-schema-B-u3AXjg.mjs:1305).
+# Grounded against the installed dist (openclaw@2026.9.8, re-read 2026-10-09; first read
+# on 2026.9.6, 2026-09-26): the `port` doc comment in `GatewayConfigSchema`, "Single
+# multiplexed port for Gateway WS + HTTP (default: 18789)" (zod-schema-b5tlDVBo.mjs:962),
+# and the literal fallback in the schema's own superRefine, `gateway.port ?? 18789`
+# (zod-schema-b5tlDVBo.mjs:1307).
 _B397_DEFAULT_GATEWAY_PORT = 18789
 
 # A single DNS label, case-insensitive -- the per-label half of
-# `isValidPortalIngressDomain` (zod-schema-B-u3AXjg.mjs:500-506, openclaw@2026.9.6,
-# 2026-09-26): `/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu` applied to each
+# `isValidPortalIngressDomain` (zod-schema-b5tlDVBo.mjs:503-510, openclaw@2026.9.8,
+# re-read 2026-10-09; first read on 2026.9.6, 2026-09-26):
+# `/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu` applied to each
 # `domain.split(".")` element.
 _B397_DOMAIN_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
 
 
 def _b397_ingress_domain_ok(domain: str) -> bool:
     """Port of the vendor's ``isValidPortalIngressDomain``
-    (``zod-schema-B-u3AXjg.mjs:500-506``, openclaw@2026.9.6, 2026-09-26):
+    (``zod-schema-b5tlDVBo.mjs:503-510``, openclaw@2026.9.8, re-read 2026-10-09; first read
+    on 2026.9.6, 2026-09-26):
 
     .. code-block:: js
 
@@ -6889,8 +8597,8 @@ def _b397_direct_reach(cfg: dict) -> "tuple[str, str]":
     """Reach classification for the "direct" portal transport (T3, the default when
     neither ``gateway.portals.ingress`` nor a managed Tailscale Serve/Funnel route is
     active): a per-portal listener on every address the Gateway's OWN HTTP server binds
-    (``params.httpBindHosts``, ``server-start-BG4nMCFD.mjs:6259-6292``, openclaw@2026.9.6,
-    2026-09-26).
+    (``params.httpBindHosts``, ``server-start-BkBmUb8t.mjs:6347-6380``, openclaw@2026.9.8,
+    re-read 2026-10-09; first read on 2026.9.6, 2026-09-26).
 
     Returns ``(reach, label)`` where *reach* is ``"local"``, ``"remote"`` or
     ``"unresolved"`` and *label* names the bind evidence for the finding text.
@@ -6927,73 +8635,89 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     gated only by a per-portal bearer token in the URL, never by ``gateway.auth``,
     trusted-proxy identity or any access layer in front of the Gateway.
 
-    Grounded on the installed dist (openclaw@2026.9.6, read 2026-09-26). Base:
+    Grounded on the installed dist (openclaw@2026.9.8, re-read 2026-10-09; first read
+    on 2026.9.6, 2026-09-26, and re-read on 2026.9.7, 2026-10-05; a citation kept on an
+    older build names that build). Base:
     ``integration/4.3.0``. Bundle names rotate on every release; see
     ``docs/CHECK_AUTHORING.md`` "Citing the OpenClaw dist".
 
     THE SCHEMA. ``gateway.portals`` is ``strictObject({ ingress: strictObject({domain,
     port}).optional() }).optional()`` (``GatewayConfigSchema``,
-    ``zod-schema-B-u3AXjg.mjs:993-996``) - no ``enabled`` field, no token/secret/
+    ``zod-schema-b5tlDVBo.mjs:991-994``, 2026.9.8) - no ``enabled`` field, no token/secret/
     SecretRef/env/cookie/bind-host field. There is no "weak auth" or "literal secret"
     mode to express in config, and nothing here for ``logsafe.redact`` to mask beyond the
     domain string itself (which is not a secret, only PII-adjacent hostname text).
 
     PORTAL AUTH IS ALWAYS THE SAME, AND IT IS STRONG. Each portal gets a per-portal
     ``token: randomBytes(32).toString("hex")`` (256 bits,
-    ``createGatewayPortalService``, ``server-start-BG4nMCFD.mjs:6210``).
-    ``authorizePortalRequest`` (``:5726-5745``) accepts only that token, compared
-    timing-safe (``tokensEqual``, ``:5678``). Never gateway.auth, trusted-proxy identity
-    or any front-door access layer: ``handlePortalProxyRequest`` (``:5840``) calls
-    ``authorizePortalRequest`` only, and ``proxyHeaders`` (``:5791-5797``) strips
+    ``createGatewayPortalService``, ``server-start-BkBmUb8t.mjs:6324`` on 2026.9.8; on
+    openclaw@2026.10.2, read 2026-10-12, the portal service moved out of server-start
+    into ``portal-service-Be3QsZbM.mjs``: ``createGatewayPortalService`` :559,
+    ``randomBytes(32)`` :668, ``authorizePortalRequest`` :129-138, ``tokensEqual`` :84,
+    ``proxyHeaders`` :185-200, ``handlePortalProxyRequest`` :234 -- every ``:NNNN``
+    line number below is the 2026.9.8 server-start one, not re-read on 2026.10.2).
+    ``authorizePortalRequest`` (``:5840-5850``) accepts only that token, compared
+    timing-safe (``tokensEqual``, ``:5792``). Never gateway.auth, trusted-proxy identity
+    or any front-door access layer: ``handlePortalProxyRequest`` (``:5945``) calls
+    ``authorizePortalRequest`` only, and ``proxyHeaders`` (``:5896-5902``) strips
     ``forwarded``/``x-real-ip``/``x-forwarded-*``/``tailscale-*``/``cf-access-*`` before
     the request reaches user code, so upstream identity is never consulted.
 
     THE INGRESS LISTENER IS ALWAYS LOOPBACK-BOUND. ``createPortalIngress`` hard-codes
-    ``bindHost: "127.0.0.1"`` (``:5983-6026``, literal at ``:5997``) and starts with the
-    Gateway (``portalService.startIngress()``, ``:7720``) whether or not any portal is
+    ``bindHost: "127.0.0.1"`` (``:6088-6131``, literal at ``:6102``) and starts with the
+    Gateway (``portalService.startIngress()``, ``:7960``) whether or not any portal is
     open. How far it reaches off-host is entirely a function of the operator's own
     wildcard HTTPS proxy for that domain, which no config field describes.
 
-    AGENTS HOLD THE URL. Every non-sandboxed agent gets ``createPortalTool()``
+    AGENTS HOLD THE URL. In openclaw@2026.9.6 every non-sandboxed agent got
+    ``createPortalTool()`` with no owner check
     (``...options?.sandboxed ? [] : [createTerminalTool(...), createPortalTool()]``,
-    ``openclaw-tools-thu-J91q.mjs:17562-17571``; ``sandboxed: Boolean(sandbox)``,
-    ``agent-tools-g36ho974.mjs:688``), which can open a portal to any local port 1-65535
-    (``PortalOpenParamsSchema``, ``src-BRUl7oDv.mjs:6011-6020``) and whose tool result
+    ``openclaw-tools-thu-J91q.mjs:17562-17571``); ``portal`` was already in the
+    owner-only core tool list on both builds. In 2026.9.7 the non-sandboxed tool list
+    spreads ``...createAvailablePortalTools(options)`` instead (call site
+    ``openclaw-tools-DCQphGzC.mjs:17666-17675``; defined in
+    ``sessions-spawn-tool-B5tfhM3J.mjs:143-145``), which returns no tool when
+    ``senderIsOwner === false`` and there is no ``sessionPortalTarget``, and otherwise
+    returns the portal tool (``sandboxed: Boolean(sandbox)``,
+    ``agent-tools-D5UK6LHM.mjs:656``), which can open a portal to any local port 1-65535
+    (``PortalOpenParamsSchema``, ``src-BvzgK7Oj.mjs:5856-5865``) and whose tool result
     text contains the tokenized URL (``formatPortalResult``,
-    ``sessions-spawn-tool-AW-VALLJ.mjs:133-135``). So a prompt-injected agent can publish
-    an internal service, and its model context holds the bearer URL.
+    ``sessions-spawn-tool-B5tfhM3J.mjs:146-148``). So a prompt-injected agent can publish
+    an internal service, and its model context holds the bearer URL. This check does not
+    model 9.7's session-bound portal tool for a non-owner sender with an attached worker
+    environment (``prepareSessionPortalToolAccess``, ``agent-tools-D5UK6LHM.mjs:309-317``).
 
     THREE TRANSPORTS, evaluated in this order because that is the vendor's own
-    precedence (``createGatewayPortalService.open``, ``server-start-BG4nMCFD.mjs:
-    6196-6310``):
+    precedence (``createGatewayPortalService.open``, ``server-start-BkBmUb8t.mjs:
+    6280-6443`` on 2026.9.8; the transport choice is ``:6309-6398``):
 
     * T1 **ingress** - used whenever ``gateway.portals.ingress`` is set
-      (``servers = ingress ? [] : ...``, ``:6235``; ingress wins over Tailscale,
-      ``:6197``). URL: ``https://<random-hex>.<domain>``, routed by Host header
-      (``portalIngressHostname``, ``:6028-6031``), served by the loopback listener.
+      (``servers = ingress ? [] : ...``, ``:6337``; ingress wins over Tailscale,
+      ``:6310``). URL: ``https://<random-hex>.<domain>``, routed by Host header
+      (``portalIngressHostname``, ``:6133-6136``), served by the loopback listener.
     * T2 **tailscale** - used when there is no ingress and
       ``gateway.tailscale.mode`` is ``serve``/``funnel`` (``managedTailscaleMode``,
-      ``:7527``). Always claimed as Tailscale **Serve**, never Funnel
-      (``claimTailscaleServePort``, ``tailscale-DHUFjoUd.mjs:309-317``) even when the
+      ``:7767``). Always claimed as Tailscale **Serve**, never Funnel
+      (``claimTailscaleServePort``, ``tailscale-Ci7R_gvD.mjs:293-302``) even when the
       Gateway itself runs Funnel, and fails closed if the managed route is not active.
       Tailscale serve/funnel also forces a loopback Gateway bind
-      (``validateGatewayTailscaleBind``, ``validation-core-C5ZDhifM.mjs:1245-1256``).
+      (``validateGatewayTailscaleBind``, ``validation-core-YrPXii0X.mjs:1146-1157``).
     * T3 **direct** - every other case. Each portal gets its own listener on every
       address the Gateway's own HTTP server binds (``params.httpBindHosts``,
-      ``:7718``, from ``resolveGatewayListenHosts``, ``net-DU4aWKLv.mjs:217-228``), on a
+      ``:7958``, from ``resolveGatewayListenHosts``, ``net-BD0odJBF.mjs:212-223``, 2026.9.8), on a
       random port, plain HTTP unless ``gateway.tls.enabled``. **A hardened primary
       gateway on ``bind=lan`` therefore also serves portals on ``0.0.0.0`` with random
       ports, outside gateway.auth** - a check that only fired on the ingress path
       would get this backwards, PASSing the equally-exposed direct-on-LAN shape.
 
     OPERATORS CAN ALWAYS OPEN PORTALS TOO. ``portal.open`` is an ``operator.write``
-    Gateway method (``method-scopes-C7g7eSZh.mjs:2584-2602``), always created
-    (``server-start-BG4nMCFD.mjs:7541-7548``); ``portal.list`` redacts the token for
-    non-write/admin clients (``portals-D5UqY34x.mjs:13-16,49``). The agent-facing
+    Gateway method (``core-method-policy-BePoiMRV.mjs:2426-2445``), always created
+    (``server-start-BkBmUb8t.mjs:7781-7788``); ``portal.list`` redacts the token for
+    non-write/admin clients (``portals-CLsDFlsV.mjs:138-141,175``). The agent-facing
     ``gateway`` tool cannot call it - its actions are only config.get,
-    config.schema.lookup and update.run (``openclaw-tools-thu-J91q.mjs:3414-3419``) -
+    config.schema.lookup and update.run (``openclaw-tools-BwWTN0hs.mjs:1429-1434``) -
     but an agent with unsandboxed exec may still reach it via
-    ``openclaw gateway call portal.open`` (``gateway-cli-C-ulFTjb.mjs:403``), disclosed
+    ``openclaw gateway call portal.open`` (``gateway-cli-D_7tPFxy.mjs:386``, 2026.9.8), disclosed
     in the P2 fix text rather than checked here (B4/B8/B43 cover exec itself).
 
     VERSION. ``gateway.portals`` first appears in the 2026.9.6 schema; it is absent from
@@ -7042,7 +8766,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
        exists, or the proxy is private, it overstates reach.
     2. The vendor's own cross-field refinement - a portal domain overlapping
        ``gateway.publicOrigin``/``gateway.controlUi.allowedOrigins``
-       (``zod-schema-B-u3AXjg.mjs:1295-1304``) - is not replicated; OpenClaw refuses
+       (``zod-schema-b5tlDVBo.mjs:1297-1306``, 2026.9.8) - is not replicated; OpenClaw refuses
        such a config outright.
     3. With Tailscale serve/funnel but Tailscale down, ``portal.open`` fails closed, so
        there are no portals at all.
@@ -7057,7 +8781,7 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     PASS-WRONGLY RESIDUALS: an absent ``gateway.bind`` on a host-networked container
     (the same residual ``_gateway_remote_exposure_reason``, B2, B11, B350 and RISK-20
     accept); CLI overrides (``--bind``/``--host``/``--tailscale``,
-    ``server-runtime-config-CtMMRH47.mjs:70,89``) are invisible; an agent with
+    ``server-runtime-config-Dq81F5gv.mjs:71-74,88-90``, 2026.9.8) are invisible; an agent with
     unsandboxed exec may open portals through ``openclaw gateway call portal.open``
     despite a `portal` tool deny (disclosed in the P2 fix; exec itself is covered by
     B4/B8/B43); and portal behavior on unmeasured builds is evaluated with the 9.6
@@ -7242,7 +8966,14 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
             transport = "tailscale"
         else:
             transport = "direct"
-            direct_reach, direct_label = _b397_direct_reach(cfg)
+            _b397_bind, _b397_unres = _effective_gateway_bind(
+                ctx, cfg, dig(cfg, "gateway.bind", "")
+            )
+            if _b397_unres:
+                # C-653: a templated bind is not a host - the existing "unresolved" reach.
+                direct_reach, direct_label = "unresolved", _b397_unres
+            else:
+                direct_reach, direct_label = _b397_direct_reach(_cfg_with_bind(cfg, _b397_bind))
 
     if transport == "direct" and direct_reach == "local":
         return _finding(
@@ -7566,7 +9297,7 @@ def check_local_model_service_command(ctx: Context) -> Finding:
     )
 
 
-def _gateway_http_reach(cfg: dict, surface: str) -> str:
+def _gateway_http_reach(cfg: dict, surface: str, ctx=None) -> str:
     """Disclosure clause for a gateway-HTTP-surface finding: whether *surface* (a short
     noun phrase, e.g. "this endpoint", "the Control UI") is reachable beyond loopback.
 
@@ -7574,7 +9305,12 @@ def _gateway_http_reach(cfg: dict, surface: str) -> str:
     ``_gateway_remote_exposure_reason`` rather than re-deriving the classification, so
     B340/B350/B358/B360 can never disagree about what counts as "exposed".
     """
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is not established.
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    if bind_unres:
+        return f"{bind_unres}, so whether {surface} is reachable off-host is not established here"
+    cfg = _cfg_with_bind(cfg, bind_raw)
+    bind_host = parse_bind_host(bind_raw)
     if bind_host in LOOPBACK:
         return f"the gateway is bound to loopback, so {surface} is reachable only from this host"
     reason = _gateway_remote_exposure_reason(cfg)
@@ -7680,7 +9416,7 @@ def check_chat_completions_endpoint(ctx: Context) -> Finding:
             config_field_paths={"gateway.http.endpoints.chatCompletions.images"},
         )
 
-    reach = _gateway_http_reach(cfg, "this endpoint")
+    reach = _gateway_http_reach(cfg, "this endpoint", ctx)
     if dig(cfg, "gateway.http.endpoints.chatCompletions.images.allowUrl") is True:
         allowlist = dig(cfg, "gateway.http.endpoints.chatCompletions.images.urlAllowlist")
         scoped = isinstance(allowlist, list) and bool(allowlist)
@@ -7859,7 +9595,7 @@ def check_control_ui_embed_sandbox(ctx: Context) -> Finding:
             "Nothing to do.",
         )
     if mode == "trusted":
-        reach = _gateway_http_reach(cfg, "the Control UI \u2014 and any embed of it")
+        reach = _gateway_http_reach(cfg, "the Control UI \u2014 and any embed of it", ctx)
         return _finding(
             "B360",
             WARN,

@@ -122,14 +122,16 @@ jobs:
       - name: Gate — the commit being published must be on main with green CI
         # C-544. Branch protection defends `main` with six required contexts; the tag-push
         # path that actually ships to users consulted none of them. This job's own smoke
-        # gate is strictly weaker than that protection — Python 3.12 only, no 3.9, no
+        # gate is strictly weaker than that protection — Python 3.12 only, no 3.14, no
         # macOS, no gitleaks, no markdownlint, no commit-integrity — so a regression those
-        # catch could reach ClawHub while `main` would have rejected it. The 3.9 gap is not
-        # theoretical: on 3.9 `ipaddress` reports 0.0.0.0/0 as private, which once made
-        # B2/B70 accept a world-open trustedProxies and emit the exact lying PASS the check
-        # existed to prevent; it was caught on a tag only because a human was watching CI.
+        # catch could reach ClawHub while `main` would have rejected it. An interpreter gap
+        # is not theoretical: on 3.9 `ipaddress` reported 0.0.0.0/0 as private, which once
+        # made B2/B70 accept a world-open trustedProxies and emit the exact lying PASS the
+        # check existed to prevent; it was caught on a tag only because a human was
+        # watching CI. (3.9 is no longer a supported or tested interpreter; the same kind
+        # of skew can still sit between 3.12 and 3.14.)
         #
-        # Reading the SHA's own check-runs is far cheaper than duplicating the 3.9/macOS
+        # Reading the SHA's own check-runs is far cheaper than duplicating the 3.14/macOS
         # matrix into this job, and pulls gitleaks, markdownlint and commit-integrity onto
         # the release path for free. The list below IS a second copy of branch protection's
         # required contexts — there is no API-free way to avoid that — so it is kept honest
@@ -148,10 +150,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # A literal block (|), not a folded one (>-): folding joins these with spaces,
           # and a context name is matched against the check-run name exactly, so a stray
-          # space would make every lookup miss and the gate would report all six missing.
+          # space would make every lookup miss and the gate would report every context
+          # missing. C-647: the 3.14 line follows the 3.14 leg added to ci.yml's matrix;
+          # branch protection's own copy of this list is a repository setting and is
+          # updated there, not by this file.
           REQUIRED_CONTEXTS: |
-            test (ubuntu-latest, 3.9)
             test (ubuntu-latest, 3.12)
+            test (ubuntu-latest, 3.14)
             test (macos-latest, 3.12)
             markdownlint
             secret-scan
@@ -861,6 +866,15 @@ jobs:
           )
           for name, digest in sorted(extra.items()):
               lines.append(row(name, digest, suncovered))
+          # C-637: the exhaustive top-level listing of the install directory as staged, so
+          # an install can be compared entry for entry (`ls -A`). Section 1 and `combined`
+          # are untouched. Inside the signed file, so the compare is authenticated.
+          tops = sorted(p.name for p in staged.iterdir())
+          lines.append("")
+          lines.append(
+              "Expected top-level entries in the install directory (exhaustive, as staged): "
+              + " ".join(tops)
+          )
           with open("SHA256SUMS.txt", "w") as f:
               f.write("\n".join(lines) + "\n")
           PYEOF

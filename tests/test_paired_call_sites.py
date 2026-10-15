@@ -47,6 +47,9 @@ PKG = Path(__file__).resolve().parents[1] / "clawseccheck"
 #   "if a call passes <trigger>, it must also pass <recorder>"
 _PAIRS = (
     ("walk_dir_safely", "max_files", "capped"),
+    # C-727: the collector's state-directory lookup is a thin wrapper over the walk and keeps its
+    # truncation sentinel, so a caller that omits `capped` is the same debt it always was.
+    ("_walk_named", "max_files", "capped"),
 )
 
 # Sites that take the trigger and not the recorder, each with the subject it scans and the

@@ -81,8 +81,9 @@ agent:
 | 4 | Agent self-report | **no** | `--ask`, then `--attest <file>` |
 | 5 | Live behaviour test | **no** | `--canary` / `--dryrun` / `--redteam` / `--multiturn` |
 
-**A letter is issued only when all five ran.** Short of that there is no number at all - not a
-capped one, not a partial one. You get the findings, led by the most urgent one in words, plus a
+**A letter is issued only when all five ran.** Short of that no security score or grade is printed - not a
+capped one, not a partial one (the text report may still show a `Tamper posture` line: the
+sub-score of one defence, labelled as not the run's verdict). You get the findings, led by the most urgent one in words, plus a
 line naming exactly which layers did not run and why:
 
 <pre><code>Most urgent: CRITICAL &#x2014; Lethal Trifecta (untrusted input × sensitive data × outbound)

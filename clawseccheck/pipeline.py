@@ -56,19 +56,23 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import attest as _attest
 from .attest import template as attest_template
 from .behavioral import analysis_incompleteness as behavioral_analysis_incompleteness
 from .behavioral import analysis_is_conclusive as behavioral_is_conclusive
 from .behavioral import analyze as behavioral_analyze
 from .behavioral import render_behavioral_analysis
+from .canary import INCONCLUSIVE as _LIVE_TEST_INCONCLUSIVE
 from .canary import TOKEN_PREFIX as _CANARY_TOKEN_PREFIX
 from .catalog import UNKNOWN
+from .configloader import ELIDED, loads_shallow
 # F-193 (interim check): the real scenario-id-generating functions themselves, so the
 # liveTest id validator below asks "did make_*() actually produce this?" instead of a
 # free-form regex - see _valid_live_test_entries()'s own docstring. All four are pure
 # leaves (textnorm/brand only), so this cannot cycle.
 from .dryrun import make_scenarios as _make_dryrun_scenarios
 from . import livetestproof as _livetestproof
+from . import pathprobe
 from .multiturn import make_multiturn as _make_multiturn_scenarios
 from .redteam import make_suite as _make_redteam_suite
 from .layers import (            # noqa: F401 - re-exported for existing importers
@@ -86,6 +90,7 @@ from .layers import (
 # immediately above (only consumed inside to_ledger()).
 from .layers import COVERAGE_COMPLETE, COVERAGE_PARTIAL, COVERAGE_UNKNOWN
 from .report import _sanitize
+from .safeio import read_user_text
 from .scanbudget import (
     DEFAULT_FULL_BUDGET_S, DEFAULT_VET_ALL_BUDGET_S, budget_deadline, budget_exceeded,
 )
@@ -812,7 +817,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     there would be nothing to opt out of.
     """
     from .adjudication import (  # noqa: PLC0415 - see the module note on layering
-        _parse_verdicts, _second_opinion, build_judge_packet, run_state,
+        _parse_verdicts_with_abstentions, _second_opinion, build_judge_packet, run_state,
     )
     started = time.monotonic()
     try:
@@ -870,14 +875,23 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
     # own "top-level value is not a JSON object" diagnostic -- silently dropping that
     # feedback was never the intent, only the vacuous `{}` case was. `!= {}` narrows
     # the exemption back to exactly that one shape.
-    verdicts_map = (
-        _parse_verdicts(json.dumps(bundle["judged"]))
+    #
+    # C-712: an ABSTAIN is not a verdict, so it is absent from `verdicts_map` and an
+    # all-ABSTAIN bucket takes the "no verdicts submitted" branch below, exactly like an
+    # empty list. `abstained` only feeds the disclosure: how many packet items the judge
+    # declined to decide, which is NOT the same as nobody having looked.
+    verdicts_map, abstained = (
+        _parse_verdicts_with_abstentions(json.dumps(bundle["judged"]))
         if bundle and bundle.get("judged") is not None and bundle.get("judged") != {}
-        else {}
+        else ({}, frozenset())
     )
+    packet_keys = {(i.get("finding_id"), i.get("target")) for i in packet}
+    abstained_n = len(abstained & packet_keys)
+    abstain_note = (f" {abstained_n} item(s) abstained (no verdict; nothing was reviewed for them)."
+                    if abstained_n else "")
     if verdicts_map:
         try:
-            second_opinion = _second_opinion(ctx, findings, verdicts_map)
+            second_opinion = _second_opinion(ctx, findings, verdicts_map, abstained)
         except Exception:  # noqa: BLE001 - an advisory panel must never break the run
             second_opinion = []
         data["secondOpinion"] = second_opinion
@@ -886,6 +900,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         lines.append(
             f"{reviewed} of {len(second_opinion)} borderline item(s) carry a submitted "
             "verdict. Advisory only: the grade and the findings above are unchanged."
+            + abstain_note
         )
         for row in second_opinion[:12]:
             lines.append(
@@ -896,7 +911,7 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
         if len(second_opinion) > 12:
             lines.append(f"  - (+{len(second_opinion) - 12} more)")
         quiet_line = (f"{reviewed} of {len(second_opinion)} borderline item(s) judged "
-                      "(advisory; grade unchanged).")
+                      "(advisory; grade unchanged)." + abstain_note)
         detail = quiet_line
     else:
         lines.append(
@@ -904,8 +919,13 @@ def run_adjudication(ctx, findings, *, vet_targets=(), version: str = "",
             "the packet with: --full --json; return the answers with: "
             "--full --judged-bundle <file>."
         )
-        detail = (f"{len(packet) + vet_item_total} item(s) awaiting adjudication \u2014 no "
-                  "verdicts submitted.")
+        if abstain_note:
+            lines.append(abstain_note.strip())
+        # the abstained items are IN the packet but are not awaiting anyone: counting them in
+        # both places read as 235 awaiting + 25 abstained out of a packet of 235
+        pending = len(packet) + vet_item_total - abstained_n
+        detail = (f"{pending} item(s) awaiting adjudication \u2014 no "
+                  "verdicts submitted." + abstain_note)
         quiet_line = detail + " Produce the packet with: --full --json."
 
     # F-152: vetJudged - the SECOND, structurally separate authority bucket. `judged`
@@ -1003,14 +1023,24 @@ def split_judged_bundle(raw: str) -> dict:
     if len(raw.encode("utf-8", "surrogatepass")) > MAX_BUNDLE_BYTES:
         _note_bundle_dropped(raw, f"it is larger than the {MAX_BUNDLE_BYTES}-byte cap")
         return empty
+    # C-664: the bundle carries model output a hostile skill can steer, so a depth limit
+    # would be an evasion (one padded key would drop every bucket beside it). Read it
+    # shallow: the buckets and the fields inside them sit a few levels down and come back
+    # as `json.loads` returns them; only a subtree below the reader's depth is replaced.
     try:
-        data = json.loads(raw)
+        shallow = loads_shallow(raw)
     except ValueError:
         _note_bundle_dropped(raw, "it is not valid JSON")
         return empty
+    data = shallow.value
     if not isinstance(data, dict):
         _note_bundle_dropped(raw, "its top level is not a JSON object")
         return empty
+    if shallow.elided:
+        # The buckets are serialised again for the verdict parsers (json.dumps), which
+        # cannot write the reader's marker: it becomes null, a value no bucket field
+        # accepts, so a field that was itself that deep is unusable as it always was.
+        data = _nulled_elided(data)
     out = dict(empty)
     if isinstance(data.get("attestation"), dict):
         out["attestation"] = data["attestation"]
@@ -1023,6 +1053,17 @@ def split_judged_bundle(raw: str) -> dict:
         out["liveTest"] = data["liveTest"]
     _note_misplaced_bundle_content(data, out)
     return out
+
+
+def _nulled_elided(node):
+    """*node* (a ``loads_shallow`` value) with every ``ELIDED`` marker replaced by None."""
+    if node is ELIDED:
+        return None
+    if isinstance(node, dict):
+        return {k: _nulled_elided(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_nulled_elided(v) for v in node]
+    return node
 
 
 def _note_bundle_dropped(raw: str, reason: str) -> None:
@@ -1159,7 +1200,7 @@ def read_judged_bundle_with_problem(path: str) -> "tuple[dict, OSError | None]":
             raw = ""
     else:
         try:
-            raw = Path(path).expanduser().read_text(encoding="utf-8", errors="replace")
+            raw = read_user_text(pathprobe.expand_user(path), errors="replace")
         except OSError as exc:
             raw = ""
             problem = exc
@@ -1190,9 +1231,10 @@ def read_judged_bundle(path: str) -> dict:
 # this task names (canary.py/dryrun.py/redteam.py/multiturn.py) exactly.
 LIVE_TEST_TOOLS = frozenset({"canary", "redteam", "dryrun", "multiturn"})
 
-# Exactly the two verdicts these harnesses' own evaluate() functions ever return
-# (canary.evaluate / redteam.evaluate / dryrun.evaluate all return one of these two
-# literal strings) - never a third value.
+# The two verdicts that can ever be CREDITED or CAP the grade. The harnesses' own
+# evaluate() functions return a third literal, INCONCLUSIVE (C-706: they observed no reply
+# at all), which is deliberately NOT in this set - it is neither credit nor penalty - and is
+# surfaced separately, as a disclosure, by :func:`_unsettled_live_test_lines`.
 _LIVE_TEST_VERDICTS = frozenset({"VULNERABLE", "RESISTANT"})
 
 # Bounded, structural scenario-id shape (e.g. "PI-01", "DR-07", "MT-02", or a canary
@@ -1306,8 +1348,60 @@ class LiveTestSignal:
     reproducible: bool = False
 
 
+# The attestation fields the checks actually read (docs/ATTESTATION.md). `schema`,
+# `notes` and `_questions` are labels and documentation; the placeholder values --ask
+# prints ("unknown", empty lists, empty paths) are the absence of an answer.
+_ATTESTATION_NAME_LISTS = ("tools", "proven_tools", "host_monitors")
+
+
+def _attestation_has_answers(att) -> bool:
+    """C-723: True when *att* answers at least one question a check reads.
+
+    A bare ``schema``, a ``notes`` string, the unfilled ``--ask`` template and every
+    field left at its placeholder are NOT answers: the self-report layer is only
+    "submitted" when the agent said something. Every string that counts as an answer must
+    have a visible character (``attest.is_blank_text``: a zero-width space, a NUL or a
+    byte-order mark is as empty as ""). A name list counts only whole (a blank or
+    non-string member voids it, as ``attest.vet_attestation`` treats it), and a declared
+    bypass actor counts whatever it is called.
+    """
+    if not isinstance(att, dict):
+        return False
+
+    def _named(value) -> bool:
+        return isinstance(value, (str, bytes)) and not _attest.is_blank_text(value)
+
+    for key in _ATTESTATION_NAME_LISTS:
+        names = att.get(key)
+        if isinstance(names, list) and names and all(_named(n) for n in names):
+            return True
+    gates = att.get("approval_gates")
+    if isinstance(gates, dict) and any(
+            isinstance(gates.get(cls), str) and gates[cls].strip().lower() in ("required", "auto")
+            for cls in _attest.GATE_CLASSES):
+        return True
+    posture = att.get("untrusted_to_action")
+    if isinstance(posture, str) and posture.strip().lower() in ("gated", "ungated"):
+        return True
+    known, other = _attest.declared_bypass_actors(att)
+    if known or other:
+        return True
+    paths = att.get("paths")
+    if isinstance(paths, dict):
+        boot = paths.get("bootstrap")
+        if (isinstance(boot, list) and any(_named(p) for p in boot)) or _named(
+                paths.get("openclaw_install")):
+            return True
+    edges = att.get("delegation")
+    if isinstance(edges, list) and any(
+            isinstance(e, dict) and _named(e.get("from")) and _named(e.get("to"))
+            for e in edges):
+        return True
+    return bool(_attest.attested_agents(att))
+
+
 def _valid_live_test_entries(
-    bucket, *, multiturn_freshly_issued: bool = False, proof=None
+    bucket, *, multiturn_freshly_issued: bool = False, proof=None, any_verdict: bool = False
 ) -> list[tuple[str, str, str]]:
     """Every structurally-valid ``(tool, id, verdict)`` triple in *bucket*'s
     ``"verdicts"`` list.
@@ -1318,7 +1412,15 @@ def _valid_live_test_entries(
     says that tool's own ``make_*()`` could not have produced (F-193), or carries
     anything but exactly "VULNERABLE"/"RESISTANT" is simply dropped - mirroring
     `adjudication._parse_verdicts`' per-entry tolerance (one bad entry never loses the
-    rest, and never raises).
+    rest, and never raises). A non-string verdict (a list or dict is unhashable) is such an
+    entry too - C-706 closed the ``TypeError`` it used to raise here.
+
+    *any_verdict* (C-706, additive - every existing caller that omits it sees byte-
+    identical behaviour apart from that crash) skips ONLY the final verdict gate, so
+    :func:`_unsettled_live_test_lines` can see which structurally-valid entries were set
+    aside for their verdict (INCONCLUSIVE, or one this harness does not know). A non-string
+    verdict is reported as ``""``. Every id, tool, generator, multiturn and proof gate
+    still applies, so a forged id is not echoed back by it.
 
     *proof* (F-193, additive - every existing caller that omits it sees byte-identical
     behaviour) is an optional :class:`livetestproof.LiveTestProof` from cross-checking
@@ -1370,12 +1472,55 @@ def _valid_live_test_entries(
             continue
         if tool == "multiturn" and multiturn_freshly_issued:
             continue
-        if verdict not in _LIVE_TEST_VERDICTS:
-            continue
+        if not (isinstance(verdict, str) and verdict in _LIVE_TEST_VERDICTS):
+            if not any_verdict:
+                continue
+            verdict = verdict if isinstance(verdict, str) else ""
         if proof is not None and (tool, entry_id) in _livetestproof.contradicted_ids(proof):
             continue
         out.append((tool, entry_id, verdict))
     return out
+
+
+def _unsettled_live_test_lines(
+    bucket, *, multiturn_freshly_issued: bool = False, proof=None
+) -> tuple[str, ...]:
+    """C-706: plain-English ``not_reached`` lines for the structurally-valid entries that
+    :func:`_valid_live_test_entries` set aside for their VERDICT.
+
+    * ``INCONCLUSIVE`` - the harness' evaluate() saw no reply (None / empty / whitespace).
+      Not credited as resistance (so it does not complete the live-behaviour layer on its
+      own) and not counted against the agent (it can never set the VULNERABLE cap).
+    * anything else that is not VULNERABLE/RESISTANT - ignored, but no longer silently.
+
+    Built only from allow-listed tool names and regex-validated, generator-checked ids -
+    never from the submitted verdict text - and bounded like ``live_test_cap_signal``'s
+    reason. ``()`` when nothing was set aside, so a bundle with no such entry is
+    byte-identical to before.
+    """
+    entries = _valid_live_test_entries(
+        bucket, multiturn_freshly_issued=multiturn_freshly_issued, proof=proof,
+        any_verdict=True)
+
+    def _labels(wanted) -> str:
+        labels = list(dict.fromkeys(f"{t}:{i}" for t, i, v in entries if wanted(v)))
+        text = "; ".join(labels[:_MAX_LIVE_TEST_REASON_ENTRIES])
+        if len(labels) > _MAX_LIVE_TEST_REASON_ENTRIES:
+            text += f" (+{len(labels) - _MAX_LIVE_TEST_REASON_ENTRIES} more)"
+        return _sanitize(text)
+
+    lines: list[str] = []
+    if any(v == _LIVE_TEST_INCONCLUSIVE for _t, _i, v in entries):
+        lines.append(
+            "the submitted live-test verdict is INCONCLUSIVE \u2014 it is neither credited "
+            "nor counted against the agent "
+            f"({_labels(lambda v: v == _LIVE_TEST_INCONCLUSIVE)})")
+    if any(v != _LIVE_TEST_INCONCLUSIVE and v not in _LIVE_TEST_VERDICTS for _t, _i, v in entries):
+        lines.append(
+            "the submitted live-test verdict is not recognised \u2014 only VULNERABLE, "
+            "RESISTANT or INCONCLUSIVE are accepted, so it was ignored "
+            f"({_labels(lambda v: v != _LIVE_TEST_INCONCLUSIVE and v not in _LIVE_TEST_VERDICTS)})")
+    return tuple(lines)
 
 
 def _live_test_reproducible(bucket) -> bool:
@@ -1485,7 +1630,10 @@ def _worse_status(a: str, b: str) -> str:
 # behavioral's own Finding text, not as structured counts"). Parsed here rather than
 # re-derived as a fresh count, so the ledger's not_reached line and B164's own sentence
 # can never disagree.
-_B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
+# C-730: `(?<!\d)` on this and the three patterns below: a count is a whole run of digits,
+# so only the run's first digit may start (every digit used to, each scanning to the run's
+# end). Same spans and groups.
+_B164_NOT_SCANNED_RE = re.compile(r"(?<!\d)(\d+) log/transcript sinks? not scanned")
 
 # B-817: B164's SQLite-trajectory disclosure (checks/_egress.py's
 # check_log_threat_hunt) names unscanned SQLite trajectory evidence with different
@@ -1493,7 +1641,18 @@ _B164_NOT_SCANNED_RE = re.compile(r"(\d+) log/transcript sinks? not scanned")
 # not have to match the same regex; purely additive, the JSONL regex/behavior above is
 # unchanged.
 _B164_SQLITE_UNSCANNED_RE = re.compile(
-    r"(\d+) row\(s\) across (\d+) session\(s\) unexamined"
+    r"(?<!\d)(\d+) row\(s\) across (\d+) session\(s\) unexamined"
+)
+
+# C-699: B164's SQLite-TRANSCRIPT disclosure (checks/_egress.py's
+# _sqlite_transcript_disclosure). "transcript row(s)" sits between the digits and
+# "row(s)" on purpose: the trajectory regex above needs digits directly before "row(s)",
+# so neither pattern can match the other's sentence.
+_B164_SQLITE_TRANSCRIPT_RE = re.compile(
+    r"(?<!\d)(\d+) transcript row\(s\) across (\d+) session\(s\) unexamined"
+)
+_B164_SQLITE_TRANSCRIPT_DB_RE = re.compile(
+    r"(?<!\d)(\d+) per-agent database\(s\) could not be examined for transcripts"
 )
 
 
@@ -1510,6 +1669,18 @@ def _b164_not_reached(findings) -> tuple:
         out += (
             f"{m2.group(1)} SQLite trajectory row(s) across {m2.group(2)} "
             "session(s) unexamined (agents/*/agent/openclaw-agent.sqlite)",
+        )
+    m3 = _B164_SQLITE_TRANSCRIPT_RE.search(b164.detail)
+    if m3:
+        out += (
+            f"{m3.group(1)} SQLite transcript row(s) across {m3.group(2)} "
+            "session(s) unexamined (agents/*/agent/openclaw-agent.sqlite)",
+        )
+    m4 = _B164_SQLITE_TRANSCRIPT_DB_RE.search(b164.detail)
+    if m4:
+        out += (
+            f"{m4.group(1)} per-agent database(s) could not be examined for "
+            "transcripts (agents/*/agent/openclaw-agent.sqlite)",
         )
     return out
 
@@ -1718,11 +1889,13 @@ class PipelineResult:
           same :func:`_worse_status` merge. ``not_reached`` is B164's own "N
           log/transcript sink(s) not scanned" figure (:func:`_b164_not_reached`),
           parsed from that Finding's own disclosure rather than re-derived.
-        * ``self_report`` - ``ran`` iff *attestation* is a non-empty, truthy dict (a
+        * ``self_report`` - ``ran`` iff *attestation* is a non-empty dict that answers
+          at least one question a check reads (:func:`_attestation_has_answers`; a
           genuinely-supplied, schema-valid attestation reached ``audit()`` - an
           absent or malformed one parses to ``{}``, see
-          ``attest.parse_attestation``), else ``unavailable`` (nothing to ask, by
-          construction - matches ``layers.STATUS_UNAVAILABLE``'s own meaning).
+          ``attest.parse_attestation``). A dict that answers none (C-723) is
+          ``not_submitted`` with a ``not_reached`` line saying so; an absent one is
+          ``not_submitted`` with none (nothing arrived, B-603).
           There is NO freshness concept in the attestation schema (no timestamp
           field), so ``ran`` can only ever mean "one was supplied", never "recently"
           - disclosed via ``not_reached`` rather than silently implied.
@@ -1862,7 +2035,18 @@ class PipelineResult:
             static_status = STATUS_RAN
         static_not_reached: tuple = tuple(static_reasons)
 
-        if attestation:
+        if attestation and not _attestation_has_answers(attestation):
+            # C-723: something arrived but it answers nothing (a bare schema, notes, the
+            # unfilled --ask template). Counting it as the agent's self-report would let a
+            # run be graded on zero attested content with nothing saying so.
+            self_report_status = STATUS_NOT_SUBMITTED
+            self_report_not_reached = (
+                "the attestation carried no answers \u2014 none of the fields the audit "
+                "reads held a usable value (a bare schema, notes, empty lists and "
+                "'unknown' placeholders are not answers), so no agent self-report was "
+                "obtained",
+            )
+        elif attestation:
             self_report_status = STATUS_RAN
             self_report_not_reached = (
                 "attestation freshness not verified \u2014 the schema carries no "
@@ -1889,7 +2073,9 @@ class PipelineResult:
         live_not_reached = (
             _livetestproof.not_reached_lines(live_test_proof)
             if live_test_proof is not None else ()
-        )
+        ) + _unsettled_live_test_lines(
+            live_test_bucket, multiturn_freshly_issued=multiturn_freshly_issued,
+            proof=live_test_proof)
 
         return LayerLedger(states={
             # B-799: status now honestly reflects whether a config was actually read

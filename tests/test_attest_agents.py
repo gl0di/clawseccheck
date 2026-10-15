@@ -32,37 +32,38 @@ def test_attested_agents_parses_roster():
 
 
 # ---- non-dict entries are skipped ----
-def test_attested_agents_skips_non_dict_entries():
+def test_attested_agents_non_dict_entries_make_the_roster_unusable():
+    # C-714: all or nothing - a roster with an unusable entry reads as no roster.
     att = {"agents": ["just a string", 42, {"name": "ok", "tools": ["x"]}]}
-    out = attested_agents(att)
-    assert out == [{"name": "ok", "tools": ["x"]}]
+    assert attested_agents(att) == []
+    assert attested_agents({"agents": [{"name": "ok", "tools": ["x"]}]}) == [
+        {"name": "ok", "tools": ["x"]}]
 
 
-# ---- missing / blank name falls back to a positional label ----
-def test_attested_agents_missing_name_is_positional():
+# ---- C-714: an entry that does not validate is dropped, never repaired ----
+def test_attested_agents_missing_or_blank_name_is_dropped():
     att = {"agents": [{"tools": ["web_fetch"]}, {"name": "  ", "tools": []}]}
-    out = attested_agents(att)
-    assert out[0]["name"] == "agent[0]"
-    assert out[1]["name"] == "agent[1]"
+    assert attested_agents(att) == []
 
 
-# ---- non-string / empty tools are dropped, missing tools -> [] ----
-def test_attested_agents_drops_non_string_tools():
-    att = {"agents": [{"name": "a", "tools": ["ok", 7, "", None, "  ", "fine"]}]}
-    out = attested_agents(att)
-    assert out[0]["tools"] == ["ok", "fine"]
+def test_attested_agents_non_string_tool_drops_the_entry():
+    att = {"agents": [{"name": "a", "tools": ["ok", 7, "fine"]}]}
+    assert attested_agents(att) == []
 
 
-def test_attested_agents_missing_tools_is_empty_list():
-    att = {"agents": [{"name": "a"}]}
-    out = attested_agents(att)
-    assert out == [{"name": "a", "tools": []}]
+def test_attested_agents_blank_tool_name_drops_the_entry():
+    # a blank tool name (empty, whitespace, or only zero-width / control characters) is not a
+    # verb: the entry's inventory is unreadable, so it is dropped, not trimmed (C-714)
+    for blank in ("", "  ", "\u200b", "\x00"):
+        assert attested_agents({"agents": [{"name": "a", "tools": ["ok", blank]}]}) == []
 
 
-def test_attested_agents_tools_not_a_list_is_empty():
-    att = {"agents": [{"name": "a", "tools": "web_fetch"}]}
-    out = attested_agents(att)
-    assert out == [{"name": "a", "tools": []}]
+def test_attested_agents_missing_tools_drops_the_entry():
+    assert attested_agents({"agents": [{"name": "a"}]}) == []
+
+
+def test_attested_agents_tools_not_a_list_drops_the_entry():
+    assert attested_agents({"agents": [{"name": "a", "tools": "web_fetch"}]}) == []
 
 
 # ---- the --ask template advertises the agents block ----

@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from clawseccheck import canary
 from clawseccheck import audit
 from clawseccheck.catalog import PASS, UNKNOWN
 from clawseccheck.cli import main
@@ -368,7 +369,7 @@ def test_stdin_bundle_still_delivers_every_bucket(tmp_path, capsys, monkeypatch)
         "liveTest": {"seed": "b476", "verdicts": [
             # F-193: a real canary-token-shaped id, not "C1" (never a shape
             # canary.make_canary() can produce, so it is now rejected).
-            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123",
+            {"tool": "canary", "id": canary.make_canary("b476")["token"],
              "verdict": "VULNERABLE"}]},
     })
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))

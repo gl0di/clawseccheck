@@ -145,7 +145,9 @@ def test_pdf_graded_empty_not_checked_is_byte_identical_to_today():
     # absent one. Neither is an input to a score — which is precisely what the
     # byte-identical `render_pdf` comparison below proves, and it could not run at all
     # while this loop failed first.
-    _ignored = {"ledger_present", "layer_coverage"}
+    # C-704 adds `layer_not_reached` (the per-layer attribution of `not_checked`) on the
+    # same terms: ledger-derived metadata, never an input to a score.
+    _ignored = {"ledger_present", "layer_coverage", "layer_not_reached"}
     _fields = [f.name for f in dataclasses.fields(default_score) if f.name not in _ignored]
     assert _fields, "ScoreResult lost its fields — this guard is inert"
     for name in _fields:

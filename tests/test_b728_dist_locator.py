@@ -23,7 +23,14 @@ from pathlib import Path
 import pytest
 
 import _distgrounding
-from _distgrounding import dist_file, dist_files, dist_text, require_dist
+from _distgrounding import (
+    SEALED_BUNDLES,
+    dist_declaring,
+    dist_file,
+    dist_files,
+    dist_text,
+    require_dist,
+)
 from _realhome import REAL_HOME
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -119,6 +126,53 @@ def test_contains_resolves_several_name_matches_to_the_one_that_declares_it(tmp_
         found = dist_file("agent-id-*.js", symbol="normalizeAgentIdStrict",
                           contains="normalizeAgentIdStrict")
     assert found.name == "agent-id-AAA.js"
+
+
+_DECL = "function collectConfiguredModelRefs(cfg) {}\n"
+
+
+def test_dist_declaring_finds_the_bundle_by_its_declaration_not_its_name(tmp_path, monkeypatch):
+    """The refs function moved from ``configured-model-refs-*`` to ``runtime-snapshot-*``
+    on 2026.9.7. Located by the line that declares it, the host's name does not matter, and
+    a bundle that merely MENTIONS the symbol (a call, an import) is not a declarer."""
+    (tmp_path / "runtime-snapshot-AAA.mjs").write_text("import x;\n" + _DECL, encoding="utf-8")
+    (tmp_path / "caller-BBB.mjs").write_text("const r = collectConfiguredModelRefs(c);\n",
+                                             encoding="utf-8")
+    (tmp_path / "indented-CCC.mjs").write_text("  " + _DECL, encoding="utf-8")
+    monkeypatch.setattr(_distgrounding, "OPENCLAW_DIST", tmp_path)
+    with _no_skipping("locating by declaration"):
+        found = dist_declaring("function collectConfiguredModelRefs(",
+                               symbol="collectConfiguredModelRefs")
+    assert found.name == "runtime-snapshot-AAA.mjs"
+
+
+def test_dist_declaring_skips_a_sealed_bundle_but_refuses_any_other_second_declarer(
+        tmp_path, monkeypatch):
+    sealed = sorted(SEALED_BUNDLES)[0]
+    (tmp_path / "real-AAA.mjs").write_text(_DECL, encoding="utf-8")
+    (tmp_path / sealed).write_text(_DECL, encoding="utf-8")
+    monkeypatch.setattr(_distgrounding, "OPENCLAW_DIST", tmp_path)
+    with _no_skipping("locating past a sealed bundle"):
+        assert dist_declaring("function collectConfiguredModelRefs(",
+                              symbol="collectConfiguredModelRefs").name == "real-AAA.mjs"
+    (tmp_path / "copy-CCC.mjs").write_text(_DECL, encoding="utf-8")
+    _distgrounding._declaring_bundles.cache_clear()
+    message = _fails_rather_than_skips(
+        lambda: dist_declaring("function collectConfiguredModelRefs(",
+                               symbol="collectConfiguredModelRefs"),
+        "two declaring bundles where one is needed")
+    assert "coin toss" in message and "copy-CCC.mjs" in message and sealed not in message
+
+
+def test_dist_declaring_fails_rather_than_skips_when_nothing_declares_the_symbol(
+        tmp_path, monkeypatch):
+    (tmp_path / "other-AAA.mjs").write_text("function somethingElse() {}\n", encoding="utf-8")
+    monkeypatch.setattr(_distgrounding, "OPENCLAW_DIST", tmp_path)
+    message = _fails_rather_than_skips(
+        lambda: dist_declaring("function collectConfiguredModelRefs(",
+                               symbol="collectConfiguredModelRefs"),
+        "a symbol no bundle declares")
+    assert "collectConfiguredModelRefs" in message and "grep -rlE" in message
 
 
 def test_a_pattern_naming_js_finds_the_same_bundle_rebuilt_as_mjs(tmp_path, monkeypatch):

@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import pathprobe
 from . import brand
 from .catalog import (
     ACTIONABLE_STATUSES,
@@ -45,6 +46,7 @@ from .layers import (
     LAYER_LOGS_TRAJECTORIES,
     LAYER_ORDER,
     describe_layer,
+    layers_definition_sentence,
 )
 from . import openclawdist as _openclawdist
 from .scoring import ScoreResult, assessment_coverage
@@ -289,7 +291,8 @@ def _sanitize_tree(value):
 # badge and SARIF. But a suppressed CRITICAL/HIGH FAIL (which caps the score) or a
 # sensitive check id must stay VISIBLE on every surface - one ignore line could otherwise
 # flip an F into an A silently. This predicate is the single source of that rule, shared by
-# the human report, the SVG badge and the SARIF renderer (B-163).
+# the human report, the dashboard card, --dashboard-findings, HTML, PDF, the "Most urgent"
+# headline, the SVG badge and the SARIF renderer (B-163, C-618).
 SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
 
 
@@ -321,7 +324,8 @@ SENSITIVE_SUPPRESSED_IDS = frozenset({"B1", "B2", "B13", "B20"})
 SELF_EXCLUDED_NOTE = (
     "not graded -- ClawSecCheck's own installed copy is excluded from the "
     "installed-skill content scan; its ClawHub install integrity and provenance "
-    "(B135/B181/B184) are still checked"
+    "(B135/B181/B184) are still checked. A match is a content heuristic, not proof: "
+    "if you did not install ClawSecCheck under this name, treat it as suspicious"
 )
 
 #: The check ids named in :data:`SELF_EXCLUDED_NOTE`, for the guard that keeps the two in
@@ -363,6 +367,30 @@ def surfaced_despite_suppression(f: Finding) -> bool:
         (f.status in FAIL_WEIGHT_STATUSES and f.severity in (CRITICAL, HIGH))
         or f.id in SENSITIVE_SUPPRESSED_IDS
     )
+
+
+# C-618: the card bounds the notice so it fits the ~4096-char ladders (the header cannot shrink).
+_DASHBOARD_NOTICE_LIMIT = 3
+
+
+def suppressed_notice_lines(findings, *, limit: "int | None" = None) -> list[str]:
+    """C-618: one WARNING sentence per suppressed finding that must still be surfaced.
+
+    The one wording every human surface shares (text, card, findings block, HTML, PDF).
+    `limit` bounds the list for the chat card; the overflow is counted, never dropped.
+    """
+    lines = [
+        f"WARNING: a {_sanitize(str(f.severity))} finding ({_sanitize(str(f.id))}) is suppressed"
+        " via .clawseccheckignore \u2014 it still counts against your real security;"
+        " review your ignore list."
+        for f in findings if surfaced_despite_suppression(f)
+    ]
+    if limit is not None and len(lines) > limit:
+        more = len(lines) - limit
+        lines = lines[:limit] + [
+            f"(+{more} more suppressed finding(s) that still count -- see the full report)"
+        ]
+    return lines
 
 
 # I3: per-severity FAIL counts a CI consumer can assert on without a grade - the
@@ -806,7 +834,9 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
     explanation and instead points at the fuller section for it.
     """
     def _pick(pool_findings, pool_risk):
-        best_f = sorted(pool_findings, key=lambda f: (_SEV_ORDER.get(f.severity, 9), f.id))[0] \
+        # C-618: a live finding wins an exact-severity tie against a suppressed one.
+        best_f = sorted(pool_findings, key=lambda f: (
+            _SEV_ORDER.get(f.severity, 9), bool(getattr(f, "suppressed", False)), f.id))[0] \
             if pool_findings else None
         best_p = sorted(pool_risk, key=lambda p: (_SEV_ORDER.get(p.severity, 9), p.id))[0] \
             if pool_risk else None
@@ -821,14 +851,19 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
 
     live = [f for f in findings if not getattr(f, "suppressed", False)]
     live_risk = [p for p in (risk or []) if not getattr(p, "suppressed", False)]
-    fail_candidates = [f for f in live if f.status in FAIL_WEIGHT_STATUSES]
+    # C-618: a suppressed FAIL that must still be surfaced (it caps the score) is a candidate.
+    fail_candidates = [
+        f for f in findings if f.status in FAIL_WEIGHT_STATUSES
+        and (not getattr(f, "suppressed", False) or surfaced_despite_suppression(f))
+    ]
 
     kind, top = _pick(fail_candidates, live_risk)
     if kind == "risk":
         return (f"Most urgent: {top.severity} \u2014 dangerous capability chain: "
                 f"{_sanitize(top.title)}")
     if kind == "finding":
-        return f"Most urgent: {top.severity} \u2014 {_sanitize(top.title)}"
+        _tag = " (suppressed via .clawseccheckignore)" if getattr(top, "suppressed", False) else ""
+        return f"Most urgent: {top.severity} \u2014 {_sanitize(top.title)}{_tag}"
 
     # C-426: the all-clear must not out-run the evidence. This headline leads every
     # ungraded surface, including the card, whose own "Most urgent" section lists
@@ -869,6 +904,19 @@ def _urgent_headline(findings: list[Finding], risk: list | None = None) -> str:
         return (f"Nothing failed outright \u2014 most serious open item: {top.severity} \u2014 "
                 f"{_sanitize(top.title)}")
     return _NOTHING_URGENT_SENTENCE
+
+
+def _logs_unexamined(score) -> "tuple[str, ...]":
+    """What the log/trajectory LAYER itself reports it left unread (``()`` when nothing).
+
+    C-704: read from the ledger entry of that layer (`ScoreResult.layer_not_reached`), not
+    from the flat `not_checked` union by matching on wording - the layer's reasons come
+    from two producers with unrelated phrasing (B164's SQLite row counts, the behavioural
+    analysis's "no trajectory sidecar ..." reasons), and a phrase list silently stops
+    matching the day either is reworded. A "Logs & trajectories - clear" mark must never
+    sit over a non-empty result."""
+    return tuple(dict(getattr(score, "layer_not_reached", ()) or ()).get(
+        LAYER_LOGS_TRAJECTORIES, ()))
 
 
 def _not_fully_covered_line(score: ScoreResult) -> str:
@@ -1324,6 +1372,75 @@ def _degraded_incomplete_clause(score: ScoreResult) -> str:
             else "this run's coverage is incomplete.")
 
 
+def _grounding_gap_sentence(ctx) -> "str | None":
+    """C-571/C-615: the run-level 'newer than grounded' disclosure, or None.
+
+    One wording for every surface (text, card, HTML, PDF) - B-483's reason. It is a fact
+    about the BUILD, not about this run's findings. `openclawdist.grounding_gap` answers
+    None on anything it cannot place past GROUNDED_MAX_VERSION (no ctx, unknown install,
+    unparseable/pre-release string, a version too short to be a calendar release), so this
+    never fires on "we don't know". Presentation-only: never touches score/grade/cap
+    (Golden Rule #5 - honesty about a gap, not a manufactured FAIL). It does not name
+    which checks are affected: that set is not sound to enumerate (B363's B-833 flip was
+    found entirely inside the check, with no schema-path diff to hang a list on). No
+    position word ("below"): the card and PDF print this under the grade line.
+    """
+    gap = _openclawdist.grounding_gap(
+        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    )
+    if gap is None:
+        return None
+    grounded = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
+    running = ".".join(str(p) for p in gap)  # rebuilt from ints, never the raw string
+    return (
+        f"This build's checks were last grounded against OpenClaw up to {grounded}; "
+        f"you are running {running}. Some checks assume behavior measured on the older "
+        "build and may be mis-grounded on this one \u2014 a real gap can still read as "
+        "a clean PASS. Not a finding; the score is unchanged."
+    )
+
+
+def _grounding_block(ctx) -> dict:
+    """C-678: the grounding gap as the `grounding` object `--json` and `--sarif` carry.
+
+    Always returns a full object, so an absent key can never be read as "no gap".
+    `newer_than_grounded` is a tri-state: True past GROUNDED_MAX_VERSION, False for a
+    build the window covers, None for one it cannot place (no ctx, unknown install,
+    unparseable/pre-release string, fewer than three numeric parts) - `grounding_gap`'s own
+    "we do not know" set, which never claims a gap either way. `installed` is rebuilt from
+    the parsed ints (never the raw string) and is None exactly when the flag is. `detail`
+    is `_grounding_gap_sentence` - marker-free, the one wording every surface shares - or
+    None when there is no gap to describe. Presentation-only: nothing here reaches
+    score/grade/cap.
+    """
+    raw = getattr(ctx, "installed_dist_version", None) if ctx is not None else None
+    gap = _openclawdist.grounding_gap(raw)
+    if gap is not None:
+        build, newer = gap, True
+    else:
+        parts = _openclawdist._numeric_parts(raw) if isinstance(raw, str) else None
+        # `grounding_gap` documents "0.0.0" as a build it cannot place, but it answers
+        # None for it the same as for an in-window one (it sorts below the ceiling). A
+        # placeholder version is "we do not know", never "inside the window", so False
+        # needs a calendar-shaped build (three parts, a four-digit year first).
+        placeable = parts is not None and len(parts) >= 3 and parts[0] >= 1000
+        build, newer = (parts[:3], False) if placeable else (None, None)
+    return {
+        "grounded_max": ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION),
+        "installed": ".".join(str(p) for p in build) if build is not None else None,
+        "newer_than_grounded": newer,
+        "detail": _grounding_gap_sentence(ctx),
+    }
+
+
+def _grounding_gap_line(ctx, ascii_only: bool) -> "str | None":
+    """C-615: `_grounding_gap_sentence` behind its warning marker (None when silent)."""
+    sentence = _grounding_gap_sentence(ctx)
+    if sentence is None:
+        return None
+    return ("[!] " if ascii_only else "\u26a0\ufe0f ") + sentence
+
+
 # C-418: one heading per reason a comparison was skipped, in the order the monitor's
 # NOTE_CATEGORY_ORDER ranks them. Phrased as "because ..." so the enumerated lines read as
 # consequences of a single cause rather than as a list of unrelated malfunctions.
@@ -1414,8 +1531,12 @@ _COV_COLOR = {"checked": "green", "partial": "yellow", "roadmap": "grey", "not_c
 
 
 def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
-                    color: bool = False) -> list[str]:
+                    color: bool = False, compact: bool = False) -> list[str]:
     """Render the OpenClaw-surface coverage map for the terminal report.
+
+    ``compact`` (the chat card) keeps the short wording: that card trims findings text tier
+    by tier to stay inside ~4096 chars, so every extra word here costs a ``why:`` line
+    (C-704). The long renderers add the surface gloss and the not-applicable split.
 
     Grounded strictly in ``coverage.coverage()`` output - the 13 config surfaces split into
     ``checked``/``partial``, plus the static, recon-grounded ``not_checkable`` names and any
@@ -1434,10 +1555,12 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
 
     total = summary["checked"] + summary["partial"]  # the 13 config-checkable surfaces
     lines = [f"{rule} Coverage of OpenClaw surfaces {rule}"]
+    _gloss = "" if compact else (
+        "; a surface counts as checked once one of its checks gave a verdict")
     lines.append(
         f"{_g('checked')} checked {summary['checked']} {dot} "
         f"{_g('partial')} partial/unknown {summary['partial']}  "
-        f"(of {total} config surfaces)"
+        f"(of {total} config surfaces{_gloss})"
     )
     # B-504: the line above counts SURFACES, and a surface counts as "checked" once ONE
     # of its checks returns a verdict - so on the maintainer's own config it printed
@@ -1451,15 +1574,28 @@ def _coverage_lines(findings: list[Finding], *, ascii_only: bool = False,
     _undetermined = [f for f in _scored if f.status == UNKNOWN]
     if _scored:
         if _undetermined:
+            # The "(N HIGH or worse)" figure is the baseline's and covers EVERY undetermined
+            # check, engine-degraded ones included; the long renderers then split the same
+            # population the way the JSON `undetermined` block does (C-704): checks the
+            # config positively confirmed absent vs checks that reached no verdict. Without
+            # the split, "29 did not" beside "checked 14, partial 0" read as a contradiction
+            # when 15 of the 29 were a surface the config does not have.
             _severe = sum(1 for f in _undetermined if f.severity in (CRITICAL, HIGH))
             _tail = f" ({_severe} HIGH or worse)" if _severe else ""
+            _absent = undetermined_summary(findings)["confirmed_absent"]
+            _split = ""
+            if _absent and not compact:
+                _split = (
+                    f": {_absent} not applicable (no such surface in your config), "
+                    f"{len(_undetermined) - _absent} with no verdict"
+                )
             lines.append(
                 f"{_g('partial')} checks {len(_scored) - len(_undetermined)} of "
                 f"{len(_scored)} scored checks reached a verdict {dot} "
                 # Plain ASCII punctuation on purpose: this block is ASCII-folded by
                 # `--ascii` and an em-dash here breaks that (caught by the terminal
                 # dashboard's own purity test, which is doing its job).
-                f"{len(_undetermined)} did not{_tail}; an undetermined check "
+                f"{len(_undetermined)} did not{_tail}{_split}; an undetermined check "
                 f"neither earns nor costs a point"
             )
         else:
@@ -1900,6 +2036,7 @@ def _credential_surface_map(ctx) -> list[dict]:
     NOT a credential reader.
     """
     from .checks import SECRET_KEY_RE, _mcp_servers  # noqa: PLC0415
+    from .checks._config import _gateway_token_configured  # noqa: PLC0415
     from .collector import WORKSPACE_DIRS, dig  # noqa: PLC0415
 
     cfg = getattr(ctx, "config", {}) or {}
@@ -1981,30 +2118,47 @@ def _credential_surface_map(ctx) -> list[dict]:
     entries.append({"class": "mcp-passthrough", "reachable": bool(mcp_evidence), "evidence": mcp_evidence})
 
     dotenv_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    dotenv_unread = 0
+    if home_path is not None and pathprobe.exists(home_path):
         candidates = [home_path / ".env", home_path / ".envrc"]
         for ws in WORKSPACE_DIRS:
             candidates.append(home_path / ws / ".env")
             candidates.append(home_path / ws / ".envrc")
         for cand in candidates:
-            if cand.is_file():  # path-existence check only - never reads contents
-                dotenv_hits.append(_rel(cand))
-    entries.append({"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_hits})
+            try:
+                if pathprobe.is_file(cand):  # path-existence check only - never reads contents
+                    dotenv_hits.append(_rel(cand))
+            except OSError:
+                # C-661: an unreadable workspace (mode 000, a root-owned directory) used to end
+                # the whole run here with "unexpected internal error"
+                dotenv_unread += 1
+    dotenv_evidence = list(dotenv_hits)
+    if dotenv_unread:
+        dotenv_evidence.append(f"{dotenv_unread} dotenv location(s) could not be read (permission denied)")
+    dotenv_entry: dict = {"class": ".env", "reachable": bool(dotenv_hits), "evidence": dotenv_evidence}
+    if dotenv_unread:
+        # a location that could not be read is not a location that was seen empty: "reachable"
+        # stays the boolean of what WAS seen, "unread" says how many were not
+        dotenv_entry["unread"] = dotenv_unread
+    entries.append(dotenv_entry)
 
     keychain_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         for rel in (
             "Library/Keychains",
             ".local/share/keyrings",
             ".gnupg",
         ):
             p = home_path / rel
-            if p.exists():  # path-existence check only - never reads contents
-                keychain_hits.append(_rel(p))
+            try:
+                if pathprobe.exists(p):  # path-existence check only - never reads contents
+                    keychain_hits.append(_rel(p))
+            except OSError:
+                continue  # C-661: unreadable parent; the keychain class stays "not seen"
     entries.append({"class": "keychain", "reachable": bool(keychain_hits), "evidence": keychain_hits})
 
     cookie_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         for rel in (
             ".config/google-chrome/Default/Cookies",
             ".config/chromium/Default/Cookies",
@@ -2013,22 +2167,22 @@ def _credential_surface_map(ctx) -> list[dict]:
             "Library/Cookies/Cookies.binarycookies",
         ):
             p = home_path / rel
-            if p.is_file():
+            if pathprobe.is_file(p):
                 cookie_hits.append(_rel(p))
-            elif p.is_dir():
+            elif pathprobe.is_dir(p):
                 for child in p.rglob("cookies.sqlite"):
-                    if child.is_file():
+                    if pathprobe.is_file(child):
                         cookie_hits.append(_rel(child))
     entries.append({"class": "cookies", "reachable": bool(cookie_hits), "evidence": cookie_hits})
 
     ssh_hits: list[str] = []
-    if home_path is not None and home_path.exists():
+    if home_path is not None and pathprobe.exists(home_path):
         ssh_dir = home_path / ".ssh"
-        if ssh_dir.is_dir():  # path-existence check only - never reads key contents
+        if pathprobe.is_dir(ssh_dir):  # path-existence check only - never reads key contents
             ssh_hits.append(_rel(ssh_dir))
             for name in ("id_rsa", "id_ed25519", "config", "known_hosts"):
                 p = ssh_dir / name
-                if p.is_file():  # path-existence check only
+                if pathprobe.is_file(p):  # path-existence check only
                     ssh_hits.append(_rel(p))
     entries.append({"class": "ssh", "reachable": bool(ssh_hits), "evidence": ssh_hits})
 
@@ -2044,7 +2198,9 @@ def _credential_surface_map(ctx) -> list[dict]:
     cloud_hits: list[str] = []
     if providers:
         cloud_hits.append(_summarize(sorted(providers), "auth.profiles providers"))
-    if dig(cfg, "gateway.auth.token") or dig(cfg, "gateway.token"):
+    # C-681: the same "is a credential configured" reading B2 and B41 use - not bare
+    # truthiness, which counted a malformed object, a list or a bool as a token.
+    if _gateway_token_configured(cfg, ctx):
         cloud_hits.append("gateway token present")
     entries.append({"class": "cloud", "reachable": bool(cloud_hits), "evidence": cloud_hits})
 
@@ -2076,7 +2232,8 @@ def _credential_surface_lines(ctx) -> list[str]:
         # evidence carries untrusted MCP server names / config-derived strings - strip
         # terminal-control sequences before they reach the terminal (B-164).
         evidence = _sanitize("; ".join(item["evidence"])) if item["evidence"] else "none"
-        lines.append(f"- {item['class']}: reachable={_bool_word(item['reachable'])}; {evidence}")
+        reach = "unknown" if item.get("unread") and not item["reachable"] else _bool_word(item["reachable"])
+        lines.append(f"- {item['class']}: reachable={reach}; {evidence}")
     return lines
 
 
@@ -2147,7 +2304,8 @@ def _group_issues_by_subject(issues):
     return out
 
 
-def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int = 0) -> str:
+def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int = 0,
+                        n_unexamined: int = 0) -> str:
     """The one phrase every subject rollup uses for "how did this subject do".
 
     Golden Rule #4: a subject whose checks could not reach a verdict is NOT clear. Saying
@@ -2172,11 +2330,18 @@ def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int 
     ("Channels (none configured) - ? clear"). "not applicable" is neither "clear" (which
     implies a positive check ran and found nothing) nor "not assessed" (which implies a
     gap this tool could close) - a subject with a genuine coverage gap alongside any
-    not_applicable members still reads "not assessed", since that is the stronger claim."""
+    not_applicable members still reads "not assessed", since that is the stronger claim.
+
+    C-704: `n_unexamined` is the count of stores this subject read only in part (today only
+    the logs subject, from the ledger's own not-checked list). It sits ABOVE
+    "not applicable" and "clear" for the same reason the unassessed case does: a subject
+    that left part of its evidence unread has not been cleared."""
     if n_issues:
         return f"{n_issues} issue(s)"
     if n_unassessed:
         return "not assessed"
+    if n_unexamined:
+        return "not fully examined"
     if n_not_applicable:
         return "not applicable"
     return "clear"
@@ -2244,7 +2409,7 @@ def _skills_roster_text(inv: dict, ctx) -> str:
     return text
 
 
-def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
+def _subject_summary_rows(findings, ctx, *, plugin_sweep=None, logs_unexamined=()):
     """Uniform per-subject summary rows - one `(label, status, count_text)` tuple per
     catalog.SUBJECT_ORDER entry - for the HTML and PDF report headers. Derived entirely
     from `build_inventory()`, so this summary can never disagree with the JSON `inventory`
@@ -2253,13 +2418,15 @@ def _subject_summary_rows(findings, ctx, *, plugin_sweep=None):
     already take)."""
     if ctx is None:
         return []
-    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep,
+                          logs_unexamined=logs_unexamined)
 
     def _issues_count(subj):
         bucket = inv[subj]
         return _subject_count_text(len(bucket.get("findings") or []),
                                    int(bucket.get("unassessed") or 0),
-                                   int(bucket.get("not_applicable_count") or 0))
+                                   int(bucket.get("not_applicable_count") or 0),
+                                   len(bucket.get("unexamined") or ()))
 
     rows = [
         (SUBJECT_LABEL["openclaw"], inv["openclaw"]["status"], _issues_count("openclaw")),
@@ -2421,14 +2588,93 @@ def _hard_truncate_compact(out: str, budget: int = _COMPACT_CHAR_BUDGET) -> str:
     """
     if len(out) <= budget:
         return out
-    marker = "\n...(truncated to fit budget)\n"
-    room = max(budget - len(marker), 0)
-    cut = out[:room]
+    base_marker = "\n...(truncated to fit budget)\n"
+
+    # The positional cut used to name nothing, so a section pushed out of the card (the
+    # Skills "not graded" note, on a real home) vanished without a trace. Name what the cut
+    # removed. The names make the marker longer, so the cut has to be chosen WITH the marker
+    # it implies: walk candidate cut points (line ends) from the latest one backwards and take
+    # the first whose cut plus its own marker fits. That is the largest cut that fits - a
+    # ratchet that only ever moved the cut earlier would also throw away a line the longer
+    # marker never actually displaced. The walk is short: any candidate more than one marker
+    # length before the budget fits, so it ends within a few lines.
+    first = min(len(out), budget) - len(base_marker)
+    nl = out.rfind("\n", 0, first + 1) if first > 0 else -1
+    while nl > 0:
+        cut = out[:nl]
+        names = _dropped_section_names(cut, out[nl:])
+        shown = names[:_TRUNC_MAX_NAMES]
+        if shown:
+            more = len(names) - len(shown)
+            listing = ", ".join(shown) + (f" +{more} more" if more else "")
+            marker = f"\n...(dropped: {listing}; truncated to fit budget)\n"
+        else:
+            marker = base_marker
+        if len(cut) + len(marker) <= budget:
+            return cut + marker
+        nl = out.rfind("\n", 0, nl)
+    # No line end leaves room for a named marker (a tiny budget, or one enormous first line):
+    # the original behaviour, which is plain-marker and never over budget.
+    cut = out[:max(budget - len(base_marker), 0)]
     nl = cut.rfind("\n")
-    if nl > 0:
-        cut = cut[:nl]
-    result = cut + marker
+    result = (cut[:nl] if nl > 0 else cut) + base_marker
     return result[:budget] if len(result) > budget else result
+
+
+# The dashboard card's own section titles. `render_dashboard` frames every section with
+# these constants (`{sep} <title> {sep}`), and `_dropped_section_names` recognises a heading
+# ONLY by membership here: a line of scanned content shaped like a frame is not a section and
+# is never named in the truncation marker.
+_SEC_FINDINGS = "Findings"
+_SEC_SKILLS = "Skills"
+_SEC_INVENTORY = "Inventory by subject"
+_SEC_URGENT = "Most urgent"
+_SEC_PLUGINS = "Plugins"
+_SEC_MCP = "MCP"
+_SEC_RISK = "RISK Chains"
+_SEC_BEHAVIOURAL = "Behavioural"
+_SEC_SECOND_OPINION = "Second opinion (advisory)"
+_SEC_COVERAGE_PAGE = "Coverage page"
+_SEC_GLANCE = "Worth a glance"
+_CARD_SECTION_TITLES = frozenset({
+    _SEC_FINDINGS, _SEC_SKILLS, _SEC_INVENTORY, _SEC_URGENT, _SEC_PLUGINS, _SEC_MCP,
+    _SEC_RISK, _SEC_BEHAVIOURAL, _SEC_SECOND_OPINION, _SEC_COVERAGE_PAGE, _SEC_GLANCE,
+})
+# Shape of a frame line: `{sep} Name {sep}` with `brand.SEPARATOR` (middle dot) or its ASCII
+# fallback (hyphen). The shape alone is not enough - see `_CARD_SECTION_TITLES`.
+_SECTION_FRAME_RE = re.compile(r"^(?:\u00b7|-) (.{1,60}?) (?:\u00b7|-)$")
+_TRUNC_MAX_NAMES = 6
+
+
+def _dropped_section_names(kept: str, dropped: str) -> "list[str]":
+    """Names of the card sections that a truncation removed, in card order.
+
+    A section whose heading sits in the dropped tail is named outright; the section the cut
+    landed inside is named "<Name> (partly)". Names are forced to ASCII (a heading may carry
+    an emoji) because the marker is appended after the card's own ascii step."""
+    def _heading(line: str) -> "str | None":
+        m = _SECTION_FRAME_RE.match(line.strip())
+        if not m:
+            return None
+        # An emoji marker may precede the title (the glance heading); strip it first.
+        name = m.group(1).encode("ascii", "ignore").decode("ascii").strip()
+        return name if name in _CARD_SECTION_TITLES else None
+
+    names: list[str] = []
+    tail = dropped.lstrip("\n")
+    first_line = tail.split("\n", 1)[0]
+    if tail and _heading(first_line) is None:
+        # The cut fell inside a section: name the one it interrupted, if there is one.
+        for line in reversed(kept.split("\n")):
+            h = _heading(line)
+            if h:
+                names.append(f"{h} (partly)")
+                break
+    for line in dropped.split("\n"):
+        h = _heading(line)
+        if h and h not in names:
+            names.append(h)
+    return names
 
 
 def _compact_detail(text: str, limit: int) -> str:
@@ -2518,6 +2764,169 @@ def _render_finding(lines, f, cfg: dict | None = None, *,
     lines.append("")
 
 
+# docs/THREAT_COVERAGE.md is written for the maintainers and its Notes cells cite
+# task ids. --explain shows that text to the person who ran the audit, to whom those ids
+# mean nothing, so the ones that can be taken out WITHOUT rewriting a sentence are
+# removed HERE, at the one place that shows the text - the doc keeps them. Only tracker
+# shapes are matched (B-/C-/F-/I- plus 2-4 digits, or an epic E-0NN); public identifiers
+# (CVE-2026-..., CWE-78, RISK-03) and standards (P-256, E-164) are not, and nothing but the
+# id and its own separator or space is ever deleted. An id the sentence needs as its object
+# ("via B-121", "split out of B-121 as B-122") stays: a leftover id reads better than a
+# sentence with a hole in it.
+_TRACKER_ID_CORE = (r"(?:CLAWSECCHECK-)?(?:[BCFI]-\d{2,4}|E-0\d\d)"
+                    r"(?:/W\d+(?:\.\d+)?)?"
+                    r"(?:[ \t]+(?:(?:shortlist[ \t]+)?item|bug|round|part|Phase)[ \t]+\d+)?(?!\w)")
+_TRACKER_ID_BARE = r"(?:CLAWSECCHECK-)?(?:[BCFI]-\d{2,4}|E-0\d\d)(?!\w)"
+_TRACKER_ID_ANY_RE = re.compile(_TRACKER_ID_BARE)    # only a cheap "is there any?" gate
+# (a) a parenthesis or bracket holding nothing but ids and their separators - "(C-211)",
+# "(B-121, C-130)", "(see F-184)" - goes away with the one space before it.
+_TRACKER_ONLY_GROUP_RE = re.compile(
+    r" ?[(\[][ \t]*(?:(?:see|cf\.?|per)[ \t]+)?(?<![\w/.-])" + _TRACKER_ID_CORE
+    + r"(?:[ \t]*(?:[,;/+&]|and)[ \t]*" + _TRACKER_ID_CORE + r")*[ \t]*[)\]]")
+# (b) an id that opens a parenthesis, with the separator after it: "(C-411; the rule ...".
+_TRACKER_LEADING_RE = re.compile(
+    r"(?<=\()[ \t]*(?<![\w/.-])" + _TRACKER_ID_CORE + r"(?:[ \t]+re-pass)?[ \t]*[;,:][ \t]+")
+# (e) an id glued to a slash list, with that slash: "B-123/SkillTrustBench", "X/B-123".
+_TRACKER_SLASH_AFTER_RE = re.compile(
+    r"(?<![\w/.-])" + _TRACKER_ID_BARE + r"/(?!W\d)(?=[A-Za-z`])")
+_TRACKER_SLASH_BEFORE_RE = re.compile(
+    r"(?<=[A-Za-z0-9)])/" + _TRACKER_ID_BARE + r"(?![/]|\.\w)")
+# (c) a label at the start of a sentence or line, with its colon: "B-243: the rule ...".
+_TRACKER_LABEL_RE = re.compile(
+    r"(?:^|(?<=[.!?:][ \t]))" + _TRACKER_ID_CORE + r":[ \t]+", re.MULTILINE)
+# (d) a modifier: "a B-123 pass", "the B-243 allowlist" - an article or pronoun before it and
+# a plain lowercase noun after it, and no function word that would make it a subject.
+_TRACKER_MODIFIER_RE = re.compile(
+    r"\b((?i:a|an|the|earlier|this|that|its|their))[ \t]+" + _TRACKER_ID_BARE
+    + r"[ \t]+(?=[a-z])(?!(?:and|or|as|is|was|are|were|has|had|have|can|does|did|will|would|"
+    r"should|may|must|not|so|also|for|to|of|in|on|at|with|by|from|but|that|which|where|when|"
+    r"if|then|than|it|be|been|via|per|into|over|under|about|after|before|because|since|while|"
+    r"whose|who)\b)")
+
+
+# Every rule below only DELETES. What is left is either the same sentence without the
+# reference, or (the last resort) the same text without the clause that could not be read
+# without one - nothing is ever added or reworded.
+# (f) "Split out of B-121 as B-122 - " / "..., " - the whole history clause and its dash.
+_TRACKER_SPLIT_RE = re.compile(
+    r"Split out of[ \t]+" + _TRACKER_ID_CORE + r"[ \t]+as[ \t]+" + _TRACKER_ID_CORE
+    + r"(?:[ \t]*[-,][ \t]+|(?=[.;)]))")
+# (g) "wrapping, via B-121, so a ..." keeps one comma; (h) "done via B-121." loses the phrase.
+_TRACKER_COMMA_CONNECTOR_RE = re.compile(
+    r",[ \t]+(?:via|since)[ \t]+" + _TRACKER_ID_CORE + r",")
+# C-730: `(?<![ \t])` - only the first blank of a run may start (every blank used to, each
+# scanning the run). The leftmost match always began there, so the removed text is the same.
+_TRACKER_CONNECTOR_RE = re.compile(
+    r"(?<![ \t])[ \t]+(?:via|since|per|of|from)[ \t]+" + _TRACKER_ID_CORE)
+# (i) a dash- or comma-separated list item: "payment - C-339, ESET ...", "(B338, E-065)".
+_TRACKER_LIST_ITEM_RE = re.compile(
+    r"(?:[ \t]-[ \t]|[,;][ \t]+)(?<![\w/.-])" + _TRACKER_ID_CORE
+    + r"(?=[,;)\]]|\.(?:\s|$)|$)")
+# (j) a label after a dash: "never FAIL - B-315: an unscored ..." keeps the dash.
+_TRACKER_DASH_LABEL_RE = re.compile(r"(?<=- )" + _TRACKER_ID_CORE + r":[ \t]+")
+# (k) "round-2 C-135 review", "its own independent C-135 pass" - the id (and its round) goes,
+# the plain noun stays.
+_TRACKER_BEFORE_NOUN_RE = re.compile(
+    r"(?:round[- ]\d+[ \t]+)?(?<![\w/.-])" + _TRACKER_ID_CORE
+    + r"[ \t]+(?=(?:pass|review|ruling|decision)\b)")
+
+
+def _drop_clause_around(text: str, start: int, end: int) -> str:
+    """*text* without the clause holding ``text[start:end]`` (a tracker id nothing else removed).
+
+    A clause runs between ``;``, a sentence end, a line break or an unmatched bracket, so a
+    balanced parenthesis inside it goes with it. The ``;`` that opened the clause goes too.
+    """
+    lo, depth, left = 0, 0, "start"
+    for i in range(start - 1, -1, -1):
+        c = text[i]
+        if c in ")]":
+            depth += 1
+        elif c in "([":
+            if depth == 0:
+                lo, left = i + 1, "open"
+                break
+            depth -= 1
+        elif depth == 0 and c == ";":
+            lo, left = i, "semi"
+            break
+        elif depth == 0 and (c == "\n" or (c in ".!?" and text[i + 1:i + 2].isspace())):
+            lo, left = i + 1, "sentence"
+            while lo < start and text[lo] in " \t":
+                lo += 1                                   # the gap after the period stays
+            break
+    hi, depth, right = len(text), 0, "end"
+    for i in range(end, len(text)):
+        c = text[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            if depth == 0:
+                hi, right = i, "close"
+                break
+            depth -= 1
+        elif depth == 0 and c == ";":
+            hi, right = i, "semi"
+            break
+        elif depth == 0 and c == "\n":
+            hi, right = i, "line"
+            break
+        elif depth == 0 and text[i:i + 3] == " - ":
+            hi, right = i, "dash"                         # "...; C-135 found X - the rest"
+            break
+        elif depth == 0 and c in ".!?" and text[i + 1:i + 2].isspace() or (
+                depth == 0 and c in ".!?" and i + 1 == len(text)):
+            hi, right = (i, "stop") if left == "semi" else (i + 1, "stop")
+            break
+    if left in ("open", "start", "sentence") and right == "semi":
+        hi += 1                                           # the clause and its own ";"
+    elif left != "semi" and right == "dash":
+        hi += 3                                           # no dash left hanging at the start
+    while left in ("open", "start", "sentence") and hi < len(text) and text[hi] in " \t":
+        hi += 1                                           # no gap left where the clause began
+    if left == "open" and right == "close":               # the whole parenthesis was the clause
+        lo, hi = lo - 1, hi + 1
+        if lo > 0 and text[lo - 1] in " \t":
+            lo -= 1
+    if left in ("sentence", "start") and lo > 0 and text[lo - 1] in " \t" \
+            and (hi >= len(text) or text[hi] in "\n)]"):
+        lo -= 1                                           # no space left dangling before it
+    return text[:lo] + text[hi:]
+
+
+def _strip_internal_ids(text: str) -> str:
+    """*text* with the tracker ids removed that can go without leaving a hole in a sentence.
+
+    Text that carries no tracker id is returned unchanged.
+    """
+    if not _TRACKER_ID_ANY_RE.search(text):
+        return text
+    out = _TRACKER_ONLY_GROUP_RE.sub("", text)
+    out = _TRACKER_LEADING_RE.sub("", out)
+    for _ in range(4):                       # "B-1/B-2/Foo": each pass uncovers the next id
+        step = _TRACKER_SLASH_AFTER_RE.sub("", out)
+        step = _TRACKER_SLASH_BEFORE_RE.sub("", step)
+        if step == out:
+            break
+        out = step
+    out = _TRACKER_LABEL_RE.sub("", out)
+    out = _TRACKER_MODIFIER_RE.sub(r"\1 ", out)
+    for rule, repl in ((_TRACKER_SPLIT_RE, ""), (_TRACKER_COMMA_CONNECTOR_RE, ","),
+                       (_TRACKER_CONNECTOR_RE, ""), (_TRACKER_LIST_ITEM_RE, ""),
+                       (_TRACKER_DASH_LABEL_RE, ""), (_TRACKER_BEFORE_NOUN_RE, "")):
+        out = rule.sub(repl, out)
+    out = _TRACKER_LEADING_RE.sub("", out)               # "(C-135 re-pass, B-238: ..." in turn
+    out = _TRACKER_ONLY_GROUP_RE.sub("", out)
+    # Last resort: an id that is still here is part of a clause that cannot be read without
+    # it ("C-135 found and fixed ...", "B-708's ..."). The clause goes, never a fragment of it.
+    for _ in range(40):
+        m = _TRACKER_ID_ANY_RE.search(out)
+        if m is None:
+            break
+        out = _drop_clause_around(out, m.start(), m.end())
+    return out
+
+
 def render_explain(f, *, coverage_note: "str | None" = None,
                    ascii_only: bool = False) -> str:
     """C-523: everything --explain/--retest show about ONE finding, and nothing else.
@@ -2550,7 +2959,8 @@ def render_explain(f, *, coverage_note: "str | None" = None,
         lines.append(f"  fix: {_sanitize(f.fix)}")
     if coverage_note:
         lines.append("")
-        lines.append(f"  coverage note (docs/THREAT_COVERAGE.md): {_sanitize(coverage_note)}")
+        lines.append("  coverage note (docs/THREAT_COVERAGE.md): "
+                     f"{_sanitize(_strip_internal_ids(coverage_note))}")
     return "\n".join(lines)
 
 
@@ -2899,7 +3309,7 @@ def _plugin_inventory(plugin_sweep) -> dict:
     }
 
 
-def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
+def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None, logs_unexamined=()) -> dict:
     """Build the additive `"inventory"` JSON payload (design §4.6, extended by F-163).
     Presentation-only: reads only what the main audit already collected on `ctx` (plus
     the optional `--full`-only `plugin_sweep`), and re-groups the SAME `findings` list
@@ -2945,6 +3355,17 @@ def build_inventory(findings: list[Finding], ctx, *, plugin_sweep=None) -> dict:
     openclaw = _bucket("openclaw")
     host = _bucket("host")
     logs = _bucket("logs")
+    # C-704: the by-finding bucket cannot see an unread store - B164 PASSes on the rows it
+    # did read and states the rest in its own prose - so a logs subject with nothing wrong
+    # in what was read printed "clear" over "2293 SQLite transcript row(s) ... unexamined".
+    # The ledger's not-checked list is the one place that fact is structured; when it
+    # names a log store the bucket reads UNKNOWN and carries the entries (additive key,
+    # present only then). `status` only ever moves PASS -> UNKNOWN here; a FAIL/WARN stays.
+    _unexamined = tuple(logs_unexamined or ())
+    if _unexamined:
+        logs["unexamined"] = list(_unexamined)
+        if logs["status"] == PASS:
+            logs["status"] = UNKNOWN
 
     agents_roster, attested = _agents_roster(ctx)
     agents = _bucket("agents")
@@ -2988,7 +3409,8 @@ def _inventory_bucket_lines(label: str, bucket: dict, by_id: dict, *, ascii_only
     fids = bucket.get("findings") or []
     marker = icon.get(status, icon.get(UNKNOWN, "?"))
     count_text = _subject_count_text(len(fids), int(bucket.get("unassessed") or 0),
-                                     int(bucket.get("not_applicable_count") or 0))
+                                     int(bucket.get("not_applicable_count") or 0),
+                                     len(bucket.get("unexamined") or ()))
     out = [f" {label} \u2014 {marker} {count_text}"]
     for fid in fids:
         f = by_id.get(fid)
@@ -3164,7 +3586,7 @@ def _mcp_inventory_lines(inv: dict, *, ascii_only: bool = False, compact: bool =
 
 def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool = False,
                               color: bool = False, plugin_sweep=None,
-                              plugins_deferred: bool = False) -> str:
+                              plugins_deferred: bool = False, logs_unexamined=()) -> str:
     """Owner-facing "Inventory by subject" block (F-131 Phase 1, extended by F-163) --
     OpenClaw core / Host machine / Agents / Skills / MCP / Plugins / Channels / Logs &
     trajectories, each with a rolled-up status; Skills, MCP and Plugins additionally get
@@ -3176,7 +3598,8 @@ def render_subject_inventory(findings: list[Finding], ctx, *, ascii_only: bool =
     where the Plugins bucket honestly reports "not scanned" rather than a fake clear."""
     if ctx is None:
         return ""
-    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+    inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep,
+                          logs_unexamined=logs_unexamined)
     by_id = {f.id: f for f in findings}
     rule_char = "=" if ascii_only else "\u2550"
     lines: list[str] = ["== INVENTORY BY SUBJECT " + rule_char * 44]
@@ -3272,31 +3695,11 @@ def render_report(findings: list[Finding], score: ScoreResult,
     if build_digest:
         lines.append(f"Build: {build_digest}")
     lines.append("=" * 44)
-    # C-571: run-level grounding disclosure, ahead of everything else - this is a fact
-    # about the BUILD, not about this run's findings, so it belongs above the per-run
-    # disclosures that follow. `openclawdist.grounding_gap` answers None on anything it
-    # cannot place past GROUNDED_MAX_VERSION (unknown install, unparseable/pre-release
-    # string, a version too short to be a calendar release), so this never fires on
-    # "we don't know" - only on a build genuinely newer than any check here was measured
-    # against. Presentation-only: never touches score/grade/cap (¶2.4/Golden Rule #5 -
-    # this is honesty about a gap, not a manufactured FAIL), and it does not name which
-    # checks are affected because that set is not sound to enumerate - see B363's B-833
-    # fix for the one flip that WAS found, entirely inside the check, with no schema-path
-    # diff to hang a static list on.
-    _gap = _openclawdist.grounding_gap(
-        getattr(ctx, "installed_dist_version", None) if ctx is not None else None
-    )
-    if _gap is not None:
-        gap_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
-        _grounded_str = ".".join(str(p) for p in _openclawdist.GROUNDED_MAX_VERSION)
-        _running_str = ".".join(str(p) for p in _gap)
-        lines.append(
-            f"{gap_icon}This build's checks were last grounded against OpenClaw up to "
-            f"{_grounded_str}; you are running {_running_str}. Some checks assume "
-            "behavior measured on the older build and may be mis-grounded on this one \u2014 "
-            "a real gap can still read as a clean PASS. Not a finding; the score below "
-            "is unchanged."
-        )
+    # C-571/C-615: run-level grounding disclosure, ahead of everything else (a fact about
+    # the BUILD, so above the per-run disclosures that follow); see the helper.
+    _gap_line = _grounding_gap_line(ctx, ascii_only)
+    if _gap_line:
+        lines.append(_gap_line)
     # B-313/B-399: disclosed ABOVE the grade, unconditionally whenever any check degraded
     # this run (crashed, timed out, or - B-399 - ran to completion but could not reach a
     # verdict for an engine-side reason, e.g. an input it expected to read that turned out
@@ -3308,7 +3711,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # config_blind_capped/runtime_capped below).
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        warn_icon = "[!]" if ascii_only else "\u26a0\ufe0f "
+        warn_icon = "[!] " if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         # B-624: the old sentence ended "...or review the affected finding(s) below for an
         # unreadable-input detail." Nothing below was marked, and nothing could be: every
@@ -3347,6 +3750,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
     else:
         lines.append(_urgent_headline(findings, risk=risk))
         lines.append(_missing_layers_sentence(score))
+        lines.append(layers_definition_sentence())
     # C-423: the mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
     _covered_line = _not_fully_covered_line(score)
@@ -3781,7 +4185,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
     # is unavailable (mirrors the ctx-gated sections above).
     inv_text = render_subject_inventory(findings, ctx, ascii_only=ascii_only, color=color,
                                          plugin_sweep=plugin_sweep,
-                                         plugins_deferred=plugins_deferred)
+                                         plugins_deferred=plugins_deferred,
+                                         logs_unexamined=_logs_unexamined(score))
     if inv_text:
         lines.append("")
         lines.extend(inv_text.split("\n"))
@@ -3826,6 +4231,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
                     if f.status == UNKNOWN and not getattr(f, "not_applicable", False)),
                 sum(1 for f in members
                     if f.status == UNKNOWN and getattr(f, "not_applicable", False)),
+                # C-704: same rule as the inventory block above (the logs subject only).
+                len(_logs_unexamined(score))
+                if subj_key == "logs" else 0,
             )
             if ascii_only:
                 lines.append(f"[{label_disp}] \u2014 {count_text}")
@@ -3859,7 +4267,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
                              " resolve via `--ask` then `--attest`")
             if n_na:
                 na_icon = _AXIS_ICON_ASCII["N/A"] if ascii_only else _AXIS_ICON_UNI["N/A"]
-                lines.append(f"  {na_icon} {n_na} not applicable (no such surface in your config)")
+                lines.append(f"  {na_icon} {n_na} not applicable (no such surface in your config); "
+                             "counts unscored checks too")
             lines.append("")
 
     # Coverage map - "check OpenClaw the platform" framing: how many config surfaces this
@@ -3896,13 +4305,7 @@ def render_report(findings: list[Finding], score: ScoreResult,
         # or hit a sensitive check (B1/B2/B13/B20). Hiding these silently could turn an F into an
         # A via one .clawseccheckignore line, so they stay visible no matter what the ignore says.
         # Same rule the badge and SARIF now use (surfaced_despite_suppression) - one source (B-163).
-        for f in findings:
-            if surfaced_despite_suppression(f):
-                lines.append(
-                    f"WARNING: a {f.severity} finding ({f.id}) is suppressed via"
-                    " .clawseccheckignore \u2014 it still counts against your real security;"
-                    " review your ignore list."
-                )
+        lines.extend(suppressed_notice_lines(findings))
 
     # B-769: a fingerprint entry that matches nothing this run, surfaced in the
     # ORDINARY run rather than only under the opt-in --show-suppressed. Either the
@@ -3991,7 +4394,8 @@ def render_report(findings: list[Finding], score: ScoreResult,
 
 def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = False,
                               compact: bool = False,
-                              why_drop_severities: frozenset = frozenset()) -> str:
+                              why_drop_severities: frozenset = frozenset(),
+                              suppression_notice: bool = True) -> str:
     """Deterministic, framed Findings block for the chat Dashboard (SKILL.md Step 3, Section 3).
 
     Emits ONLY what Section 3 must contain, so the host agent PASTES this verbatim instead
@@ -4016,17 +4420,20 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
     config, the caller re-renders with this set widened (weakest severity first) so
     entire why lines are dropped rather than merely narrowed. Empty by default,
     reproducing the exact prior output.
+
+    `suppression_notice` (C-618): append the bounded WARNING for a suppressed finding that
+    still counts (the body stays excluded). render_dashboard's --full pass turns it off,
+    because its header already carries the notice.
     """
     findings = deduplicate_findings(findings)
-    qualifying = [
-        f for f in findings
-        if f.status in ACTIONABLE_STATUSES
-        and not getattr(f, "suppressed", False)
-        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
-    ]
+    notice = (suppressed_notice_lines(findings, limit=_DASHBOARD_NOTICE_LIMIT)
+              if suppression_notice else [])
+    qualifying = _headline_qualifying_findings(findings)
     if not qualifying:
         ok = "[OK]" if ascii_only else "\u2705"
         out = f"No high-confidence issues to fix. {ok}\n"
+        if notice:
+            out += "\n" + "\n".join(notice) + "\n"
         return _asciify(out) if ascii_only else out
 
     lines: list = []
@@ -4052,6 +4459,8 @@ def render_dashboard_findings(findings: list[Finding], *, ascii_only: bool = Fal
                             why_drop_severities=why_drop_severities)
         lines.append("")
 
+    if notice:
+        lines.extend(notice)
     out = "\n".join(lines).rstrip() + "\n"
     return _asciify(out) if ascii_only else out
 
@@ -4229,8 +4638,57 @@ def _glance_qualifying_findings(findings: list[Finding]) -> list[Finding]:
     ]
 
 
+def _headline_qualifying_findings(findings: list[Finding]) -> list[Finding]:
+    """The complement of `_glance_qualifying_findings`: the non-suppressed FAIL/WARN
+    findings that are NOT MEDIUM/ATTESTED confidence - the set the card's subject blocks
+    (`render_dashboard_findings`) and its "Most urgent" lines (`_card_top_urgent_lines`)
+    draw from. One filter shared by both and by the header's issue-count clause (C-712), so
+    the count the header reconciles against is the list the renderer prints."""
+    return [
+        f for f in findings
+        if f.status in ACTIONABLE_STATUSES
+        and not getattr(f, "suppressed", False)
+        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
+    ]
+
+
+# How many lower-confidence findings the --full card prints under "Worth a glance".
+_GLANCE_LIMIT = 12
+_GLANCE_LIMIT_COMPACT = 6
+
+
+def _issues_count_phrase(findings: list[Finding], n_issues: int, *, compact: bool,
+                         reconcile: bool) -> str:
+    """The header's "N issues", plus (C-712) the split when the subject blocks below do not
+    add up to it. `n_issues` counts every non-suppressed FAIL/WARN; the subject blocks print
+    only the high-confidence ones, so a card with lower-confidence findings used to show
+    "38 issues" over blocks that listed 28 and say nothing about the other 10.
+
+    `reconcile` is False for the overview card (no subject blocks: its pointer line carries
+    the reconciliation instead). Both parts are measured with the filters the renderers use,
+    and the clause appears only when both parts exist and add up to `n_issues` - a count it
+    cannot reconcile is left plain rather than guessed."""
+    word = "issue" if n_issues == 1 else "issues"
+    phrase = f"{n_issues} {word}"
+    if not reconcile:
+        return phrase
+    n_high = len(_headline_qualifying_findings(findings))
+    n_low = len(_glance_qualifying_findings(findings))
+    if not n_low or n_high + n_low != n_issues:
+        return phrase
+    if compact:
+        # --compact: the glance section is short and the budget cut usually removes it, so
+        # promise only what holds in every case - the full report carries every finding.
+        where = "see the full report"
+    elif n_low <= _GLANCE_LIMIT:
+        where = "listed further down"
+    else:
+        where = f"{_GLANCE_LIMIT} listed further down, the rest in the full report"
+    return f"{phrase} ({n_high} high-confidence, {n_low} lower-confidence: {where})"
+
+
 def _worth_a_glance_lines(findings: list[Finding], *, ascii_only: bool = False,
-                          limit: int = 12, compact: bool = False,
+                          limit: int = _GLANCE_LIMIT, compact: bool = False,
                           why_drop_severities: frozenset = frozenset()) -> list[str]:
     """MEDIUM/ATTESTED-confidence findings for the combined pipeline Dashboard
     (F-153) - the exact complement of render_dashboard_findings's own filter (which
@@ -4346,12 +4804,14 @@ def _card_trim_title(title: str, limit: int = _CARD_TITLE_LIMIT) -> str:
     return (cut or t[:limit]) + "\u2026"
 
 
-def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = False) -> list[str]:
+def _card_summary_lines(findings, ctx, *, plugin_sweep=None, ascii_only: bool = False,
+                        logs_unexamined=()) -> list[str]:
     """Per-subject overview lines for the chat card - built from the SAME
     `_subject_summary_rows` the HTML and PDF summary tables use, so all three surfaces
     (and the JSON `inventory`) can never disagree. Returns [] when `ctx` is unavailable,
     the same skip-don't-guess stance `render_subject_inventory` already takes."""
-    rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep,
+                                 logs_unexamined=logs_unexamined)
     if not rows:
         return []
     icon = _ICON_ASCII if ascii_only else _ICON
@@ -4377,12 +4837,7 @@ def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
     Returns `(lines, n_named)`; the caller reconciles `n_named` against the header's own
     issue count and DISCLOSES the difference (Golden Rule #4 - a card that quietly names
     5 of 26 findings would read as a complete list)."""
-    qualifying = [
-        f for f in findings
-        if f.status in ACTIONABLE_STATUSES
-        and not getattr(f, "suppressed", False)
-        and getattr(f, "confidence", "HIGH") not in (MEDIUM, ATTESTED)
-    ]
+    qualifying = _headline_qualifying_findings(findings)
     qualifying.sort(key=lambda f: (_SEV_ORDER.get(f.severity, 9), _STATUS_ORDER.get(f.status, 9)))
     named = qualifying[:limit] if limit else []
     lines = [
@@ -4393,7 +4848,7 @@ def _card_top_urgent_lines(findings, *, limit: int = _CARD_TOP_URGENT,
 
 
 def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool = False,
-                               full: bool = False) -> list[str]:
+                               full: bool = False, n_lower: int = 0) -> list[str]:
     """Where the rest of the detail is. Two jobs: disclose how many findings the card did
     NOT name, and point at the full report.
 
@@ -4414,7 +4869,19 @@ def _card_detail_pointer_lines(n_more: int, pdf_path=None, *, ascii_only: bool =
                      " second-opinion and coverage blocks") if full else ""
     if n_more > 0:
         word = "finding" if n_more == 1 else "findings"
-        lines.append(f"(+{n_more} more {word} not named above \u2014 the full list is in the report.)")
+        # C-712: when some of the unnamed findings are lower-confidence, say how many, so
+        # the header count equals the named lines plus each remainder (`n_lower` comes from
+        # the same filter list as the render; it is clamped so the parts never exceed n_more).
+        n_lower = max(0, min(n_lower, n_more))
+        if n_lower:
+            n_high_more = n_more - n_lower
+            parts = ([f"{n_high_more} high-confidence"] if n_high_more else []) + [
+                f"{n_lower} lower-confidence"]
+            split = ", ".join(parts) + "; "
+        else:
+            split = ""
+        lines.append(f"(+{n_more} more {word} not named above \u2014 {split}"
+                     "the full list is in the report.)")
     if pdf_path:
         lines.append(f"Full detail \u2014 every finding, with its why and evidence{full_pipeline}"
                      " \u2014 is in the attached PDF report.")
@@ -4529,7 +4996,19 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # Grade"/"- Findings -" spots, a middle-dot for the "Grade F · 49/100" spot) - a
     # visible drift within the same string. One brand separator everywhere now.
     sep = brand.ASCII_SEPARATOR.strip() if ascii_only else brand.SEPARATOR.strip()
-    issues_word = "issue" if n_issues == 1 else "issues"
+    # C-712: the subject blocks print only the high-confidence findings, so over them the
+    # header splits the count; the overview card (default / --full with a PDF) has no such
+    # blocks and reconciles in its pointer line instead.
+    _reconcile = bool(full and not pdf_path)
+    issues_phrase_split = _issues_count_phrase(
+        findings, n_issues, compact=compact, reconcile=_reconcile)
+    # --compact is tuned to the ~4096-char budget and, on a big home, already sits at the
+    # hard-truncation step: the extra ~70 characters displaced the Skills "not graded" note
+    # (measured on a real home). So the compact card is rendered with the plain phrase and
+    # the split is substituted into the header AFTER the budget is enforced, only when the
+    # whole card still fits - the clause can add a clause, never cost the card a line.
+    issues_phrase = (_issues_count_phrase(findings, n_issues, compact=compact, reconcile=False)
+                     if compact else issues_phrase_split)
     # B-444 bug B: this used to hand-assemble "{mascot}OpenClaw Security Audit" as an
     # f-string, bypassing brand.header() entirely -- so brand.WORDMARK ("ClawSecCheck")
     # never reached the single most-seen surface (the card a host agent pastes into
@@ -4545,14 +5024,18 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         grade_lines = [
             f"{head} {sep} Grade {score.grade} {sep} {score.score}/100",
             f"{_score_bar(score.score, score.grade, ascii_only=ascii_only)}"
-            f"  {sep}  {n_issues} {issues_word}",
+            f"  {sep}  {issues_phrase}",
         ]
     else:
         _headline = _urgent_headline(findings, risk=risk)
         grade_lines = [
             f"{head} {sep} {_headline}",
-            f"{_missing_layers_sentence(score)}  {sep}  {n_issues} {issues_word}",
+            f"{_missing_layers_sentence(score)}  {sep}  {issues_phrase}",
         ]
+        if not compact:
+            # C-704: the sentence above counts layers it never names; the compact card
+            # skips this line because it is tuned to fit ~4096 chars on a real home.
+            grade_lines.append(layers_definition_sentence())
         if _headline != _NOTHING_URGENT_SENTENCE:
             # CLAWSECCHECK headline-id-leak: this headline states the risk, never the
             # check id (design-system.md Layer 0), and this card's own Skills/MCP
@@ -4570,6 +5053,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         grade_lines.append(_covered_line)
+    # C-615: the newer-than-grounded notice (C-571) - the card is what SKILL.md pastes.
+    _gap_line = _grounding_gap_line(ctx, ascii_only)
+    if _gap_line:
+        grade_lines.append(_gap_line)
     # B-767: render_report/render_html/pdf.render_pdf all disclose a degraded check
     # (crashed, timed out, or hit unreadable/corrupted input) unconditionally, above the
     # grade - this renderer never did, even though it is the ONE artifact SKILL.md tells
@@ -4579,7 +5066,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # reader happens to be looking at.
     _degraded_n = getattr(score, "degraded_count", 0)
     if _degraded_n:
-        _degraded_mark = "[!]" if ascii_only else "\u26a0\ufe0f "
+        _degraded_mark = "[!] " if ascii_only else "\u26a0\ufe0f "
         _plural = "check" if _degraded_n == 1 else "checks"
         grade_lines.append(
             f"{_degraded_mark}{_degraded_n} {_plural} could not reach a reliable verdict "
@@ -4615,6 +5102,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             f"{_mark} {_cap_primary_reason_text(_cap_primary, score)}"
             f"{_cap_also_clause(_cap_extras)} \u2014 {_UNGRADED_CAP_TAIL}"
         )
+    # C-618: a suppressed finding that still counts (it explains the cap above) - bounded.
+    grade_lines.extend(suppressed_notice_lines(findings, limit=_DASHBOARD_NOTICE_LIMIT))
     if getattr(score, "config_blind_capped", False):
         # C-426: "This grade reflects..." is incoherent on a run that has no grade - and
         # after C-426 the config-blind case is USUALLY ungraded, because a bare run is.
@@ -4637,7 +5126,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     # `--full` keeps its existing header (grade card + the "· Findings ·" section label
     # immediately below); the C-373 default card opens with the grade lines only and
     # labels its own sections as it goes.
-    header_block = "\n".join([*grade_lines, "", f"{sep} Findings {sep}"]) + "\n"
+    header_block = "\n".join([*grade_lines, "", f"{sep} {_SEC_FINDINGS} {sep}"]) + "\n"
     card_header_block = "\n".join(grade_lines) + "\n"
 
     # Skills is a fixed block (unaffected by why_drop_severities): computed once.
@@ -4648,13 +5137,13 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         inv = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
         if inv["skills"]:
             skill_lines = _skills_inventory_lines(inv, ctx, ascii_only=ascii_only)
-            skills_block = "\n" + f"{sep} Skills {sep}" + "\n" + "\n".join(skill_lines) + "\n"
+            skills_block = "\n" + f"{sep} {_SEC_SKILLS} {sep}" + "\n" + "\n".join(skill_lines) + "\n"
             # C-373: the card caps the clean roster (the one unbounded part - see
             # _skills_inventory_lines); flagged skills are always named in full, since
             # those are the ones the reader has to act on.
             card_skill_lines = _skills_inventory_lines(
                 inv, ctx, ascii_only=ascii_only, clean_roster_limit=_CARD_CLEAN_SKILLS)
-            card_skills_block = ("\n" + f"{sep} Skills {sep}" + "\n"
+            card_skills_block = ("\n" + f"{sep} {_SEC_SKILLS} {sep}" + "\n"
                                  + "\n".join(card_skill_lines) + "\n")
 
     # C-374: `--dashboard --full --pdf <path>` ALSO renders the overview card. Under
@@ -4678,8 +5167,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # above") instead of letting the header count and the rendered list silently
         # disagree - and every one of those N IS in the PDF, which renders all
         # FAIL/WARN regardless of confidence.
+        n_lower = len(_glance_qualifying_findings(findings))
         summary_lines = _card_summary_lines(findings, ctx, plugin_sweep=plugin_sweep,
-                                            ascii_only=ascii_only)
+                                            ascii_only=ascii_only,
+                                            logs_unexamined=_logs_unexamined(score))
         ok = "[OK]" if ascii_only else "\u2705"
 
         def _assemble_card(limit: int) -> str:
@@ -4687,15 +5178,16 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
                 findings, limit=limit, ascii_only=ascii_only)
             out = card_header_block
             if summary_lines:
-                out += ("\n" + f"{sep} Inventory by subject {sep}" + "\n"
+                out += ("\n" + f"{sep} {_SEC_INVENTORY} {sep}" + "\n"
                         + "\n".join(summary_lines) + "\n")
             if top_lines:
-                out += ("\n" + f"{sep} Most urgent {sep}" + "\n"
+                out += ("\n" + f"{sep} {_SEC_URGENT} {sep}" + "\n"
                         + "\n".join(top_lines) + "\n")
             elif n_issues == 0:
                 out += f"\nNo known attack pattern matched. Keep it that way. {ok}\n"
             out += ("\n" + "\n".join(_card_detail_pointer_lines(
-                n_issues - n_named, pdf_path, ascii_only=ascii_only, full=full)) + "\n")
+                n_issues - n_named, pdf_path, ascii_only=ascii_only, full=full,
+                n_lower=n_lower)) + "\n")
             return out + card_skills_block
 
         return _finalize_card(_assemble_card, ascii_only=ascii_only)
@@ -4720,29 +5212,29 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     tail_block = ""
     plugin_lines = _plugins_inventory_lines(plugin_sweep, ascii_only=ascii_only, compact=compact)
     if plugin_lines:
-        tail_block += ("\n" + f"{sep} Plugins {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_PLUGINS} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in plugin_lines) + "\n")
 
     if inv is not None and inv["mcp"]:
         mcp_lines = _mcp_inventory_lines(inv, ascii_only=ascii_only, compact=compact)
-        tail_block += ("\n" + f"{sep} MCP {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_MCP} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in mcp_lines) + "\n")
 
     risk_lines = _risk_chain_lines(risk or [], ascii_only=ascii_only, compact=compact)
     if risk_lines:
-        tail_block += "\n" + f"{sep} RISK Chains {sep}" + "\n" + "\n".join(risk_lines) + "\n"
+        tail_block += "\n" + f"{sep} {_SEC_RISK} {sep}" + "\n" + "\n".join(risk_lines) + "\n"
 
     behavioral_lines = _behavioral_block_lines(behavioral, ascii_only=ascii_only)
     if behavioral_lines:
-        tail_block += ("\n" + f"{sep} Behavioural {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_BEHAVIOURAL} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in behavioral_lines) + "\n")
 
     second_opinion_lines = _second_opinion_lines(adjudication, ascii_only=ascii_only)
     if second_opinion_lines:
-        tail_block += ("\n" + f"{sep} Second opinion (advisory) {sep}" + "\n"
+        tail_block += ("\n" + f"{sep} {_SEC_SECOND_OPINION} {sep}" + "\n"
                + "\n".join(_redact_home_paths(ln) for ln in second_opinion_lines) + "\n")
 
-    coverage_lines = _coverage_lines(findings, ascii_only=ascii_only)
+    coverage_lines = _coverage_lines(findings, ascii_only=ascii_only, compact=compact)
     if coverage_lines:
         tail_block += "\n" + "\n".join(coverage_lines) + "\n"
 
@@ -4762,7 +5254,7 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         cov_page_lines = _coverage_page_lines(coverage_page, ascii_only=ascii_only,
                                               show_reasons=not compact)
         if cov_page_lines:
-            tail_block += ("\n" + f"{sep} Coverage page {sep}" + "\n"
+            tail_block += ("\n" + f"{sep} {_SEC_COVERAGE_PAGE} {sep}" + "\n"
                           + "\n".join(cov_page_lines) + "\n")
 
     glance_marker = "" if ascii_only else "\U0001f440 "
@@ -4771,7 +5263,8 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
     def _assemble(why_drop_severities: frozenset = frozenset()) -> str:
         body = render_dashboard_findings(
             findings, ascii_only=ascii_only, compact=compact,
-            why_drop_severities=why_drop_severities).rstrip("\n")
+            why_drop_severities=why_drop_severities,
+            suppression_notice=False).rstrip("\n")  # C-618: the header carries it
         out = header_block + body + "\n" + skills_block + tail_block
 
         # B-381: --compact also tightens the "Worth a glance" limit (12 -> 6) -- this
@@ -4779,10 +5272,10 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
         # ATTESTED findings could blow the char budget on its own even after Section 2
         # is trimmed.
         glance_lines = _worth_a_glance_lines(
-            findings, ascii_only=ascii_only, limit=6 if compact else 12, compact=compact,
+            findings, ascii_only=ascii_only, limit=_GLANCE_LIMIT_COMPACT if compact else _GLANCE_LIMIT, compact=compact,
             why_drop_severities=why_drop_severities)
         if glance_lines:
-            out += ("\n" + f"{sep} {glance_marker}Worth a glance {sep}" + "\n"
+            out += ("\n" + f"{sep} {glance_marker}{_SEC_GLANCE} {sep}" + "\n"
                    + "\n".join(glance_lines) + "\n")
 
         # C-373: `--dashboard --full --pdf <path>` wrote an attachable report this run -
@@ -4795,8 +5288,15 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
 
         return out + footer_block
 
-    return _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only,
-                                       reserve=compact_reserve)
+    result = _finalize_compact_dashboard(_assemble, compact=compact, ascii_only=ascii_only,
+                                         reserve=compact_reserve)
+    if compact and issues_phrase_split != issues_phrase:
+        anchor = f"  {sep}  {issues_phrase}\n"
+        widened = result.replace(anchor, f"  {sep}  {issues_phrase_split}\n", 1)
+        if (widened != result
+                and len(widened) <= max(_COMPACT_CHAR_BUDGET - max(compact_reserve, 0), 0)):
+            return widened
+    return result
 
 
 def render_card(score: ScoreResult, findings: list[Finding], ascii_only: bool = False) -> str:
@@ -4895,7 +5395,8 @@ def _header_rule_width(header_line: str, ascii_only: bool) -> int:
 def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
                    baseline: bool = False, persisted: bool = True,
                    baseline_corrupt: bool = False, live_test_skipped: bool = False,
-                   notes=None, verbose: bool = False, baseline_ref: str = "") -> str:
+                   notes=None, verbose: bool = False, baseline_ref: str = "",
+                   probe: bool = False) -> str:
     """Render the --monitor body.
 
     *baseline* - this was a genuine first run (no prior state file at all).
@@ -4906,6 +5407,11 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     for ongoing monitoring that is not in fact running. Alerts computed this run ARE still
     real (the comparison happened against a real baseline) and are still shown; the CLI
     prints the failure verdict on stderr and exits non-zero.
+
+    *probe* - C-718: this was a ``--monitor --probe`` run, which persists nothing by design.
+    ``persisted`` is False for it on an otherwise ordinary comparison (a failed journal or
+    state write sets it False too, and is not a probe), so a probe that found no drift may
+    say so; it still makes no claim about the baseline.
 
     *baseline_corrupt* - B-270: a prior baseline existed but could not be used. This is
     NOT a first run (saying "Baseline saved." there is what made a destroyed baseline look
@@ -4976,6 +5482,12 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         # B-271: nothing was written, so make no claim about the baseline either way.
         if alerts:
             lines += _alert_lines()
+        elif probe and not baseline and not baseline_corrupt and not live_test_skipped:
+            # C-718: a probe persists nothing by design, so it fell through here and never
+            # said the one thing an unchanged check says. Same claim, same scoping as the
+            # ordinary run's all-clear below - it is about drift, not about the baseline.
+            lines += ["", "No new threats among what was compared." if notes
+                      else f"No new threats since last check. {ok}"]
         if live_test_skipped:
             # B-379: distinguish "deliberately not persisted" from "write failed" -
             # the CLI does not treat this as an error, and neither should this text.
@@ -5008,10 +5520,14 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
     #
     # Suppressed on three branches. A first run and a corrupt-baseline run compared nothing
     # at all and already say so in words, so a count would be a second, vaguer voice for a
-    # state that is already named precisely. The unpersisted branch is subtler: it
-    # deliberately makes NO affirmation about this run, so a qualifier there would scope a
-    # claim that was never made - the reader is handed a caveat with nothing to attach it to.
-    if not baseline and not baseline_corrupt and persisted:
+    # state that is already named precisely. The unpersisted branch is subtler: a run whose
+    # write failed, or whose grade was not recorded, deliberately makes NO affirmation
+    # about itself, so a qualifier there would scope a claim that was never made - the
+    # reader is handed a caveat with nothing to attach it to. A probe is the exception
+    # (C-718): it reports its alerts or says that nothing changed, exactly as an ordinary
+    # run does, so it carries the same qualifier.
+    _probe_claims = probe and not live_test_skipped
+    if not baseline and not baseline_corrupt and (persisted or _probe_claims):
         lines += _not_compared_lines(notes, verbose, ascii_only)
     # F-173: printed on every run that actually advanced the baseline, including the very
     # first - a first run is exactly when a user has nothing to compare against later, so
@@ -5687,23 +6203,35 @@ def _breaks_the_line_it_is_printed_on(text: str) -> bool:
     return bool(text) and text.splitlines() != [text]
 
 
-def _refuse_command_plan(target: str) -> str:
-    """The --vet-plan output for a target carrying a control character: no commands.
+def _refuse_command_plan(target: str, *, option_shaped: bool = False) -> str:
+    """The --vet-plan output for a target it will not build commands for: no commands.
 
     Renders the same 4-step plain-language preamble (a reader still deserves to know what
     the flow does) but replaces every command line with a refusal. The target is shown
     with its control characters escaped via `repr`, so the refusal itself cannot smuggle a
-    line break into the output it is protecting.
+    line break into the output it is protecting. `option_shaped` (C-628) swaps the reason
+    for an npm/pypi spec that a package manager would read as an option.
     """
+    if option_shaped:
+        why = [
+            "Its package name or version starts with '-'. Written into an npm or pip",
+            "command, that text is read as a command-line option, not as a package, and",
+            "could point the fetch at a server of its own choosing. Nothing you can fetch",
+            "by name starts with '-'.",
+        ]
+    else:
+        why = [
+            "It contains a control character (a newline, carriage return, or similar). No real",
+            "package name, URL, git ref, or skill slug does. Because these commands are meant to",
+            "be copied and run line by line, a target that spans lines would let the target's own",
+            "text land on a line of its own \u2014 which is how injected text reaches command position.",
+        ]
     return "\n".join([
         "I will not build a fetch plan for this target.",
         "",
         f"  target (escaped): {target!r}",
         "",
-        "It contains a control character (a newline, carriage return, or similar). No real",
-        "package name, URL, git ref, or skill slug does. Because these commands are meant to",
-        "be copied and run line by line, a target that spans lines would let the target's own",
-        "text land on a line of its own \u2014 which is how injected text reaches command position.",
+        *why,
         "",
         "Treat this as a strong signal about the target itself: something produced an",
         "identifier that cannot be one. Check where it came from before going further.",
@@ -5730,9 +6258,11 @@ def _looks_like_quarantine(target: str) -> bool:
     False otherwise. --advise can be pointed at ANY path, including a real installed
     skill - never suggest an unconditional `rm -rf` outside temp, or a user could paste
     it against their live install."""
+    import os  # noqa: PLC0415
     try:
-        resolved = Path(target).expanduser().resolve()
-        tmp = Path(tempfile.gettempdir()).resolve()
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+        resolved = Path(os.path.realpath(pathprobe.expand_user(target)))
+        tmp = Path(os.path.realpath(tempfile.gettempdir()))
         return resolved == tmp or tmp in resolved.parents
     except OSError:
         return False
@@ -5895,6 +6425,8 @@ def render_vet_plan(target: str) -> str:
         return _refuse_command_plan(target)
 
     info = _parse_source_target(target)
+    if info.get("option_shaped"):
+        return _refuse_command_plan(target, option_shaped=True)
     eco, name, version = info["ecosystem"], info["name"], info.get("version")
     ver_suffix = f"@{version}" if version else ""
 
@@ -6007,7 +6539,7 @@ def render_permission_manifest(ctx, target: str) -> str:
     printed `shell.exec: false`. Presence covers `os.system`/`os.popen`/`subprocess.*`
     through the same `_is_exec_sink_call` predicate the engine's own TT5 rule uses.
     """
-    skill_key = Path(target).expanduser().name or str(target)
+    skill_key = pathprobe.expand_user(target).name or str(target)
     name = _sanitize(skill_key)
     header = [
         f"# proposed-permission-manifest for: {name}",
@@ -6049,11 +6581,12 @@ def render_permission_manifest(ctx, target: str) -> str:
 
     if unprofilable and self_excluded:
         lines = header + [
-            "# this target is ClawSecCheck's own source -- self-scan is deliberately",
-            "# skipped (see its own B13 PASS reason: a security auditor's signature",
-            "# database would otherwise flag itself). This is NOT \"opaque/unparseable/",
-            "# no code\" -- point --emit-manifest at a different skill for a real",
-            "# capability profile.",
+            "# this target matched ClawSecCheck's own-source layout. Its self-scan is deliberately",
+            "# skipped, so NOTHING in it was scanned (see its B13 NOT SCANNED reason: a",
+            "# security auditor's signature database would otherwise flag itself, and a",
+            "# layout match is a content heuristic, not proof this is the genuine scanner).",
+            "# This is NOT \"opaque/unparseable/no code\" -- point --emit-manifest at a",
+            "# different skill for a real capability profile.",
             "unprofilable: true",
             "filesystem:",
             "  read: unknown",
@@ -6342,6 +6875,11 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     _cfg_reason = getattr(ctx, "config_parse_reason", None) if ctx is not None else None
     payload["config_parse_reason"] = _sanitize(_cfg_reason) if _cfg_reason else None
     payload["errors"] = [_sanitize(e) for e in getattr(ctx, "errors", [])] if ctx is not None else []
+    # C-678: the grounding gap (C-571/C-615) on the machine surface -- ALWAYS present, and
+    # `newer_than_grounded` is null (not false) when the installed build is unknown, so an
+    # absent or false value can never be the way "we could not tell" is read. Presentation
+    # only: never folded into score/grade/findings above.
+    payload["grounding"] = _grounding_block(ctx)
     # B-769: same fact as the text report's dead-suppression note, structurally --
     # a fingerprint .clawseccheckignore entry that matched no finding this run.
     # Always present (empty list when none), matching this payload's own convention
@@ -6352,7 +6890,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
     # F-131 Phase 1: "Inventory by subject" - additive top-level key (design §4.6).
     # Presentation-only: never alters score/grade/findings above; empty/UNKNOWN-shaped
     # when ctx is unavailable (build_inventory's own ctx-is-None fallback).
-    payload["inventory"] = build_inventory(findings, ctx, plugin_sweep=plugin_sweep)
+    payload["inventory"] = build_inventory(findings, ctx, plugin_sweep=plugin_sweep,
+                                            logs_unexamined=_logs_unexamined(score))
     # F-149 JSON gap: present ONLY under --full (the caller passes None otherwise) -
     # matches the printed SKILL SWEEP section, which likewise only exists under
     # --full. Visibility only, same as the printed section: never folded into
@@ -6426,6 +6965,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         icon_char = "\u2715" if f.status in FAIL_WEIGHT_STATUSES else "\u26a0"
         card_cls = "finding is-fail" if f.status in FAIL_WEIGHT_STATUSES else "finding"
         f_title = esc(_sanitize(f.title))
+        # C-717: the catalog id (the string `--explain` takes and `.clawseccheckignore`
+        # names) beside the title. This page is the full report the text report sends the
+        # reader to, and it was the one full-report surface that named no finding.
+        f_id = esc(_sanitize(str(f.id)))
         # B-825: `detail_plain` (unredacted) stays the `already_shown` comparison key below
         # -- evidence de-dup has to match against the SAME text `_evidence_bullets` sees, or
         # an entry that is only a duplicate after redaction collapses two different-looking
@@ -6482,6 +7025,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
                     <div class="finding-head">
                         <span class="finding-icon" aria-hidden="true">{esc(icon_char)}</span>
                         <span class="finding-title">{f_title}</span>
+                        <span class="finding-id">{f_id}</span>
                         {conf_html}
                         <span class="sev-pill">{esc(f.severity)}</span>
                     </div>
@@ -6533,7 +7077,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
     # payload and the terminal "Inventory by subject" block use (single source of truth).
     # "" when ctx is unavailable (a bare render_html(findings, score) call) - degrades to
     # no table, never a fabricated one.
-    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep)
+    summary_rows = _subject_summary_rows(findings, ctx, plugin_sweep=plugin_sweep,
+                                         logs_unexamined=_logs_unexamined(score))
     if summary_rows:
         _st_color = {FAIL: "#d9534f", WARN: "#d9a406", PASS: "#1a7f37", UNKNOWN: "#8a8f98"}
         # B-755: both halves of this cell read the RAW status. The colour lookup missed and
@@ -6648,7 +7193,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         _also_html = _cap_also_clause([esc(p) for p in _extras])
         capped_html = (f'<p class="capped">{_reason_html}{_also_html} \u2014 '
                        f'{esc(_UNGRADED_CAP_TAIL)}</p>')
-    capped_html = degraded_html + capped_html
+    # C-615: the newer-than-grounded notice (C-571), ahead of the degraded line, as in text.
+    _gap_text = _grounding_gap_line(ctx, False)
+    gap_html = f'<p class="meta">{esc(_gap_text)}</p>' if _gap_text else ""
+    capped_html = gap_html + degraded_html + capped_html
+    # C-618: every suppressed finding that still counts (body stays out; archival, unbounded).
+    suppressed_html = "".join(
+        f'<p class="capped" role="note">{esc(line)}</p>'
+        for line in suppressed_notice_lines(findings))
 
     # C-423: mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
@@ -6702,8 +7254,14 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         score_block_html = (
             '<div class="scorewrap">'
             f'<p class="meta">{esc(_urgent_headline(findings))}</p>'
-            f'<p class="meta">{esc(_missing_layers_sentence(score))}</p></div>'
+            f'<p class="meta">{esc(_missing_layers_sentence(score))}</p>'
+            f'<p class="meta">{esc(layers_definition_sentence())}</p></div>'
         )
+
+    # C-717: the build that wrote this page, once, in the footer (the PDF prints it as
+    # `v<version>` in its header band). Lazy import: `__version__` is assigned in the
+    # package `__init__` after the renderers are imported.
+    from . import __version__ as _tool_version  # noqa: PLC0415
 
     html_body = f'''<!doctype html>
 <html lang="en">
@@ -6901,6 +7459,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         .finding-head {{ display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap; }}
         .finding-icon {{ color: var(--sev); font-weight: 700; }}
         .finding-title {{ font-weight: 700; color: var(--ink); flex: 1 1 12rem; }}
+        .finding-id {{
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.78rem; color: var(--muted); user-select: all;
+        }}
         .finding.is-fail {{
             border-left-width: 7px; border-left-color: var(--sev);
             background: color-mix(in srgb, var(--sev) 12%, var(--card));
@@ -6987,6 +7549,7 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             {not_checked_html}
             <p class="meta"><strong>{esc(label_trifecta)}</strong> {esc(trifecta)}</p>
             {capped_html}
+            {suppressed_html}
             {summary_html}
         </header>
 
@@ -7004,7 +7567,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         {findings_html}
 
         <footer class="footer">Generated locally by ClawSecCheck · read-only against your OpenClaw config · this report never leaves your machine
-            <br>{esc(_EXPORT_FINDINGS_ONLY_NOTE)}</footer>
+            <br>{esc(_EXPORT_FINDINGS_ONLY_NOTE)}
+            <br>ClawSecCheck v{esc(_tool_version)}</footer>
     </main>
 </body>
 </html>'''
@@ -7104,9 +7668,14 @@ def render_brief(state: "dict | None", events: "list | None",
                          "ago it was taken cannot be determined.")
         elif age >= _BRIEF_DEAD_DAYS:
             lines.append(
-                f"Monitoring is effectively not running \u2014 nothing has checked this setup "
-                f"for {int(age)} days. Stopping the schedule is the cheapest way to "
-                "silence a monitor, and it leaves no trace in the files it watches.")
+                # C-712: the evidence is ClawSecCheck's own monitor journal, not the
+                # machine's monitoring in general - a run with --no-history, or another
+                # tool, never writes to it - so the sentence says whose monitor it is.
+                f"ClawSecCheck's own monitor has not run for {int(age)} days \u2014 its "
+                "journal records no check of this setup in that time (a run with "
+                "--no-history, or another tool, leaves no trace there). Stopping the "
+                "schedule is the cheapest way to silence a monitor, and it leaves no "
+                "trace in the files it watches.")
         elif age >= _BRIEF_STALE_DAYS:
             lines.append(
                 "That is longer than this setup's usual gap between checks. Confirm the "

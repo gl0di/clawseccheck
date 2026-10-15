@@ -7,7 +7,8 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
+from .. import pathprobe
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
 from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
@@ -33,6 +34,16 @@ from ..collector import (
     agent_roster,
     dig,
     limit_hits_for,
+    openclaw_effective_home,  # B33: where a --profile home lives
+    openclaw_state_dir,  # B33: is the audited home the one the local install serves
+)
+from ..configloader import (  # C-648: bounded JSON nesting
+    ELIDED as _ELIDED,
+    JSONNestingError as _JSONNestingError,
+    MAX_JSON_NESTING as _MAX_JSON_NESTING,
+    SHALLOW_JSON_DEPTH as _SHALLOW_JSON_DEPTH,
+    loads_bounded as _loads_bounded,
+    loads_shallow as _loads_shallow,
 )
 from ..safeio import walk_dir_safely
 from .. import deptree as _deptree  # B349: bounded, read-only dependency-tree enumeration
@@ -71,7 +82,10 @@ from ._shared import (
     _key_advice,
     _node_allow_skills,  # B396 - shared with B386
     _node_commands,  # B396 - shared with B71
+    _doctor_refuses_retired_formats,  # C-686
+    _doctor_whole_config_hedge,  # C-686
     _numeric_version,  # B396
+    _RETIRED_STATE_BRIDGE_VERSION,  # C-686
     _openclaw_generation,
     _finding,
     _has_approval_gate,
@@ -143,9 +157,9 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # base version - "2026.7.1-2" parses identically to "2026.7.1" (both -> (2026, 7, 1)).
 # OpenClaw does ship this shape in the wild (observed: package.json "2026.7.1-2").
 # Consequence: the `parsed <= max_vuln` compare below cannot tell a base version from any
-# of its correction releases, so "X", "X-1", "X-2" ... always receive the SAME verdict. This
-# table can therefore only place a boundary BETWEEN base versions, never inside one base
-# version's correction-release family.
+# of its correction releases, so a ROW gives "X", "X-1", "X-2" ... the SAME verdict. A row can
+# therefore only place a boundary BETWEEN base versions, never inside one base version's
+# correction-release family.
 #
 # RULE: max_vulnerable_version_tuple must never be the base tuple of a version whose
 # correction releases straddle this advisory - i.e. never split an "X" / "X-N" family.
@@ -160,14 +174,16 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 #       base tuple with the fixed version, so rule (a) alone would wave the row through,
 #       yet the clean "2026.7.1" FAILs (false positive, GR#5). Backing max_vuln down to
 #       (2026, 7, 0) instead PASSes the vulnerable "2026.7.1-2" (false negative).
-# Neither direction is expressible here: a correction-release boundary needs a comparator
-# change (e.g. a (base_tuple, correction_int) pair), not a new table row.
+# Neither direction is expressible by a ROW: a correction-release boundary needs a comparator
+# change (e.g. a (base_tuple, correction_int) pair), not a new table row. Case (b) has ONE
+# mechanism, for an advisory whose published range is an exact build (`= 2026.7.1-2`): the
+# `_ADVISORY_EXACT_BUILDS` side table below, which matches the version STRING. Case (a) has none.
 #
 # C-414: a row is 4 elements (id, max_vulnerable_version_tuple, fixed_version_str, title) -
-# version-only, matching on `parsed <= max_vuln` alone, exactly as every row below already
-# does - OR 5 elements, with a `condition: Callable[[dict], bool]` appended that takes
-# `ctx.config` and returns whether THIS host's config shape can actually reach the
-# defect. `check_known_vulns` treats a 4-tuple as `condition=None` (version-only,
+# version-only, matching on `parsed <= max_vuln`, narrowed by the two side tables below
+# (`_ADVISORY_FIRST_VULNERABLE`, `_ADVISORY_EXACT_BUILDS`) and by the extended-stable rule -
+# OR 5 elements, with a `condition: Callable[[dict], bool]` appended that takes `ctx.config`
+# and returns whether THIS host's config shape can actually reach the defect. `check_known_vulns` treats a 4-tuple as `condition=None` (version-only,
 # unchanged), so EVERY EXISTING ROW BELOW IS LEFT AS A PLAIN 4-TUPLE - a config-
 # conditioned advisory only ever adds a 5th element to its OWN row, never pads the rest
 # of the table. A condition that raises is treated as unproven (the row does not match) -
@@ -184,25 +200,51 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-09-19 (openclaw-9.5-triage). The newest row below fixes 2026.6.6 - there
-# is simply no advisory on file past that boundary yet. `check_known_vulns`'s PASS wording,
-# "OpenClaw {version} is at or past all known-advisory fixes", is honest but easy to
-# over-read for a build like 2026.9.5, 2026.7.33 or 2026.6.33-6.35: it means "no row in
-# THIS TABLE reaches this version", not "swept and cleared as of this version". Advisories
-# keep arriving; re-sweep on every upgrade response (docs/process/OPENCLAW_UPGRADE_PROTOCOL.md
-# bucket A) and move this date forward, rather than reading an old date as still current.
+# Last swept: 2026-10-14 against the vendor repository's own advisory endpoint (722 published
+# advisories). The global GitHub advisory database lags it and missed a whole batch, so it is
+# not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
+# npm package (70 rows, titles as published); below that it is a curated subset, so the id
+# list for an old build is a lower bound, not a census. Checked against that sweep, a row's
+# max_vulnerable tuple is the upper bound of the range the advisory publishes: for `< X` that is X
+# minus one patch (`< 2026.8.1` -> (2026, 8, 0); no ".0" patch was ever published, so that means
+# "everything below 2026.8.1"); for `<= X` or `= X` it is X itself. One exception:
+# GHSA-mc68-q9jw-2h3v keeps its seed (2026, 1, 28), the vendor publishes `<= 2026.1.24`;
+# GHSA-g8p2-7wf7-98mq covers those builds. `check_known_vulns`'s PASS wording, "OpenClaw {version}
+# is at or past all known-advisory fixes", is honest but easy to over-read: it means "no row in THIS
+# TABLE reaches this version" (the extended-stable exception below aside), not "swept and cleared".
+# Advisories keep arriving; re-sweep on every upgrade response
+# (docs/process/OPENCLAW_UPGRADE_PROTOCOL.md bucket A) and move this date forward, rather
+# than reading an old date as still current.
 #
-# Extended-stable convention: OpenClaw's own `isExtendedStableReleaseVersion` (a final
-# release, minor 1-12, patch >= 33) marks a maintenance line that back-ports fixes onto an
-# otherwise-frozen minor and never auto-applies. This table needs no separate mechanism for
-# that line: a row already supports a per-release-line exemption through its optional 5th
-# element, `condition(config) -> bool` (C-414, tested by
-# tests/test_c414_config_conditioned_advisory.py) - read `meta.lastTouchedVersion`/the
-# resolved build inside the condition and return whether THIS release line actually carries
-# the fix. If a genuine extended-stable advisory ever needs recording, add a config-
-# conditioned row (or a plain version-only one, if the backport boundary is uniform across
-# lines) rather than inventing a second table, a new field, or a bespoke "is this
-# extended-stable" helper.
+# Not tabulated by this sweep: advisories on the vendor's separately versioned plugin packages and
+# on the iOS app (not core version boundaries: a plugin installed on its own can sit on another
+# version, and the app is versioned independently of the npm package). One older row,
+# GHSA-jvm4-4j77-39p6 (@openclaw/qqbot, `<= 2026.4.27`), stays: it moves no verdict, as core row
+# GHSA-w4v6-g3wm-w36c reaches every build this one does, with the same fix.
+# Owner ruling (C-662, b): that stays out of scope of this table; it is disclosed in every
+# verdict's `fix` (`_B33_SCOPE_NOTE`) and in the docs. B33 reads no installed plugin version.
+# The title (element 3) is documentation only: nothing in the package reads it, and it is shown
+# in no output; `tests/test_c662_b33_documented_decisions.py` pins one row's title so a silent edit
+# of a published summary is noticed (owner ruling C-662, g).
+#
+# Extended-stable builds (a final release, minor 1-12, patch >= 33 - the maintenance lines
+# 2026.6.33-35, 2026.7.33-35 and 2026.8.33-35) get fixes back-ported selectively and the
+# advisories do not say which. Measured against the vendor's repository: the 2026.8 line is
+# the exact 2026.8.2 release plus back-ports and, as far as could be checked, carries the
+# batch's fixes (the one advisory fixed in 2026.9.2 is back-ported there; its code is absent
+# from the 2026.7 line), while the 2026.7 and 2026.6 lines still contain vulnerable code for
+# some advisories at their newest build. So neither "patch >= 33 means fixed" nor "the
+# published range decides" is true. Rule (`_b33_assess`): take the rows that match
+# numerically, minus _EXTENDED_STABLE_NOT_AFFECTED; none left -> PASS (so 2026.8.33-35 PASS
+# although the published range of the one not-affected id contains them); else, for an exact
+# final of a line and patch we examined, FAIL naming only the advisories confirmed still
+# unfixed there (_EXTENDED_STABLE_LINES); any other build -> UNKNOWN. A build still left with a
+# row after that removal, and never examined, is UNKNOWN - not a guessed FAIL, not a guessed
+# PASS. The vendor reserves EVERY patch >= 33 "including unsupported correction/build
+# variants", so the line is decided on the parsed tuple (2026.8.33-1 is on it: PASS;
+# 2026.7.35-1: UNKNOWN, never FAIL). Every FAIL's `fix` targets the highest fixed version over
+# every row that reaches the build, this one included. The finding text's counts of "published
+# ranges" include the not-affected id's range.
 _KNOWN_ADVISORIES: list[
     tuple[str, tuple[int, ...], str, str]
     | tuple[str, tuple[int, ...], str, str, Callable[[dict], bool]]
@@ -377,7 +419,226 @@ _KNOWN_ADVISORIES: list[
         "MCP loopback feature let lower-trust callers execute owner-only tools "
         "via configured input paths",
     ),
+    # ---- repository-endpoint sweep 2026-10-05: every published core advisory that reaches
+    # 2026.6.6 or later. Generated from the vendor's own advisory dump, never typed by hand.
+    # ---- published 2026-06-30, first stable patched version 2026.6.8
+    ("GHSA-jhfx-v2j8-x3m6", (2026, 6, 6), "2026.6.8",
+     "OpenAI-compatible HTTP model overrides could miss admin authorization"),
+    # ---- published 2026-06-30, first stable patched version 2026.6.9
+    ("GHSA-3fp5-v549-9v66", (2026, 6, 6), "2026.6.9",
+     "flock wrapper could bypass durable exec approval binding"),
+    ("GHSA-3pmr-x9g8-m55r", (2026, 6, 6), "2026.6.9",
+     "Discord guild actions could skip cross-provider requester authorization"),
+    ("GHSA-7vrr-rp4x-4g76", (2026, 6, 8), "2026.6.9",
+     "Plugin install commands could allow non-owner persistence"),
+    ("GHSA-f6p7-6326-vf7v", (2026, 6, 8), "2026.6.9",
+     "Discord moderation actions could miss trusted requester checks"),
+    ("GHSA-m38g-vpwj-mpg9", (2026, 6, 6), "2026.6.9",
+     "OpenShell mirror sync could follow remote symlink parents"),
+    ("GHSA-mm9g-83wh-mhwj", (2026, 6, 8), "2026.6.9",
+     "Isolated cron jobs could regain denied exec tools"),
+    ("GHSA-v7hx-r36p-f68m", (2026, 6, 6), "2026.6.9",
+     "Message mutations could skip requester authorization"),
+    ("GHSA-wgq8-x5wm-g4rw", (2026, 6, 8), "2026.6.9",
+     "Plugin install wrappers could skip install policy"),
+    # ---- published 2026-09-11, first stable patched version 2026.7.1
+    ("GHSA-224w-vfr9-h35c", (2026, 7, 0), "2026.7.1",
+     "Google Meet node commands could skip exec approvals"),
+    ("GHSA-4wvr-f35r-f8w4", (2026, 7, 0), "2026.7.1",
+     "message.action could trust spoofed requester provenance"),
+    ("GHSA-8xxh-v4vc-qvm4", (2026, 7, 0), "2026.7.1",
+     "Cron tool could accept mixed-case command payloads"),
+    ("GHSA-9p6m-2872-xm7x", (2026, 7, 0), "2026.7.1",
+     "Codex bind could omit owner authorization"),
+    ("GHSA-9x88-f7rh-4c83", (2026, 7, 0), "2026.7.1",
+     "Browser node targets could bypass sandbox host control"),
+    ("GHSA-crg9-c62w-j2p5", (2026, 7, 0), "2026.7.1",
+     "OpenShell filesystem mutations could race path validation"),
+    ("GHSA-jghr-xp78-995p", (2026, 7, 0), "2026.7.1",
+     "Browser proxy could miss its admin scope"),
+    ("GHSA-p5g8-m35v-7m82", (2026, 7, 0), "2026.7.1",
+     "Claude permission replies could omit owner authorization"),
+    ("GHSA-pjjr-5qhr-5w6r", (2026, 7, 0), "2026.7.1",
+     "Codex computer-use install could omit owner authorization"),
+    ("GHSA-qw7m-h363-33qw", (2026, 7, 0), "2026.7.1",
+     "chat.send could expose owner-only infrastructure tools"),
+    ("GHSA-r88x-r7jj-f2cf", (2026, 7, 0), "2026.7.1",
+     "Signal reactions could bind to the wrong approval"),
+    ("GHSA-wwx7-573h-pqwc", (2026, 7, 0), "2026.7.1",
+     "MCP configuration changes could omit owner authorization"),
+    ("GHSA-22v4-33m3-8p7m", (2026, 7, 0), "2026.7.1",
+     "Memory dreaming changes could omit owner checks"),
+    ("GHSA-4hwv-rj92-h7rp", (2026, 7, 0), "2026.7.1",
+     "Diagnostics export could omit owner authorization"),
+    ("GHSA-5j27-v2pw-cj9m", (2026, 7, 0), "2026.7.1",
+     "Talk Voice changes could omit admin authorization"),
+    ("GHSA-89cw-7452-cfrf", (2026, 7, 0), "2026.7.1",
+     "Trajectory export could omit owner authorization"),
+    ("GHSA-q9j5-4xr6-xqqw", (2026, 7, 0), "2026.7.1",
+     "Group activation changes could omit owner authorization"),
+    ("GHSA-rgjw-6v73-php6", (2026, 7, 0), "2026.7.1",
+     "Windows allowlist execution could use workspace shadows"),
+    ("GHSA-xw9g-7xvv-gcjc", (2026, 7, 0), "2026.7.1",
+     "Active Memory global toggles could omit owner checks"),
+    # ---- published 2026-09-11, first stable patched version 2026.8.1
+    ("GHSA-3mq7-q27j-mq7q", (2026, 8, 0), "2026.8.1",
+     "Exec approvals could outlive their reviewed working directory"),
+    ("GHSA-4r25-35qc-fr6j", (2026, 8, 0), "2026.8.1",
+     "Gateway upgrade-like requests could retain unauthenticated sockets"),
+    ("GHSA-5mrc-77hj-xjxv", (2026, 8, 0), "2026.8.1",
+     "Workspace Cloud SDK arguments could execute code during Gmail setup"),
+    ("GHSA-62qm-6fjj-6g23", (2026, 8, 0), "2026.8.1",
+     "Dreaming could widen restricted sender authority"),
+    ("GHSA-74gc-hg2m-79p9", (2026, 8, 0), "2026.8.1",
+     "Reusable exec approvals could authorize changed arguments"),
+    ("GHSA-7cp7-87pj-p32v", (2026, 8, 0), "2026.8.1",
+     "Skill tool dispatch could skip owner-only policy"),
+    ("GHSA-9f86-pvv5-rxfw", (2026, 8, 0), "2026.8.1",
+     "Escaped newlines could confuse exec allowlist parsing"),
+    ("GHSA-cf95-m4jv-59rc", (2026, 8, 0), "2026.8.1",
+     "Synology file delivery could lose DNS pinning"),
+    ("GHSA-ghpx-6xwq-2w4w", (2026, 8, 0), "2026.8.1",
+     "Exec wrapper allowlists could trust arbitrary inner commands"),
+    ("GHSA-hpg5-cq3m-phqp", (2026, 8, 0), "2026.8.1",
+     "Agent cron tool could reach operator command jobs"),
+    ("GHSA-p3h6-v2h4-36q2", (2026, 8, 0), "2026.8.1",
+     "Browser CDP connections could discard DNS pinning"),
+    ("GHSA-qgj5-6x35-9g6f", (2026, 8, 0), "2026.8.1",
+     "Config revision hashes could expose password verifiers"),
+    ("GHSA-wwcw-jfpp-gpxw", (2026, 8, 0), "2026.8.1",
+     "Codex native tools could ignore per-chat policy"),
+    ("GHSA-356g-m7rx-7pm3", (2026, 7, 1), "2026.8.1",
+     "ACP file URLs could skip out-of-cwd read approval"),
+    ("GHSA-39hf-qg99-f4qv", (2026, 8, 0), "2026.8.1",
+     "Google Meet attendance CSV could interpret names as formulas"),
+    ("GHSA-4g58-43jr-6738", (2026, 8, 0), "2026.8.1",
+     "Browser wait predicates could reach blocked destinations"),
+    ("GHSA-5fwv-rrvp-8xvr", (2026, 8, 0), "2026.8.1",
+     "Session filename generation could regain denied tools"),
+    ("GHSA-5rx7-34fw-64qg", (2026, 8, 0), "2026.8.1",
+     "Unicode fallback could escape workspaceOnly roots"),
+    ("GHSA-66hm-hxq3-5pfh", (2026, 8, 0), "2026.8.1",
+     "Embedding fallback could forward a provider key across vendors"),
+    ("GHSA-72p2-79fg-pvph", (2026, 8, 0), "2026.8.1",
+     "Trusted-host DNS checks could admit unspecified addresses"),
+    ("GHSA-7jfq-rmfm-29wp", (2026, 8, 0), "2026.8.1",
+     "File-transfer approvals could widen durable authority"),
+    ("GHSA-8938-r7c6-54vq", (2026, 8, 0), "2026.8.1",
+     "Microsoft Teams access-group failures could admit unlisted senders"),
+    ("GHSA-fphf-69cp-h5xw", (2026, 8, 0), "2026.8.1",
+     "Structured attachments could hide unvalidated host paths"),
+    ("GHSA-fvxr-9g24-x3hf", (2026, 8, 0), "2026.8.1",
+     "Video asset downloads could reach private destinations"),
+    ("GHSA-fw6q-2frm-jxxr", (2026, 8, 0), "2026.8.1",
+     "Synology pre-auth limits could lock out valid webhooks"),
+    ("GHSA-g697-vv6h-r8hv", (2026, 8, 0), "2026.8.1",
+     "Revoked Canvas capability could remain active during disconnect"),
+    ("GHSA-h9jh-75j7-7hhx", (2026, 8, 0), "2026.8.1",
+     "Feishu unpin could miss cross-context policy"),
+    ("GHSA-j4mm-p864-vx7f", (2026, 8, 0), "2026.8.1",
+     "sessions.create could miss admin scope for keyed reconfiguration"),
+    ("GHSA-mm7m-wcgh-8mfq", (2026, 8, 0), "2026.8.1",
+     "WhatsApp session resets could bypass command authorization"),
+    ("GHSA-pfrw-r5vr-89hw", (2026, 8, 0), "2026.8.1",
+     "Workspace endpoint override could expose Azure Speech credentials"),
+    ("GHSA-rm45-4jx5-2927", (2026, 8, 0), "2026.8.1",
+     "QQBot voice filenames could escape the staging directory"),
+    ("GHSA-vhpg-cq3w-v8p9", (2026, 8, 0), "2026.8.1",
+     "OpenAI-compatible transport could send provider credentials to the wrong endpoint"),
+    ("GHSA-w5x7-c87m-3jpc", (2026, 8, 0), "2026.8.1",
+     "Outbound attachments could ignore requester read denials"),
+    ("GHSA-xw48-j584-r73h", (2026, 8, 0), "2026.8.1",
+     "Twilio pre-auth limits could lock out valid webhooks"),
+    ("GHSA-xx9p-hc9w-6p5h", (2026, 8, 0), "2026.8.1",
+     "Usage CSV export could interpret session labels as formulas"),
+    ("GHSA-5m4g-88rg-69pj", (2026, 8, 0), "2026.8.1",
+     "MCP loopback could omit sandbox tool deny policy"),
+    ("GHSA-6xpv-wwr5-265h", (2026, 8, 0), "2026.8.1",
+     "Truncated tar listings could bypass extraction limits"),
+    ("GHSA-chr6-w4m5-57fv", (2026, 8, 0), "2026.8.1",
+     "Memory tools could retain revoked access"),
+    ("GHSA-g24w-m94m-59qc", (2026, 8, 0), "2026.8.1",
+     "Webhook TaskFlow cancellation could target unrelated sessions"),
+    ("GHSA-wjfv-5qch-m5vj", (2026, 8, 0), "2026.8.1",
+     "Active Memory recall could ignore requester policy"),
+    # ---- published 2026-09-11, first stable patched version 2026.8.2
+    ("GHSA-m78m-7h3q-q938", (2026, 8, 1), "2026.8.2",
+     "Browser relay authentication could exhaust shared pending capacity"),
+    # ---- published 2026-09-11, first stable patched version 2026.9.2
+    ("GHSA-5x6q-wg56-rxg8", (2026, 9, 1), "2026.9.2",
+     "Discord realtime transcripts could inherit another speaker's owner status"),
 ]
+
+# A range with a lower bound (`>= X, < Y`): the row matches only from X up. A lower bound
+# never changes a verdict (every build below one is covered by an unbounded row); it keeps
+# the list of ids truthful. Keyed by advisory id; a row with no entry is unbounded below.
+_ADVISORY_FIRST_VULNERABLE: dict[str, tuple[int, ...]] = {
+    "GHSA-3pmr-x9g8-m55r": (2026, 6, 6),  # = 2026.6.6
+    "GHSA-7vrr-rp4x-4g76": (2026, 5, 20),  # >= 2026.5.20, < 2026.6.9
+    "GHSA-mm9g-83wh-mhwj": (2026, 6, 1),  # >= 2026.6.1, < 2026.6.9
+    "GHSA-v7hx-r36p-f68m": (2026, 6, 6),  # = 2026.6.6
+    "GHSA-wgq8-x5wm-g4rw": (2026, 6, 5),  # >= 2026.6.5, < 2026.6.9
+    "GHSA-224w-vfr9-h35c": (2026, 5, 1),  # >= 2026.5.1 < 2026.7.1
+    "GHSA-22v4-33m3-8p7m": (2026, 4, 10),  # >= 2026.4.10 < 2026.7.1
+    "GHSA-rgjw-6v73-php6": (2026, 2, 26),  # >= 2026.2.26 < 2026.7.1
+    "GHSA-5mrc-77hj-xjxv": (2026, 3, 28),  # >= 2026.3.28, < 2026.8.1
+    "GHSA-62qm-6fjj-6g23": (2026, 4, 5),  # >= 2026.4.5, < 2026.8.1
+    "GHSA-cf95-m4jv-59rc": (2026, 7, 1),  # >= 2026.7.1, < 2026.8.1
+    "GHSA-ghpx-6xwq-2w4w": (2026, 3, 22),  # >= 2026.3.22, < 2026.8.1
+    "GHSA-p3h6-v2h4-36q2": (2026, 4, 5),  # >= 2026.4.5, < 2026.8.1
+    "GHSA-356g-m7rx-7pm3": (2026, 7, 1),  # = 2026.7.1-2
+    "GHSA-66hm-hxq3-5pfh": (2026, 3, 28),  # >= 2026.3.28, < 2026.8.1
+    "GHSA-fw6q-2frm-jxxr": (2026, 3, 25),  # >= 2026.3.25, < 2026.8.1
+    "GHSA-g697-vv6h-r8hv": (2026, 5, 12),  # >= 2026.5.12, < 2026.8.1
+    "GHSA-h9jh-75j7-7hhx": (2026, 6, 9),  # >= 2026.6.9, < 2026.8.1
+    "GHSA-mm7m-wcgh-8mfq": (2026, 5, 2),  # >= 2026.5.2, < 2026.8.1
+    "GHSA-pfrw-r5vr-89hw": (2026, 4, 25),  # >= 2026.4.25, < 2026.8.1
+    "GHSA-xw48-j584-r73h": (2026, 6, 6),  # >= 2026.6.6, < 2026.8.1
+    "GHSA-6xpv-wwr5-265h": (2026, 5, 28),  # >= 2026.5.28, < 2026.8.1
+    "GHSA-5x6q-wg56-rxg8": (2026, 7, 2),  # >= 2026.7.2, < 2026.9.2
+}
+
+# A range that is one exact build (`= 2026.7.1-2`). _parse_version() collapses 2026.7.1,
+# 2026.7.1-1 and 2026.7.1-2 onto one tuple (the warning above), so such a row matches ONLY
+# when the version string, stripped, is a member of the set. This is the comparator change
+# that warning asks for, kept to the single row that needs it.
+_ADVISORY_EXACT_BUILDS: dict[str, frozenset[str]] = {
+    "GHSA-356g-m7rx-7pm3": frozenset({"2026.7.1-2"}),  # = 2026.7.1-2
+}
+
+# Extended-stable lines (see the paragraph above the table). A RELEASED build is a string that,
+# stripped, is exactly <year>.<minor 1-12>.<patch >= 33> with no suffix (the vendor's
+# isExtendedStableReleaseVersion); a version is ON the line by its parsed tuple (below).
+_EXTENDED_STABLE_MIN_PATCH = 33
+# Advisories that apply to no extended-stable build: back-ported on the 2026.8 line from
+# 2026.8.33, and the affected code is absent from the 2026.7 line.
+_EXTENDED_STABLE_NOT_AFFECTED = frozenset({"GHSA-5x6q-wg56-rxg8"})
+# (year, minor) -> (newest patch examined, advisories confirmed still unfixed there). An
+# advisory is listed only when the vulnerable pre-fix code was OBSERVED at that newest build;
+# one whose fix was merely not found there is not listed.
+_EXTENDED_STABLE_LINES: dict[tuple[int, int], tuple[int, tuple[str, ...]]] = {
+    (2026, 6): (35, ("GHSA-8xxh-v4vc-qvm4", "GHSA-66hm-hxq3-5pfh")),
+    (2026, 7): (35, ("GHSA-66hm-hxq3-5pfh", "GHSA-xx9p-hc9w-6p5h", "GHSA-7cp7-87pj-p32v")),
+    (2026, 8): (35, ()),
+}
+_EXTENDED_STABLE_RE = re.compile(r"([1-9][0-9]{3})\.([1-9]|1[0-2])\.([1-9][0-9]*)")
+
+
+def _extended_stable_build(raw) -> "tuple[int, int, int] | None":
+    """(year, minor, patch) when *raw* is an extended-stable release, else None."""
+    m = _EXTENDED_STABLE_RE.fullmatch(str(raw).strip())
+    if m is None:
+        return None
+    year, minor, patch = (int(g) for g in m.groups())
+    return (year, minor, patch) if patch >= _EXTENDED_STABLE_MIN_PATCH else None
+
+
+def _on_extended_stable_line(raw) -> bool:
+    """The vendor's hasExtendedStablePatch on the PARSED tuple, whatever suffix the string had:
+    3+ parts, 1000 <= year <= 9999, 1 <= minor <= 12, patch >= 33 (reserved, "including
+    unsupported correction/build variants")."""
+    p = _parse_version(str(raw).strip())
+    return bool(p) and len(p) >= 3 and 1000 <= p[0] <= 9999 and 1 <= p[1] <= 12 and p[2] >= _EXTENDED_STABLE_MIN_PATCH
 
 
 # Keys under plugins/skills that are structural config, not installable entries.
@@ -476,10 +737,14 @@ def _writable_by_others(st) -> bool:
     return False
 
 
-def _writable_identity_files(ctx: Context) -> list[str]:
+def _writable_identity_files(ctx: Context, unreadable: "list | None" = None) -> list[str]:
     """Return relative paths of identity/skill targets writable by someone other than the
     owner (world-writable, or group-writable with a non-singleton owning group), OR whose
     parent dir is. Only called on POSIX. Returns paths relative to ctx.home.
+
+    C-722: a workspace directory this process cannot enter makes ``pathprobe.is_file`` on
+    its children raise on purpose; that one directory is skipped (its labels go into
+    *unreadable* when a list is passed) instead of ending the whole scan.
 
     B-189: the singleton down-rank applies to EVERY leg - SOUL.md, the workspace/skills dirs,
     and openclaw.json - so a user-private-group / umask-002 box never false-FAILs.
@@ -539,7 +804,7 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         try:
             st = ws_dir.stat()
             if _writable_by_others(st) and any(
-                (ws_dir / f).is_file() for f in _IDENTITY_TARGETS
+                pathprobe.is_file(ws_dir / f) for f in _IDENTITY_TARGETS
             ):
                 writable.append(f"{ws}/ (dir mode {oct(st.st_mode & 0o777)[-3:]})")
         except OSError:
@@ -547,8 +812,13 @@ def _writable_identity_files(ctx: Context) -> list[str]:
         # Individual identity files
         for fname in _IDENTITY_TARGETS:
             f = ws_dir / fname
-            if not f.is_file():
-                continue
+            try:
+                if not pathprobe.is_file(f):
+                    continue
+            except OSError:
+                if unreadable is not None:
+                    unreadable.append(ws)
+                break
             try:
                 st = f.stat()
                 if _writable_by_others(st) and _first_time(f):
@@ -565,11 +835,11 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     # not the absolute path the attestation supplied: this string is rendered, and an
     # absolute path carries the user's login name (§8).
     for raw in _attest.attested_paths(ctx.attestation)["bootstrap"]:
-        f = Path(raw).expanduser()
+        f = pathprobe.expand_user(raw)
         if f.name not in _IDENTITY_TARGETS:
             continue
         try:
-            if not f.is_file():
+            if not pathprobe.is_file(f):
                 continue
             st = f.stat()
         except OSError:
@@ -582,7 +852,13 @@ def _writable_identity_files(ctx: Context) -> list[str]:
     # Check the skills directories (writing here installs new skills)
     for rel in SKILL_DIRS:
         d = ctx.home / rel
-        if not d.is_dir():
+        try:
+            if not pathprobe.is_dir(d):
+                continue
+        except OSError:
+            # C-722: a skills dir under a directory this process cannot enter.
+            if unreadable is not None:
+                unreadable.append(rel)
             continue
         try:
             st = d.stat()
@@ -623,7 +899,7 @@ def _writable_skill_dirs(ctx: Context):
     for rel in SKILL_DIRS:
         base = ctx.home / rel
         try:
-            if not base.is_dir() or base.is_symlink():
+            if not pathprobe.is_dir(base) or pathprobe.is_symlink(base):
                 continue
         except OSError:
             continue
@@ -632,7 +908,7 @@ def _writable_skill_dirs(ctx: Context):
             for c in sorted(base.iterdir()):
                 if seen >= 200:
                     break
-                if c.is_dir() and not c.is_symlink():
+                if pathprobe.is_dir(c) and not pathprobe.is_symlink(c):
                     candidates.append(c)
                     seen += 1
         except OSError:
@@ -917,10 +1193,36 @@ def _c3_git_covers(directory: Path, boundary: Path) -> bool:
         candidates = [directory, *(p for p in directory.parents if p.is_relative_to(boundary))]
     for candidate in candidates:
         try:
-            if (candidate / ".git").is_dir():
+            if pathprobe.is_dir(candidate / ".git"):
                 return True
         except OSError:
             continue
+    return False
+
+
+# The collector's notes for a bootstrap path it could not look at / open (collect()'s
+# bootstrap loop): "could not check '<path>' (<Error>) ..." / "could not read '<path>' (...) ...".
+_BOOTSTRAP_PATH_HIT_RE = re.compile(r"^could not (?:check|read) '(.*)' \(\w+\)")
+
+
+def _bootstrap_unreadable(ctx: Context, names: tuple) -> bool:
+    """C-722: could the workspace not be searched for one of *names*?
+
+    True when the collector recorded that a workspace DIRECTORY could not be checked (the
+    directory that would hold the file could not be listed), or that one of *names* itself
+    could not be checked/opened. An unreadable SIBLING file (USER.md beside a readable
+    directory) is not a reason to doubt that a memory file is absent: the directory listing
+    proves it. The size-cap hit in the same bucket is another fact again (that file WAS
+    read, in part), so only the collector's "could not ..." notes count.
+    """
+    wanted = {n.lower() for n in names}
+    for hit in limit_hits_for(ctx, LIMIT_DOMAIN_BOOTSTRAP):
+        text = str(hit)
+        if text.startswith("could not check workspace dir "):
+            return True
+        m = _BOOTSTRAP_PATH_HIT_RE.match(text)
+        if m and m.group(1).replace("\\", "/").rsplit("/", 1)[-1].lower() in wanted:
+            return True
     return False
 
 
@@ -928,6 +1230,20 @@ def check_backups(ctx: Context) -> Finding:
     """Are the agent's identity/memory files backed up (recoverable after drift/poisoning)?"""
     has_bootstrap = any(n.endswith(("SOUL.md", "MEMORY.md", "AGENTS.md")) for n in ctx.bootstrap)
     if not has_bootstrap:
+        # C-722: "none found" and "could not look" are different facts (same split as B6's
+        # C-716). Status unchanged; only the unreadable case gets new wording, so the
+        # sentence below, which baseline.fingerprint() hashes, stays byte-identical for a
+        # truly absent workspace.
+        if _bootstrap_unreadable(ctx, ("SOUL.md", "MEMORY.md", "AGENTS.md")):
+            return _finding(
+                "C3",
+                UNKNOWN,
+                "No bootstrap/memory files could be inspected for backup coverage: the "
+                "workspace directory or an identity file (SOUL.md/AGENTS.md/MEMORY.md) "
+                "could not be read, so their absence is not established.",
+                "Make the workspace directory and its SOUL.md/AGENTS.md/MEMORY.md readable "
+                "by the user running this audit (check permissions), then re-run.",
+            )
         return _finding("C3", UNKNOWN, "No bootstrap/memory files found to back up.", "\u2014")
 
     # Which collected bootstrap files are the identity triple, and where they live - used
@@ -1043,6 +1359,21 @@ def check_backups(ctx: Context) -> Finding:
 def check_bootstrap_injection(ctx: Context) -> Finding:
     """Coverage gap: the native audit does not scan bootstrap-file content; this check does."""
     if not ctx.bootstrap:
+        # C-716: "none found" and "could not look" are different facts. The collector
+        # records a bootstrap-domain limit hit when a workspace directory or file could not
+        # be checked/read (e.g. chmod 000), and that case used to be reported as absence.
+        # The status is unchanged; only the unreadable case gets new wording, so the
+        # sentence below (which baseline.fingerprint() hashes) stays byte-identical for a
+        # truly absent workspace.
+        if limit_hits_for(ctx, LIMIT_DOMAIN_BOOTSTRAP):
+            return _finding(
+                "B6",
+                UNKNOWN,
+                "No bootstrap files could be inspected: a workspace directory or "
+                "bootstrap file could not be read, so their absence is not established.",
+                "Make the workspace directory and its SOUL.md/AGENTS.md/TOOLS.md readable "
+                "by the user running this audit (check permissions), then re-run.",
+            )
         return _finding(
             "B6",
             UNKNOWN,
@@ -1185,7 +1516,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
         soft (MEMORY.md/HEARTBEAT.md): WARN on group OR world write.
         critical (SOUL/AGENTS/TOOLS): FAIL on world write, WARN on group write.
         """
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return False
         try:
             real = path.resolve()
@@ -1275,7 +1606,7 @@ def check_bootstrap_write_protection(ctx: Context) -> Finding:
     # live (any path, any name). The agent supplies WHERE; the engine still stat()s the
     # file itself, so this stays an authoritative permission check, not a weak self-report.
     for raw in _attest.attested_paths(ctx.attestation)["bootstrap"]:
-        p = Path(raw).expanduser()
+        p = pathprobe.expand_user(raw)
         # Classify by filename: a known identity file gets the critical (FAIL-on-world)
         # rule; anything else is treated as soft (memory) -> WARN only.
         soft = p.name not in _CRITICAL_BOOTSTRAP
@@ -1482,7 +1813,8 @@ def check_cron_job_content(ctx: Context) -> Finding:
               on: an unread job past the cap can only ADD a directive this scan would have
               caught, never remove one, so a clean verdict over a truncated read is unsound
               regardless of whether anything suspicious turned up among the jobs that WERE
-              read. All causes above suppress only a clean verdict - a FAIL/WARN found in
+              read; or (C-664) part of the store nests deeper than the collector's shallow
+              reader follows, so that content was never scanned. All causes above suppress only a clean verdict - a FAIL/WARN found in
               what WAS read still stands, so none of them can hide a payload the scan
               actually caught.
     PASS    - a cron store was read and no job triggers any signal, with the row cap not
@@ -1615,11 +1947,23 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # The label discloses that explicitly, same disclosure idiom as B-555's
         # advice-text carve-out -- this is a positive observation about a file that
         # really is on disk (B189/shadow-store precedent), not a live-execution claim.
-        _scan_field(
+        # C-686: that sentence is a fact about Doctor through 2026.9.9 only. EXECUTED on the
+        # installed 2026.10.2: `assertNoRetiredStateFiles("Cron state", ...)` throws
+        # `RetiredStateFormatError` for a legacy `cron/jobs.json` (and for `jobs-state.json`
+        # and `runs/*.jsonl`), Doctor imports nothing, and the message names the bridge
+        # release `_RETIRED_STATE_BRIDGE_VERSION`. The label is part of `detail`, so it is
+        # swapped by the INSTALLED build only (an unknown or older build keeps the
+        # original, byte for byte) and the FAIL stays: the file is still a latent hazard on
+        # the upgrade route the vendor itself prescribes.
+        dormant_label = (
+            f"{job_label}.payload (dormant legacy shape \u2014 the installed OpenClaw's "
+            "Doctor refuses this retired file instead of importing it; Doctor on the "
+            f"bridge release {_RETIRED_STATE_BRIDGE_VERSION} would import it)"
+            if _doctor_refuses_retired_formats(ctx) else
             f"{job_label}.payload (dormant legacy shape \u2014 would be reactivated by "
-            "`openclaw doctor`)",
-            job.get("payload_message_dormant"),
+            "`openclaw doctor`)"
         )
+        _scan_field(dormant_label, job.get("payload_message_dormant"))
         _scan_field(f"{job_label}.trigger.script", job.get("trigger_script"))
         # C-476: a `command`-kind payload's argv vector and a `script`-kind payload's
         # body were collected (collector._cron_payload_extras) but never content-scanned
@@ -1763,6 +2107,40 @@ def check_cron_job_content(ctx: Context) -> Finding:
             # store, just never read -- present-but-unread, same Finding.engine_degraded
             # contract as this check's cron_store_shadowed branch and B189's identical
             # truncation shape.
+            engine_degraded=True,
+        )
+    # C-664: a job store nested deeper than the collector's shallow reader follows. The jobs
+    # (and the payload/trigger fields this check scans, a few levels down) were read and
+    # scanned above, and a FAIL/WARN found in them stands; only the verdict by absence is
+    # unsound, because padding of unbounded depth can hold anything the reader never saw.
+    if ctx.cron_content_elided:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job(s) and found no embedded "
+            "instruction-override or install directive \u2014 but part of the job store "
+            "nests deeper than the audit reads, so that content was never scanned. A clean "
+            "bill of health cannot be given over it.",
+            "Remove the deeply nested padding from the cron job store (jobs.json or the "
+            "job_json column of the state database) so the whole store can be read, then "
+            "re-run the audit.",
+            engine_degraded=True,
+        )
+    # C-680: the state store's `cron.store` value is nested deeper than the audit reads, so
+    # which store the runtime uses is unknown. Not the shadow branch above (that one is
+    # proven and its texts are about a SQLite table): its own detail and advice.
+    if ctx.cron_store_key_elided:
+        return _finding(
+            "B168",
+            UNKNOWN,
+            f"Scanned {len(ctx.cron_jobs)} cron job(s) and found no embedded "
+            "instruction-override or install directive \u2014 but the cron.store value in "
+            "OpenClaw's state database nests deeper than the audit reads, so which job "
+            "store the runtime actually uses is unknown. A clean bill of health cannot be "
+            "given over a store that may not be the one that runs.",
+            "Remove the deeply nested padding from the cron.store entry of the "
+            "config_machine_state table in ~/.openclaw/state/openclaw.sqlite so the "
+            "configured store can be read, then re-run the audit.",
             engine_degraded=True,
         )
     return _finding(
@@ -2072,17 +2450,30 @@ def check_cron_run_log_orphans(ctx: Context) -> Finding:
         "If you did not schedule these, review the sessions they ran under with "
         "`--analyze-trajectory`. A prompt-injected agent can schedule its own self-erasing "
         "job (deleteAfterRun is exposed as a cron-tool option), which leaves exactly this "
-        "trace and nothing else.",
+        "trace and nothing else."
+        + (
+            # C-680: the orphans are real against the store that was read; the padded
+            # cron.store value means that store may not be the one the runtime uses.
+            " Note: the cron.store value in the state database nests deeper than the audit "
+            "reads, so the job store compared against may not be the one the runtime uses."
+            if ctx.cron_store_key_elided else ""
+        ),
         ev,
     )
 
 
 def check_exec_approvals_grants(ctx: Context) -> Finding:
-    """B172 (B-236, re-scoped): inventory of standing exec-approvals.json "allow-always"
+    """B172 (B-236, re-scoped): inventory of standing exec-approvals "allow-always"
     grants.
 
-    ``~/.openclaw/exec-approvals.json`` is OpenClaw's persisted per-agent exec-approval
-    store (grounded against the dist: exec-approvals-BIKWP8_V.js). A historical "always
+    OpenClaw's persisted per-agent exec-approval store is ONE document (grounded against
+    the dist: exec-approvals-BIKWP8_V.js; src/infra/exec-approvals-sqlite.ts) that lives
+    in the ``exec_approvals_config`` table of ``~/.openclaw/state/openclaw.sqlite`` on
+    current builds and in ``~/.openclaw/exec-approvals.json`` on older ones (the runtime
+    refuses exec approvals while a leftover file still exists, until Doctor imports it).
+    The collector reads BOTH into the same ``ctx`` fields; the verdict is the UNION: a
+    grant in either store is a WARN, and a store that was present but unreadable can
+    never be turned into a PASS by the other one. A historical "always
     allow" click on an exec confirmation prompt writes a durable
     ``agents.<id>.allowlist[]`` entry with ``source: "allow-always"`` -- a standing,
     per-command exec grant living entirely outside openclaw.json that, before this
@@ -2100,11 +2491,23 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     may have forgotten about), not a correctness fix for those checks.
 
     WARN    - at least one agent has 1+ "allow-always" allowlist entries: name them so
-              the user can review/revoke stale standing grants.
-    PASS    - the store was read and no agent has an "allow-always" entry (the common
-              case -- e.g. freshly-provisioned defaults/agents are both empty `{}`).
-    UNKNOWN - exec-approvals.json is absent (or a symlink, never followed), or was
-              found but could not be parsed/read; OR (B-657) the store parsed fine but
+              the user can review/revoke stale standing grants. Checked BEFORE the
+              unreadable-store branch: a grant found in a store that WAS read stands
+              even if the other store could not be read. A state-database row in the
+              pre-2026.10.1 entry shape (no ``id``, a ``commandText``, a bare string, or
+              ``agents.default``) is counted the same -- the grants are real and
+              persisted -- but OpenClaw 2026.10.1 and later refuse to load that row until
+              the store is repaired (``parsePersistedExecApprovals``, executed on the
+              installed 2026.10.2), so they are not in force until then; the advice says
+              so (``ctx.exec_approvals_legacy_row_shape``). 2026.9.9 honoured the row.
+    PASS    - a store was read and no agent has an "allow-always" entry (the common
+              case -- e.g. freshly-provisioned defaults/agents are both empty `{}`, or
+              the state database's table holds no row, which OpenClaw itself reads as
+              empty approvals).
+    UNKNOWN - NEITHER store exists (a symlinked legacy file is never followed, and a
+              state database without the table is an older build), or a present store
+              could not be parsed/read (unknown schema, a view standing in for the
+              table, invalid JSON, over the byte cap); OR (B-657) the store parsed fine but
               exceeded the collector's byte cap or its agent-count cap
               (``_MAX_EXEC_APPROVALS_AGENTS``) -- some agents/content were never
               scanned, so "no agent has a grant" cannot be said of the whole store. A
@@ -2119,7 +2522,7 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     over argv. One click on a POSIX host therefore grants the binary with ANY
     arguments, durably -- for an argument-weaponizable binary (`git`, `tar`, `ssh`,
     `find`, `awk`, ...) that is a standing arbitrary-execution grant, not merely "this
-    binary is trusted". `collector._collect_exec_approvals` now splits each agent's
+    binary is trusted". `collector._ingest_exec_approvals_document` now splits each agent's
     tally into `binary_wide_count` (no `argPattern`) and `arg_restricted_count` (a real
     `argPattern`) so this check's evidence can say which kind a reader is looking at,
     instead of a bare number that reads the same either way. This is a pure disclosure
@@ -2137,48 +2540,85 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
     question this one answers, matching the task's own two-shape framing.
     """
     if not ctx.exec_approvals_found:
+        # Reached only when NEITHER store exists (the state database's table or row, or
+        # the legacy file), so the sentence stays literally true; its wording is left
+        # unchanged on purpose -- baseline.fingerprint() hashes `detail`.
         return _finding(
             "B172",
             UNKNOWN,
             "No exec-approvals.json store found at ~/.openclaw/exec-approvals.json \u2014 "
             "cannot determine whether any standing 'always allow' exec grants are "
             "persisted.",
-            "If exec approvals have ever been granted, ensure the store is "
-            "owner-readable so a future audit can inventory it.",
-        )
-    if ctx.exec_approvals_parse_error:
-        return _finding(
-            "B172",
-            UNKNOWN,
-            "exec-approvals.json was found but could not be parsed/read \u2014 cannot "
-            "determine whether any standing 'always allow' exec grants are persisted.",
-            "Fix the exec-approvals.json store so it is valid JSON and owner-readable, "
-            "then re-run the audit.",
+            "If exec approvals have ever been granted, ensure the store that holds them "
+            "(the OpenClaw state database, ~/.openclaw/state/openclaw.sqlite, or on older "
+            "builds ~/.openclaw/exec-approvals.json) is owner-readable so a future audit "
+            "can inventory them.",
         )
 
     grants = [g for g in ctx.exec_approvals_grants if g.get("allow_always_count")]
     if not grants:
+        if ctx.exec_approvals_parse_error:
+            if ctx.exec_approvals_sqlite_unreadable:
+                # The state database's store is present but was not read in full: an
+                # input this check expected to read turned out unreadable (B-399).
+                return _finding(
+                    "B172",
+                    UNKNOWN,
+                    "An exec-approvals store was found but could not be read in full "
+                    "\u2014 cannot determine whether any standing 'always allow' exec "
+                    "grants are persisted.",
+                    "Make sure the OpenClaw state database "
+                    "(~/.openclaw/state/openclaw.sqlite) and, if one still exists, "
+                    "~/.openclaw/exec-approvals.json are intact, regular files, "
+                    "owner-readable and of ordinary size, then re-run the audit.",
+                    engine_degraded=True,
+                )
+            return _finding(
+                "B172",
+                UNKNOWN,
+                "exec-approvals.json was found but could not be parsed/read \u2014 cannot "
+                "determine whether any standing 'always allow' exec grants are persisted.",
+                "Fix the exec-approvals.json store so it is valid JSON and owner-readable, "
+                "then re-run the audit.",
+            )
         # B-657: "no agent has a standing grant" is a claim about every agent the store
         # holds. exec_approvals_parse_error only catches a store that failed to parse at
         # all -- it does not catch a store that parsed FINE but exceeded the
         # collector's byte cap or agent-count cap (collector._collect_exec_approvals,
         # LIMIT_DOMAIN_APPROVALS), where the agents/content past the cap were never
-        # scanned. Same ordering as B6/B168: a WARN above (a grant found in what WAS
+        # scanned. Same ordering as B6/B168: a WARN below (a grant found in what WAS
         # scanned) stands regardless; only this verdict-by-absence degrades.
         if limit_hits_for(ctx, LIMIT_DOMAIN_APPROVALS):
+            store_read = ctx.exec_approvals_sqlite_read
             return _finding(
                 "B172",
                 UNKNOWN,
                 "No standing 'allow-always' exec grant found among the agents that WERE "
-                "scanned, but exec-approvals.json exceeded a collector size/count cap \u2014 "
+                "scanned, but "
+                + ("an exec-approvals store" if store_read else "exec-approvals.json")
+                + " exceeded a collector size/count cap \u2014 "
                 "some agents or content were never read, so a clean bill of health "
                 "cannot be given.",
+                "Keep the exec-approvals store under the collector's size cap, or prune "
+                "stale agent entries, then re-run the audit."
+                if store_read else
                 "Keep exec-approvals.json under the collector's size cap, or prune "
                 "stale agent entries, then re-run the audit.",
                 # C-135: present-but-unread agents (a real store the collector's own
                 # cap cut short), not a genuinely empty/absent store -- same
                 # Finding.engine_degraded contract as B6's identical branch above.
                 engine_degraded=True,
+            )
+        if ctx.exec_approvals_sqlite_read:
+            return _finding(
+                "B172",
+                PASS,
+                "The OpenClaw exec-approvals store in the state database was read and "
+                "no agent has a standing 'allow-always' exec grant.",
+                "Standing grants are created by clicking 'always allow' on an exec "
+                "confirmation prompt \u2014 avoid them for anything you would not want "
+                "run unattended.",
+                pass_confidence="verified",
             )
         return _finding(
             "B172",
@@ -2211,9 +2651,42 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
             line += f", security={g['security']}"
         if g.get("ask"):
             line += f", ask={g['ask']}"
+        if g.get("store") == "sqlite":
+            # Only the state-database source is tagged; legacy-file lines stay as they were.
+            line += " [state database]"
         evidence.append(line)
     ev_summary = "; ".join(evidence[:4])
     extra = f" (+{len(evidence) - 4} more)" if len(evidence) > 4 else ""
+    fix = (
+        "Review standing exec approvals with `openclaw approvals get`, then revoke any "
+        "'always allow' pattern that is no longer wanted with `openclaw approvals "
+        "allowlist remove \"<pattern>\"`"
+    )
+    if all(g.get("store") == "sqlite" for g in grants):
+        fix += "."
+    else:
+        fix += " (or inspect ~/.openclaw/exec-approvals.json directly)."
+    if ctx.exec_approvals_legacy_row_shape and any(
+        g.get("store") == "sqlite" for g in grants
+    ):
+        # The grants are real and persisted, so the WARN stands and the counts are
+        # unchanged; but OpenClaw 2026.10.1 and later refuse a row in the older shape
+        # until the store is repaired (collector._exec_approvals_row_has_pre_10_1_shape),
+        # so those grants are not in force until then. Advice text only: `detail` is
+        # fingerprinted.
+        fix += (
+            " The state database row holds entries in the shape OpenClaw wrote before "
+            "2026.10.1 (no id, a commandText, or an agents.default key): OpenClaw "
+            "2026.10.1 and later refuse to load that row until the store is repaired, so "
+            "those grants are persisted but not in force until then."
+        )
+    if ctx.exec_approvals_parse_error:
+        # The WARN above stands, but a present store was not read in full: the list is
+        # what the readable store(s) hold, not necessarily every standing grant.
+        fix += (
+            " Another exec-approvals store could not be read in full, so this list may "
+            "be incomplete."
+        )
     return _finding(
         "B172",
         WARN,
@@ -2222,10 +2695,7 @@ def check_exec_approvals_grants(ctx: Context) -> Finding:
         "openclaw.json tools.exec gate (OpenClaw always applies the stricter of the "
         "two), but they ARE a durable per-command exec authority that may have been "
         "forgotten.",
-        "Review standing exec approvals with `openclaw approvals get`, then revoke any "
-        "'always allow' pattern that is no longer wanted with `openclaw approvals "
-        "allowlist remove \"<pattern>\"` (or inspect ~/.openclaw/exec-approvals.json "
-        "directly).",
+        fix,
         evidence,
     )
 
@@ -3078,104 +3548,316 @@ def check_secrets_provider_exec(ctx: Context) -> Finding:
 # precedent used elsewhere in this module for enumerable evidence lists.
 _B33_EVIDENCE_CAP = 20
 
+# C-662 (b), owner ruling "out of scope of the core-advisory table; disclosed": text only, in
+# `fix` (the fingerprint hashes `detail`), on every verdict that judged a version.
+_B33_SCOPE_NOTE = (
+    "Advisories on separately versioned plugin packages and on the iOS app are not tabulated "
+    "here, so this result says nothing about them."
+)
+
+
+def _b33_further_note(further: int, what: str = "this build") -> str:
+    """The extended-stable disclosure: published ranges that contain the build but that the
+    table has not confirmed for it. Shared by the FAIL and, since C-662 (d), the WARN."""
+    return (
+        f"{further} further published advisories cover {what} by version range; "
+        f"they are not listed because the table has not confirmed them for {what}: "
+        "the vendor back-ports some fixes to extended-stable lines, and some affected "
+        "code was never on them, without recording either in the advisory."
+    )
+
+
+class _B33Outcome(NamedTuple):
+    """What the advisory table says about one version string (`_b33_assess`)."""
+
+    kind: str  # "clear" | "affected" | "unexamined"
+    ids: list  # advisory ids to name, in table order ("affected" only)
+    n_published: int  # published ranges that contain the build (counted BEFORE the not-affected set is removed)
+    fix: "str | None"  # upgrade target ("affected" only)
+    extended: bool  # on the extended-stable line (reserved patch), released build or not
+    variant: bool = False  # "unexamined" only: reserved patch, but not an exact released build
+
+
+def _b33_condition_holds(row: tuple, cfg: dict) -> bool:
+    """C-414: a 4-tuple row is version-only; a 5-tuple row's `condition(cfg)` must also hold.
+    A condition that raises counts as "did not hold" - a broken predicate never manufactures
+    a FAIL (Golden Rule #5)."""
+    if len(row) < 5:
+        return True
+    try:
+        return bool(row[4](cfg))
+    except Exception:
+        return False
+
+
+def _b33_highest_fixed(rows: list) -> str:
+    return max((row[2] for row in rows), key=lambda v: _parse_version(v) or ())
+
+
+def _b33_assess(raw: str, cfg: dict) -> "_B33Outcome | None":
+    """(version string, config) -> outcome. The ONE place a version is matched against the
+    table, used for the installed build and the config stamp alike so the two cannot drift.
+    None when the string cannot be parsed.
+
+    A row matches when parsed <= max_vulnerable, its optional condition holds (C-414),
+    parsed >= its `_ADVISORY_FIRST_VULNERABLE` bound and, for an `_ADVISORY_EXACT_BUILDS`
+    row, the stripped string is a listed member (a row absent from a side table is
+    unbounded). For EVERY FAIL `fix` is the highest fixed version over every row that reaches
+    the build by version (bounds and the not-affected set only trim the id list), so upgrading
+    to it clears the finding in one step. A reserved extended-stable patch follows the rule
+    above the table.
+    """
+    s = str(raw).strip()
+    parsed = _parse_version(s)
+    if parsed is None:
+        return None
+    reserved = _on_extended_stable_line(s)
+    ext = _extended_stable_build(s) if reserved else None  # an exact released build, or None
+    reach = [r for r in _KNOWN_ADVISORIES if parsed <= r[1] and _b33_condition_holds(r, cfg)]
+    cover = [
+        r for r in reach
+        if parsed >= _ADVISORY_FIRST_VULNERABLE.get(r[0], ())
+        and s in _ADVISORY_EXACT_BUILDS.get(r[0], (s,))
+    ]
+    n_published = len(cover)  # what the finding text calls "published ranges": the not-affected id counts
+    if reserved:
+        cover = [r for r in cover if r[0] not in _EXTENDED_STABLE_NOT_AFFECTED]
+    if not cover:
+        return _B33Outcome("clear", [], n_published, None, reserved)
+    fix = _b33_highest_fixed(reach)
+    if not reserved:
+        return _B33Outcome("affected", [r[0] for r in cover], n_published, fix, False)
+    newest, confirmed = _EXTENDED_STABLE_LINES.get(ext[:2], (0, ())) if ext else (0, ())
+    listed = [r for r in cover if r[0] in confirmed] if ext and ext[2] <= newest else []
+    if not listed:
+        return _B33Outcome("unexamined", [], n_published, None, True, ext is None)
+    return _B33Outcome("affected", [r[0] for r in listed], n_published, fix, True)
+
+
+_B33_PROFILE_HOME_RE = re.compile(r"\.openclaw-([A-Za-z0-9][A-Za-z0-9_-]{0,63})")  # vendor PROFILE_NAME_RE
+
+
+def _b33_is_this_machines_home(home) -> bool:
+    """True when *home* is a home the local OpenClaw installation serves. Accepted, compared
+    as resolved paths: the vendor's state directory (``collector.openclaw_state_dir``:
+    ``OPENCLAW_STATE_DIR``, else ``~/.openclaw``, else an existing legacy ``~/.clawdbot``); and
+    a ``--profile`` home - *home* is what ``<effective home>/.openclaw-<name>`` resolves to,
+    <name> matching the vendor's profile pattern and not "default" in any case (that profile
+    is the plain ``.openclaw``). Anything else, a home that cannot be stat'ed (missing, a
+    symlink loop, an unreadable parent) and ANY exception while deciding are "not this
+    machine's home". A wrong "yes" cannot turn a FAIL into a PASS: an affected stamp beside a
+    clear installed build is a WARN. It can turn a stamp-only FAIL into that WARN, and a
+    missing stamp's UNKNOWN into a verdict on the installed build. A wrong "no" gives the
+    stamp-only verdict this check gave before the installed build was consulted.
+
+    Owner ruling (C-662, i): KEPT. A ``.openclaw-<name>`` directory is judged this machine's
+    home by its NAME and PATH alone; nothing local says it is run as a profile, so an ordinary
+    backup copy such as ``~/.openclaw-backup`` is judged by the installed build (stale-stamp
+    FAIL -> WARN; a copy without a stamp -> PASS on the installed build). Accepted because no
+    case turns a stamp-only FAIL into a PASS. A profile directory that is a symlink elsewhere
+    is the mirror image: served by the vendor, judged another home (stamp decides).
+    """
+    try:
+        os.stat(home)  # raises for a loop or an unreachable home on every Python (resolve() does not)
+        resolved = home.resolve()
+        if resolved == openclaw_state_dir().resolve():
+            return True
+        base = openclaw_effective_home()
+        for name in (home.name, resolved.name):
+            m = _B33_PROFILE_HOME_RE.fullmatch(name)
+            if m and m.group(1).lower() != "default" and (base / name).resolve() == resolved:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _b33_installed_build(ctx: Context) -> "str | None":
+    """The installed OpenClaw build, but ONLY when it is evidence about the audited home.
+
+    ``ctx.installed_dist_version`` is read from whatever ``openclaw`` is on THIS machine's PATH
+    and is filled in even when ``--home`` points at another directory (a copied home, a
+    fixture), so on its own it describes the auditing machine, not the audited config. It is
+    used only when `_b33_is_this_machines_home` says the audited home is served by it.
+    """
+    installed = getattr(ctx, "installed_dist_version", None)
+    if not installed or not _b33_is_this_machines_home(getattr(ctx, "home", None)):
+        return None
+    return str(installed).strip() or None
+
+
+def _b33_verdict(label: str, out: _B33Outcome) -> Finding:
+    """PASS / UNKNOWN / FAIL for one outcome; *label* is "OpenClaw <ver>" (the config stamp,
+    or an installed build that equals it) or "OpenClaw <ver> (installed)". The PASS and FAIL
+    detail wording is byte-identical to what the stamp-only gate always said, so existing
+    ignore-file fingerprints for an unchanged situation survive. The extended-stable FAIL
+    discloses its limit in `fix`, never in `detail` (the fingerprint hashes `detail`); the
+    UNKNOWN states its reason, back-port caveat included, in `detail`."""
+    if out.kind == "clear":
+        return _finding(
+            "B33",
+            PASS,
+            f"{label} is at or past all known-advisory fixes.",
+            "Keep OpenClaw updated and re-check after new advisories are published. "
+            + _B33_SCOPE_NOTE,
+        )
+    if out.kind == "unexamined":
+        what = (
+            "has an extended-stable patch number but is not a released extended-stable build, "
+            "and has not been checked against the advisory table" if out.variant
+            else "is an extended-stable build that has not been checked against the advisory table"
+        )
+        return _finding(
+            "B33",
+            UNKNOWN,
+            f"{label} {what}: {out.n_published} published advisory ranges cover it numerically, "
+            "but the vendor back-ports fixes to extended-stable lines without recording it in "
+            "the advisory, so a version comparison alone cannot say whether it is affected.",
+            "Move to a current OpenClaw release and re-run this check; extended-stable "
+            "builds are examined against the table one build at a time. " + _B33_SCOPE_NOTE,
+        )
+    n_total = len(out.ids)
+    shown_ids = out.ids[:_B33_EVIDENCE_CAP]
+    truncation_note = f" (showing {_B33_EVIDENCE_CAP} of {n_total})" if n_total > _B33_EVIDENCE_CAP else ""
+    advisory_word = "advisory" if n_total == 1 else "advisories"
+    if out.extended:
+        further = out.n_published - n_total
+        fix = (
+            f"Upgrade OpenClaw to >= {out.fix} to remediate "
+            f"{'this advisory' if n_total == 1 else f'all {n_total} listed advisories'}."
+        )
+        if further > 0:
+            fix += " " + _b33_further_note(further)
+    else:
+        fix = (
+            f"Upgrade OpenClaw to >= {out.fix} to remediate "
+            f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
+            "in a single upgrade."
+        )
+    # C-662 (a), owner ruling: a FAIL on the stamp alone (another home, --no-dist, no usable
+    # installed build) is KEPT although a stamp can be stale (only a config write refreshes it,
+    # never a package install); the stamp is the only evidence about a copied or foreign home.
+    return _finding(
+        "B33",
+        FAIL,
+        f"{label} is affected by {n_total} known {advisory_word}: "
+        f"{', '.join(shown_ids)}{truncation_note}.",
+        fix + " " + _B33_SCOPE_NOTE,
+        evidence=shown_ids,
+    )
+
 
 def check_known_vulns(ctx: Context) -> Finding:
     """B33 - Known-vulnerable OpenClaw version gate.
 
-    FAIL    - installed version <= one or more known advisories' max_vulnerable_version_tuple,
-              AND - for a config-conditioned row (C-414) - that row's `condition(ctx.config)`
-              also holds. A version-only row (still the vast majority of the table) has no
-              condition to satisfy, matching on version alone exactly as before this task.
-              Reports EVERY matching advisory (B-332) - not just the first row in table
-              order - and the `fix` targets the HIGHEST fixed_version across all matches,
-              since that is the only version that actually clears the finding. Returning on
-              the first match handed a far-behind user the OLDEST advisory's fixed version
-              as remediation: a version still vulnerable to every later advisory in the
-              table, turning the fix into a multi-step upgrade treadmill instead of a single
-              correct jump.
-    PASS    - installed version is past all known advisory fixes, OR every version-matched
-              config-conditioned row's condition came back False (this host's config shape
-              cannot reach that particular defect) or raised (C-414: an unproven condition
-              never manufactures a FAIL - Golden Rule #5 - so it is treated the same as
-              "condition did not hold", not surfaced as its own UNKNOWN).
-    UNKNOWN - meta.lastTouchedVersion is missing or cannot be parsed.
+    Which version is judged. The INSTALLED build (``ctx.installed_dist_version``) decides only
+    when the audited home is this machine's own OpenClaw home (``_b33_installed_build``).
+    Otherwise - another home (a copy, a fixture), ``--no-dist``, an installed string that does
+    not parse - the config stamp (``meta.lastTouchedVersion``, else the root alias) decides,
+    as it always did. A package upgrade does not re-stamp the config, so a stale stamp must
+    not condemn a patched build; a rolled-back build must not hide behind a newer stamp.
+
+      installed build matches rows ............ FAIL, on the installed build (UNKNOWN when
+                                                it is an unexamined extended-stable one)
+      installed clear, stamp matches rows ..... WARN: the build on PATH is patched, but the
+                                                last build that wrote this config is affected
+                                                or unexamined, and this check does not
+                                                determine which one the running gateway is
+      installed clear, stamp clear/absent/bad . PASS
+      no usable installed build, stamp:
+        matches rows FAIL | clear PASS | absent or unparseable UNKNOWN (as before)
+
+    Residual: when two OpenClaw installations exist on one machine, the one on PATH is the
+    one this check reads. A pre-release reads as its release (``_parse_version``).
+
+    Owner rulings (C-662): the behaviour above is the DECISION for each open point, pinned by
+    ``tests/test_c662_b33_documented_decisions.py``.
+      a  A stamp-only affected result stays FAIL, though a stamp can be stale.
+      b  Plugin-package and iOS advisories are not tabulated; every verdict's `fix` says so.
+      c  A pre-release collapses onto its release (``2026.9.2-beta.1`` reads as ``2026.9.2``,
+         so it PASSes; a beta of an affected build FAILs). ``_parse_version`` is shared with
+         C6, and ordering a pre-release would move verdicts.
+      d  The WARN for an affected extended-stable stamp carries the "N further published
+         advisories" disclosure in `fix`, as the FAIL does.
+      e  C4's rollback WARN keeps its `detail`; its `fix` says when B33 reads the stamp.
+      f  The WARN advice names only ``openclaw --version`` (executed); ``openclaw gateway
+         status`` exists in the installed dist but its output with the gateway down was read,
+         not executed, so it is not named.
+      g  A table row's title is documentation only.
+      h  ``fixtures/reliability/clean_b33_version_patched`` (stamp 2026.2.14) FAILs B33; the
+         name is historical and is not changed (documented in ``fixtures/README.md``).
+      i  A ``.openclaw-<name>`` directory is judged this machine's home by name and path
+         (``_b33_is_this_machines_home``).
+
+    Matching (``_b33_assess``, identical for both versions) reports EVERY matching advisory
+    (B-332), not just the first. For every FAIL, an extended-stable one included, `fix` targets
+    the HIGHEST fixed version over every row that reaches the build by version, listed or
+    not, so upgrading to it clears the finding in one step. A config-conditioned row
+    (C-414) also needs its condition to hold. A version on a reserved extended-stable patch
+    (minor 1-12, patch >= 33) follows the rule above the table: PASS when no row is left; FAIL,
+    naming only the advisories confirmed still unfixed on its line, for an exact released
+    build that was examined; UNKNOWN for any other (an unexamined final, or a variant such
+    as ``2026.7.35-1``).
     """
     raw_ver = dig(ctx.config, "meta.lastTouchedVersion") or dig(ctx.config, "lastTouchedVersion")
-    if not raw_ver:
+    installed = _b33_installed_build(ctx)
+    inst = _b33_assess(installed, ctx.config) if installed else None
+    stamp = _b33_assess(str(raw_ver), ctx.config) if raw_ver else None
+
+    if inst is None:  # the stamp decides, exactly as before
+        if not raw_ver:
+            return _finding(
+                "B33",
+                UNKNOWN,
+                "OpenClaw version unknown (meta.lastTouchedVersion / lastTouchedVersion "
+                "not set) \u2014 cannot check against known advisories.",
+                "Set meta.lastTouchedVersion in openclaw.json (or upgrade to a current "
+                "release) and keep OpenClaw current.",
+            )
+        if stamp is None:
+            return _finding(
+                "B33",
+                UNKNOWN,
+                f"OpenClaw version {raw_ver!r} could not be parsed \u2014 "
+                "cannot check against known advisories.",
+                "Verify your version string (expected dotted-integer format like '2026.1.29') "
+                "and keep OpenClaw current.",
+            )
+        return _b33_verdict(f"OpenClaw {raw_ver}", stamp)
+
+    if inst.kind == "clear" and stamp is not None and stamp.kind != "clear":
+        if stamp.kind == "affected":
+            n = len(stamp.ids)
+            covered = f"is affected by {n} known {'advisory' if n == 1 else 'advisories'}"
+            if n > _B33_EVIDENCE_CAP:
+                covered += f" (the evidence lists the first {_B33_EVIDENCE_CAP})"
+        else:
+            covered = (
+                "has an extended-stable patch number but is not a released extended-stable "
+                "build, and the table has not checked it" if stamp.variant
+                else "is an extended-stable build the table has not checked"
+            ) + f" ({stamp.n_published} published advisory ranges cover it numerically)"
+        # C-662 (f): only `openclaw --version` is named (executed). Not `openclaw gateway status`.
+        fix = (
+            "`openclaw --version` prints the installed version, which can differ from the build "
+            "a gateway started before the upgrade is still running. If the gateway was started "
+            "before the upgrade, restart it. The recorded version refreshes the next time "
+            "OpenClaw saves its config."
+        )
+        further = stamp.n_published - len(stamp.ids)
+        if stamp.kind == "affected" and stamp.extended and further > 0:  # C-662 (d)
+            fix += " " + _b33_further_note(further, "the build that last wrote this config")
         return _finding(
             "B33",
-            UNKNOWN,
-            "OpenClaw version unknown (meta.lastTouchedVersion / lastTouchedVersion "
-            "not set) \u2014 cannot check against known advisories.",
-            "Set meta.lastTouchedVersion in openclaw.json (or upgrade to a current "
-            "release) and keep OpenClaw current.",
+            WARN,
+            f"The installed OpenClaw build ({installed}) is at or past all known-advisory "
+            f"fixes, but the build that last wrote this config ({str(raw_ver).strip()}) "
+            f"{covered}. This check does not determine which of the two the running gateway is.",
+            fix + " " + _B33_SCOPE_NOTE,
+            evidence=stamp.ids[:_B33_EVIDENCE_CAP],
         )
-
-    parsed = _parse_version(str(raw_ver))
-    if parsed is None:
-        return _finding(
-            "B33",
-            UNKNOWN,
-            f"OpenClaw version {raw_ver!r} could not be parsed \u2014 "
-            "cannot check against known advisories.",
-            "Verify your version string (expected dotted-integer format like '2026.1.29') "
-            "and keep OpenClaw current.",
-        )
-
-    # Collect EVERY matching row (table order is oldest-first, so this is already a
-    # deterministic, stable ordering across runs) rather than returning on the first.
-    #
-    # C-414: version match alone is not enough for a config-conditioned (5-element) row -
-    # its condition(ctx.config) must also hold. `row[4]` is only ever present on a 5-tuple
-    # (a plain 4-tuple version-only row indexes nothing past row[3]), so `len(row) < 5` is
-    # checked first and short-circuits `row[4]` for every existing row untouched by this
-    # task. A condition that raises is caught and treated as "did not hold" - never let a
-    # broken predicate manufacture a FAIL (Golden Rule #5); it degrades to silently not
-    # matching this one row, not to a crash or a finding of its own.
-    def _condition_holds(row: tuple) -> bool:
-        if len(row) < 5:
-            return True
-        try:
-            return bool(row[4](ctx.config))
-        except Exception:
-            return False
-
-    matched = [row for row in _KNOWN_ADVISORIES if parsed <= row[1] and _condition_holds(row)]
-    if not matched:
-        return _finding(
-            "B33",
-            PASS,
-            f"OpenClaw {raw_ver} is at or past all known-advisory fixes.",
-            "Keep OpenClaw updated and re-check after new advisories are published.",
-        )
-
-    matched_ids = [row[0] for row in matched]
-    # The only version that actually clears the finding is the HIGHEST fixed_version
-    # across every matched advisory - a lower fixed_version leaves later advisories open.
-    highest_fixed_ver = max(
-        (row[2] for row in matched),
-        key=lambda v: _parse_version(v) or (),
-    )
-
-    n_total = len(matched_ids)
-    if n_total > _B33_EVIDENCE_CAP:
-        shown_ids = matched_ids[:_B33_EVIDENCE_CAP]
-        truncation_note = f" (showing {_B33_EVIDENCE_CAP} of {n_total})"
-    else:
-        shown_ids = matched_ids
-        truncation_note = ""
-
-    advisory_word = "advisory" if n_total == 1 else "advisories"
-    return _finding(
-        "B33",
-        FAIL,
-        f"OpenClaw {raw_ver} is affected by {n_total} known {advisory_word}: "
-        f"{', '.join(shown_ids)}{truncation_note}.",
-        f"Upgrade OpenClaw to >= {highest_fixed_ver} to remediate "
-        f"{'this advisory' if n_total == 1 else f'all {n_total} matched advisories'} "
-        "in a single upgrade.",
-        evidence=shown_ids,
-    )
+    same = bool(raw_ver) and str(raw_ver).strip() == installed
+    return _b33_verdict(f"OpenClaw {raw_ver}" if same else f"OpenClaw {installed} (installed)", inst)
 
 
 def check_memory_poisoning(ctx: Context) -> Finding:
@@ -3232,6 +3914,16 @@ def check_memory_poisoning(ctx: Context) -> Finding:
                 WARN,
                 "Agent has persistent memory; confirm it is not written from untrusted input.",
                 "Restrict memory writes to the owner; sanitize anything derived from external content.",
+            )
+        # C-722: as B6/C3 - an unreadable workspace is not an absent memory file.
+        if _bootstrap_unreadable(ctx, ("MEMORY.md", "memory.md")):
+            return _finding(
+                "B7",
+                UNKNOWN,
+                "No memory file could be inspected: the workspace directory or the memory "
+                "file could not be read, so the absence of a memory file is not established.",
+                "Make the workspace directory and its MEMORY.md readable by the user "
+                "running this audit (check permissions), then re-run.",
             )
         return _finding("B7", UNKNOWN, "No memory file found.", "\u2014")
 
@@ -3345,11 +4037,14 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
     # F-164: --exhaustive widens the per-sink budget and full-line coverage via
     # limits_for(ctx); DEFAULT_LIMITS reproduces _B180_PER_FILE_BUDGET_S exactly.
     lim = limits_for(ctx)
+    unread_sinks: list[str] = []  # C-727: has bytes, could not be read
     for sink in memory_sinks:
         deadline = audit_deadline(lim.log_per_file_budget_s)
         result = scan_log_file(sink, deadline, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
+            if _shared._sink_unreadable(sink.path):
+                unread_sinks.append(_detail_path(sink.path, ctx.home))
             continue
         any_scanned = True
 
@@ -3406,6 +4101,11 @@ def check_memory_reconsumption_injection(ctx: Context) -> Finding:
             "signal in the same file \u2014 e.g. a security note merely quoting an attack phrase)."
         )
     detail += note
+    # C-727: a memory directory that could not be listed was not scanned (a WARN above stands).
+    if unreadable_sinks or unread_sinks:
+        return _shared._unreadable_dirs_finding(
+            "B180", "the agent memory files",
+            [_detail_path(u, ctx.home) for u in unreadable_sinks] + unread_sinks)
     return _finding(
         "B180",
         PASS,
@@ -3459,7 +4159,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     )
 
     home = getattr(ctx, "home", None)
-    if not isinstance(home, Path) or not home.exists():
+    if not isinstance(home, Path) or not pathprobe.exists(home):
         return _custom(
             "B104", LOW, UNKNOWN,
             "No OpenClaw home filesystem to inspect for offboarding hygiene.",
@@ -3473,15 +4173,28 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
     # into one name-keyed map, last-merged wins, no warning) - is surfaced, not just same-tier
     # stale copies. name -> [(tier, rel_dir), ...].
     name_hits: dict[str, list[tuple[str, str]]] = {}
+    skills_unreadable: list[str] = []  # C-727
+    # C-727: a skill dir whose SKILL.md could not be read is one dir of unknown name; a
+    # duplicate needs two dirs, so these alone cannot hide one when there is no other dir.
+    unnamed_dirs: list[str] = []
     for base, tier in skill_load_roots(home, ctx.config, user_home=_b104_user_home(home)):
+        errs_before = len(ctx.errors)
         if not _safe_is_dir(base, ctx, what=f"skill root '{base}'", domain=LIMIT_DOMAIN_SKILL):
+            if len(ctx.errors) > errs_before:  # C-727: could not be looked at, not absent
+                skills_unreadable.append(_detail_path(base, home))
             continue
         try:
             entries = sorted(base.iterdir())
         except OSError:
+            skills_unreadable.append(_detail_path(base, home))  # C-727
             continue
         for sd in entries:
-            if sd.is_symlink() or not sd.is_dir():
+            try:
+                if pathprobe.is_symlink(sd) or not pathprobe.is_dir(sd):
+                    continue
+            except OSError:
+                # C-727: `base` can be listed but not searched, so its entries cannot be classified.
+                skills_unreadable.append(_detail_path(sd, home))
                 continue
             skill_md = sd / "SKILL.md"
             # B-767: stat'ing an entry INSIDE `sd` needs traverse permission on `sd`
@@ -3489,11 +4202,15 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             # stat `sd` from its already-traversable parent) denies -- and
             # Path.is_file() does NOT swallow EACCES. _safe_is_file degrades this one
             # directory to "skip it" and records the gap instead of crashing the check.
+            errs_before = len(ctx.errors)
             if not _safe_is_file(skill_md, ctx, what=f"'{skill_md.name}' in a skill dir"):
+                if len(ctx.errors) > errs_before:  # C-727: could not be looked at, not absent
+                    unnamed_dirs.append(_detail_path(skill_md, home))
                 continue
             try:
                 blob = skill_md.read_text(encoding="utf-8", errors="replace")
             except OSError:
+                unnamed_dirs.append(_detail_path(skill_md, home))  # C-727
                 continue
             # A raw on-disk SKILL.md starts with `---` (the collector injects the
             # `# file: SKILL.md` header that _frontmatter_name needs, but we read raw), so
@@ -3537,7 +4254,7 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
         if not isinstance(cmd, str) or not cmd.strip():
             continue
         expanded = os.path.expanduser(cmd.strip())
-        if os.path.isabs(expanded) and not Path(expanded).exists():
+        if os.path.isabs(expanded) and not pathprobe.exists(Path(expanded)):
             warns.append(f"MCP server '{name}' command path is missing: {cmd.strip()}")
 
     if warns:
@@ -3554,6 +4271,15 @@ def check_offboarding_hygiene(ctx: Context) -> Finding:
             "missing command path there before removing it.",
             warns,
         )
+    # C-727: a skill directory that could not be read was not compared, so "no duplicates" is
+    # not established (a duplicate found in what WAS read WARNed above) -- unless the only gaps
+    # are unread SKILL.md files and there are fewer than two skill dirs in all.
+    if unnamed_dirs and (skills_unreadable
+                         or len(unnamed_dirs) + sum(len(h) for h in name_hits.values()) >= 2):
+        skills_unreadable += unnamed_dirs
+    if skills_unreadable:
+        return _shared._unreadable_dirs_finding(
+            "B104", "the installed skill directories (duplicate installs)", skills_unreadable)
     # B-661: unlike the duplicate-skill scan above (which walks disk load roots
     # directly), the "no dead MCP command paths" half is read ENTIRELY from
     # `ctx.config` (`_mcp_servers(ctx.config or {})`), and `skill_load_roots` also
@@ -3630,7 +4356,20 @@ def check_self_modification(ctx: Context) -> Finding:
         )
 
     # Condition (b): writable identity or skills target
-    writable = _writable_identity_files(ctx)
+    unreadable: list = []
+    writable = _writable_identity_files(ctx, unreadable)
+    if not writable and unreadable:
+        # C-722: a workspace directory that cannot be entered is not "no writable targets".
+        # Status is the same UNKNOWN; the sentence below stays for a truly absent directory.
+        return _finding(
+            "B22",
+            UNKNOWN,
+            "Dangerous tools present, but a workspace directory could not be read, so its "
+            "identity files (SOUL.md and the like) were not checked for group/world write "
+            "access and the self-modification risk could not be assessed there.",
+            "Make the workspace directory readable by the user running this audit (check "
+            "permissions), then re-run.",
+        )
     if not writable:
         return _finding(
             "B22",
@@ -3703,7 +4442,13 @@ def check_self_modification(ctx: Context) -> Finding:
 # skills.workshop.autonomous.enabled=true lets the agent AUTHOR brand-new executable
 # skill proposals from conversation signals with no explicit user request
 # (get-reply-OTG64ybi.js: `skillSuggestionEnabled = !autonomous.enabled` - autonomous
-# mode replaces the normal suggest-then-ask flow). approvalPolicy="auto" removes the
+# mode replaces the normal suggest-then-ask flow; 2026.7.1 dist. On openclaw@2026.10.2,
+# read 2026-10-12, the symbol `skillSuggestionEnabled` no longer exists (zero matches for
+# `skillSuggestion` in dist/*.mjs) and the schema keys this behaviour on
+# `skills.workshop.autonomous.mode` -- "off" keeps only the suggestion nudge, "propose"
+# creates proposals: schema-Bc7Xr5WK.mjs:1017, context-engine-lifecycle-CMMQY2BB.mjs:162 --
+# not on an `enabled` flag; whether this check's `autonomous.enabled` path still matches the
+# schema is a separate re-grounding question, not decided by this comment). approvalPolicy="auto" removes the
 # human confirmation step for EVERY skill_workshop lifecycle call
 # (propose/apply/reject/quarantine) - agent-tools.before-tool-call-C95DXQXZ.js:608:
 # `if (resolveSkillWorkshopConfig(params.config).approvalPolicy === "auto") return;`
@@ -3723,7 +4468,15 @@ def check_self_modification(ctx: Context) -> Finding:
 #     sandboxed (`...options?.sandboxed ? [] : [createSkillWorkshopTool(...)]`), and
 #     status-message-CQq9FqoB.js:73 makes agents.defaults.sandbox.mode == "all"
 #     unconditionally sandboxed (`if (sandboxMode === "all") return true;`) - not a
-#     misconfigurable policy, a hard guarantee.
+#     misconfigurable policy, a hard guarantee. CORRECTION (read 2026-10-12): that status-message
+#     line is a display-label fallback, never the sandbox decision. The decision is
+#     `resolveSandboxRuntimeStatusForClassification` in runtime-status-BrQA2iWu.mjs:138
+#     on openclaw@2026.10.2, read 2026-10-12 (`sandboxed` needs the session entry's
+#     `sandboxMode` to be other than "off", `mode` other than "off", and `mode === "all"` or a
+#     non-main session key; `sandboxRequired` short-circuits it to true)
+#     -- on 2026.10.2 a per-session `sandboxMode: "off"` entry overrides even
+#     `mode: "all"` unless the session is `sandboxRequired`, so "hard guarantee" holds for
+#     the CONFIG only. (shouldSandboxSession in runtime-status-*.js was the 2026.9.x name.)
 #   - tool-policy-BHUGxE3p.js / effective-tool-policy-CRZGJ2R3.js run tools.deny and
 #     tools.allow (global and per-agent, via agents.list[].tools.*) as a pipeline of
 #     narrowing filters: any single layer denying "skill_workshop", or any non-"*"
@@ -4026,6 +4779,9 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                         "change.")
         else:
             pass_fix = "\u2014"
+        if retired_note and _doctor_refuses_retired_formats(ctx):
+            # C-686: fix only (the note is in `detail`, which a fingerprint hashes).
+            pass_fix += f" {_doctor_whole_config_hedge(ctx)}"
         return _finding(
             "B175",
             PASS,
@@ -4260,7 +5016,7 @@ def check_skill_symlink_target_writability(ctx: Context) -> Finding:
                 "local account could plant a symlink target there for the agent to "
                 "load as skill code"
             )
-        elif not p.exists():
+        elif not pathprobe.exists(p):
             warns.append(
                 f"skills.load.allowSymlinkTargets entry {raw!r} could not be resolved "
                 "on this machine \u2014 its permissions cannot be verified from here"
@@ -4372,7 +5128,6 @@ _B79_WINDOW_NOTE = (
 
 
 def check_session_approval_policy(ctx: Context) -> Finding:
-    import json as _json
 
     no_sessions = _finding(
         "B79",
@@ -4384,10 +5139,10 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # Evaluate EACH agent independently (N=5 most-recent files per agent).
     # Worst-case posture wins: a single fully-auto-approving agent triggers WARN
     # regardless of how safe other agents are - safe agents cannot dilute a dangerous one.
-    agents_root = ctx.home / "agents"
-    agent_dirs: list[Path] = []
-    if agents_root.is_dir():
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+    # C-727: an unreadable agents/<id> tree is noted and skipped, never a crash.
+    unreadable: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
+    agent_dirs = _shared._agent_dirs_noting(ctx.home, unreadable)
 
     any_sessions = False  # at least one .jsonl file found anywhere
     any_turns = False  # at least one turn_context event parsed
@@ -4415,12 +5170,21 @@ def check_session_approval_policy(ctx: Context) -> Finding:
     # sampling bound, and it needs its own C-135 rather than riding along with a wording
     # fix. Filed with B-727.
     any_truncated = False
+    any_partial = False  # C-680: a line nested past the shallow bound was read in part
 
     for agent_dir in agent_dirs:
         sessions_dir = agent_dir / "agent" / "codex-home" / "sessions"
-        if not sessions_dir.is_dir():
+        if not _shared._probe_noting(pathprobe.is_dir, sessions_dir, ctx.home, unreadable):
             continue
-        agent_files = [p for p in walk_dir_safely(sessions_dir) if p.name.endswith(".jsonl")]
+        # C-727: opt in to the unreadable-entry channel (a re-raise would crash this check).
+        walk_gaps: list = []
+        try:
+            agent_files = [p for p in walk_dir_safely(sessions_dir, unreadable_dirs=walk_gaps)
+                           if p.name.endswith(".jsonl")]
+        except OSError:
+            unreadable.append(_detail_path(sessions_dir, ctx.home))
+            continue
+        unreadable.extend(_detail_path(Path(g[0]), ctx.home) for g in walk_gaps)
         if not agent_files:
             continue
         any_sessions = True
@@ -4431,9 +5195,19 @@ def check_session_approval_policy(ctx: Context) -> Finding:
         a_total = 0
         a_never = 0
         for fp in recent:
+            # C-731: lstat before any open - a named pipe here would block the read, a
+            # device or link is not a session log. Present but not read is never "clean".
+            kind = _shared._probe_kind(fp, ctx.home, unreadable)
+            if kind not in ("absent", "file"):
+                not_understood.append(
+                    (_detail_path(fp, ctx.home), _shared._NOT_UNDERSTOOD_REASONS[kind]))
+                continue
+            if kind == "absent":
+                continue
             try:
                 raw, fp_truncated = _read_jsonl_tail(fp)
             except OSError:
+                unreadable.append(_detail_path(fp, ctx.home))  # C-727: not a clean skip
                 continue
             any_truncated = any_truncated or fp_truncated
             for ln in raw.splitlines():
@@ -4441,9 +5215,10 @@ def check_session_approval_policy(ctx: Context) -> Finding:
                 if not ln:
                     continue
                 try:
-                    rec = _json.loads(ln)
+                    rec, line_elided = _loads_shallow(ln)
                 except ValueError:
                     continue
+                any_partial = any_partial or bool(line_elided)
                 if not isinstance(rec, dict) or rec.get("type") != "turn_context":
                     continue
                 payload = rec.get("payload")
@@ -4465,6 +5240,12 @@ def check_session_approval_policy(ctx: Context) -> Finding:
                 worst_total = a_total
                 worst_never = a_never
                 worst_files = len(recent)
+
+    # C-727: part of the session-log tree could not be read. A WARN found in what WAS read
+    # stands (worst_agent); anything else cannot be reported as clean or as "no sessions".
+    if (unreadable or not_understood) and worst_agent is None:
+        return _shared._not_understood_finding(
+            "B79", "the Codex session logs", not_understood, unreadable)
 
     if not any_sessions:
         return no_sessions
@@ -4495,6 +5276,15 @@ def check_session_approval_policy(ctx: Context) -> Finding:
                 f"session files sampled: {worst_files}",
             ],
         )
+    if any_partial:
+        return _finding(
+            "B79",
+            UNKNOWN,
+            "recent Codex sessions sampled include human-approval gates in the part of "
+            "each log line that was read, but at least one log line was nested too deep "
+            "to be read in full.",
+            _C680_PARTIAL_FIX.replace("file", "log line"),
+        )
     return _finding(
         "B79",
         PASS,
@@ -4514,40 +5304,123 @@ def check_session_approval_policy(ctx: Context) -> Finding:
 # under that project path. Same on-disk neighborhood as B79's codex-home/sessions read
 # (agents/<id>/agent/codex-home/), different sub-path (config.toml, not sessions/).
 #
-# No TOML library is used anywhere else in this codebase (stdlib-only, no third-party
-# TOML dep) and we only need to detect ONE specific shape, not parse general TOML - a
-# narrow line-scan is sufficient and deliberately conservative (no false PASS on a
-# section we can't confidently rule out).
-_TOML_PROJECT_SECTION_RE = re.compile(r'^\[projects\.(?P<path>"(?:[^"\\]|\\.)*")\]\s*$')
-_TOML_TRUST_LEVEL_TRUSTED_RE = re.compile(r'^trust_level\s*=\s*"trusted"\s*$')
+# No TOML library is used anywhere else in this codebase (stdlib-only; `tomllib` exists only
+# from 3.11 and a verdict must not depend on the interpreter), so this is a line scan, not a
+# parser. C-731: it used to know exactly one spelling - `[projects."<path>"]` followed by a
+# bare `trust_level = "trusted"` line - and answered PASS for every other VALID way to write
+# the same thing: a trailing comment, a single-quoted value or key, a dotted key
+# (`projects."/p".trust_level = "trusted"`), an inline table. It now reads those, and a
+# `trust_level` it still cannot read (a multi-line string, an escape that spells the key or
+# the value) is counted so the caller answers UNKNOWN instead of PASS.
+_TOML_QUOTED = r'"(?:[^"\\]|\\.)*"|\'[^\']*\''
+_TOML_PROJECT_SECTION_RE = re.compile(
+    r'^\[\s*projects\s*\.\s*(?P<path>' + _TOML_QUOTED + r'|[A-Za-z0-9_-]+)\s*\]$')
+_TOML_TRUST_ASSIGN_RE = re.compile(
+    r'(?<![A-Za-z0-9_-])(?:trust_level|"trust_level"|\'trust_level\')\s*=\s*'
+    r'(?P<val>' + _TOML_QUOTED + r')')
+# the quoted key a dotted or inline `trust_level` belongs to: `"/p".` or `"/p" = {`
+_TOML_KEY_BEFORE_RE = re.compile(r'(?P<key>' + _TOML_QUOTED + r')\s*(?:\.\s*|=\s*\{[^{}"\']*)$')
+# an unescaped \uXXXX / \UXXXXXXXX (an even number of backslashes before it is an escaped
+# backslash, as in a Windows path "C:\\Users")
+_TOML_UNICODE_ESCAPE_RE = re.compile(
+    r'(?<!\\)((?:\\\\)*)\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8}))')
+
+
+def _toml_strip_comment(line: str) -> str:
+    """*line* without a trailing `# comment` (a "#" inside a quoted string is not one)."""
+    quote = ""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote == '"':
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                quote = ""
+        elif quote == "'":
+            if ch == "'":
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#":
+            return line[:i]
+        i += 1
+    return line
+
+
+def _toml_spells(line: str) -> str:
+    """*line* with its unicode escapes decoded, for the one question "does this line spell
+    `trust_level` or `projects` through an escape?"."""
+    def _decode(m):
+        try:
+            return m.group(1) + chr(int(m.group(2) or m.group(3), 16))
+        except (ValueError, OverflowError):
+            return m.group(0)
+    return _TOML_UNICODE_ESCAPE_RE.sub(_decode, line)
+
+
+def _codex_trust_scan(text: str) -> "tuple[list, int]":
+    """``(trusted, unread)`` for codex-home config.toml text.
+
+    *trusted*: one entry per `trust_level = "trusted"` found - the project path as written
+    (quotes stripped), or None when the setting is there but its project path was not read.
+    *unread*: lines that set or mention `trust_level` in a form this scan does not read.
+    """
+    trusted: list = []
+    unread = 0
+    section: "str | None" = None        # the project path of the [projects."..."] we are in
+    in_projects = False                 # inside a bare [projects] table
+    for raw_line in text.splitlines():
+        line = _toml_strip_comment(raw_line).strip()
+        if not line:
+            continue
+        m = _TOML_PROJECT_SECTION_RE.match(line)
+        if m:
+            section = m.group("path").strip("\"'")
+            in_projects = False
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            # Any other table header ([projects] alone, an unrelated table) ends the section.
+            section = None
+            in_projects = line.strip("[] \t") == "projects"
+            continue
+        assigns = list(_TOML_TRUST_ASSIGN_RE.finditer(line))
+        if not assigns:
+            if "trust_level" in line or (section is not None and "=" in line and "trust" in line):
+                unread += 1             # a multi-line string, an unquoted value, ...
+            elif _toml_spells(line) != line and (
+                    "trust_level" in _toml_spells(line) or "projects" in _toml_spells(line)):
+                unread += 1             # an escape that spells the key or the table
+            continue
+        for a in assigns:
+            val = a.group("val")
+            if line[a.end():a.end() + 1] in ("'", '"') and line[a.end():a.end() + 1]:
+                unread += 1             # a multi-line string (three quotes): not read
+                continue
+            if val.startswith('"') and "\\" in val:
+                unread += 1             # an escaped value: not interpreted, not guessed
+                continue
+            if val[1:-1] != "trusted":
+                continue
+            whole_line = a.start() == 0 and a.end() == len(line)
+            if whole_line:
+                if section is None:
+                    continue            # a top-level `trust_level`: not a project's
+                trusted.append(section)
+                section = None          # one trust_level line per section is all we track
+                continue
+            if not in_projects and "projects" not in line[:a.start()]:
+                continue                # a dotted / inline `trust_level` of some other table
+            before = _TOML_KEY_BEFORE_RE.search(line[:a.start()])
+            trusted.append(before.group("key").strip("\"'") if before else None)
+    return trusted, unread
 
 
 def _codex_trusted_projects(text: str) -> list[str]:
-    """Scan codex-home config.toml text for [projects."..."] sections with trust_level="trusted".
-
-    Returns the list of project paths (quotes stripped) found trusted. A narrow,
-    line-oriented scan - not a general TOML parser - since we only need to detect this
-    one specific key/section shape.
-    """
-    trusted: list[str] = []
-    current_project: str | None = None
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Any other top-level section (e.g. "[projects]" alone, or an unrelated table)
-        # ends the current [projects."..."] context.
-        m = _TOML_PROJECT_SECTION_RE.match(line)
-        if m:
-            current_project = m.group("path").strip('"')
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            current_project = None
-            continue
-        if current_project is not None and _TOML_TRUST_LEVEL_TRUSTED_RE.match(line):
-            trusted.append(current_project)
-            current_project = None  # one trust_level line per section is all we track
-    return trusted
+    """The project paths codex-home config.toml text marks trusted (see `_codex_trust_scan`);
+    a setting whose path was not read is listed as an empty string."""
+    return [p or "" for p in _codex_trust_scan(text)[0]]
 
 
 def check_codex_project_trust(ctx: Context) -> Finding:
@@ -4560,30 +5433,64 @@ def check_codex_project_trust(ctx: Context) -> Finding:
     UNKNOWN - no agents/<id>/agent/codex-home/config.toml found anywhere (Codex CLI
               is not in use).
     """
-    agents_root = ctx.home / "agents"
-    agent_dirs: list[Path] = []
-    if agents_root.is_dir():
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
+    # C-727: an unreadable agents/<id> tree is noted and skipped, never a crash.
+    unreadable: list[str] = []
+    agent_dirs = _shared._agent_dirs_noting(ctx.home, unreadable)
 
     any_config = False
     trusted_ev: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
 
     for agent_dir in agent_dirs:
         config_path = agent_dir / "agent" / "codex-home" / "config.toml"
-        if not config_path.is_file():
+        shown_path = _detail_path(config_path, ctx.home)
+        kind = _shared._probe_kind(config_path, ctx.home, unreadable, resolve=True)
+        if kind == "absent":
+            continue
+        if kind != "file":
+            # C-731: a link / directory / pipe is present but not read - never "no trust set".
+            not_understood.append((shown_path, _shared._NOT_UNDERSTOOD_REASONS[kind]))
             continue
         any_config = True
         try:
-            text = config_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+            raw = _shared._read_regular_bytes(config_path)
+        except OSError as exc:
+            reason = _shared._read_failure_reason(exc)
+            if reason:
+                not_understood.append((shown_path, reason))
+            else:
+                unreadable.append(shown_path)  # C-727: not a clean skip
             continue
-        for project_path in _codex_trusted_projects(text):
+        text = _shared._toml_text(raw)
+        if text is None:
+            # C-731: not text at all (not UTF-8, or NUL bytes: UTF-16, a binary file). A
+            # trusted project the line scan still finds in a lenient decode stands as a WARN;
+            # nothing else may be called clean.
+            not_understood.append((shown_path, "is not a text file"))
+            text = raw.decode("utf-8", errors="replace")
+        trusted_paths, unread_lines = _codex_trust_scan(text)
+        for project_path in trusted_paths:
+            if project_path is None:
+                # C-731: set through a dotted key / inline table whose key was not read.
+                trusted_ev.append(
+                    f"agent {agent_dir.name}: a project whose path this audit did not read")
+                continue
             # B-757: the codex-home config stores the project's absolute path;
             # collapse the OS account home before it reaches rendered evidence.
             trusted_ev.append(
                 f"agent {agent_dir.name}: project "
                 f"{_shared._username_safe_path(project_path)!r}"
             )
+        if unread_lines and not trusted_paths:
+            # C-731: a trust_level the scan could not read is not "no project is trusted".
+            not_understood.append(
+                (shown_path, "sets trust_level in a form this audit does not read"))
+
+    # C-727: a trusted project found in a readable config still WARNs; otherwise an
+    # unreadable codex-home cannot be reported as clean or as "Codex not in use".
+    if (unreadable or not_understood) and not trusted_ev:
+        return _shared._not_understood_finding(
+            "B136", "the Codex project trust settings", not_understood, unreadable)
 
     if not any_config:
         return _finding(
@@ -4625,34 +5532,53 @@ def check_codex_project_trust(ctx: Context) -> Finding:
 _HIGH_SCOPE_NAMES = frozenset({"operator.admin", "operator.write"})
 
 
-def check_pending_device_pairing_scope(ctx: Context) -> Finding:
-    """B138 - dangling high-scope pending device pairing (devices/pending.json).
+_C680_PARTIAL_FIX = (
+    f"Part of the file is nested deeper than {_SHALLOW_JSON_DEPTH} levels and was not read, so "
+    "this result covers only the part that was read. Review the file manually."
+)
 
-    PASS    - devices/pending.json is absent (no pending pairings at all - the common,
-              expected case), OR present with no high-scope pending entries.
-    WARN    - a pending entry requests a high-privilege scope (operator.admin /
-              operator.write), especially combined with isRepair=true - this is a
-              pending pairing awaiting human approval, not proof of compromise.
-    UNKNOWN - devices/pending.json exists but is unreadable or not valid JSON.
 
-    B-661: exempt from the "23 checks PASS on an unread config" audit. This check
-    never reads ``ctx.config`` - the locus is ``devices/pending.json`` under
-    ``ctx.home``, checked by presence/content alone regardless of whether
-    openclaw.json was found or parsed.
+def _c680_unread_as_null(value):
+    """*value* with every unread-subtree marker replaced by None (iterative; <= 64 levels)."""
+    todo = [value]
+    while todo:
+        node = todo.pop()
+        items = enumerate(node) if isinstance(node, list) else (
+            list(node.items()) if isinstance(node, dict) else ())
+        for key, child in items:
+            if child is _ELIDED:
+                node[key] = None
+            elif isinstance(child, (list, dict)):
+                todo.append(child)
+    return value
+
+
+def _c680_has_elided(value) -> bool:
+    """Does *value* hold the unread-subtree marker anywhere (iterative; <= 64 levels deep)?"""
+    todo = [value]
+    while todo:
+        node = todo.pop()
+        if node is _ELIDED:
+            return True
+        if isinstance(node, list):
+            todo.extend(node)
+        elif isinstance(node, dict):
+            todo.extend(node.values())
+    return False
+
+
+def _c680_text(value, default="unknown"):
+    """*value*, or *default* when it is, or holds, the unread-subtree marker (never str() it)."""
+    return default if _c680_has_elided(value) else value
+
+
+def _b138_judge_legacy_file(pending_path: Path) -> Finding:
+    """B138's judgement of ``devices/pending.json`` alone (the file is known to exist).
+
+    Wording of every outcome is unchanged since before C-685 (a fingerprint hashes it).
     """
-    import json as _json
-
-    pending_path = ctx.home / "devices" / "pending.json"
-    if not pending_path.is_file():
-        return _finding(
-            "B138",
-            PASS,
-            "no devices/pending.json found \u2014 no pending device pairing requests.",
-            "No action needed.",
-        )
-
     try:
-        data = _json.loads(pending_path.read_text(encoding="utf-8", errors="replace"))
+        data, elided = _loads_shallow(pending_path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return _finding(
             "B138",
@@ -4688,9 +5614,9 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
             continue
         if not any(s in _HIGH_SCOPE_NAMES for s in scopes if isinstance(s, str)):
             continue
-        device_id = entry.get("deviceId", "unknown")
-        platform = entry.get("platform", "unknown")
-        is_repair = bool(entry.get("isRepair", False))
+        device_id = _c680_text(entry.get("deviceId", "unknown"))
+        platform = _c680_text(entry.get("platform", "unknown"))
+        is_repair = bool(_c680_text(entry.get("isRepair", False), False))
         high_scope_ev.append(
             f"deviceId={device_id} platform={platform} isRepair={is_repair}"
         )
@@ -4718,12 +5644,269 @@ def check_pending_device_pairing_scope(ctx: Context) -> Finding:
             evidence=high_scope_ev[:6],
         )
 
+    if elided:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{len(data)} pending device pairing request(s) found; none of the part of "
+            "devices/pending.json that was read requests a high-privilege scope, but part "
+            "of it was not read.",
+            _C680_PARTIAL_FIX,
+        )
+
     return _finding(
         "B138",
         PASS,
         f"{len(data)} pending device pairing request(s) found; none request a "
         "high-privilege scope (operator.admin/operator.write).",
         "Continue reviewing pending pairing requests before approving them.",
+    )
+
+
+_B138_FILE = "devices/pending.json"
+_B138_TABLE = "device_pairing_pending (state/openclaw.sqlite)"
+_B138_REVIEW_FIX = (
+    "Review each pending pairing request before approving it. Only approve "
+    "admin/write scope for a device you recognize and expect; reject/ignore "
+    "unrecognized requests."
+)
+
+
+def _b138_judge_pending_table(ctx: Context):
+    """B138's judgement of the ``device_pairing_pending`` table alone (C-685).
+
+    Returns ``(finding, items)``: *items* are the clock-free WARN lines (what a fingerprint
+    may hash); the finding's ``evidence`` additionally carries each request's age.
+    """
+    import time as _time
+
+    from ..logsafe import redact as _redact  # noqa: PLC0415
+
+    if ctx.pending_pairings_sqlite_not_regular:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{ctx.pending_pairings_sqlite_not_regular}, so the pending pairing store was not "
+            "read \u2014 cannot evaluate pending device pairing requests.",
+            "A relocated or replaced state database is not followed. Review the pending "
+            "pairing requests with `openclaw devices list`, or point the audit at the real "
+            "OpenClaw home.",
+        ), []
+    if ctx.pending_pairings_sqlite_parse_error:
+        if not ctx.pending_pairings_sqlite_state_db:
+            why = (
+                "the state directory listing was cut short before openclaw.sqlite was "
+                "reached, so " + _B138_TABLE + " was not read"
+            )
+        else:
+            why = _B138_TABLE + " is present but could not be reliably read"
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{why} \u2014 cannot evaluate pending device pairing requests.",
+            "Review the pending pairing requests manually with `openclaw devices list`, "
+            "or re-run once the state database is not locked.",
+        ), []
+
+    now_ms = _time.time() * 1000.0
+    data = ctx.pending_pairings_sqlite
+    items: list[str] = []
+    evidence: list[str] = []
+    unread: list[str] = []
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        scopes = entry.get("scopes")
+        if isinstance(scopes, (list, tuple)) and any(
+            s in _HIGH_SCOPE_NAMES for s in scopes if isinstance(s, str)
+        ):
+            base = _redact(
+                f"requestId={entry.get('requestId') or key} "
+                f"deviceId={entry.get('deviceId') or 'unknown'} "
+                f"platform={entry.get('platform') or 'unknown'} "
+                f"isRepair={bool(entry.get('isRepair'))}"
+            )
+            ts = entry.get("ts")
+            age = (
+                f" requestAgeDays={max(0.0, (now_ms - ts) / 86_400_000.0):.1f}"
+                if isinstance(ts, (int, float)) and ts > 0 else ""
+            )
+            items.append(base)
+            evidence.append(base + age)
+        elif entry.get("scopesUnparsed"):
+            unread.append(_redact(str(entry.get("requestId") or key)))
+
+    dropped = ctx.pending_pairings_sqlite_dropped
+    gaps = []
+    if unread:
+        gaps.append(
+            f"{len(unread)} request(s) have a scopes value that could not be read "
+            f"(not a JSON list, not valid JSON, or nested deeper than {_MAX_JSON_NESTING} levels)"
+        )
+    if dropped:
+        gaps.append(f"at least {dropped} row(s) were not read (past the collector's size/row cap)")
+    gap_fix = (
+        " Not evaluated: " + "; ".join(gaps) + ". Review them with `openclaw devices list`."
+        if gaps else ""
+    )
+
+    if items:
+        detail = "; ".join(items[:6]) + (f" (+{len(items) - 6} more)" if len(items) > 6 else "")
+        return _finding(
+            "B138",
+            WARN,
+            f"pending device pairing request(s) in {_B138_TABLE} awaiting your approval "
+            f"request a high-privilege scope (operator.admin/operator.write): {detail}.",
+            _B138_REVIEW_FIX + gap_fix,
+            evidence=evidence[:6],
+        ), items
+    if gaps:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            f"{len(data)} pending device pairing request(s) read from {_B138_TABLE}; none of "
+            "them requests a high-privilege scope, but part of the table was not read "
+            "\u2014 a clean bill of health cannot be given.",
+            gap_fix.strip(),
+        ), []
+    if not data:
+        return _finding(
+            "B138",
+            PASS,
+            f"{_B138_TABLE} found with no pending device pairing requests.",
+            "No action needed.",
+        ), []
+    return _finding(
+        "B138",
+        PASS,
+        f"{len(data)} pending device pairing request(s) found in {_B138_TABLE}; none request "
+        "a high-privilege scope (operator.admin/operator.write).",
+        "Continue reviewing pending pairing requests before approving them.",
+    ), []
+
+
+def _b138_merge(legacy: Finding, table: Finding, table_items: list) -> Finding:
+    """One B138 verdict from BOTH containers (the legacy file and the table).
+
+    A WARN in either stands. The legacy file's own wording is kept whenever the file alone
+    decides the verdict (a fingerprint hashes ``detail``, so a legacy finding must not change
+    just because a table also exists); the table's part is appended after it, never before.
+    """
+    gap = lambda label, f: f" Not fully read: {label}: {f.detail}"  # noqa: E731
+    if legacy.status == WARN:
+        if table.status == WARN:
+            head = legacy.detail[:-1] if legacy.detail.endswith(".") else legacy.detail
+            more = f" (+{len(table_items) - 6} more)" if len(table_items) > 6 else ""
+            return _finding(
+                "B138",
+                WARN,
+                f"{head}; state database: {'; '.join(table_items[:6])}{more}.",
+                legacy.fix,
+                evidence=(list(legacy.evidence) + [f"state database: {e}" for e in table.evidence])[:6],
+            )
+        if table.status == UNKNOWN:
+            return _finding(
+                "B138", WARN, legacy.detail, legacy.fix + gap(_B138_TABLE, table),
+                evidence=legacy.evidence,
+            )
+        return legacy
+    if table.status == WARN:
+        fix = table.fix + (gap(_B138_FILE, legacy) if legacy.status == UNKNOWN else "")
+        return _finding("B138", WARN, table.detail, fix, evidence=table.evidence)
+    if legacy.status == UNKNOWN:
+        fix = legacy.fix + (gap(_B138_TABLE, table) if table.status == UNKNOWN else "")
+        # C-727: keep the flag of the unreadable-directory finding (False for every earlier
+        # legacy UNKNOWN, so nothing else changes).
+        return _finding("B138", UNKNOWN, legacy.detail, fix, engine_degraded=legacy.engine_degraded)
+    if table.status == UNKNOWN:
+        return table
+    return _finding(
+        "B138",
+        PASS,
+        f"{_B138_FILE} and {_B138_TABLE} were both read; no pending device pairing request "
+        "requests a high-privilege scope (operator.admin/operator.write).",
+        "Continue reviewing pending pairing requests before approving them.",
+    )
+
+
+def check_pending_device_pairing_scope(ctx: Context) -> Finding:
+    """B138 - dangling high-scope pending device pairing.
+
+    Pending pairing requests live in the ``device_pairing_pending`` table of the state
+    database (OpenClaw 2026.8.1 onward; C-685) or, on an older install, in
+    ``devices/pending.json``. Both are judged by PRESENCE, not by version, and every
+    container that exists is read:
+
+    WARN    - a pending request, in either container, asks for a high-privilege scope
+              (operator.admin / operator.write), especially with isRepair=true - a pairing
+              awaiting human approval, not proof of compromise. A WARN stands even when the
+              other container could not be read.
+    PASS    - at least one container was read and none holds such a request; OR (the one
+              PASS that rests on absence) openclaw.json was found and there is no state
+              database path and no devices/pending.json at all - an install that predates
+              the pairing store kept requests only in that file, so no file means none.
+    UNKNOWN - a container exists but could not be fully read: an unreadable or invalid file;
+              a view, locked or oddly-shaped table; rows past the size/row cap; a scopes
+              value that is not valid JSON, not a list, or holds a non-string element;
+              ``state/openclaw.sqlite`` (or ``state``) present but a symlink, directory or
+              special file, which is not followed (a relocated state directory reads here as
+              UNKNOWN, never as "no store"); a state database with no pending-request table
+              and no legacy file; or a directory that is not recognisable as an OpenClaw home
+              (no openclaw.json, no state database, no file), where nothing was looked at.
+
+    Table scopes are trimmed (the vendor trims) and compared case-sensitively; legacy-file
+    outcomes keep their exact wording. The request age is evidence text only (a fingerprint
+    hashes ``detail``). ``remote_ip`` and ``public_key`` are not read.
+
+    Known limit: the high-scope set is only ``operator.admin`` and ``operator.write``. The
+    vendor defines further operator scopes (``operator.pairing``, ``operator.approvals``,
+    ``operator.talk.secrets``, ``operator.sessions.write``) that are NOT treated as high
+    here; widening the set is a separate decision.
+
+    B-661: the locus is the pairing store under ``ctx.home``, not ``ctx.config``. With the
+    config not found and no store anywhere it is UNKNOWN, not PASS.
+    """
+    pending_path = ctx.home / "devices" / "pending.json"
+    try:
+        has_legacy = pathprobe.is_file(pending_path)
+        legacy = _b138_judge_legacy_file(pending_path) if has_legacy else None
+    except OSError:
+        # C-727: devices/ cannot be entered, so the legacy file was not looked for. Judged as
+        # an unreadable container: a WARN from the state-database table still stands in
+        # _b138_merge below, and nothing else can turn this into "no pending requests".
+        legacy = _shared._unreadable_dirs_finding(
+            "B138", "pending device pairing requests (devices/pending.json)",
+            [_detail_path(pending_path.parent, ctx.home)])
+    table, items = None, []
+    if ctx.pending_pairings_sqlite_found or ctx.pending_pairings_sqlite_parse_error:
+        table, items = _b138_judge_pending_table(ctx)
+    if legacy is not None and table is not None:
+        return _b138_merge(legacy, table, items)
+    if legacy is not None or table is not None:
+        return legacy if legacy is not None else table
+
+    if ctx.pending_pairings_sqlite_state_db:
+        return _finding(
+            "B138",
+            UNKNOWN,
+            "state/openclaw.sqlite exists but holds no device_pairing_pending table and there "
+            "is no devices/pending.json \u2014 the pending pairing store was not found, so "
+            "pending device pairing requests were not evaluated.",
+            "Review pending pairing requests with `openclaw devices list`.",
+        )
+    if ctx.config_found:
+        return _finding(
+            "B138",
+            PASS,
+            "no devices/pending.json found \u2014 no pending device pairing requests.",
+            "No action needed.",
+        )
+    return _finding(
+        "B138",
+        UNKNOWN,
+        "no devices/pending.json, no state database and no openclaw.json found \u2014 this does "
+        "not look like an OpenClaw home, so pending device pairing requests were not evaluated.",
+        "Point the audit at the OpenClaw home (default ~/.openclaw).",
     )
 
 
@@ -4770,13 +5953,15 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     WARN    -- one or more paired devices hold standing operator.admin/operator.write
               authority via a live (non-revoked) token -- an inventory advisory (count +
               age), never proof of compromise.
-    UNKNOWN -- devices/paired.json exists but is unreadable or not valid JSON, OR (when
+    UNKNOWN -- devices/paired.json exists but is unreadable, not valid JSON, or nested
+              deeper than ``configloader.MAX_JSON_NESTING`` levels (C-648), OR (when
               that file is absent) the device_pairing_paired state-DB table exists but
               could not be reliably read, OR (when that file is absent) no device among
               those actually read holds high-privilege authority BUT the collector's own
               size/row cap excluded one or more device_pairing_paired rows -- a verdict
               built only over what WAS read cannot be trusted as a clean bill of health
-              when rows were dropped for size (see the C-135 round 2 note below).
+              when rows were dropped for size (see the C-135 round 2 note below), OR no
+              device read holds authority BUT a device's scopes could not be read (C-648).
 
     B-661: exempt from the "23 checks PASS on an unread config" audit. This check
     never reads ``ctx.config`` -- the locus is ``devices/paired.json`` under
@@ -4815,22 +6000,71 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     was dropped, the same ``LIMIT_DOMAIN_APPROVALS``/B172 precedent this codebase
     already uses for its own collector-cap case: "a WARN found in what WAS scanned
     stands regardless; only a verdict built on ABSENCE degrades."
+
+    C-648 (nesting limit): the unit that is lost to a too-deep value is the WHOLE document,
+    or for the SQLite store the whole scopes value of one row - never part of it. A legacy
+    ``devices/paired.json`` nested deeper than ``MAX_JSON_NESTING`` is UNKNOWN as a
+    whole: an ``operator.admin`` inside that same unreadable document cannot be salvaged
+    (that would take an iterative parser), so no WARN is claimed for it. Likewise a
+    scopes list that contains one too-deep element is unreadable as a whole, and so is its
+    ``operator.admin`` sitting next to that element. What stands is a WARN found in OTHER,
+    readable SQLite rows; a device whose scopes were not read is disclosed (``fix`` only)
+    and is never counted as "no authority".
     """
-    import json as _json
     import time as _time
 
     using_sqlite_fallback = False
     paired_path = ctx.home / "devices" / "paired.json"
-    if paired_path.is_file():
+    paired_unreadable: list[str] = []
+    try:
+        paired_kind = _shared._file_kind_resolved(paired_path)
+    except OSError:
+        # C-727: devices/ cannot be entered, so the legacy file was not looked for. The state
+        # database is still read below (a WARN from it stands); no PASS may rest on the file
+        # being "absent".
+        paired_unreadable.append(_detail_path(paired_path.parent, ctx.home))
+        paired_kind = "absent"
+    if paired_kind in ("symlink-unusable", "directory", "special"):
+        # C-731: present but no regular file is there - not opened, never "absent". (A link
+        # to a regular file is read as it always was.)
+        return _shared._not_understood_finding(
+            "B176", "paired device operator authority",
+            [(_detail_path(paired_path, ctx.home), _shared._NOT_UNDERSTOOD_REASONS[paired_kind])],
+            engine_degraded=False)
+    paired_file = paired_kind == "file"
+    if paired_file:
         try:
-            data = _json.loads(paired_path.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
+            # C-648: nesting deeper than MAX_JSON_NESTING raises JSONNestingError here, before
+            # the parser runs, so every interpreter answers alike. Before, a document past the
+            # interpreter's own limit raised RecursionError out of this check (an `ERR:`
+            # degrade), and one inside it parsed - a different answer per machine.
+            data = _loads_bounded(_shared._read_regular_text(paired_path))
+        except OSError as exc:
+            reason = _shared._read_failure_reason(exc)
+            if reason:  # C-731: swapped for a pipe / directory, or past the size bound, since the probe
+                return _shared._not_understood_finding(
+                    "B176", "paired device operator authority",
+                    [(_detail_path(paired_path, ctx.home), reason)], engine_degraded=False)
             return _finding(
                 "B176",
                 UNKNOWN,
                 "devices/paired.json present but unreadable \u2014 cannot evaluate paired "
                 "device operator authority.",
                 "Ensure devices/paired.json is owner-readable, or review it manually.",
+            )
+        except _JSONNestingError:
+            # UNKNOWN as a whole: one document, and a too-deep value leaves every device in
+            # it unread. A WARN inside that same unreadable document cannot be salvaged
+            # (that needs an iterative parser), so none is claimed. It is VALID JSON, so it
+            # must not be called invalid.
+            return _finding(
+                "B176",
+                UNKNOWN,
+                "devices/paired.json present but nested deeper than the "
+                f"{_MAX_JSON_NESTING} levels this audit reads \u2014 its paired devices could "
+                "not be read, so paired device operator authority was not evaluated.",
+                "A real devices/paired.json nests only a few levels. Review the file manually "
+                "and run `openclaw devices list` to see the paired devices and their scopes.",
             )
         except ValueError:
             return _finding(
@@ -4897,6 +6131,10 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                     "more rows than the collector's cap, then re-run the audit.",
                     engine_degraded=True,
                 )
+            if paired_unreadable:
+                return _shared._unreadable_dirs_finding(
+                    "B176", "paired device operator authority (devices/paired.json)",
+                    paired_unreadable)
             return _finding(
                 "B176",
                 PASS,
@@ -4917,6 +6155,10 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
     # up to 12 evidence lines for a WARN), so the reader still sees how stale each device is.
     high_scope: list[str] = []
     high_scope_ev: list[str] = []
+    # C-648: SQLite-store devices whose scopes could not be read (malformed / too deep): they
+    # never hide a WARN found in another row, are disclosed in `fix` (never `detail`, which a
+    # fingerprint hashes), and degrade a no-finding result to UNKNOWN.
+    unread: list[str] = []
     for key, entry in data.items():
         if not isinstance(entry, dict):
             continue
@@ -4927,6 +6169,8 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 scopes.update(s for s in values if isinstance(s, str))
         granted = sorted(s for s in scopes if s in _HIGH_SCOPE_NAMES)
         if not granted:
+            if entry.get("scopesUnparsed"):
+                unread.append(_redact(str(entry.get("deviceId") or key)))
             continue
 
         tokens = entry.get("tokens")
@@ -4952,6 +6196,16 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         high_scope.append(_redact(base))
         high_scope_ev.append(_redact(f"{base} lastSeenAgeDays={age_desc}"))
 
+    unread_note = ""
+    if unread:
+        more = f" (+{len(unread) - 6} more)" if len(unread) > 6 else ""
+        unread_note = (
+            f" {len(unread)} paired device(s) ({', '.join(unread[:6])}{more}) have a "
+            "scopes/approvedScopes value that could not be read (not valid JSON, or nested "
+            f"deeper than {_MAX_JSON_NESTING} levels), so their authority was not evaluated "
+            "- review them with `openclaw devices list`."
+        )
+
     if not high_scope_ev:
         if using_sqlite_fallback and limit_hits_for(ctx, LIMIT_DOMAIN_PAIRED):
             # C-135 round 2: none of the devices that WERE read hold high-privilege
@@ -4971,8 +6225,22 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
                 "so a clean bill of health cannot be given.",
                 "Investigate why device_pairing_paired holds an oversized row "
                 "(scopes/approvedScopes/tokens/role/roles/nodeSurface past the size cap) or "
-                "more rows than the collector's cap, then re-run the audit.",
+                "more rows than the collector's cap, then re-run the audit." + unread_note,
                 engine_degraded=True,
+            )
+        if paired_unreadable:
+            return _shared._unreadable_dirs_finding(
+                "B176", "paired device operator authority (devices/paired.json)",
+                paired_unreadable)
+        if unread:
+            return _finding(
+                "B176",
+                UNKNOWN,
+                f"{len(data) - len(unread)} paired device(s) were read and none hold "
+                f"operator.admin/operator.write authority, but {len(unread)} paired "
+                "device(s) have a scopes/approvedScopes value that could not be read "
+                "\u2014 a clean bill of health cannot be given.",
+                unread_note.strip(),
             )
         return _finding(
             "B176",
@@ -4994,7 +6262,7 @@ def check_paired_device_operator_authority(ctx: Context) -> Finding:
         "devices list`); remove any unknown or stale device (`openclaw devices remove "
         "<deviceId>`) and rotate the token of any you keep "
         "(`openclaw devices rotate --device <id> --role <role>`) so an old standing "
-        "token cannot be replayed.",
+        "token cannot be replayed." + unread_note,
         evidence=high_scope_ev[:6],
     )
 
@@ -5035,8 +6303,8 @@ def _b396_js_truthy(v) -> bool:
 
 
 def _b396_role_list(v) -> list:
-    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-_gRhJUDw.mjs:
-    74-82): a list keeps only its non-blank, JS-trimmed string items; a bare non-blank
+    """`normalizeUniqueSingleOrTrimmedStringList` (string-normalization-CECOqf64.mjs:
+    74-82, grounded against 2026.10.1): a list keeps only its non-blank, JS-trimmed string items; a bare non-blank
     string becomes a one-item list; anything else is empty."""
     if isinstance(v, list):
         return [s.strip(_JS_TRIM_CHARS) for s in v if isinstance(s, str) and s.strip(_JS_TRIM_CHARS)]
@@ -5056,8 +6324,8 @@ def _b396_safe_int(v) -> bool:
 
 
 def _b396_legacy_record_valid(rec) -> bool:
-    """`normalizeLegacyPairedDevice` (state-migrations.pairing:24-41): the 9.6 migration
-    silently DROPS a legacy `devices/paired.json` record missing a non-blank
+    """`normalizeLegacyPairedDevice` (state-migrations.pairing-DFzHgpP3.mjs:24-41, 2026.9.8): the
+    9.6 migration silently DROPS a legacy `devices/paired.json` record missing a non-blank
     `publicKey` or a safe-integer `createdAtMs`/`approvedAtMs` -- so this check, which
     models the post-migration merge (unlike B176's own "legacy wins outright"), must
     drop it too rather than treat it as a live device the runtime would actually admit."""
@@ -5156,12 +6424,10 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
     absent, or (None, reason) for every other outcome -- unreadable, over the 4MB cap,
     invalid JSON, or not a JSON object. *parts* are joined with "/" for the reason
     string ONLY -- never an absolute path (fingerprint/privacy discipline)."""
-    import json as _json  # noqa: PLC0415 -- lazy, matches this module's own local-import idiom
-
     rel = "/".join(parts)
     p = ctx.home.joinpath(*parts)
     try:
-        if not p.is_file():
+        if not pathprobe.is_file(p):
             return None, None
         with p.open("rb") as fh:
             raw = fh.read(_B396_MAX_LEGACY_STORE_BYTES + 1)
@@ -5170,37 +6436,46 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
     if len(raw) > _B396_MAX_LEGACY_STORE_BYTES:
         return None, f"{rel} is larger than the 4 MB read cap"
     try:
-        data = _json.loads(raw.decode("utf-8"))
+        data, elided = _loads_shallow(raw.decode("utf-8"))
     except (ValueError, RecursionError):
         return None, f"{rel} is present but is not valid JSON"
     if not isinstance(data, dict):
         return None, f"{rel} is present but is not a JSON object"
+    if elided:
+        # C-680: the shallow part is delivered; an unread subtree reads as JSON null (every
+        # consumer already handles a missing/null field) and the gap is disclosed.
+        return _c680_unread_as_null(data), (
+            f"{rel} is nested deeper than {_SHALLOW_JSON_DEPTH} levels and was read only in part"
+        )
     return data, None
 
 
 # ---------- B396: paired-node skills outside the skill content scan (coverage disclosure) ----------
-# Every dist claim below was read on the installed openclaw@2026.9.6 (2026-09-26), under
+# Every dist claim below was first read on openclaw@2026.9.6 (2026-09-26), re-read on the
+# installed openclaw@2026.9.7 (2026-10-05) and again on the installed openclaw@2026.9.8
+# (2026-10-09, whose bundle names are the ones cited; 2026.9.9 carries the same code at the
+# same lines), under
 # ~/.npm-global/lib/node_modules/openclaw/dist/. Citations name the symbol first;
 # file:line is only a convenience, since bundle names rotate (CHECK_AUTHORING.md).
 #
 # The gap: a paired NODE (not an operator device -- B176/B138 already cover operator
 # authority) can publish its own machine's ~/.openclaw/skills content into this gateway
-# while connected. `scanNodeHostedSkills` (startup-state-migrations-BqKx_IWS.mjs:
-# 3674-3729) scans the node's own `resolveConfigDir()/skills`
-# (utils-aKqR_F_U.mjs:14-20) and pushes the result via RPC `node.skills.update`
-# (`publishInventory`, :352-355). The gateway's handler
-# (nodes.read-CBW8WUjQ.mjs:205-221) calls `NodeRegistry.updateNodeSkills`
-# (node-registry-zajLqj5_.mjs:703-712), which writes `NODE_SESSION_POLICIES.skills`
-# (in-memory only) and, via `refreshSessionPolicy` (:313), sets
+# while connected. `scanNodeHostedSkills` (startup-state-readiness-ucrJBHoD.mjs:
+# 3622-3677) scans the node's own `resolveConfigDir()/skills`
+# (utils-DUAwk2p5.mjs:14-20) and pushes the result via RPC `node.skills.update`
+# (`publishInventory`, :363-366). The gateway's handler
+# (nodes.read-uaBfLm1n.mjs:201-217) calls `NodeRegistry.updateNodeSkills`
+# (node-registry-D-enNN7q.mjs:740-749), which writes `NODE_SESSION_POLICIES.skills`
+# (in-memory only) and, via `refreshSessionPolicy` (:353), sets
 # `node.nodeSkills = cfg?.gateway?.nodes?.allowSkills === false ? [] : policy.skills`
-# before calling `replaceRemoteNodeSkills` (:314-319) into the process-memory
-# `remoteSkillNodes` Map (remote-skills-CZuGGEXx.mjs:10) -- cleared on disconnect
-# (node-registry:437,505). `mergeRemoteNodeSkillEntries` (remote-skills:101-104) is the
+# before calling `replaceRemoteNodeSkills` (:354-359) into the process-memory
+# `remoteSkillNodes` Map (remote-skills-Co_eXsF5.mjs:10, 2026.9.8) -- cleared on disconnect
+# (node-registry:477,544). `mergeRemoteNodeSkillEntries` (remote-skills:100-103) is the
 # ONLY reader of that content, gated on `options.canExec === true` (agent-side, runtime/
 # session-decided -- not modelled here) AND, node-side, `node.canExec` = `node.commands
 # ?.includes("system.run")` (remote-skills:49), where `node.commands` is the paired
-# device's OWN approved surface (`resolveNodeCommandAllowlist`, node-registry:282) minus
-# `gateway.nodes.commands.deny` (node-command-policy-CnGfXM76.mjs:294,312-315).
+# device's OWN approved surface (`resolveNodeCommandAllowlist`, node-registry:322) minus
+# `gateway.nodes.commands.deny` (node-command-policy-B8V85z2C.mjs:229,247-250).
 #
 # So the content this gateway would offer an agent from a paired node is NEVER written to
 # this machine's disk and never reaches B13/B5/B25/SKILL_CONTENT_RING (all of which read
@@ -5213,23 +6488,28 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 # config weakness in itself; B386 already covers the gate default) or not (PASS).
 #
 # Node admission itself requires a persisted pairing record
-# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-BxpHZHxS.mjs:35-47):
+# (`captureAuthenticatedNodePairingState`, device-pairing-node-state-DT8PKpkZ.mjs:30-42,
+# 2026.9.8):
 # `hasEffectivePairedDeviceRole(device, "node")` (active role intersect approved role,
-# device-pairing-identity-BnU9nqx2.mjs:603-625) AND a truthy `tokens.node`
-# (`resolveNodePairingIdentity`, :627-643), with `approvedSurface.commands` sourced from
-# `device.nodeSurface?.commands ?? []` (node-registry:400). That record lives in
+# device-pairing-identity-DEwtmAba.mjs:563-585) AND a truthy `tokens.node`
+# (`resolveNodePairingIdentity`, :587-603), with `approvedSurface.commands` sourced from
+# `device.nodeSurface?.commands ?? []` (device-pairing-node-state:38; node-registry:440
+# reads it back as `opts.approvedSurface?.commands`). That record lives in
 # `state/openclaw.sqlite`'s `device_pairing_paired` table (`role`, `roles_json`,
-# `tokens_json`, `node_surface_json` -- confirmed in the real 9.6 DDL on this machine),
+# `tokens_json`, `node_surface_json` -- confirmed in the real 9.6 DDL on this machine
+# and re-read in 9.7's `OPENCLAW_STATE_SCHEMA_SQL`, managed-handoff-runtime.mjs:4954),
 # or, pre-migration / not yet imported, in the legacy `devices/paired.json` +
 # `nodes/paired.json` pair (`listLegacyPairingStoreFiles`,
-# pairing-files-BJQEMPCI.mjs:20-35; folded in by `migrateLegacyNodePairingStore`,
-# state-migrations.pairing-CC8_e_xh.mjs:58-170 -- SQLite wins per device id, legacy node
-# rows folded in only for an id SQLite does not already have).
+# pairing-files-DdxuFZBY.mjs:20-35; folded in by `migrateLegacyNodePairingStore`,
+# state-migrations.pairing-DFzHgpP3.mjs:125-170, 2026.9.8 -- SQLite wins per device id: a legacy node
+# row is folded into the device record with the same id only when that record has an
+# approved `node` role and carries no `nodeSurface` yet (:136-140); a row with no such
+# device record is dropped as an orphan).
 #
 # Unlike B176 (which uses "legacy JSON wins outright" -- the RUNTIME's OWN behavior
 # before it ever runs `doctor --fix`), this check deliberately models the 9.6 MIGRATION
 # MERGE instead: what the runtime sees NOW, or after the `doctor --fix` its own startup
-# log demands (`server-startup-plugins-PEmmbrVx.mjs:53-58`). The two checks read the same
+# log demands (`server-startup-plugins-BGnrh3LD.mjs:55-60`, 2026.9.8). The two checks read the same
 # store with two different, each individually correct, merge rules -- see
 # `_b396_admission_state`'s own docstring below and B176's for the contrast.
 #
@@ -5239,9 +6519,11 @@ def _b396_read_legacy_store(ctx, *parts) -> "tuple[dict | None, str | None]":
 #     scores/reports the gate default); scoring it would double-count B386's gate.
 #   - Never FAILs (B-315 invariant) -- WARN is its ceiling.
 #   - Confidence is MEDIUM because of two deliberate over-approximations: the platform
-#     filter (`filterApprovedRuntimeCommands`, node-command-policy:264-271) and the
-#     agent-side exec policy are NOT modelled, and a node sharing THIS machine's home is
-#     not distinguishable from a genuinely remote one (disclosed in the WARN detail).
+#     filter (on 9.6 `filterApprovedRuntimeCommands`; on 9.7 inlined into
+#     `resolveNodeCommandAllowlistInternal` as the `desktop` predicate and the
+#     DESKTOP_HOST_COMMANDS filters, node-command-policy-B8V85z2C.mjs:222-223,227) and
+#     the agent-side exec policy are NOT modelled, and a node sharing THIS machine's home
+#     is not distinguishable from a genuinely remote one (disclosed in the WARN detail).
 #   - `engine_degraded` mirrors B176 exactly: True ONLY for a LIMIT_DOMAIN_PAIRED hit (an
 #     oversized/truncated row, or a capped state-dir walk that never reached the DB) --
 #     never for a plain parse/read failure, which is a plain UNKNOWN.
@@ -5252,7 +6534,8 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
     disclosure).
 
     See this check's own preceding comment block for the full dist grounding (every
-    claim there was read on the installed openclaw@2026.9.6, 2026-09-26) and for why
+    claim there was first read on openclaw@2026.9.6, 2026-09-26, and re-read on the
+    installed openclaw@2026.9.7, 2026-10-05, and openclaw@2026.9.8, 2026-10-09) and for why
     this check reports the CAPABILITY (a skill-capable paired node exists) rather than
     UNKNOWN-for-unreadable-content: the content a paired node would publish is held only
     in gateway memory and on the node's own machine, never on this machine's disk
@@ -5266,7 +6549,7 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
          precedes every store read below: OpenClaw's own runtime applies the SAME gate
          before ever consulting a node's approved commands
          (`node.nodeSkills = allowSkills === false ? [] : policy.skills`,
-         node-registry:313), so the pairing store's content is irrelevant once the gate
+         node-registry:353), so the pairing store's content is irrelevant once the gate
          is shut.
       3. On a build this check's node-admission model was actually read on (2026.9.6 and
          later, judged the same way `_openclaw_generation` judges the config schema
@@ -5276,9 +6559,9 @@ def check_paired_node_skill_coverage(ctx: Context) -> Finding:
          that JS-trims to exactly ``"system.run"`` -> PASS. `node.canExec` requires
          ``system.run`` in the node's OWN approved commands (`remote-skills:49`), and the
          deny list is subtracted from every node's allowlist
-         (node-command-policy:294,312-315) -- so no paired node can ever satisfy the
+         (node-command-policy:229,247-250) -- so no paired node can ever satisfy the
          canExec gate, whatever its own pairing record says. NOT taken on an unmodelled
-         build: the canExec/deny-precedence chain above is only grounded on 9.6.
+         build: the canExec/deny-precedence chain above is only grounded on 9.6 and 9.7.
       4/5/6. Otherwise, the paired-device store (SQLite `device_pairing_paired`, folded
          with any legacy `devices/paired.json` + `nodes/paired.json` per the 9.6
          migration merge -- see the preceding comment block) is read for node-capable
@@ -5761,7 +7044,6 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
     found or parsed. "No lock file" is a real, directly-observed disk fact on any
     host, config-readable or not.
     """
-    import json as _json
 
     from ..collector import WORKSPACE_DIRS
 
@@ -5818,13 +7100,15 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
     inconclusive_ev: list[str] = []
     any_parsed = False
     any_unreadable = False
+    partial = False
 
     for lock_path in lock_paths:
         try:
-            data = _json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+            data, elided = _loads_shallow(lock_path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             any_unreadable = True
             continue
+        partial = partial or bool(elided)
         if not isinstance(data, dict):
             any_unreadable = True
             continue
@@ -5843,19 +7127,19 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             if ok is False or decision == "fail":
                 reasons = verification.get("reasons")
                 reasons_str = (
-                    ", ".join(str(r) for r in reasons)
+                    ", ".join(str(_c680_text(r, "(unread)")) for r in reasons)
                     if isinstance(reasons, list) and reasons
                     else "none listed"
                 )
                 signature = verification.get("signature")
                 sig_status = (
-                    signature.get("status")
+                    _c680_text(signature.get("status"))
                     if isinstance(signature, dict)
                     else "unknown"
                 )
-                version = entry.get("version", "unknown")
+                version = _c680_text(entry.get("version", "unknown"))
                 line = (
-                    f"{slug}@{version}: decision={decision!r} ok={ok!r} "
+                    f"{slug}@{version}: decision={_c680_text(decision)!r} ok={_c680_text(ok)!r} "
                     f"reasons=[{reasons_str}] signature={sig_status}"
                 )
                 # B-258: separate "rejected" from "not answered yet" - see the block
@@ -5875,7 +7159,7 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             f"skill(s) installed despite failed ClawHub verification: {detail}.",
             "Review the flagged skill(s) manually \u2014 ClawHub's own verification rejected "
             "them but they are installed and running; uninstall or re-verify their "
-            "provenance before trusting them.",
+            "provenance before trusting them." + (" " + _C680_PARTIAL_FIX if partial else ""),
             evidence=rejected_ev[:6],
         )
 
@@ -5885,7 +7169,7 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             UNKNOWN,
             ".clawhub/lock.json found but unreadable or not valid JSON \u2014 cannot evaluate "
             "ClawHub skill-verification state.",
-            "Review .clawhub/lock.json manually.",
+            "Review .clawhub/lock.json manually." + (" " + _C680_PARTIAL_FIX if partial else ""),
         )
 
     if inconclusive_ev:
@@ -5901,8 +7185,17 @@ def check_clawhub_lock_verification(ctx: Context) -> Finding:
             "Re-check these skills once ClawHub's audit has completed (re-installing or "
             "updating the skill refreshes the recorded verification). A verdict that stays "
             "unresolved, or reasons that change to a real rejection code, is worth a manual "
-            "review of the skill's provenance.",
+            "review of the skill's provenance." + (" " + _C680_PARTIAL_FIX if partial else ""),
             evidence=inconclusive_ev[:6],
+        )
+
+    if partial:
+        return _finding(
+            "B135",
+            UNKNOWN,
+            ".clawhub/lock.json found; no skill in the part that was read failed registry "
+            "verification, but part of the file was not read.",
+            _C680_PARTIAL_FIX,
         )
 
     return _finding(
@@ -5967,9 +7260,12 @@ def _b181_confined_path(base: Path, rel: str):
     if candidate.is_absolute() or ".." in candidate.parts:
         return None
     target = base / candidate
+    # C-682: `os.path.realpath` never raises on a symlink loop (`Path.resolve` raises
+    # RuntimeError on 3.12 and returns on 3.14). A recorded path that loops is judged the same
+    # way on every interpreter: it stays inside `base`, and the file is then reported as recorded but gone.
     try:
-        resolved_base = base.resolve()
-        resolved = target.resolve()
+        resolved_base = Path(os.path.realpath(base))
+        resolved = Path(os.path.realpath(target))
     except OSError:
         return None
     if resolved != resolved_base and resolved_base not in resolved.parents:
@@ -5982,7 +7278,7 @@ def _b181_sha256(path: Path):
     import hashlib
 
     try:
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return "missing", None
         if path.stat().st_size > _B181_MAX_BYTES_PER_FILE:
             return "too-large", None
@@ -5995,13 +7291,15 @@ def _b181_sha256(path: Path):
     return "ok", digest.hexdigest()
 
 
-def _b181_read_json(path: Path):
-    import json as _json
-
+def _b181_read_json(path: Path, partial_out: "list | None" = None):
+    # C-680: a record nested past the shallow bound is read in part; the caller that passes
+    # *partial_out* learns of it (and can refuse a clean answer for the unread part).
     try:
-        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        data, elided = _loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return None
+    if elided and partial_out is not None:
+        partial_out.append(path.name)
     return data if isinstance(data, dict) else None
 
 
@@ -6065,12 +7363,13 @@ def _b181_skill_dir(slug: str, lock_parent: Path):
     """
     cand = lock_parent / "skills" / slug
     try:
-        return cand if cand.is_dir() else None
+        return cand if pathprobe.is_dir(cand) else None
     except OSError:
         return None
 
 
-def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
+def _b181_provenance_records(home: Path, ctx: "Context | None" = None,
+                             partial_out: "list | None" = None):
     """[(slug, skill_dir | None, record, source_label)] from every lock + origin.json found.
 
     *ctx*, when given, routes an unreadable lock/origin path through `_safe_is_file` so a
@@ -6095,7 +7394,7 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
             lock_path = home / rel / dot / "lock.json"
             if not _safe_is_file(lock_path, ctx, what=f"'{lock_path.name}'"):
                 continue
-            data = _b181_read_json(lock_path)
+            data = _b181_read_json(lock_path, partial_out)
             skills = data.get("skills") if data else None
             if not isinstance(skills, dict):
                 # Unparseable/!schema - the CLI falls through to the legacy path, so do we.
@@ -6114,12 +7413,12 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
     for rel in SKILL_DIRS:
         root = home / rel
         try:
-            children = sorted(root.iterdir()) if root.is_dir() else []
+            children = sorted(root.iterdir()) if pathprobe.is_dir(root) else []
         except OSError:
             continue
         for skill_dir in children:
             try:
-                if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                if not pathprobe.is_dir(skill_dir) or skill_dir.name.startswith("."):
                     continue
             except OSError:
                 continue
@@ -6133,15 +7432,120 @@ def _b181_provenance_records(home: Path, ctx: "Context | None" = None):
                 # Path.is_file() does not swallow (EACCES).
                 if not _safe_is_file(origin, ctx, what=f"'{dot}/origin.json' in a skill dir"):
                     continue
-                data = _b181_read_json(origin)
+                data = _b181_read_json(origin, partial_out)
                 if data is None:
                     continue
                 seen_dirs.add(str(skill_dir))
                 records.append(
-                    (data.get("slug") or skill_dir.name, skill_dir, data, f"{dot}/origin.json")
+                    (_c680_text(data.get("slug"), None) or skill_dir.name, skill_dir, data,
+                     f"{dot}/origin.json")
                 )
                 break
     return records
+
+
+_B181_VERSION_RE = re.compile(r"^version\s*:\s*[\"']?([0-9A-Za-z][0-9A-Za-z.+_-]{0,40})",
+                              re.MULTILINE)
+
+
+def _b181_recorded_version(record: dict):
+    """The version ClawHub recorded for this install: a lock entry's `version`, or an
+    origin.json's `installedVersion` (its own top-level `version` is a schema number).
+    The raw string only - `_b181_version_parts` decides whether it is fit to quote."""
+    for key in ("version", "installedVersion"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _b181_installed_version(skill_dir: Path):
+    """`version:` from the front matter of the skill's own SKILL.md, or None. Bounded read
+    of a regular file only; anything unreadable or absent is simply no answer."""
+    path = skill_dir / "SKILL.md"
+    try:
+        if pathprobe.is_symlink(path) or not pathprobe.is_file(path):
+            return None
+        with open(path, "rb") as fh:
+            head = fh.read(8192).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    lines = head.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    block = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        block.append(line)
+    else:
+        return None
+    m = _B181_VERSION_RE.search("\n".join(block))
+    return m.group(1) if m else None
+
+
+# A version fit to be quoted in advice: an optional "v", one to four numbers, and a short
+# pre-release/build suffix. Anything else (free text, a sentence, control characters, a
+# very long string) is never printed.
+_B181_VERSION_OK_RE = re.compile(r"v?(\d+(?:\.\d+){0,3})([-+][0-9A-Za-z.-]{0,20})?")
+_B181_SLUG_OK_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def _b181_version_parts(value):
+    """(numbers, suffix, printable) of a plain version, else None."""
+    if not isinstance(value, str):
+        return None
+    m = _B181_VERSION_OK_RE.fullmatch(value.strip())
+    if m is None:
+        return None
+    numbers = tuple(int(p) for p in m.group(1).split("."))
+    return numbers, m.group(2) or "", m.group(0).lstrip("v")
+
+
+def _b181_version_notes(candidates: "list[tuple[str, Path, dict]]") -> str:
+    """Neutral facts about the versions, appended AFTER the remediation sentence.
+
+    A newer local copy that replaced a ClawHub install fails the digest comparison just
+    like tampering does, and reinstalling then replaces it with the version the record
+    describes. This states that fact - and nothing that argues against reinstalling: the
+    SKILL.md `version:` is read from the very files that failed the digest check, so a
+    tampered skill can declare any version it likes, and the install record cannot tell a
+    deliberate newer copy from tampering. Text only: it reads two version strings and
+    never touches a record or a digest. A version that is not a plain version is compared
+    as "different" without being printed, and a skill name that is not a plain name is not
+    printed either.
+    """
+    notes = []
+    for slug, skill_dir, record in candidates[:3]:
+        recorded = _b181_recorded_version(record)
+        installed = _b181_installed_version(skill_dir)
+        if not recorded or not installed:
+            continue
+        who = f"'{slug}'" if _B181_SLUG_OK_RE.fullmatch(slug) else "the skill"
+        rec, inst = _b181_version_parts(recorded), _b181_version_parts(installed)
+        if rec is None or inst is None:
+            if recorded.strip() == installed.strip():
+                continue
+            notes.append(
+                f"{who}: the install record's version and the SKILL.md version on disk "
+                "could not be compared; reinstalling replaces the files on disk with "
+                "the recorded version")
+            continue
+        width = max(len(rec[0]), len(inst[0]))      # 1.0 and 1.0.0 are the same version
+        rec_n = rec[0] + (0,) * (width - len(rec[0]))
+        inst_n = inst[0] + (0,) * (width - len(inst[0]))
+        if rec_n == inst_n and rec[1] == inst[1]:
+            continue
+        notes.append(
+            f"{who}: the install record is for version {rec[2]}, and the SKILL.md on "
+            f"disk declares version {inst[2]}; reinstalling replaces the files on disk "
+            f"with the recorded version {rec[2]}")
+    if not notes:
+        return ""
+    return (" Version note: " + "; ".join(notes) + ". The version number on disk comes "
+            "from the modified files themselves, so it does not show who changed them, "
+            "and the install record cannot tell a deliberate newer local copy from "
+            "tampering.")
 
 
 def check_skill_install_tamper(ctx: Context) -> Finding:
@@ -6158,7 +7562,8 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
               unreadable / too large to hash, or a record's skill directory could not be
               located. Never a fake PASS (Golden Rule #4).
     """
-    records = _b181_provenance_records(ctx.home, ctx)
+    partial: list = []
+    records = _b181_provenance_records(ctx.home, ctx, partial)
     if not records:
         return _finding(
             "B181",
@@ -6169,13 +7574,14 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             "detected either way.",
             "Skills installed through ClawHub record a SHA-256 of their files at install "
             "time. If you installed skills another way, verify their contents against the "
-            "upstream source yourself.",
+            "upstream source yourself." + (" " + _C680_PARTIAL_FIX if partial else ""),
         )
 
     tampered: list[str] = []
     missing: list[str] = []
     linked: list[str] = []
     unverifiable: list[str] = []
+    drifted: "dict[str, tuple[str, Path, dict]]" = {}   # C-705: slug -> what to compare
     verified = 0
     budget = _B181_MAX_FILES_TOTAL
 
@@ -6194,7 +7600,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
                                 "could not be located on disk")
             continue
         try:
-            is_link = skill_dir.is_symlink()
+            is_link = pathprobe.is_symlink(skill_dir)
         except OSError:
             is_link = False
         if is_link:
@@ -6223,8 +7629,10 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
                 else:
                     tampered.append(f"{slug}: '{rel}' does not match the digest recorded "
                                     f"in {source} at install time")
+                    drifted.setdefault(slug, (slug, skill_dir, record))
             elif state == "missing":
                 missing.append(f"{slug}: '{rel}' is recorded in {source} but is gone")
+                drifted.setdefault(slug, (slug, skill_dir, record))
             else:
                 unverifiable.append(f"{slug}: '{rel}' could not be hashed ({state})")
 
@@ -6240,7 +7648,7 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             "from ClawHub to restore the verified bytes, and review the modified file "
             "first \u2014 if you did not edit it yourself, something else on this machine "
             "(another agent, another skill, or an attacker) rewrote a skill the agent "
-            "auto-loads.",
+            "auto-loads." + _b181_version_notes(list(drifted.values())),
             evidence=tampered[:6],
         )
 
@@ -6254,8 +7662,20 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
             "fully matched to what is on disk: " + "; ".join(items[:6]) + extra,
             "A file recorded at install time that is now gone, or a skill directory linked "
             "to a working tree, both mean the bytes running today are not the bytes "
-            "ClawHub verified. Reinstall the skill if the change was not deliberate.",
+            "ClawHub verified. Reinstall the skill if the change was not deliberate."
+            + _b181_version_notes(list(drifted.values())),
             evidence=items[:6],
+        )
+
+    if verified and partial:
+        return _finding(
+            "B181",
+            UNKNOWN,
+            f"Every install-time digest that could be checked ({verified} file(s)) matches "
+            "the bytes on disk, but part of an install record was not read, so post-install "
+            "modification cannot be ruled out for what it describes.",
+            _C680_PARTIAL_FIX,
+            evidence=unverifiable[:6],
         )
 
     if verified:
@@ -6281,7 +7701,8 @@ def check_skill_install_tamper(ctx: Context) -> Finding:
         "against disk, so post-install modification cannot be ruled in or out: "
         + "; ".join(unverifiable[:6])
         + extra,
-        "Check that the installed skill directories are readable, then re-run the audit.",
+        "Check that the installed skill directories are readable, then re-run the audit."
+        + (" " + _C680_PARTIAL_FIX if partial else ""),
         evidence=unverifiable[:6],
     )
 
@@ -6440,7 +7861,8 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
     env_bad: "list[str]" = []
     observed_canonical = 0
 
-    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home, ctx):
+    partial: list = []
+    for slug, _skill_dir, record, source in _b181_provenance_records(ctx.home, ctx, partial):
         if not isinstance(record, dict):
             continue
         verdict = _b184_is_canonical(record.get("registry"), _B184_CANONICAL_REGISTRY_HOST)
@@ -6533,6 +7955,16 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
             engine_degraded=True,
         )
 
+    if partial and observed_canonical:
+        return _finding(
+            "B184",
+            UNKNOWN,
+            f"Every recorded ClawHub endpoint that was read ({observed_canonical} "
+            "record(s)/setting(s)) is the public https://clawhub.ai, but part of an install "
+            "record was not read.",
+            _C680_PARTIAL_FIX,
+        )
+
     if observed_canonical:
         return _finding(
             "B184",
@@ -6552,7 +7984,8 @@ def check_clawhub_registry_provenance(ctx: Context) -> Finding:
         "that B135, B177 and B181 report on.",
         "If skills were installed some other way, confirm for yourself where they came "
         "from. Running the audit on the machine and account the agent runs as, with no "
-        "--home argument, also lets the persistent override locations be checked.",
+        "--home argument, also lets the persistent override locations be checked."
+        + (" " + _C680_PARTIAL_FIX if partial else ""),
     )
 
 
@@ -6700,7 +8133,6 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
     The token value itself is never read into a message, logged, or placed in evidence -
     only whether the `token` key holds a non-empty string (§8).
     """
-    import json as _json
 
     exposed: list[str] = []
     swappable: list[str] = []
@@ -6708,16 +8140,17 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
     tokenless: list[str] = []
     unreadable: list[str] = []
     found_any = False
+    partial = False
 
     for store in _b182_candidate_stores(ctx):
         try:
-            if not store.is_file():
+            if not pathprobe.is_file(store):
                 continue
         except OSError:
             continue
         found_any = True
         try:
-            data = _json.loads(store.read_text(encoding="utf-8", errors="replace"))
+            data, elided = _loads_shallow(store.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             unreadable.append(f"{store}: present but could not be read or parsed")
             continue
@@ -6729,7 +8162,14 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
         raw_token = data.get("token")
         has_token = isinstance(raw_token, str) and bool(raw_token.strip())
         if not has_token:
-            tokenless.append(f"{store}: no token stored")
+            if elided:
+                unreadable.append(
+                    f"{store}: no token in the part that was read, but part of the file "
+                    "was not read"
+                )
+                partial = True
+            else:
+                tokenless.append(f"{store}: no token stored")
             continue
 
         try:
@@ -6760,6 +8200,12 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
                 f"{store}: token file is owner-only (mode {mode}) but its directory is "
                 "writable by others"
             )
+        elif elided:
+            unreadable.append(
+                f"{store}: holds a token, mode {mode} (owner-only), but part of the file "
+                "was not read"
+            )
+            partial = True
         else:
             safe.append(f"{store}: holds a ClawHub API token, mode {mode} (owner-only)")
 
@@ -6816,7 +8262,8 @@ def check_clawhub_token_store(ctx: Context) -> Finding:
             "A ClawHub CLI config file was found but its token state or permissions could "
             "not be determined: " + "; ".join(unreadable[:4]),
             "Check the file manually \u2014 it holds a token that can publish new versions of "
-            "your skills, and it should be readable only by you.",
+            "your skills, and it should be readable only by you."
+            + (" " + _C680_PARTIAL_FIX if partial else ""),
             evidence=unreadable[:4],
         )
 
@@ -6874,14 +8321,22 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     unreadable: list[str] = []
 
     cred_dir = ctx.home / "credentials"
-    if cred_dir.is_dir():
+    if pathprobe.is_dir(cred_dir):
         try:
             entries = list(cred_dir.iterdir())
         except OSError:
             unreadable.append("credentials/ is present but could not be listed")
             entries = []
         for entry in entries:
-            if entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and entry.is_file():
+            try:
+                legacy_entry = entry.name.endswith(_LEGACY_ALLOWFROM_SUFFIX) and pathprobe.is_file(entry)
+            except OSError:
+                # C-727: credentials/ can be listed but not searched, so an entry cannot be stat'ed.
+                note = "credentials/ is present but its entries could not be examined"
+                if note not in unreadable:
+                    unreadable.append(note)
+                continue
+            if legacy_entry:
                 channel = entry.name[: -len(_LEGACY_ALLOWFROM_SUFFIX)]
                 found.append(
                     f"credentials/{channel}{_LEGACY_ALLOWFROM_SUFFIX} "
@@ -6889,8 +8344,12 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
                 )
 
     device_auth = ctx.home / "identity" / "device-auth.json"
-    if device_auth.is_file():
-        found.append("identity/device-auth.json (legacy device-auth store)")
+    try:
+        if pathprobe.is_file(device_auth):
+            found.append("identity/device-auth.json (legacy device-auth store)")
+    except OSError:
+        # C-727: identity/ cannot be entered; a legacy file found elsewhere still WARNs.
+        unreadable.append("identity/ is present but could not be read")
 
     if found:
         found.sort()
@@ -6903,7 +8362,28 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
             "current-generation state \u2014 for the device-auth file specifically, the "
             "gateway refuses to start at all until it is migrated away.",
             "Stop the OpenClaw gateway and run `openclaw doctor --fix` to migrate this "
-            "legacy state, then confirm the file(s) above are gone.",
+            "legacy state, then confirm the file(s) above are gone."
+            + (
+                # C-686: EXECUTED on 2026.10.2 -- Doctor's preflight (`prepareDoctorConfigRecovery`)
+                # throws before it migrates anything when the config holds a key from the
+                # vendor's retired list or the state tree holds a retired file (OAuth
+                # sidecars, cron state, JSON delivery queues). The allowFrom and device-auth
+                # files themselves are on none of those lists. The legacy plugin install
+                # index is NOT a Doctor stop: Doctor only warns and leaves it unchanged
+                # (refusal code `unsupported-plugin-install-index`, message names 2026.9.5),
+                # while `openclaw update` refuses it (`assertNoRetiredStateFiles("Plugin
+                # install index", ...)`, names 2026.9.7).
+                f" On OpenClaw 2026.10.1 and later Doctor stops first, before it migrates "
+                "these files, if it finds a retired pre-July-2026 config key or state file "
+                "(older OAuth credential sidecars, cron state or JSON delivery queues); it "
+                f"then names the release to install first (OpenClaw "
+                f"{_RETIRED_STATE_BRIDGE_VERSION} for a state file), so follow that message "
+                "before retrying. A legacy plugin install index is different: Doctor only "
+                "warns and leaves it unchanged (naming OpenClaw 2026.9.5), while `openclaw "
+                "update` refuses it (naming OpenClaw "
+                f"{_RETIRED_STATE_BRIDGE_VERSION})."
+                if _doctor_refuses_retired_formats(ctx) else ""
+            ),
             evidence=found,
         )
     if unreadable:
@@ -6924,8 +8404,152 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     )
 
 
+# C-701: from OpenClaw 2026.10.2 the supervisor restart handoff is a row of the state database
+# (`gateway_restart_handoff`) and the dist never touches `gateway-supervisor-restart-
+# handoff.json`. 2026.10.2 is the ONE build whose dist was read for this (`restart-handoff-*.mjs`:
+# the table is read through `readGatewayRestartHandoffSync`, written and removed through the
+# state-DB transaction path, and no code names the JSON file). The table is known to be declared
+# by 2026.9.1 (this repo's `tests/vendor_state_tables.txt`), but that its readers had already
+# replaced the file then was not read, so no earlier build is claimed. Keyed on the INSTALLED
+# build only -- a config stamp survives a downgrade and travels with a copied config. An older,
+# pre-release or unseen build keeps today's JSON-file answer.
+_RESTART_HANDOFF_IN_STATE_DB_MIN = (2026, 10, 2)
+_RESTART_HANDOFF_SERIES_YEAR = 2026
+_RESTART_HANDOFF_FILE = "gateway-supervisor-restart-handoff.json"
+# OpenClaw writes a handoff that expires within 60 s of creation and rejects a longer one
+# (GATEWAY_RESTART_HANDOFF_TTL_MS); a row expiring more than this far ahead of now was not
+# written by it, whatever the clock skew.
+_RESTART_HANDOFF_MAX_AHEAD_MS = 10 * 60 * 1000
+
+
+def _restart_handoff_lives_in_state_db(ctx: Context) -> bool:
+    """True only for a calendar release (three or more numeric parts) at or after
+    ``_RESTART_HANDOFF_IN_STATE_DB_MIN``. No installed version, a pre-release string
+    (``_numeric_version`` orders it as None) or a two-part version is False."""
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return bool(
+        installed is not None
+        and len(installed) >= 3
+        and installed[0] >= _RESTART_HANDOFF_SERIES_YEAR
+        and tuple(installed[:3]) >= _RESTART_HANDOFF_IN_STATE_DB_MIN
+    )
+
+
+def _restart_handoff_state_db_finding(ctx: Context, leftover_file: bool) -> "Finding | None":
+    """B357 on a build that keeps the handoff in the state DB: answer from the table.
+
+    Returns None when the collector did not find the table (no state DB, a capped listing,
+    or a DB that has no ``gateway_restart_handoff``) -- the layout is then not shown to be in
+    use under this home, so the caller keeps today's JSON-file answer. A state DB that exists
+    but could not be read (corrupt, locked, a symlink, a directory, a view posing as the
+    table) is UNKNOWN, never that fallback. The leftover file is never opened here: this
+    build does not read it, so its content cannot decide anything.
+
+    What the 2026.10.2 dist proves about an EXPIRED row, and all this text claims: the read
+    path (`readGatewayRestartHandoffSync`, used by startup, doctor and status) returns nothing
+    once ``now >= expires_at``, so OpenClaw does not act on it; the row is deleted only by
+    `consumeGatewayRestartHandoffSync` (the hidden `gateway restart-handoff consume` command)
+    and by the one-time legacy state-migration repair. Nothing there clears it on an ordinary
+    restart, so a stale row is a leftover that may or may not reflect an interrupted restart.
+    """
+    import time as _time
+    from datetime import datetime
+
+    retired = (
+        f"{_RESTART_HANDOFF_FILE} is a retired state file left over from an older OpenClaw "
+        "build. This build keeps the handoff in its state database and no longer reads that "
+        "file, so it is not a crash marker."
+    )
+    if getattr(ctx, "restart_handoff_parse_error", False):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw keeps the supervisor restart handoff in its state database, and that "
+            "table could not be read \u2014 cannot determine whether a restart is stuck.",
+            "Make state/openclaw.sqlite owner-readable and not locked (or a regular file), "
+            "then re-run.",
+        )
+    if not getattr(ctx, "restart_handoff_read", False):
+        return None
+
+    expiries = list(getattr(ctx, "restart_handoff_expires_at_ms", None) or [])
+    if any(isinstance(e, bool) or not isinstance(e, (int, float)) for e in expiries):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw's state database holds a supervisor restart handoff whose expiry is not "
+            "a readable timestamp \u2014 cannot determine whether a restart is stuck.",
+            "Review the gateway_restart_handoff table manually.",
+        )
+    fix_tail = f" Separately, {retired}" if leftover_file else ""
+    if not expiries:
+        return _finding(
+            "B357",
+            PASS,
+            "No restart handoff is recorded in OpenClaw's state database."
+            + (f" {retired}" if leftover_file else ""),
+            "No action needed." + (" The leftover file can be deleted." if leftover_file else ""),
+        )
+    first = min(expiries)
+    try:
+        label = datetime.fromtimestamp(first / 1000.0).isoformat(timespec="seconds")
+    except (ValueError, OSError, OverflowError):
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw's state database holds a supervisor restart handoff whose expiry "
+            f"({first!r}) is not a parseable timestamp \u2014 cannot determine whether a "
+            "restart is stuck.",
+            "Review the gateway_restart_handoff table manually.",
+        )
+    # OpenClaw itself treats a handoff as expired once now >= expires_at and then ignores it;
+    # the row stays until the consume command or the migration removes it, so an expired row
+    # is a leftover, not proof of a failed restart. `time.time()`, never `datetime.now()`: see
+    # the B357 docstring on the clock-frozen fingerprint test.
+    now_ms = _time.time() * 1000.0
+    if first - now_ms > _RESTART_HANDOFF_MAX_AHEAD_MS:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "OpenClaw's state database holds a supervisor restart handoff record whose expiry "
+            f"({label}) is more than 10 minutes ahead \u2014 OpenClaw itself only writes records "
+            "that expire within 60 seconds, so this one is not what it writes and cannot be "
+            "read as a live handoff.",
+            "Review the gateway_restart_handoff table manually.",
+        )
+    if now_ms >= first:
+        return _finding(
+            "B357",
+            WARN,
+            "OpenClaw's state database still stores a supervisor restart handoff record whose "
+            f"expiry ({label}) has already passed. OpenClaw ignores a handoff record once it "
+            "has expired and does not act on it; it may be left over from an interrupted "
+            "restart or simply be a record nothing has removed, and the record alone cannot "
+            "tell which.",
+            "An expired record is removed only by OpenClaw's own `gateway restart-handoff "
+            "consume` command or by a one-time legacy state migration, so on a host that does "
+            "not use either it can remain indefinitely - then it is a leftover, not proof of "
+            "a crash. If you suspect a restart failed around that time, check the gateway "
+            "service's own logs." + fix_tail,
+        )
+    return _finding(
+        "B357",
+        PASS,
+        "OpenClaw's state database holds a supervisor restart handoff record that has not yet "
+        f"expired (expiry {label})." + (f" {retired}" if leftover_file else ""),
+        "No action needed." + (" The leftover file can be deleted." if leftover_file else ""),
+    )
+
+
 def check_restart_handoff_stale(ctx: Context) -> Finding:
     """B357 (C-409) - a supervisor restart-handoff blob that outlived its own expiry.
+
+    C-701: on an installed build at or after ``_RESTART_HANDOFF_IN_STATE_DB_MIN`` the
+    handoff is a row of ``gateway_restart_handoff`` in the state database, not the JSON file
+    described below, and the answer comes from that row (``_restart_handoff_state_db_finding``).
+    A leftover JSON file there is reported as a retired file, never as a crashed supervisor.
+    Everything below describes the older layout and is unchanged for an older, unknown or
+    pre-release build, and for a home whose state DB does not hold the table.
 
     `~/.openclaw/gateway-supervisor-restart-handoff.json` is a short-lived IPC blob a
     restarting/crashed gateway supervisor writes - confirmed shape on a real install:
@@ -6961,12 +8585,15 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
     ``gateway-supervisor-restart-handoff.json`` under ``ctx.home``, checked by
     presence/content alone regardless of whether openclaw.json was found or parsed.
     """
-    import json as _json
     import time as _time
     from datetime import datetime
 
     path = ctx.home / "gateway-supervisor-restart-handoff.json"
-    if not path.is_file():
+    if _restart_handoff_lives_in_state_db(ctx):
+        in_db = _restart_handoff_state_db_finding(ctx, pathprobe.is_file(path))
+        if in_db is not None:
+            return in_db
+    if not pathprobe.is_file(path):
         return _finding(
             "B357",
             PASS,
@@ -6975,7 +8602,7 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
         )
 
     try:
-        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        data, elided = _loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return _finding(
             "B357",
@@ -7042,6 +8669,15 @@ def check_restart_handoff_stale(ctx: Context) -> Finding:
             "after a clean restart, remove it manually and investigate why the "
             "supervisor did not clean it up.",
         )
+    if elided:
+        return _finding(
+            "B357",
+            UNKNOWN,
+            "gateway-supervisor-restart-handoff.json present and, in the part that was read, "
+            f"still within its own expiresAt window ({expires_label}), but part of the file "
+            "was not read.",
+            _C680_PARTIAL_FIX,
+        )
     return _finding(
         "B357",
         PASS,
@@ -7061,7 +8697,6 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     skillFile. (skills.entries/plugins.entries are apiKey/config OVERLAYS keyed by an already-
     installed id - they carry no source/url and are deliberately NOT reconciled here.)
     """
-    import json as _json
 
     from ..collector import WORKSPACE_DIRS
     from ..skilldiscovery import config_extra_skill_dirs, config_plugin_load_paths
@@ -7089,7 +8724,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     ):
         for d in dirs:
             try:
-                present = d.is_dir()
+                present = pathprobe.is_dir(d)
             except OSError:
                 present = False
             if not present:
@@ -7105,6 +8740,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
     # checked, so a permission problem is never silently folded into "nothing to
     # reconcile here".
     unreadable_lock_paths: list[str] = []
+    partial_lock_paths: list[str] = []
     for rel in [""] + list(WORKSPACE_DIRS):
         lock = ctx.home / rel / ".clawhub" / "lock.json"
         errs_before = len(ctx.errors)
@@ -7113,9 +8749,11 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 unreadable_lock_paths.append(str(lock))
             continue
         try:
-            data = _json.loads(lock.read_text(encoding="utf-8", errors="replace"))
+            data, elided = _loads_shallow(lock.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
             continue
+        if elided:
+            partial_lock_paths.append(str(lock))
         skills = data.get("skills") if isinstance(data, dict) else None
         if not isinstance(skills, dict):
             continue
@@ -7127,7 +8765,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 continue
             p = Path(sf) if Path(sf).is_absolute() else (ctx.home / sf)
             try:
-                gone = not p.parent.is_dir()
+                gone = not pathprobe.is_dir(p.parent)
             except OSError:
                 gone = True
             if gone and str(p) not in seen:
@@ -7138,6 +8776,15 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 )
 
     if not missing:
+        if partial_lock_paths and not unreadable_lock_paths:
+            return _finding(
+                "B158",
+                UNKNOWN,
+                "Every declared skill-load source in the part of the ClawHub lock file(s) "
+                "that was read resolves to a present directory, but part of "
+                f"{len(partial_lock_paths)} lock file(s) was not read.",
+                _C680_PARTIAL_FIX,
+            )
         if unreadable_lock_paths:
             joined = "; ".join(unreadable_lock_paths[:8])
             extra = (
@@ -7152,7 +8799,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 f"skill-load sources: {joined}{extra} \u2014 reconciliation against disk "
                 "is incomplete.",
                 "Fix permissions on the listed path(s) (or their parent workspace "
-                "dir) and re-run.",
+                "dir) and re-run." + (" " + _C680_PARTIAL_FIX if partial_lock_paths else ""),
             )
         return _finding(
             "B158",
@@ -7176,7 +8823,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         WARN,
         detail,
         "Remove the stale declaration, or install the skill/plugin so ClawSecCheck can scan it "
-        "before it auto-loads.",
+        "before it auto-loads." + (" " + _C680_PARTIAL_FIX if partial_lock_paths else ""),
         evidence=missing,
     )
 
@@ -7567,8 +9214,12 @@ def check_version(ctx: Context) -> Finding:
             "another machine that ran a newer build can all produce this. This is not a "
             "vulnerability claim \u2014 B33 checks the installed version against real "
             "advisories.",
+            # C-662 (e): the sentence above is in `detail` (hashed by baseline fingerprints), so
+            # its nuance goes here: B33 reads the installed build only on this machine's home.
             "Confirm this rollback was intentional; if not, reinstall the OpenClaw "
-            "version you expect and re-run the checks.",
+            "version you expect and re-run the checks. B33 judges the installed build only "
+            "when you audit this machine's own OpenClaw home; with --no-dist, or on another "
+            "home, it judges the version recorded in the config instead.",
         )
     if order == "up":
         return _custom(
@@ -7828,7 +9479,9 @@ def check_marketplace_feed_provenance(ctx: Context) -> Finding:
             "on this build: " + "; ".join(bad),
             "Delete the marketplaces block (`openclaw doctor --fix` removes it). Custom "
             "feed profiles no longer exist; the remaining override is the --feed-url flag, "
-            "which OpenClaw gates against its own clawhub.ai hostname allowlist.",
+            "which OpenClaw gates against its own clawhub.ai hostname allowlist."
+            + (f" {_doctor_whole_config_hedge(ctx)}"
+               if _doctor_refuses_retired_formats(ctx) else ""),
             evidence=list(bad),
             # `verified`, not `no_signal`: this PASS is not "we saw nothing". The profiles
             # were read and named, and the build was identified as one whose schema has no

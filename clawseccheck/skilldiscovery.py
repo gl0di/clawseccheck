@@ -1,7 +1,9 @@
 """Bounded discovery of configured and grouped OpenClaw skill directories."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from . import pathprobe
 
 _MAX_DEPTH = 6
 _MAX_DIRS = 2_000
@@ -59,6 +61,25 @@ def _discovery_gap_label(display: Path, depth: int) -> str:
     return name
 
 
+def _declared_root_key(path: Path) -> Path:
+    """De-duplication key for a declared load root - and never a reason to drop it (C-658).
+
+    A declared root is dropped here only if the audit decided it is not a root at all; a root
+    that merely cannot be resolved (a symlink loop, an unsearchable parent) is exactly the
+    "declared but not readable" fact B158 exists to report, so it must reach the caller. The
+    old ``Path.resolve()`` hid it on some interpreters only: it raises ``RuntimeError`` for a
+    loop on 3.9 / 3.12 (the root was dropped, B158 PASSed) and returns the path on 3.14 (the
+    root was kept, B158 WARNed). ``os.path.realpath`` does not raise for a loop in non-strict
+    mode (measured on 3.12 and 3.14: same result), and whether the kept root is present is
+    decided by the caller through ``pathprobe``, which raises or classifies ELOOP the same way
+    on every interpreter. The key is only for collapsing two spellings of one directory.
+    """
+    try:
+        return Path(os.path.realpath(path))
+    except (OSError, ValueError):
+        return Path(os.path.abspath(path))
+
+
 def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
     """Resolve ``skills.load.extraDirs`` without guessing outside the audited config."""
     skills = cfg.get("skills") if isinstance(cfg, dict) else None
@@ -70,13 +91,10 @@ def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
     for value in values:
         if not isinstance(value, str) or not value.strip() or "\x00" in value:
             continue
-        path = Path(value).expanduser()
+        path = pathprobe.expand_user(value)
         if not path.is_absolute():
             path = home / path
-        try:
-            resolved = path.resolve()
-        except (OSError, ValueError, RuntimeError):
-            continue
+        resolved = _declared_root_key(path)
         if resolved not in seen:
             seen.add(resolved)
             out.append(path)
@@ -86,7 +104,7 @@ def config_extra_skill_dirs(home: Path, cfg: dict) -> list[Path]:
 def config_plugin_load_paths(home: Path, cfg: dict) -> list[Path]:
     """Resolve ``plugins.load.paths`` (a real dist key) - extra plugin roots whose bundled
     skills live under ``<plugin>/skills/`` and enter the auto-load surface. Mirrors
-    ``config_extra_skill_dirs``: no guessing outside the audited config; ``\\x00`` / OSError /
+    ``config_extra_skill_dirs``: no guessing outside the audited config; ``\\x00`` /
     dedup guards; relative paths resolve against *home*."""
     plugins = cfg.get("plugins") if isinstance(cfg, dict) else None
     load = plugins.get("load") if isinstance(plugins, dict) else None
@@ -97,13 +115,10 @@ def config_plugin_load_paths(home: Path, cfg: dict) -> list[Path]:
     for value in values:
         if not isinstance(value, str) or not value.strip() or "\x00" in value:
             continue
-        path = Path(value).expanduser()
+        path = pathprobe.expand_user(value)
         if not path.is_absolute():
             path = home / path
-        try:
-            resolved = path.resolve()
-        except (OSError, ValueError, RuntimeError):
-            continue
+        resolved = _declared_root_key(path)
         if resolved not in seen:
             seen.add(resolved)
             out.append(path)
@@ -169,7 +184,7 @@ def iter_discovered_skill_dirs(
 
         manifest = target / "SKILL.md"
         try:
-            is_manifest = manifest.is_file()
+            is_manifest = pathprobe.is_file(manifest)
         except OSError as exc:
             # `Path.is_file()` re-raises anything outside ENOENT/ENOTDIR/EBADF/ELOOP, so
             # EACCES propagates - a `chmod 000` directory anywhere under a skills root
@@ -239,11 +254,11 @@ def iter_discovered_skill_dirs(
             if entry.name in {".git", "node_modules", "__pycache__"}:
                 continue
             try:
-                is_link = entry.is_symlink()
+                is_link = pathprobe.is_symlink(entry)
                 if is_link and not allow_symlink_entries:
                     continue
                 entry_target = entry.resolve() if is_link else entry
-                if not entry_target.is_dir():
+                if not pathprobe.is_dir(entry_target):
                     continue
             except (OSError, ValueError, RuntimeError):
                 continue

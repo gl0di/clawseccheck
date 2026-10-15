@@ -6,10 +6,14 @@ Depends only on layer-1 modules, stdlib, and the checks/_shared leaf.
 from __future__ import annotations
 import os
 import re
+import reprlib
+import stat as _stat
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
+from .. import pathprobe
+from . import _shared
 from .. import attest as _attest
 from .. import harnessruntime as _harnessruntime
 from .. import mcpsurface as _mcpsurface
@@ -33,13 +37,22 @@ from ..collector import (
     LIMIT_DOMAIN_APPROVALS,
     LIMIT_DOMAIN_CONFIG,
     Context,
+    _NON_CODE_SUFFIXES,
+    _file_language,
     agent_roster,
     classify_bytes,
     collect,
     dig,
     limit_hits_for,
 )
-from ..configloader import loads_json5
+from ..configloader import (
+    ELIDED,
+    SHALLOW_JSON_DEPTH,
+    JSONNestingError,
+    json_nesting_exceeds,
+    loads_shallow,
+)
+from ..safeio import _VCS_DIR_NAMES
 from ..scanbudget import (
     DEFAULT_VET_ALL_BUDGET_S,
     DEFAULT_VET_TARGET_BUDGET_S,
@@ -69,6 +82,7 @@ from ._shared import (
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
+    _doctor_refuses_retired_formats,  # C-686
     _numeric_version,
     _openclaw_generation,
     _plugins,
@@ -97,6 +111,7 @@ from ._vet import (
     _decoded_payloads,
     _locate_plugin_root,
     _locate_plugin_root_or_reason,
+    _read_plugin_manifest_text,
     coverage_gap_finding,
     vet_skill,
 )
@@ -135,6 +150,10 @@ _PLUGIN_JS_EXT = (".js", ".mjs", ".cjs", ".ts")
 # nothing opens. Kept separate from _PLUGIN_JS_EXT because those ARE lexically scanned;
 # this list is "we can see the file and cannot say anything about it".
 _PLUGIN_UNREAD_SOURCE_EXT = (".py", ".pyw")
+# C-633: shell outside a dispatched skill has no reader at all (a skill's own shell goes
+# through vet_skill's read_skill_shell). Same set as collector._SH_SUFFIXES, kept apart
+# from _PLUGIN_UNREAD_SOURCE_EXT because that tuple drives the Python reader (`loose_py`).
+_PLUGIN_UNREAD_SHELL_EXT = (".sh", ".bash", ".zsh")
 _PLUGIN_JS_MAX_BYTES = 2_000_000
 # B-636: the same input bound the lexical JS pass uses, for the same reason - the AST pass
 # is bounded by input SIZE, not content hostility (F-148). A file over the cap is NOT
@@ -193,6 +212,7 @@ def _reprefix_bundled_evidence(entry: str, name: str, rel_label: str) -> str:
 
 
 _PY_BUDGET_GAP = "the scan budget was reached while it was being read"
+_PY_BUDGET_BEFORE = "the scan budget was reached before it was read"
 
 
 def _scan_loose_plugin_python(
@@ -202,7 +222,9 @@ def _scan_loose_plugin_python(
 
     Returns "" when the file was analysed, or a short phrase naming why it was not - the
     caller turns that into a `coverage:` note AND keeps the file in `unanalysed_code`, so
-    "this scan has no reader for it" stays true of exactly the files it is true of.
+    "this scan has no reader for it" stays true of exactly the files it is true of. Except
+    for a budget gap (which already rides the VET-COVERAGE finding), the caller also emits
+    a B13 UNKNOWN sub-finding so the gap moves the verdict (C-634).
 
     Fail-capable findings become B13 sub-findings on the plugin's own `subs` list rather
     than a parallel channel: `vet_plugin`'s FAIL branch selects `worst` out of `subs`, and
@@ -321,6 +343,498 @@ def _attribute_to_bundled_skill(f: Finding, name: str, rel_label: str) -> Findin
     return f
 
 
+# C-632: suffixes that mean "code" in a directory the plugin engine never sweeps. Wider
+# than what the skill/plugin readers analyse on purpose: this list decides only whether a
+# coverage gap is DISCLOSED, never a verdict, so a language nobody parses (.rb, .ps1) must
+# still count as code present. Data/prose suffixes (collector._NON_CODE_SUFFIXES: .md,
+# .txt, .json, images ...) are never code by suffix alone.
+_WRAPPER_CODE_EXT = frozenset({
+    ".py", ".pyw", ".ipynb", ".sh", ".bash", ".zsh", ".ksh", ".csh", ".fish",
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".mts", ".cts", ".tsx",
+    ".rb", ".pl", ".pm", ".php", ".lua", ".ps1", ".psm1", ".bat", ".cmd", ".vbs",
+    ".jar", ".node", ".wasm", ".exe", ".dll", ".so", ".dylib", ".class", ".pyc", ".pyo",
+    ".gyp",  # binding.gyp: npm runs `node-gyp rebuild` on install when it is present
+})
+# npm runs these on a plain `npm install` of a package.json; each is a shell command line.
+# Measured against npm 11.11.0 (`npm install --offline` on a scratch package.json whose every
+# script echoed its own name): preinstall, install, postinstall, prepublish, prepare,
+# preprepare and postprepare all ran; prepublishOnly, prepack, postpack, publish and
+# postpublish did not. `prepublish` is deprecated but still fires on a bare install, and
+# `preprepare` / `postprepare` wrap `prepare`, so a list of the "obvious" four is a rename
+# away from a bypass. Any change here needs the same measurement, not a docs read.
+_WRAPPER_LIFECYCLE_KEYS = (
+    "preinstall", "install", "postinstall",
+    "prepublish", "prepare", "preprepare", "postprepare",
+)
+# The three languages vet_skill's readers analyse (collector.read_skill_python / _shell /
+# _js, decided by collector._file_language). Nothing else in a directory dispatched to
+# vet_skill is read as code: Ruby, Perl, PHP, Lua, PowerShell, VBScript, .jsx/.tsx, an
+# exec-bit file with no shebang and a package.json lifecycle script all pass through it
+# unanalysed (`--vet-skill` prints "no executable code to analyze" for them).
+_SKILL_READ_LANGS = frozenset({"py", "sh", "js"})
+
+
+def _colocated_skill_dirs(p: Path, root: Path, dispatched: "list[Path]") -> "list[Path]":
+    """Directories holding a SKILL.md that ``manifest.skills`` did not dispatch (C-632).
+
+    Candidates are the plugin root and, in the node_modules-wrapper case (``p`` is a
+    directory the locator re-rooted into ``node_modules/<pkg>``), the wrapper's own top
+    directory. The match is case-insensitive because ``vet_skill`` / ``resolve_skill_
+    target`` treat ``skill.md`` case-insensitively - matching only ``SKILL.md`` would be
+    a rename away from a bypass on a case-sensitive filesystem. A symlinked SKILL.md still
+    qualifies: the symlink policy belongs to ``vet_skill``, not to this gate. A candidate
+    already covered by a declared skill dir is skipped, so nothing is dispatched twice.
+
+    An OSError listing a candidate is swallowed HERE on purpose: the very same directory
+    is walked by the tree sweep (``root``) or by ``_wrapper_top_level_scan`` (the wrapper
+    top) with an ``onerror`` that records a coverage gap, so unreadable is reported once,
+    by the walk that owns it, and never as "confidently no SKILL.md".
+    """
+    candidates = [root]
+    if root != p and pathprobe.is_dir(p):
+        candidates.append(p)
+    try:
+        covered = {d.resolve() for d in dispatched}
+    except OSError:
+        covered = set()
+    found: list[Path] = []
+    for cand in candidates:
+        try:
+            if cand.resolve() in covered:
+                continue
+            with os.scandir(cand) as it:
+                hit = False
+                for entry in it:
+                    if entry.name.lower() != "skill.md":
+                        continue
+                    try:
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        is_dir = False
+                    if not is_dir:
+                        hit = True
+                        break
+        except OSError:
+            continue
+        if hit:
+            found.append(cand)
+    return found
+
+
+def _plugin_nonregular_kind(fp: Path) -> str | None:
+    """C-654: what a tree entry is when it must NOT be opened, else ``None``.
+
+    Only the kinds whose ``open()`` can block: a named pipe with no writer blocks forever
+    (neither scan budget can fire inside a blocked ``open()`` - ``cpu_exceeded`` counts CPU
+    time, ``sweep_plugins`` checks its wall clock only between plugins), and a character or
+    block device can block or stall too. ``lstat`` only, never ``open``. A socket is NOT
+    listed: opening one fails at once, so it keeps the verdict it always had (an unreadable
+    file, handled by the readers). A symlink is judged by itself, not its target, so it
+    reports ``None`` - the sweep skips every symlink before this is asked. An entry
+    ``lstat`` cannot classify is also ``None`` and falls through to the readers' own
+    handling of an unreadable path.
+    """
+    try:
+        mode = os.lstat(fp).st_mode
+    except OSError:
+        return None
+    if _stat.S_ISFIFO(mode):
+        return "named pipe"
+    if _stat.S_ISCHR(mode) or _stat.S_ISBLK(mode):
+        return "device file"
+    return None
+
+
+def _nonregular_gap_finding(entries: "list[tuple[str, str]]", total: int, where: str) -> Finding:
+    """The coverage gap for entries ``_plugin_nonregular_kind`` declined to open.
+
+    A file that was NOT READ is a coverage gap, not a warning about content: it goes
+    through the same ``coverage_gap_finding`` vehicle an unreadable file or a capped sweep
+    uses, so the dossier keeps every axis the gap hides UNKNOWN instead of reading a WARN as
+    "something was assessed". The standard fix text ("restore read and search permission")
+    is wrong for a pipe, so this carries its own. ``entries`` is the first few
+    ``(relative path, kind)``; ``total`` counts them all. Names come from the target, so
+    they go through ``repr`` (a hostile name cannot smuggle control characters into a
+    report) and are plugin-relative, never a host path.
+    """
+    shown = ", ".join(f"{r!r} ({k})" for r, k in entries)
+    more = "" if total <= len(entries) else f" (+{total - len(entries)} more)"
+    return coverage_gap_finding(
+        f"plugin scan coverage is incomplete: non-regular file(s) in {where} were not "
+        f"read ({shown}{more}) - this scan does not open a named pipe or device it finds "
+        "when it lists the tree, because reading one can block forever",
+        fix=(
+            "Remove the listed named pipe(s) or device file(s) from the scanned directory "
+            "(or replace them with regular files) and re-run; this scan does not read them."
+        ),
+    )
+
+
+def _wrapper_file_is_code(fp: Path, gaps: dict, skill_reads: bool = False) -> bool:
+    """Whether one file in a directory the plugin engine does not sweep is executable code.
+
+    Any of: a code suffix; a native-executable magic (ELF/PE/Mach-O/class/pyc/wasm); or,
+    for a file whose suffix is not data/prose, a ``#!`` line or an execute permission bit
+    (the shell runs an execute-bit text file with no shebang as a shell script). A README,
+    LICENSE or ``.gitignore`` matches none of these. A symlink is judged by its NAME only
+    and never opened. A file that exists but cannot be opened cannot be classified, so it
+    is recorded as a coverage gap - never treated as "not code".
+
+    ``skill_reads`` is set when this file's directory was ALSO handed to ``vet_skill`` (it
+    carries a SKILL.md) AND the file is somewhere that engine's walk actually goes - the
+    caller clears it under ``.hg``/``.svn``, which ``vet_skill`` prunes. Only then is a
+    regular file the skill engine really analyses - Python, shell or JS/TS, by suffix or by
+    shebang, exactly ``collector._file_language`` - left out: it is not unscanned, so
+    listing it would be a false claim. Everything else stays code, because ``vet_skill``
+    has no reader for it. A benign SKILL.md must never be what switches this disclosure off
+    (C-632 review): it is one file the attacker controls.
+    """
+    suffix = fp.suffix.lower()
+    try:
+        st = os.lstat(fp)
+    except OSError as exc:
+        if exc.errno not in WALK_VANISHED_ERRNOS:
+            note_walk_gap(gaps, fp.parent, exc)
+        return False
+    regular = _stat.S_ISREG(st.st_mode)
+    if suffix in _WRAPPER_CODE_EXT:
+        return not (
+            skill_reads and regular and _file_language(fp.name, "") in _SKILL_READ_LANGS
+        )
+    if not regular:
+        return False
+    try:
+        with open(fp, "rb") as fh:
+            head = fh.read(_PLUGIN_SNIFF_BYTES)
+    except OSError as exc:
+        if exc.errno not in WALK_VANISHED_ERRNOS:
+            note_walk_gap(gaps, fp, exc)
+        return False
+    _cls, fmt = classify_bytes(head, st.st_size)
+    if fmt in ("ELF", "PE", "class", "pyc", "wasm") or (fmt or "").startswith("Mach-O"):
+        return True
+    if suffix in _NON_CODE_SUFFIXES:
+        return False
+    if not (head.startswith(b"#!") or st.st_mode & 0o111):
+        return False
+    if skill_reads:
+        lang = _file_language(fp.name, head.decode("utf-8", errors="replace"))
+        return lang not in _SKILL_READ_LANGS
+    return True
+
+
+@dataclass
+class _WrapperScan:
+    """What ``_wrapper_top_level_scan`` found in a wrapper's own directory (C-632)."""
+
+    code: "list[str]" = field(default_factory=list)  # executable code, relative names
+    gaps: dict = field(default_factory=dict)  # B-902-style unreadable directories / files
+    capped: bool = False  # the walk stopped at _PLUGIN_FILE_CAP files
+    over_budget: bool = False  # the CPU budget ran out mid-walk
+    pkg_unassessed: bool = False  # package.json exists but could not be judged
+    unread: "list[tuple[str, str]]" = field(default_factory=list)  # C-654: pipes/devices not opened
+    local_pkgs: bool = False  # C-650: package.json wires in workspaces / file: packages (not read)
+
+
+def _json_int_unbounded(_digits: str) -> int:
+    """``parse_int`` hook: read a JSON integer without converting it (value is never used).
+
+    CPython 3.9.14+ / 3.10.7+ / 3.11+ refuse to convert an integer literal of more than
+    4300 digits and raise a plain ``ValueError`` (not a ``JSONDecodeError``) from
+    ``json.loads``. node and npm parse such a file without complaint, so the wrapper's
+    ``scripts`` must still be read; only the ``scripts`` keys matter here, never a number.
+    """
+    return 0
+
+
+_NO_DOC = object()  # _wrapper_read_package_json: "there is no JSON document to look at"
+
+
+def _wrapper_read_package_json(top: Path) -> "tuple[object, int, bool]":
+    """``(parsed value or _NO_DOC, subtrees elided, package.json could not be assessed)``.
+
+    The one reader of a wrapper's own ``package.json``. Its judgement rules - what is
+    "could not tell", what is inert - are documented on
+    :func:`_wrapper_declares_lifecycle_script`, the caller they were written for.
+    """
+    import json as _json  # noqa: PLC0415
+
+    pj = top / "package.json"
+    try:
+        st = os.stat(pj)
+    except OSError as exc:
+        return _NO_DOC, 0, exc.errno not in WALK_VANISHED_ERRNOS
+    if not _stat.S_ISREG(st.st_mode):
+        return _NO_DOC, 0, False
+    if st.st_size > _PLUGIN_JS_MAX_BYTES:
+        return _NO_DOC, 0, True
+    try:
+        text = pj.read_text(encoding="utf-8-sig", errors="replace")
+        if json_nesting_exceeds(text, SHALLOW_JSON_DEPTH):
+            # C-664: decided on the TEXT, so the answer is the same on every interpreter
+            # (whether json.loads would follow such a file is the interpreter's business).
+            # The shallow reader has no integer hook, so a huge integer in a file this deep
+            # is "could not tell".
+            shallow = loads_shallow(text)
+            loaded, elided = shallow.value, shallow.elided
+        else:
+            loaded, elided = _json.loads(text, parse_int=_json_int_unbounded), 0
+    except _json.JSONDecodeError:
+        return _NO_DOC, 0, False
+    except (RecursionError, MemoryError, OSError, ValueError, OverflowError):
+        return _NO_DOC, 0, True
+    return loaded, elided, False
+
+
+# C-650: a documented limit, not a reader. A package.json that the wrapper (or the plugin
+# root) pulls in through `workspaces` or a `file:` / `link:` dependency lives in a nested
+# directory, and its install-time script is never opened: this vet reads exactly one
+# package.json per target. The shipped fix is a disclosure only - an evidence-only note,
+# never a verdict. A reader was built and retracted: following the wired-in manifests means
+# modelling npm's workspace-glob and dependency-spec grammar by hand, and that list does
+# not close (a symlinked intermediate directory, `overrides`, `FILE:` / bare-path / tarball
+# specs, negated and character-class patterns, a pattern count that outruns the CPU budget);
+# each shape missed was a silent INSTALL, i.e. a false sense of coverage worse than the
+# stated limit. Pinned by tests/test_c650_wired_package_limit.py.
+_DEP_SECTIONS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+_LOCAL_PKG_NOTE = (
+    "coverage: this package.json declares workspaces or a local file:/link: dependency; "
+    "npm can load packages from those paths, and this vet reads no package.json other "
+    "than the one at the top of the target, so an install script in a package it wires "
+    "in was not examined (the verdict does not account for it)"
+)
+
+
+def _declares_local_packages(pkg: object) -> bool:
+    """Whether a parsed package.json carries the two markers C-650 discloses.
+
+    ``workspaces`` with any non-empty value, or a dependency spec that starts with
+    ``file:`` / ``link:`` (any case, as npm reads the scheme). A marker test and nothing
+    more: a spec spelled some other way (a bare path, a tarball name, an ``overrides``
+    entry) is not recognised, and the docs say so.
+    """
+    if not isinstance(pkg, dict):
+        return False
+    if pkg.get("workspaces"):
+        return True
+    for section in _DEP_SECTIONS:
+        deps = pkg.get(section)
+        if isinstance(deps, dict) and any(
+            isinstance(v, str) and v.strip().lower().startswith(("file:", "link:"))
+            for v in deps.values()
+        ):
+            return True
+    return False
+
+
+def _wrapper_declares_local_packages(top: Path) -> bool:
+    """:func:`_declares_local_packages` for the ``package.json`` at the top of ``top``."""
+    loaded, _elided, _unassessed = _wrapper_read_package_json(top)
+    return loaded is not _NO_DOC and _declares_local_packages(loaded)
+
+
+def _wrapper_declares_lifecycle_script(top: Path) -> "tuple[bool, bool]":
+    """``(declares an npm lifecycle script, package.json could not be assessed)``.
+
+    A wrapper's own ``package.json`` is a file ``npm install`` runs on: a lifecycle script
+    in it is executable code even though no file with a code suffix exists. The two flags
+    are separate because "no script" and "could not tell" are different claims. Only a
+    file this reader cannot judge but npm could is "could not tell": unreadable, over the
+    size cap, nested deeper than Python's parser will follow, or any other parser refusal
+    that is not a syntax error. Only a ``json.JSONDecodeError`` means "not JSON": npm
+    refuses that file too, so it is inert and neither flag is set. Every other
+    ``ValueError`` is NOT proof of invalid JSON - Python's integer-digit limit raises one
+    on a document node parses happily - so it reads as "could not tell" (C-632 review).
+    Integers are read through :func:`_json_int_unbounded` so that limit is never reached
+    in the first place and the file is judged, not just disclosed. The read strips a
+    leading BOM (``utf-8-sig``) exactly as npm does; a plain ``utf-8`` read would fail to
+    parse a BOM-prefixed file and quietly hide its scripts.
+    """
+    loaded, elided, unassessed = _wrapper_read_package_json(top)
+    if loaded is _NO_DOC:
+        return False, unassessed
+    scripts = loaded.get("scripts") if isinstance(loaded, dict) else None
+    declares = isinstance(scripts, dict) and any(k in scripts for k in _WRAPPER_LIFECYCLE_KEYS)
+    # npm reads `scripts` only at the top level, so a script buried below the bound is not
+    # wired and `declares` is exact. A file with a subtree nested past the bound that
+    # declares no script is still reported as "could not read in full" (the second flag),
+    # the same on every interpreter, so a partly read file is never called clean.
+    return declares, bool(elided) and not declares
+
+
+def _wrapper_top_level_scan(top: Path, deadline, skill_reads: bool = False) -> _WrapperScan:
+    """Find executable code in the directory an npm-wrapper vet was pointed at (C-632).
+
+    ``vet_plugin`` re-roots a directory with no manifest of its own into the single
+    ``node_modules/<pkg>/openclaw.plugin.json`` under it, and every reader after that
+    point sees only the plugin. Whatever else sits beside ``node_modules`` in the target
+    the user actually named - ``index.js``, ``run.sh``, ``lib/x.py`` - was therefore read
+    by nothing, and the verdict was INSTALL over it. This walks that directory
+    (``node_modules``, ``.git`` and ``__pycache__`` pruned, exactly as the plugin sweep
+    prunes them; symlinks are never followed, as everywhere in this vet) and reports
+    what it found as a :class:`_WrapperScan`.
+
+    It does NOT analyse the code. The plugin engine has no reader for most of what can
+    sit here (shell, PowerShell, Ruby, extension-less scripts), so a partial scan would
+    still need the UNKNOWN fallback for the rest; the caller reports the PRESENCE
+    instead, which is the one claim that is always sound.
+
+    What counts as code is decided by :func:`_wrapper_file_is_code`; the bound of that
+    decision is deliberate. A build recipe with no code suffix and no shebang (a
+    ``Makefile``, a ``Dockerfile``) is data for another tool and is not judged here, and
+    a benign file that picked up an execute bit on a FAT/NTFS mount is reported by name
+    (UNKNOWN is the safe direction; it never becomes a verdict).
+
+    ``skill_reads`` says ``top`` was also dispatched to ``vet_skill`` because a SKILL.md sits
+    there; the Python, shell and JS/TS it analysed are then not listed (see
+    :func:`_wrapper_file_is_code`). The scan still runs in full: a SKILL.md is a file the
+    attacker controls, and the skill engine has no reader for Ruby, Perl, PHP, Lua,
+    PowerShell, VBScript, an extension-less exec-bit file or an npm lifecycle script.
+    """
+    scan = _WrapperScan()
+    seen = 0
+
+    def _onerror(exc: OSError) -> None:
+        if exc.errno in WALK_VANISHED_ERRNOS:
+            return
+        note_walk_gap(scan.gaps, Path(getattr(exc, "filename", None) or top), exc)
+
+    for dirpath, dirnames, filenames in os.walk(
+        top, topdown=True, onerror=_onerror, followlinks=False
+    ):
+        if cpu_exceeded(deadline):
+            scan.over_budget = True
+            break
+        dirnames[:] = sorted(d for d in dirnames if d not in _PLUGIN_SKIP_DIRS)
+        for fn in sorted(filenames):
+            if seen >= _PLUGIN_FILE_CAP:
+                scan.capped = True
+                break
+            seen += 1
+            fp = Path(dirpath) / fn
+            # vet_skill's own walk prunes `.git`/`.hg`/`.svn` (collector, exclude_vcs=True,
+            # matched on the path as walked - the same spelling it was handed). Code under
+            # .hg/.svn is therefore NOT something it read, so the SKILL.md must not exempt it.
+            reads = skill_reads and not any(v in fp.parts for v in _VCS_DIR_NAMES)
+            if _wrapper_file_is_code(fp, scan.gaps, reads):
+                scan.code.append(str(fp.relative_to(top)))
+            elif not reads:
+                # C-654: a pipe or device is not opened (above), but must not vanish. Not
+                # where `vet_skill` walked (`reads`): it reports the pipe itself there.
+                kind = _plugin_nonregular_kind(fp)
+                if kind:
+                    scan.unread.append((str(fp.relative_to(top)), kind))
+        if scan.capped:
+            break
+    declares, scan.pkg_unassessed = _wrapper_declares_lifecycle_script(top)
+    if declares:
+        scan.code.append("package.json")
+    scan.local_pkgs = _wrapper_declares_local_packages(top)
+    return scan
+
+
+def _wrapper_coverage_findings(
+    top: Path, scan: _WrapperScan, skill_reads: bool = False
+) -> "list[Finding]":
+    """The VET-COVERAGE findings for ``_wrapper_top_level_scan``'s result (C-632).
+
+    One finding per cause, each naming only its own limit (the B-344 rule). File names
+    that come from the target go through ``repr`` so a hostile name cannot smuggle control
+    characters into a rendered report; a host path goes only in ``fix`` (B-902).
+
+    ``skill_reads`` (a SKILL.md there was vetted as a skill) adds WHY the listed files were
+    still not read: the skill engine has no reader for them. Without it a reader would see
+    a skill verdict and a coverage gap side by side and have no way to reconcile them.
+    """
+    out: list[Finding] = []
+    if scan.code:
+        shown = ", ".join(repr(c) for c in sorted(scan.code)[:3])
+        more = "" if len(scan.code) <= 3 else f" (+{len(scan.code) - 3} more)"
+        why = (
+            "; the SKILL.md there was vetted as a skill, but that engine analyses only "
+            "Python, shell and JavaScript/TypeScript, so the files listed were never scanned"
+            if skill_reads else
+            "; the plugin engine reads only the package, so this code was never scanned"
+        )
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: the target directory holds executable "
+            f"code outside the plugin package ({shown}{more}), beside the node_modules "
+            f"the plugin was found in{why}",
+            fix=(
+                "Review those files by hand before installing, or remove them and re-run. "
+                "To vet only the plugin package, point --vet at its own directory under "
+                "node_modules."
+            ),
+        ))
+    if scan.capped:
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: the walk of the target directory stopped "
+            f"at the {_PLUGIN_FILE_CAP}-file cap, so files beyond it were never checked "
+            "for executable code outside the plugin package"
+        ))
+    if scan.pkg_unassessed:
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: the target directory's own package.json "
+            "could not be read (unreadable, over the size cap, or too deeply nested), so "
+            "an npm install script beside the plugin package could not be ruled out"
+        ))
+    if scan.gaps:
+        shown_gaps = []
+        for gate, reason, _err in scan.gaps.values():
+            try:
+                shown_gaps.append(f"{str(gate.relative_to(top))!r} ({reason})")
+            except ValueError:
+                shown_gaps.append(f"{_username_safe_path(gate)!r} ({reason})")
+        shown_gaps.sort()
+        extra = f" (+{len(shown_gaps) - 6} more)" if len(shown_gaps) > 6 else ""
+        out.append(coverage_gap_finding(
+            "plugin scan coverage is incomplete: part of the target directory outside the "
+            "plugin package could not be read, so executable code there could not be ruled "
+            "out",
+            fix=(
+                "Restore read and search permission on the unreadable path(s) (or remove "
+                "them) and re-run: " + "; ".join(shown_gaps[:6]) + extra
+            ),
+        ))
+    return out
+
+
+def _manifest_value_text(value: object) -> str:
+    """The text of one parsed manifest / package.json value, safe at any nesting depth.
+
+    ``str()`` of a nested list or dict recurses once per level, and where that stops is
+    the interpreter's own business: Python 3.14's JSON parser follows a document tens of
+    thousands of levels deep (3.12's gives up near ten thousand, 3.9's near a thousand),
+    and ``str()`` of the result raised ``RecursionError`` out of ``vet_plugin`` while the
+    parse had succeeded - measured on 3.14.4 with a ``skills`` entry 50,000 levels deep.
+    On 3.12 and earlier the same text, long enough to exceed the file-name limit, made
+    ``Path.is_dir`` raise ``OSError``. ``reprlib.repr`` is bounded by construction (six
+    levels, truncated items), so every interpreter answers the same way. A string - the
+    only shape a real manifest holds here - is returned unchanged, and so is the text of
+    a small scalar or container, so no ordinary manifest reads differently.
+    """
+    return value if isinstance(value, str) else reprlib.repr(value)
+
+
+def _is_symlink_loop(p: Path) -> bool:
+    """Whether ``p`` cannot be reached because a symlink on the way to it loops (ELOOP).
+
+    ``pathprobe`` answers "not there" for ELOOP (pathlib's own contract), so a manifest
+    ``skills`` entry that is a loop reads exactly like one that names nothing - and on
+    3.14 ``Path.resolve`` no longer raises on a loop either, so nothing else notices. A
+    loop is a path the vet could not look at, not an absent one. A dangling link is ENOENT
+    and stays absent.
+    """
+    import errno as _errno  # noqa: PLC0415
+    try:
+        os.stat(p)
+    except OSError as exc:
+        return exc.errno == _errno.ELOOP
+    except ValueError:
+        return False
+    return False
+
+
 def vet_plugin(
     path: str | Path, target_budget_s: float = DEFAULT_VET_TARGET_BUDGET_S
 ) -> Finding:
@@ -334,7 +848,10 @@ def vet_plugin(
     vet runs (analyze_javascript: obfuscated-RCE / remote-fetch-then-eval and a couple of
     warn-level signals) - a JS signal raises the verdict to WARN so it is never a silent
     PASS (B-165). That pass is lexical, not a full runtime analysis (the residual D2 limit);
-    the coverage note still says so, and it never forces a FAIL on its own.
+    the coverage note still says so, and it never forces a FAIL on its own. C-633: that note
+    is emitted for every lexically scanned loose JS/TS file whether or not `package.json`
+    declares `openclaw.extensions`, and names the files; shell outside a declared skill has
+    no reader at all and is named as unread (never scanned).
 
     F-148: cost here is driven by INPUT SIZE, not content hostility - a benign target at
     the legal per-skill byte cap can cost far more than a small hostile one (see the
@@ -394,14 +911,45 @@ def vet_plugin(
                        skipped by the lexical pass. Measured: a plugin whose only runtime
                        file was an oversized bundle graded a confident A/PASS and exited
                        0 - it did not even reach the UNKNOWN floor.
+
+    C-634: loose plugin Python that cannot be read, fails to parse, or exceeds
+    `_PLUGIN_PY_MAX_BYTES` (a budget gap excepted - it rides `budget_hit`) emits one
+    aggregate B13 UNKNOWN `engine_degraded` sub-finding, so the gap floors the verdict to
+    CAUTION instead of leaving INSTALL / Danger PASS on code that was never analysed.
+
+    C-632: `detect_vet_type` deliberately keeps a directory that carries an
+    ``openclaw.plugin.json`` classified as a plugin, so this function is the only place a
+    skill that ALSO carries one can still be vetted as a skill. Two things used to escape
+    it, both measured as INSTALL / rc 0 over an explicit override directive:
+
+      * a SKILL.md beside the manifest (or at the top of an npm wrapper whose only
+        manifest sits under ``node_modules/<pkg>``) that ``manifest.skills`` does not list -
+        only declared skill dirs were dispatched. It is now dispatched to ``vet_skill``
+        through the SAME loop, budget handling and attribution as a declared one. It is
+        deliberately NOT added to ``skill_dirs``: ``_under_skills`` and ``dispatched_dirs``
+        derive from that list, and putting the plugin root there would switch the tree
+        sweep (embedded MCP specs, native stowaways, the JS lexical and loose-Python AST
+        passes) off for the whole plugin;
+      * executable code in the wrapper's own directory (``index.js``, ``run.sh``, ...),
+        which the re-root to ``node_modules/<pkg>`` hides from every reader. Scanned for
+        PRESENCE only (``_wrapper_top_level_scan``) and disclosed as a VET-COVERAGE
+        UNKNOWN - the plugin engine has no reader for most of what can sit there, so
+        presence is the one claim that is always sound. A README or ``.gitignore`` is not
+        code and changes nothing, and neither does a host-generated wrapper
+        (``node_modules`` + ``package.json`` + ``package-lock.json``). The scan also runs
+        when the wrapper's top directory was ITSELF dispatched to ``vet_skill`` (a SKILL.md
+        there): that engine analyses Python, shell and JS/TS only, so Ruby, Perl, PHP, Lua,
+        PowerShell, an exec-bit file with no shebang and a package.json lifecycle script are
+        still listed - a SKILL.md the attacker supplies must not be the switch that turns the
+        disclosure off. Only what ``vet_skill`` really read (and only when it returned) is
+        left out of the list.
     """
-    import json as _json
 
     from ..shippedexec import ShippedArtifact as _ShippedArtifact  # noqa: PLC0415
     from ..skillast import analyze_javascript, analyze_python  # noqa: PLC0415
 
-    p = Path(str(path)).expanduser()
-    if not p.exists():
+    p = pathprobe.expand_user(str(path))
+    if not pathprobe.exists(p):
         return _plugin_finding(
             HIGH,
             UNKNOWN,
@@ -437,29 +985,92 @@ def vet_plugin(
             f"not an OpenClaw plugin: no {_PLUGIN_MANIFEST} found under {p}",
             "A plugin root carries openclaw.plugin.json; for a skill directory use --vet.",
         )
+    manifest_problem: "tuple[str, str] | None" = None
+    manifest_unreadable = False  # C-665: no readable regular file (a pipe, a dangling link, ...)
+    manifest_read_failed = False  # C-665: ... and the READ itself raised, vs read-but-not-regular
+    colocated_skill = False
+    manifest = None
+    # C-664: documents the author padded past the shallow reader's bound. Their shallow
+    # fields are read exactly as unpadded, but a part of the file was never examined, so the
+    # vet can be at most CAUTION and says so (see the disclosure after the sweep).
+    elided_docs: list[str] = []
     try:
-        manifest = loads_json5(
-            (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
+        shallow_manifest = loads_shallow(
+            _read_plugin_manifest_text(root / _PLUGIN_MANIFEST), json5=True
         )
+        manifest = shallow_manifest.value
+        if shallow_manifest.elided:
+            elided_docs.append(_PLUGIN_MANIFEST)
     except (OSError, ValueError, RecursionError, MemoryError) as exc:
         # RecursionError (deeply-nested manifest) and MemoryError (huge manifest) are not
         # ValueError - without them a hostile manifest would abort the whole vet instead of
         # degrading to UNKNOWN, the graceful path every other bad manifest takes (C-135).
-        return _plugin_finding(
-            HIGH,
-            UNKNOWN,
+        # "Unreadable" is a READ that failed OR a manifest that is not a regular file (a
+        # link to /dev/null reads as an empty, unparseable text). Either way the file is not
+        # the author's JSON, so what it declares is unknown.
+        manifest_read_failed = isinstance(exc, OSError)
+        try:
+            manifest_unreadable = manifest_read_failed or not _stat.S_ISREG(
+                os.stat(root / _PLUGIN_MANIFEST).st_mode
+            )
+        except OSError:
+            manifest_unreadable = True
+        manifest_problem = (
             f"could not parse {_PLUGIN_MANIFEST}: {type(exc).__name__}",
             "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
         )
-    if not isinstance(manifest, dict):
-        return _plugin_finding(
-            HIGH,
-            UNKNOWN,
-            f"{_PLUGIN_MANIFEST} is not a JSON object",
-            "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
-        )
+    else:
+        if not isinstance(manifest, dict):
+            manifest_problem = (
+                f"{_PLUGIN_MANIFEST} is not a JSON object",
+                "Inspect the manifest manually \u2014 the host would refuse this plugin too.",
+            )
+    if manifest_problem is not None:
+        # C-632: a stub manifest the host refuses is the cheapest way to make `--vet`
+        # classify a directory as a plugin, and stopping here would hand the SKILL.md
+        # beside it a free pass exactly as an unlisted one got before. Only when a
+        # SKILL.md is actually there does the vet continue (as a manifest with no fields,
+        # so the ordinary "invalid manifest" WARN is raised and the skill is dispatched
+        # below); with none, the answer is byte-identical to what it always was.
+        #
+        # C-665: EXCEPT when the manifest could not be READ (a named pipe, a dangling link,
+        # a directory, an endless device read to its ceiling). The locator returns such a
+        # hit, so `--vet` routes the directory here; an early UNKNOWN would leave the other
+        # bundled files (an `mcp.json`, an `index.js`) unscanned and turn a manifest the
+        # attacker can make unreadable into a way past the content scan. Everything below
+        # is the SAME code a readable manifest goes through, with the manifest treated as
+        # `{}` (id unknown, no declared skills), so its exclusions (docs, tests, examples,
+        # README ...) apply unchanged; the WARN floor is the manifest warning itself. A
+        # manifest that was read but is not usable JSON keeps the answer above.
+        colocated_skill = bool(_colocated_skill_dirs(p, root, []))
+        if not colocated_skill and not manifest_unreadable:
+            return _plugin_finding(HIGH, UNKNOWN, manifest_problem[0], manifest_problem[1])
+        manifest = {}
 
     warns: list[str] = []
+    if manifest_problem is not None:
+        warns.append(
+            manifest_problem[0]
+            + (
+                " \u2014 the host would refuse this plugin; the SKILL.md beside it is vetted "
+                "as a standalone skill below"
+                if colocated_skill else
+                " \u2014 what it declares is unknown; the files bundled with it are "
+                "scanned below without it"
+            )
+        )
+    # C-665: said in `fix`, never in `detail` (baseline.fingerprint() hashes `detail`).
+    manifest_fix = ""
+    if manifest_problem is not None and manifest_unreadable:
+        manifest_fix = (
+            (
+                f" The plugin manifest could not be read ({manifest_problem[0].rsplit(': ', 1)[-1]})"
+                if manifest_read_failed else
+                " The plugin manifest is not a regular file"
+            )
+            + ", so what it declares is unknown; the files bundled with it were scanned "
+            "without it."
+        )
     notes: list[str] = []  # coverage / informational evidence - never verdict-moving
     subs: list[Finding] = []  # dispatched engine findings (vet_skill / vet_mcp)
     js_signals: list[str] = []  # B-165: lexical JS/TS findings - raise the verdict to WARN
@@ -481,15 +1092,22 @@ def vet_plugin(
     # -- npm packaging (recon §11.3/§11.4)
     pkg: dict = {}
     pkg_path = root / "package.json"
-    if pkg_path.is_file():
+    if pathprobe.is_file(pkg_path):
         try:
-            loaded = _json.loads(pkg_path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
-            loaded = None
+            shallow_pkg = loads_shallow(pkg_path.read_text(encoding="utf-8", errors="replace"))
+            loaded = shallow_pkg.value
+        except (OSError, ValueError, RecursionError):
+            # A parser refusal (or a stack too small even for the shallow reader) is
+            # "unreadable", not an abort.
+            loaded, shallow_pkg = None, None
         if isinstance(loaded, dict):
             pkg = loaded
+            if shallow_pkg.elided:
+                elided_docs.append("package.json")
         else:
             warns.append("unreadable/unparseable package.json \u2014 npm packaging not assessed")
+    if _declares_local_packages(pkg) and _LOCAL_PKG_NOTE not in notes:
+        notes.append(_LOCAL_PKG_NOTE)  # C-650: disclosure only, no verdict
     scripts = pkg.get("scripts") if isinstance(pkg.get("scripts"), dict) else {}
     lifecycle = [k for k in ("preinstall", "install", "postinstall") if k in scripts]
     if lifecycle:
@@ -505,8 +1123,8 @@ def vet_plugin(
     # have false-WARNed). Only *floating* version ranges are an actionable signal.
     if (
         deps
-        and not (root / "npm-shrinkwrap.json").is_file()
-        and not (root / "package-lock.json").is_file()
+        and not pathprobe.is_file(root / "npm-shrinkwrap.json")
+        and not pathprobe.is_file(root / "package-lock.json")
     ):
         notes.append(
             f"coverage: {len(deps)} runtime dependency(ies) without a lockfile "
@@ -528,14 +1146,12 @@ def vet_plugin(
     for key in ("extensions", "runtimeExtensions"):
         val = oc.get(key)
         if isinstance(val, list):
-            entries.extend(str(x) for x in val)
-    if entries:
-        notes.append(
-            "coverage: plugin runtime JS/TS ("
-            + ", ".join(entries[:3])
-            + ") is lexically scanned for obfuscated-RCE / remote-eval signals only \u2014 not a "
-            "full runtime analysis; still review the entry files before trusting"
-        )
+            entries.extend(_manifest_value_text(x) for x in val)
+    # C-633: the JS/TS coverage note is no longer emitted here. It used to be gated on
+    # `entries` (declared extensions), so a plugin without them said nothing about its
+    # loose JS/TS being read by five lexical rules only. It is emitted after the tree
+    # sweep below, naming the files that pass actually read; `entries` is kept for the
+    # declared-but-not-shipped fallback.
     notes.append("coverage: node_modules/ (third-party npm deps) excluded from the content scan")
     npm_spec = dig(pkg, "openclaw.install.npmSpec")
     if isinstance(npm_spec, str) and npm_spec and "@" not in npm_spec.lstrip("@"):
@@ -561,23 +1177,46 @@ def vet_plugin(
     skills_field = manifest.get("skills")
     if isinstance(skills_field, list):
         for entry in skills_field:
-            d = root / str(entry)
+            entry_text = _manifest_value_text(entry)
+            d = root / entry_text
+            # C-659: an entry the file system cannot answer for (a name past the file-name
+            # limit, an embedded NUL, a symlink loop, a directory the user cannot search)
+            # raises out of resolve / the probes / the listing below. That must not end
+            # the vet: the other declared skills are still dispatched and the entry gets
+            # one WARN per such entry (CAUTION floor), never a silent skip and never a clean look.
             try:
-                escaped = not d.resolve().is_relative_to(root_res)
-            except OSError:
-                escaped = True
-            if escaped:
-                warns.append(f"manifest skills entry escapes the plugin root: {str(entry)!r}")
-                continue
-            if not d.is_dir():
-                notes.append(f"manifest skills entry not present in the package: {str(entry)!r}")
-                continue
-            if (d / "SKILL.md").is_file():
-                skill_dirs.append(d)
-            else:
-                kids = [c for c in sorted(d.iterdir()) if c.is_dir() and not c.is_symlink()]
-                skill_dirs.extend(kids if kids else [d])
-    for sd in skill_dirs:
+                try:
+                    escaped = not d.resolve().is_relative_to(root_res)
+                except OSError:
+                    escaped = True
+                if escaped:
+                    warns.append(f"manifest skills entry escapes the plugin root: {entry_text!r}")
+                    continue
+                if not pathprobe.is_dir(d):
+                    if _is_symlink_loop(d):
+                        raise OSError("symlink loop")
+                    notes.append(f"manifest skills entry not present in the package: {entry_text!r}")
+                    continue
+                if pathprobe.is_file(d / "SKILL.md"):
+                    skill_dirs.append(d)
+                else:
+                    kids = [c for c in sorted(d.iterdir()) if pathprobe.is_dir(c) and not pathprobe.is_symlink(c)]
+                    skill_dirs.extend(kids if kids else [d])
+            except (OSError, ValueError, RuntimeError):
+                warns.append(
+                    f"manifest skills entry {entry_text[:80]!r} "
+                    "could not be examined (unreadable, over-long, or a symlink loop) - "
+                    "its content was not vetted"
+                )
+    # C-632: a SKILL.md the manifest did not dispatch is still a skill the user is about to
+    # install. Kept OUT of `skill_dirs` (see the docstring), dispatched through the same loop.
+    extra_skill_dirs = _colocated_skill_dirs(p, root, skill_dirs)
+    colocated_vetted: list[Path] = []  # co-located dirs vet_skill actually returned for
+    # C-632 x C-633: shell files a co-located `vet_skill` really read (resolved paths, taken
+    # from the context it returned, never inferred from "a SKILL.md sits there"). C-633 names
+    # shell the SWEEP has no reader for as "not read"; for these that would be false.
+    colocated_shell_read: set[str] = set()
+    for sd, colocated in [(d, False) for d in skill_dirs] + [(d, True) for d in extra_skill_dirs]:
         if cpu_exceeded(deadline):
             budget_hit = True
             break
@@ -602,18 +1241,40 @@ def vet_plugin(
         # for that cause; it stays as defense-in-depth for a genuinely OUTER deadline
         # (one `vet_skill` would still re-raise, per its own owner-check) and for
         # `vet_skill`'s other, non-ring failure modes.
+        # C-632: `--vet .` hands over `Path(".")`, whose `.name` is "" - the finding would
+        # read "[bundled skill '']" and change with how the same directory was spelled. A
+        # co-located dir is vetted under its real name instead (the same directory, so the
+        # evidence prefix, the detail and the note all agree). Declared skills are untouched.
+        vet_dir = sd
+        if colocated and not sd.name:
+            try:
+                vet_dir = sd.resolve()
+            except (OSError, RuntimeError):
+                vet_dir = sd
         try:
-            sf = vet_skill(sd)
+            sf = vet_skill(vet_dir)
         except ScanBudgetExceeded:
             budget_hit = True
             break
         except Exception:  # noqa: BLE001 - a dispatched engine must never break the vet
             warns.append(f"bundled skill {sd.name!r} could not be vetted")
             continue
+        if colocated:
+            colocated_vetted.append(sd)
         try:
             rel_label = str(sd.resolve().relative_to(root_res))
         except (OSError, ValueError):
             rel_label = sd.name
+        if colocated:
+            # C-632: "." for the root and a ValueError fallback for the wrapper's top
+            # directory are not labels; the directory's own name is what vet_skill prefixes
+            # its evidence with, so it is also the only label that keeps them matching.
+            rel_label = vet_dir.name
+            notes.append(
+                f"coverage: the SKILL.md in {vet_dir.name!r} is not listed in manifest.skills, so "
+                "the plugin engine would not scan it; it was vetted as a standalone skill "
+                "(unlike the plugin sweep, that scan does not skip node_modules/)"
+            )
         # B-614: carry the LOSERS, not just the dispatched primary.
         #
         # vet_skill collapses its content ring into ONE primary
@@ -653,10 +1314,47 @@ def vet_plugin(
         sctx = getattr(sf, "ctx", None)
         if sctx is not None:
             bundled_contexts.append(sctx)
-            for _srcs in (getattr(sctx, "installed_skill_py", None) or {}).values():
+            if colocated:
+                for _shs in (getattr(sctx, "installed_skill_shell", None) or {}).values():
+                    for _shr, _shsrc in _shs:
+                        try:
+                            colocated_shell_read.add(str((vet_dir.resolve() / _shr).resolve()))
+                        except (OSError, RuntimeError):
+                            continue
+            # C-632: a co-located skill's Python is already in `loose_py` (the sweep walks
+            # the root); registering it a second time under a different key would hand
+            # ShippedArtifact two spellings of one file (B-638).
+            for _srcs in (() if colocated else (getattr(sctx, "installed_skill_py", None) or {}).values()):
                 bundled_py.extend((f"{rel_label}/{r}", s) for r, s in _srcs)
-        subs.append(_attribute_to_bundled_skill(sf, sd.name, rel_label))
-        subs.extend(_attribute_to_bundled_skill(rf, sd.name, rel_label) for rf in ring)
+        subs.append(_attribute_to_bundled_skill(sf, vet_dir.name, rel_label))
+        subs.extend(_attribute_to_bundled_skill(rf, vet_dir.name, rel_label) for rf in ring)
+
+    # C-632: the node_modules-wrapper case. `root != p` means the locator re-rooted `p` into
+    # `node_modules/<pkg>`; everything else in `p` is outside every reader below.
+    #
+    # This runs EVEN WHEN `p` itself was dispatched to vet_skill above (a SKILL.md at its
+    # top). vet_skill analyses Python, shell and JS/TS only, so a benign SKILL.md must not
+    # switch the disclosure off for Ruby, Perl, PHP, Lua, PowerShell, an exec-bit file with no
+    # shebang or an npm lifecycle script: the caller-controlled file would then be the
+    # switch. What vet_skill DID read is passed as `skill_reads` and left out of the list.
+    # Only a dispatch that returned counts - a vet_skill that raised read nothing.
+    wrapper_findings: list[Finding] = []
+    wrapper_code: list[str] = []
+    if root != p and pathprobe.is_dir(p):
+        if cpu_exceeded(deadline):
+            budget_hit = True
+        else:
+            _wscan = _wrapper_top_level_scan(p, deadline, skill_reads=p in colocated_vetted)
+            wrapper_code = _wscan.code
+            budget_hit = budget_hit or _wscan.over_budget
+            wrapper_findings = _wrapper_coverage_findings(p, _wscan, p in colocated_vetted)
+            if _wscan.local_pkgs and _LOCAL_PKG_NOTE not in notes:
+                notes.append(_LOCAL_PKG_NOTE)  # C-650: disclosure only, no verdict
+            if _wscan.unread:  # C-654: same disclosure as the tree sweep's
+                wrapper_findings.append(_nonregular_gap_finding(
+                    _wscan.unread[:3], len(_wscan.unread),
+                    "the target directory outside the plugin package",
+                ))
 
     # -- capped tree sweep (skips node_modules; symlinks never followed) for embedded
     #    MCP specs and native-executable stowaways outside the dispatched skill dirs
@@ -670,7 +1368,16 @@ def vet_plugin(
     # dir rather than inside one, is therefore never opened by any reader. Recorded so
     # the dossier cannot mistake "one bundled skill had Python" for "this plugin's code
     # was measured" -- exactly the affirmative claim the reviewer reproduced.
-    unanalysed_code: list[str] = []
+    unanalysed_code: list[str] = list(wrapper_code)  # C-632: wrapper code nothing read
+    # C-634: the subset of `unanalysed_code` whose cause is NOT the scan budget - a budget
+    # gap already rides `budget_hit`'s VET-COVERAGE finding, and naming it again would
+    # state one fact twice. Each entry is (plugin-relative name, reason).
+    py_unread: list[tuple[str, str]] = []
+    deep_json: list[str] = []  # *.json files too deeply nested for the parser to follow
+    # C-654: pipes and devices the sweep does not open (a pipe with no writer blocks
+    # `open()` forever). Count plus the first few (rel path, kind): the disclosure is bounded.
+    nonregular: list[tuple[str, str]] = []
+    nonregular_n = 0
     # B-636: plugin Python the Danger pass DID read. Distinct from `unanalysed_code` and
     # from "no code at all": the AST/taint pass covers dangerous patterns, while the
     # Persistence and Connections axes are computed from bundled-skill Contexts that never
@@ -678,6 +1385,16 @@ def vet_plugin(
     # one - after the reader landed, a plugin shipping install.py printed "no executable
     # code to analyze", which is a claim about the ARTIFACT and was simply untrue.
     analysed_loose_code: list[str] = []
+    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s five lexical rules
+    # and nothing else (no B13 text-signature scan, no content ring). Only files that
+    # were actually read land here: one over `_PLUGIN_JS_MAX_BYTES` (`js_capped`) or cut
+    # off by the budget already rides a VET-COVERAGE finding and must not also be
+    # claimed as read.
+    lexical_loose_code: list[str] = []
+    # C-633: shell outside a dispatched skill dir. No reader exists for it; it is named,
+    # never scanned, and also kept in `unanalysed_code` so the dossier's Persistence /
+    # Connections wording says "no reader for" for exactly these files.
+    unread_shell: list[str] = []
     # B-902: shares B-899's root cause (checks/_content.py's `_enumerate_symlinks`) --
     # `fp.is_symlink()` needs search (`x`) permission on `fp`'s PARENT to `lstat()` an
     # entry inside it, so a plugin subdirectory at mode 0644 (listable, not searchable)
@@ -723,12 +1440,28 @@ def vet_plugin(
             for fn in sorted(filenames):
                 fp = Path(dirpath) / fn
                 try:
-                    is_link = fp.is_symlink()
+                    is_link = pathprobe.is_symlink(fp)
                 except OSError as exc:
                     if exc.errno not in WALK_VANISHED_ERRNOS:
                         note_walk_gap(gaps, Path(dirpath), exc)  # gate: parent missing `x`
                     continue  # unclassifiable -> never trust it enough to open it
                 if is_link:
+                    continue
+                # C-654: classify with lstat BEFORE anything below can open it. Not counted
+                # against the cap either: it is never read, so it cannot be "a file the cap
+                # left unscanned".
+                #
+                # Not under a dispatched skill dir: nothing below ever opened an entry there
+                # (the readers skip it, `vet_skill` reports the pipe itself), so such a tree
+                # never hung and keeps exactly the output it always had.
+                kind = (
+                    None if any(sd in fp.parents for sd in skill_dirs)
+                    else _plugin_nonregular_kind(fp)
+                )
+                if kind:
+                    nonregular_n += 1
+                    if len(nonregular) < 3:
+                        nonregular.append((str(fp.relative_to(root)), kind))
                     continue
                 # B-344: the cap test runs BEFORE the append, not after it. Tripping
                 # `truncated` while appending the Nth file claims files went unscanned
@@ -753,7 +1486,10 @@ def vet_plugin(
     def _under_skills(fp: Path) -> bool:
         return any(sd in fp.parents for sd in skill_dirs)
 
-    dispatched_dirs = [d.resolve() for d in skill_dirs]
+    # C-682: `os.path.realpath` never raises on a symlink loop (`Path.resolve` raises
+    # RuntimeError on 3.12 and returns on 3.14); a declared entry that loops was already
+    # refused with a WARN above, so this only keeps the answer interpreter-independent.
+    dispatched_dirs = [Path(os.path.realpath(d)) for d in skill_dirs]
     # B-638: read the loose plugin Python up front, so each file is analysed knowing every
     # other one -- an exec() of a file the plugin ships is judged by where its path
     # resolves, and that needs the whole set (shippedexec.ShippedArtifact). A file that
@@ -818,13 +1554,15 @@ def vet_plugin(
                 # Anything this branch cannot read - over the cap, unparseable, unreadable,
                 # or cut off by the budget - still lands in `unanalysed_code`, so B-628's
                 # honest "no reader for this" keeps firing for exactly the files it is true
-                # of. Doing both in ONE pass is what makes it impossible for the dossier to
-                # claim a file was unread on one line and quote its contents on the next.
+                # of. Except for a budget gap, it also becomes a B13 UNKNOWN sub-finding
+                # (C-634, see `py_unread` below) so the gap moves the verdict. Doing both
+                # in ONE pass is what makes it impossible for the dossier to claim a file
+                # was unread on one line and quote its contents on the next.
                 rel = str(fp.relative_to(root))
                 gap = ""
                 if cpu_exceeded(deadline):
                     budget_hit = True
-                    gap = "the scan budget was reached before it was read"
+                    gap = _PY_BUDGET_BEFORE
                 else:
                     try:
                         py_size = fp.stat().st_size
@@ -852,6 +1590,8 @@ def vet_plugin(
                                 budget_hit = True
                 if gap:
                     unanalysed_code.append(rel)
+                    if gap not in (_PY_BUDGET_GAP, _PY_BUDGET_BEFORE):
+                        py_unread.append((rel, gap))
                     notes.append(
                         f"coverage: plugin Python '{rel}' was not analysed \u2014 {gap}"
                     )
@@ -864,9 +1604,22 @@ def vet_plugin(
             continue  # bundled-skill content already dispatched to vet_skill above
         if fp.suffix == ".json" and fp.name not in _PLUGIN_MCP_SKIP:
             try:
-                data = _json.loads(fp.read_text(encoding="utf-8", errors="replace"))
+                shallow_json = loads_shallow(fp.read_text(encoding="utf-8", errors="replace"))
+                data = shallow_json.value
+                if shallow_json.elided:
+                    elided_docs.append(str(fp.relative_to(root)))
+            except JSONNestingError:
+                data = None  # the stack cannot even hold one layer: not examined
+                deep_json.append(str(fp.relative_to(root)))
             except (OSError, ValueError):
                 data = None
+            except RecursionError:
+                # Nested deeper than this interpreter's parser follows. The host's own
+                # parser may read it, so this is "not examined", never "no MCP spec here":
+                # disclosed below instead of aborting the vet (which is what an uncaught
+                # RecursionError did, at a depth that differs per interpreter).
+                data = None
+                deep_json.append(str(fp.relative_to(root)))
             servers = None
             if isinstance(data, dict):
                 servers = (
@@ -924,6 +1677,8 @@ def vet_plugin(
                             js_signals.append(
                                 f"runtime JS/TS: {af.reason} ({rel}:{af.lineno})"
                             )
+                        # C-633: reached only when the pass ran to completion.
+                        lexical_loose_code.append(str(rel))
                     except ScanBudgetExceeded:
                         budget_hit = True
                         break
@@ -933,6 +1688,79 @@ def vet_plugin(
                     f"coverage: runtime JS/TS '{fp.relative_to(root)}' exceeds the "
                     f"{_PLUGIN_JS_MAX_BYTES // 1_000_000}MB scan cap \u2014 not lexically scanned"
                 )
+        elif fp.suffix.lower() in _PLUGIN_UNREAD_SHELL_EXT:
+            # C-633: after the stowaway test on purpose - an ELF named `x.sh` still gets
+            # the native-executable WARN. No reader is added: the file is only named, so
+            # the report can say plainly that it was not read.
+            shell_rel = str(fp.relative_to(root))
+            try:
+                read_by_skill_engine = str(fp.resolve()) in colocated_shell_read
+            except (OSError, RuntimeError):
+                read_by_skill_engine = False
+            if not read_by_skill_engine:
+                unanalysed_code.append(shell_rel)
+                unread_shell.append(shell_rel)
+
+    # C-633: name what the sweep did and did not read. Emitted after the loop so the note
+    # lists the files that were actually read, whether or not `package.json` declares
+    # `openclaw.extensions`.
+    if lexical_loose_code:
+        shown_js = ", ".join(sorted(lexical_loose_code)[:3])
+        more_js = (
+            "" if len(lexical_loose_code) <= 3 else f" (+{len(lexical_loose_code) - 3} more)"
+        )
+        notes.append(
+            f"coverage: plugin runtime JS/TS ({shown_js}{more_js}) was read by five lexical "
+            "rules only (obfuscated eval, remote fetch-then-eval, dynamic child_process "
+            "command, dynamic require, native dlopen); NOT checked: pipe-to-shell strings, "
+            "config or credential reads, outbound POSTs - not a full runtime analysis; "
+            "review these files before trusting"
+        )
+    elif entries:
+        # Declared entry points but nothing swept (e.g. build output not shipped): the
+        # long-standing note, unchanged.
+        notes.append(
+            "coverage: plugin runtime JS/TS ("
+            + ", ".join(entries[:3])
+            + ") is lexically scanned for obfuscated-RCE / remote-eval signals only \u2014 not a "
+            "full runtime analysis; still review the entry files before trusting"
+        )
+    if deep_json:
+        shown_dj = ", ".join(sorted(deep_json)[:3])
+        more_dj = "" if len(deep_json) <= 3 else f" (+{len(deep_json) - 3} more)"
+        warns.append(
+            f"JSON file(s) nested too deeply for this scanner's parser ({shown_dj}{more_dj}) "
+            "were not checked for embedded MCP server specs"
+        )
+    elision_fix = ""
+    if elided_docs:
+        # C-664: the shallow fields of these files were read as if unpadded; what lies below
+        # the bound was not. Never INSTALL (a WARN floors the headline at CAUTION); the
+        # remediation goes in `fix`, which baseline.fingerprint() does not hash.
+        shown_ed = ", ".join(sorted(set(elided_docs))[:3])
+        more_ed = "" if len(set(elided_docs)) <= 3 else f" (+{len(set(elided_docs)) - 3} more)"
+        warns.append(
+            f"JSON file(s) nested too deeply to be read in full ({shown_ed}{more_ed}): "
+            f"everything below {SHALLOW_JSON_DEPTH} levels was not examined"
+        )
+        elision_fix = (
+            f" Part of {shown_ed}{more_ed} is nested too deeply (over {SHALLOW_JSON_DEPTH} "
+            "levels) for this scan to read; inspect it manually - the scan cannot say what "
+            "that part declares."
+        )
+    if nonregular_n:
+        # C-654: a coverage gap, not a note and not a WARN - a tree holding an entry this
+        # scan declined to open cannot read as INSTALL/PASS, and a WARN would make the
+        # dossier treat the tree as assessed and flip the axes the gap hides back to PASS.
+        subs.append(_nonregular_gap_finding(nonregular, nonregular_n, "the plugin tree"))
+    if unread_shell:
+        shown_sh = ", ".join(sorted(unread_shell)[:3])
+        more_sh = "" if len(unread_shell) <= 3 else f" (+{len(unread_shell) - 3} more)"
+        notes.append(
+            f"coverage: plugin shell file(s) ({shown_sh}{more_sh}) were not read - this scan "
+            "has no reader for shell outside a declared skill, so pipe-to-shell strings, "
+            "config or credential reads and outbound POSTs in them were not checked"
+        )
 
     # B-344: the CPU budget is not the only way this scan ends up partial. Three other
     # limits truncate it, and until B-344 each reached nothing but `notes` - human text
@@ -968,6 +1796,31 @@ def vet_plugin(
                 "file past that point went unexamined"
             )
         )
+    if py_unread:
+        # C-634: loose plugin Python that could not be read, parsed or fit under the scan
+        # cap used to reach only `unanalysed_code` and a `coverage:` note - neither moves
+        # the verdict - so padding a loader past 2 MB (or making it unparseable) turned a
+        # DO-NOT-INSTALL into INSTALL. B13 UNKNOWN + engine_degraded is what the skill path
+        # emits for the same parse failure, and `dossier._AXIS_BY_ID["B13"]` is already the
+        # danger axis, so `_danger_coverage_gap` floors the headline to CAUTION. It is NOT
+        # a VET-COVERAGE finding: that id flips the dossier's `scan_truncated` and rewrites
+        # the Persistence/Connections wording, and a per-file gap is not a truncated scan
+        # (tests/test_b628_plugin_code_measurable.py::test_i). A budget gap is excluded
+        # above - it already rides `budget_hit`'s VET-COVERAGE finding. Filenames are
+        # plugin-relative, so they may sit in `detail`; the remediation prose is in `fix`
+        # only (baseline.fingerprint() hashes `detail`).
+        shown = "; ".join(f"{r} ({why})" for r, why in sorted(py_unread)[:3])
+        more = "" if len(py_unread) <= 3 else f" (+{len(py_unread) - 3} more)"
+        subs.append(_finding(
+            "B13", UNKNOWN,
+            f"could not analyze plugin Python {shown}{more} \u2014 not scanned by the "
+            "AST/taint layer",
+            "Inspect the flagged file(s) manually before installing: Python a scanner "
+            "cannot read, parse, or fit under the scan cap is how a loader is hidden from "
+            "an AST pass (a parse failure can also mean Python 2 syntax, a template, or "
+            "syntax newer than the Python running this scan).",
+            severity=HIGH, engine_degraded=True,
+        ))
     if js_capped:
         shown = ", ".join(sorted(js_capped)[:3])
         more = "" if len(js_capped) <= 3 else f" (+{len(js_capped) - 3} more)"
@@ -1012,6 +1865,8 @@ def vet_plugin(
             )
         )
 
+    subs.extend(wrapper_findings)  # C-632
+
     # F-148: honest degradation - never let a budget-truncated scan read as a clean
     # PASS, and never say so twice. This used to also push a plain-text note onto
     # `notes` (which lands in `evidence` unconditionally) alongside the synthetic
@@ -1054,6 +1909,14 @@ def vet_plugin(
     status = _VET_RANK_STATUS[rank]
 
     n_mcp = sum(1 for f in subs if f.id == "MCP-VET")
+    # C-632: `len(skill_dirs)` on purpose, NOT plus the co-located dirs. `detail` is what
+    # baseline.fingerprint() hashes, so a count that moved for every plugin that has an
+    # undeclared SKILL.md would orphan the .clawseccheckignore entries already written
+    # against those verdicts; the co-located skill is disclosed in `notes` (evidence) and
+    # by its own attributed findings instead. This keeps the COUNT stable only: a plugin
+    # that ships an undeclared SKILL.md beside code the skill engine convicts can still
+    # lead with the bundled-skill finding, so the lead detail of an already-failing plugin
+    # can change (measured on a manifest + SKILL.md + install.py loader).
     summary = f"plugin '{pid}' ({len(skill_dirs)} bundled skill(s), {n_mcp} embedded MCP spec(s))"
     # B-751: sub_rank above already promotes the plugin to FAIL via _VET_MERGE_RANK, but the
     # traversal sub-finding was dropped here - plugin convicted, reason unstated.
@@ -1076,7 +1939,8 @@ def vet_plugin(
             sev,
             FAIL,
             f"dangerous bundled content in {summary}: {worst.detail}",
-            "Do NOT install this plugin. " + (worst.fix or "Review the flagged content."),
+            "Do NOT install this plugin. " + (worst.fix or "Review the flagged content.")
+            + manifest_fix,
             evidence,
         )
     elif status == WARN:
@@ -1093,7 +1957,7 @@ def vet_plugin(
             WARN,
             f"{label} in {summary}: {head_sig}",
             "Review the flagged signals before installing; prefer pinned, shrinkwrapped, "
-            "source-readable plugins.",
+            "source-readable plugins." + manifest_fix + elision_fix,
             evidence,
         )
     elif status == UNKNOWN:
@@ -1109,7 +1973,16 @@ def vet_plugin(
             LOW,
             PASS,
             f"{summary}: no manifest, packaging, or bundled-content signals",
-            "Skim the JS/TS entry files anyway \u2014 this vet's JS pass is lexical, not a full runtime analysis.",
+            # C-633: the disclosure lives in `fix`, never `detail` - baseline.fingerprint()
+            # hashes `detail`, so moving it would orphan every existing ignore entry.
+            (
+                "Read the JS/TS and shell files named in the coverage notes before "
+                "installing - this vet ran five lexical JS/TS rules only and did not read "
+                "shell files, so pipe-to-shell strings, config or credential reads and "
+                "outbound POSTs in them were not checked."
+                if lexical_loose_code or unread_shell else
+                "Skim the JS/TS entry files anyway \u2014 this vet's JS pass is lexical, not a full runtime analysis."
+            ),
             evidence,
         )
     finding.ring_findings = actionable
@@ -1119,6 +1992,7 @@ def vet_plugin(
     finding.bundled_contexts = bundled_contexts
     finding.unanalysed_code = unanalysed_code
     finding.analysed_loose_code = analysed_loose_code
+    finding.lexical_loose_code = lexical_loose_code
     axis_reasons: dict[str, list] = {}
     if warns:
         # Container-native signals (manifest sanity, npm lifecycle scripts, floating
@@ -1287,18 +2161,32 @@ def sweep_plugins(home_dir, *, ascii_only: bool = False,
 
     seen: set = set()
     plugin_dirs: list = []
+    loop_roots: set = set()  # C-682: recorded roots that loop (ELOOP), never vetted
     for rec in ctx.plugin_index_records:
         root_dir = rec.get("root_dir")
         if not root_dir:
             continue
         candidate = Path(root_dir)
+        # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve`
+        # raises RuntimeError on 3.12 (aborting the whole sweep) and returns on 3.14.
         try:
-            resolved = candidate.resolve()
-        except OSError:
+            resolved = Path(os.path.realpath(candidate))
+        except (OSError, ValueError):
             resolved = candidate
-        if resolved in seen or not candidate.is_dir():
+        key = resolved
+        if not pathprobe.is_dir(candidate):
+            if not _is_symlink_loop(candidate):
+                continue  # an absent root: a stale index record, as before
+            # A looping root is a plugin the index records and the sweep could not look at -
+            # not an absent one. It rides the sweep's not-scanned channel (TRUNCATED row).
+            # Its de-duplication key is the recorded text, not the partial `realpath`, which
+            # collapses `loop/..` lexically and would swallow a later, readable record of
+            # the directory that path names (C-135, C-682b).
+            loop_roots.add(candidate)
+            key = candidate
+        if key in seen:
             continue
-        seen.add(resolved)
+        seen.add(key)
         plugin_id = rec.get("plugin_id") or candidate.name
         plugin_dirs.append((plugin_id, candidate))
 
@@ -1328,6 +2216,19 @@ def sweep_plugins(home_dir, *, ascii_only: bool = False,
         name = _plugin_narrate_safe(str(plugin_id))
         if narrate:
             print(f"\n=== {name} ===")
+        if plugin_dir in loop_roots:
+            if narrate:
+                print("  (plugin root is a symlink loop \u2014 not scanned; not counted as safe)")
+            results.append((name, "TRUNCATED", 0))
+            sweep.findings.append((name, _plugin_finding(
+                HIGH, UNKNOWN,
+                f"plugin root for {name!r} could not be resolved: a symlink on the way to it loops",
+                "Repair the symlink loop at the plugin's recorded root, then re-run.",
+                engine_degraded=True,
+            )))
+            sweep.target_paths[name] = str(plugin_dir)
+            truncated = True
+            continue
         try:
             f = vet_plugin(str(plugin_dir))
         except ScanBudgetExceeded:
@@ -2435,6 +3336,20 @@ def _mcp_reason_axis(reason: str) -> str | None:
     return None
 
 
+def _without_elided(node):
+    """``None`` for every ELIDED marker in a ``loads_shallow`` value.
+
+    The value is at most ``SHALLOW_JSON_DEPTH`` + 1 levels deep, so the recursion is bounded.
+    ``None`` is a JSON ``null`` and every spec reader already ignores a field it cannot use;
+    the marker itself would reach code that calls ``json.dumps`` or ``.get`` on it.
+    """
+    if isinstance(node, dict):
+        return {k: _without_elided(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_without_elided(v) for v in node]
+    return None if node is ELIDED else node
+
+
 def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
     """Load a JSON file and normalise to {name: spec}.
 
@@ -2459,13 +3374,26 @@ def _load_mcp_spec_file(path: Path) -> dict[str, dict] | None:
     contract. The caller (vet_mcp) detects it separately and routes it through
     mcpsurface.from_probe_json instead.
     """
-    import json as _json
+    return _load_mcp_spec_file_ex(path)[0]
 
+
+def _load_mcp_spec_file_ex(path: Path) -> "tuple[dict[str, dict] | None, int]":
+    """:func:`_load_mcp_spec_file` plus how many subtrees the shallow reader elided (C-664).
+
+    A spec file is the server author's document: it is read to ``SHALLOW_JSON_DEPTH`` levels
+    exactly as ``json.loads`` would, and a subtree nested deeper is dropped to ``None`` and
+    counted, so the caller can say the file was only partly read.
+    """
     try:
-        data = _json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        shallow = loads_shallow(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return None
+        return None, 0
+    data, elided = _without_elided(shallow.value), shallow.elided
+    servers = _spec_servers(path, data)
+    return servers, (elided if servers is not None else 0)
 
+
+def _spec_servers(path: Path, data) -> "dict[str, dict] | None":
     if not isinstance(data, dict):
         return None
 
@@ -2568,9 +3496,10 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
     # these; both stay False everywhere else.
     _vet_mcp_config_found = False
     _vet_mcp_config_parse_error = False
+    spec_elided = 0  # C-664: subtrees of a --vet-mcp spec file the shallow reader dropped
 
     if target is not None:
-        p = Path(str(target)).expanduser()
+        p = pathprobe.expand_user(str(target))
         # B-683: `Path.is_file()` does NOT swallow EACCES, so a target under a directory
         # this process cannot stat used to raise straight past every branch below and out
         # to the top-level handler, which printed "unexpected internal error
@@ -2578,7 +3507,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         # own directory mode. Ask the question this branch actually needs ("is there a
         # readable spec file here?") in a form that can answer "I could not look".
         try:
-            _is_spec_file = p.is_file()
+            _is_spec_file = pathprobe.is_file(p)
         except OSError:
             # NOT subject_absent (B-681): whether this names a server or a spec file is
             # exactly what we failed to establish, and the caller turns subject_absent
@@ -2597,7 +3526,7 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 )
             ]
         if _is_spec_file:
-            loaded = _load_mcp_spec_file(p)
+            loaded, spec_elided = _load_mcp_spec_file_ex(p)
             if loaded is None:
                 # F-142: none of the four {name: spec} config shapes matched - last
                 # resort, try the openclaw probe --json (names-only) shape before
@@ -2623,9 +3552,8 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
         else:
             # Treat target as a server name - load from config.
             name = str(target)
-            home_path = Path(str(home)).expanduser()
+            home_path = pathprobe.expand_user(str(home))
             cfg_file = home_path / "openclaw.json"
-            import json as _json
 
             # B-681: whether the config could be READ decides what we are entitled to
             # say next. Both failures used to collapse into `cfg = {}`, which makes an
@@ -2634,14 +3562,27 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             # managed to open. Harmless while it was only a sentence; not harmless once
             # it drives an exit code, which is what this task added.
             cfg_read = True
+            cfg_elided = 0
             try:
-                cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+                # C-680 (C-664): the user's own config, read to 64 levels exactly as
+                # json.loads reads it; a deeper subtree is counted (cfg_elided), not followed.
+                # Accepted difference (owner-visible residual): a server whose `command` or
+                # `args` is itself a list nested ~60 levels or more reads FAIL on the previous
+                # head and WARN here, with "nested too deeply" in `fix` - never a PASS. No MCP
+                # host runs such a spec (`args` is an array of strings), and the raw text of the
+                # elided span cannot be scanned to reproduce the old verdict exactly.
+                shallow_cfg = loads_shallow(cfg_file.read_text(encoding="utf-8", errors="replace"))
             except (OSError, ValueError):
                 cfg, cfg_read = {}, False
+            else:
+                cfg, cfg_elided = _without_elided(shallow_cfg.value), shallow_cfg.elided
+                if not isinstance(cfg, dict):
+                    cfg, cfg_read = {}, False
             all_servers = _mcp_servers(cfg)
             if name in all_servers:
                 servers = {name: all_servers[name]}
-            elif not cfg_read:
+                spec_elided = cfg_elided
+            elif not cfg_read or cfg_elided:
                 # The server may well be configured -- a truncated or unreadable
                 # openclaw.json cannot tell us either way. UNKNOWN, and NOT
                 # subject_absent: this keeps its dossier rather than being reported as
@@ -2657,7 +3598,12 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                             f"'{name}' is a configured server is undetermined."
                         ),
                         fix="Check that the config exists and is valid JSON, or point "
-                        "--vet-mcp at a JSON spec file.",
+                        "--vet-mcp at a JSON spec file."
+                        + (
+                            " The config is nested too deeply for this scan to read in full."
+                            if cfg_elided
+                            else ""
+                        ),
                         framework="MCP Trust",
                         scored=False,
                     )
@@ -2685,18 +3631,22 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 ]
     else:
         # Vet all servers from config at home.
-        home_path = Path(str(home)).expanduser()
+        home_path = pathprobe.expand_user(str(home))
         cfg_file = home_path / "openclaw.json"
-        import json as _json
-
-        _vet_mcp_config_found = cfg_file.is_file()
+        _vet_mcp_config_found = pathprobe.is_file(cfg_file)
         try:
-            cfg = _json.loads(cfg_file.read_text(encoding="utf-8", errors="replace"))
+            # C-680 (C-664): see the named-server read above.
+            shallow_cfg = loads_shallow(cfg_file.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             cfg = {}
         except ValueError:
             cfg = {}
             _vet_mcp_config_parse_error = _vet_mcp_config_found
+        else:
+            cfg, spec_elided = _without_elided(shallow_cfg.value), shallow_cfg.elided
+            if not isinstance(cfg, dict):
+                cfg = {}
+                _vet_mcp_config_parse_error = _vet_mcp_config_found
         servers = _mcp_servers(cfg)
 
     if not servers:
@@ -2707,16 +3657,28 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
                 severity=HIGH,
                 status=UNKNOWN,
                 detail="No MCP servers configured.",
-                fix="Configure MCP servers under mcp.servers.<name> in openclaw.json.",
+                fix="Configure MCP servers under mcp.servers.<name> in openclaw.json."
+                + (
+                    " The config is nested too deeply for this scan to read in full."
+                    if spec_elided
+                    else ""
+                ),
                 framework="MCP Trust",
                 scored=False,
-                not_applicable=_vet_mcp_config_found and not _vet_mcp_config_parse_error,
+                not_applicable=(
+                    _vet_mcp_config_found and not _vet_mcp_config_parse_error and not spec_elided
+                ),
             )
         ]
 
     findings: list[Finding] = []
     for sname, spec in servers.items():
         dangerous, suspicious = _vet_mcp_server(sname, spec)
+        if spec_elided:
+            suspicious = suspicious + [
+                f"{sname}: the spec file is nested too deeply to be read in full "
+                f"(over {SHALLOW_JSON_DEPTH} levels) - the part below that was not examined"
+            ]
 
         if dangerous:
             status = FAIL
@@ -2738,6 +3700,12 @@ def vet_mcp(target: str | Path | None = None, home: str | Path = "~/.openclaw") 
             status = PASS
             all_reasons = []
             fix = "No supply-chain signals detected \u2014 keep specs pinned and env vars minimal."
+
+        if spec_elided:
+            fix += (
+                " The spec file is nested too deeply for this scan to read in full; "
+                "inspect it manually."
+            )
 
         # Reasons are collected with a "<sname>: " prefix; strip it so the server name
         # appears once (as the finding title), not repeated on every line.
@@ -3667,20 +4635,28 @@ def _codex_effective_exec_modes(cfg: dict) -> "list[tuple[str, str | None]]":
 
 
 def _codex_exec_approvals_floor(ctx: Context) -> "str | None":
-    """A reason the exec-approvals store the collector DID read (B-236,
-    `exec-approvals.json`) could tighten the exec policy, or None.
+    """A reason the exec-approvals store the collector DID read (B-236, the legacy
+    `exec-approvals.json` and/or the state database's `exec_approvals_config` row --
+    `src/infra/exec-approvals-sqlite.ts`) could tighten the exec policy, or None.
 
     The vendor applies it after the config layers (`applyOpenClawExecApprovalFloors`:
     `minSecurity` / `maxAsk`, `@openclaw/codex@2026.9.5 dist/.setup/config-CedDWjM-.mjs`),
     so a floor can only move the mode AWAY from "full" -- it can turn a "yes" into a
     "no", never the reverse. Which agent a per-agent entry applies to is not modelled:
-    any tightening value anywhere in the file is enough to stop a definite "yes".
+    any tightening value anywhere in the store is enough to stop a definite "yes".
     """
     if not getattr(ctx, "exec_approvals_found", False):
         return None
+    # The wording names the file only when the state database was not involved at all (the
+    # historical text, byte-identical); once it was read -- or was present and could NOT be
+    # read -- the tiers may come from either store, so "the file" would be a wrong claim.
+    store = ("the exec-approvals store"
+             if getattr(ctx, "exec_approvals_sqlite_read", False)
+             or getattr(ctx, "exec_approvals_sqlite_unreadable", False)
+             else "exec-approvals.json")
     if getattr(ctx, "exec_approvals_parse_error", False) or limit_hits_for(
             ctx, LIMIT_DOMAIN_APPROVALS):
-        return ("exec-approvals.json is present but could not be read in full, and a "
+        return (f"{store} is present but could not be read in full, and a "
                 "stricter default there would tighten the exec policy")
     sources = [("defaults", getattr(ctx, "exec_approvals_defaults", None) or {})]
     sources += [(f"agents.{g.get('agent_id')}", g)
@@ -3695,7 +4671,7 @@ def _codex_exec_approvals_floor(ctx: Context) -> "str | None":
             # omitted entirely rather than printed as a Python None.
             set_fields = [f"{name}={value!r}" for name, value in
                           (("security", security), ("ask", ask)) if value is not None]
-            return (f"exec-approvals.json {label} sets " + " / ".join(set_fields) +
+            return (f"{store} {label} sets " + " / ".join(set_fields) +
                     ", a floor that tightens the exec policy of the agent(s) it covers")
     return None
 
@@ -3708,7 +4684,8 @@ _CODEX_TRANSPORTS = frozenset(("stdio", "websocket", "unix"))
 #: The run-time inputs `_codex_appserver_yolo_reach` cannot see, said in every WARN it
 #: produces. Each is grounded in `@openclaw/codex@2026.9.5`: the exec-approvals floors
 #: (`loadExecApprovals`, which on this build reads `state/openclaw.sqlite`'s
-#: `exec_approvals_config`, not the legacy JSON the collector reads), the
+#: `exec_approvals_config`; the collector reads that row too, but only when the state
+#: database was readable -- when it was NOT, this original text stands), the
 #: `OPENCLAW_CODEX_APP_SERVER_MODE` / `_SANDBOX` / `_APPROVAL_POLICY` fallbacks in
 #: `resolveCodexAppServerRuntimeOptions`, and `applyCodexSessionPermissionPolicy`.
 _CODEX_APPSERVER_RUNTIME_CAVEAT = (
@@ -3717,6 +4694,13 @@ _CODEX_APPSERVER_RUNTIME_CAVEAT = (
     "OPENCLAW_CODEX_APP_SERVER_* variable in the gateway's environment, or a per-session "
     "permission mode can each change this posture at run time, and none of those is read "
     "here.)"
+)
+#: The same caveat once the collector DID read the state database's exec-approvals row
+#: (`ctx.exec_approvals_sqlite_read`): the store clause is no longer true, so it is dropped.
+_CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ = (
+    "(Read from openclaw.json and the exec-approvals store only: an "
+    "OPENCLAW_CODEX_APP_SERVER_* variable in the gateway's environment or a per-session "
+    "permission mode can each change this posture at run time, and neither is read here.)"
 )
 
 
@@ -3835,17 +4819,21 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     confident "no" or "yes"; each was a finding of the targeted review):
 
     1. Plugin activation -- `_plugin_activation_blocked`, the same enabled/deny/allow gate
-       B-421 grounded for memory-core (`resolvePluginActivationDecisionShared`,
-       `dist/config-normalization-shared-*.mjs:82-102`): `plugins.enabled: false`,
+       B-421 grounded for memory-core (`resolvePluginActivationStateShared`, renamed from
+       `resolvePluginActivationDecisionShared`; `dist/config-activation-shared-DnNUje5Q.mjs
+       :117-182` on openclaw@2026.10.2, read 2026-10-12, gates at :137/:139/:141):
+       `plugins.enabled: false`,
        `"codex"` in `plugins.deny`, `entries.codex.enabled: false`, or a non-empty
        `plugins.allow` without `"codex"` each deactivate the plugin. `deny`/`allow`/
        `entries` are matched case-insensitively (B-831 round 2): the real gate compares
-       through `normalizePluginPolicyId` (`plugin-policy-id-C9JZrwYv.mjs:9-11`, trim +
-       lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
+       through `normalizePluginPolicyId` (`plugin-policy-id-1GfPFu0U.mjs:10-12` as of 2026.10.2,
+       trim + lowercase, no alias table -- that is a DIFFERENT normalizer, `normalizePluginId`,
        used elsewhere), because "`plugins.allow`, `plugins.deny`, and `plugins.entries` ...
        are lowercase-normalized when config is normalized" per that function's own
        comment. A missing `plugins.entries.codex` block entirely does not by itself mean
-       "not installed" either -- see the harness-reach fallback below.
+       "not installed" either -- see the harness-reach fallback below: only a definite
+       "no" reach reads as "not installed"; an "unknown" one (every config on a build
+       outside the oracle window) stays "unknown" with a hedge saying so (C-673).
     2. The effective exec mode, PER AGENT (`_codex_effective_exec_modes`: global
        `tools.exec`, then each roster agent's own, with the mode derived from
        `security`/`ask` when `mode` is absent). "deny"/"allowlist" make the app-server
@@ -3864,6 +4852,7 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     """
     cfg = ctx.config if isinstance(ctx.config, dict) else {}
     codex_entry = _plugins(cfg).get("codex")
+    reach_hedge = ""
     if isinstance(codex_entry, dict):
         if codex_entry.get("enabled") is False:
             return "no", ["the Codex plugin is not installed/enabled "
@@ -3871,8 +4860,9 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     else:
         # B-831 round 2: NO `plugins.entries.codex` block at all does not prove the
         # plugin is not installed. A non-bundled plugin with no entry of its own still
-        # activates on the implicit default (`resolvePluginActivationDecisionShared`
-        # returns `decision("default")` when nothing names it explicitly) whenever its
+        # activates on the implicit default (`resolvePluginActivationStateShared`,
+        # config-activation-shared-DnNUje5Q.mjs:182 on openclaw@2026.10.2, returns
+        # `decision("default")` when nothing names it explicitly) whenever its
         # manifest declares `onAgentHarnesses: ["codex"]` and a configured model would
         # reach that harness -- this audit cannot see whether the package is actually
         # installed, only whether a model would reach the Codex harness IF it were
@@ -3880,10 +4870,20 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
         # "no" is "not installed/enabled" a safe reading; a "yes" (or an "unknown" this
         # audit cannot rule out) gets the same treatment as an empty, all-implicit
         # `config.appServer: {}` (`_codex_appserver_posture`), never a confident "no".
-        if _harness_reach(ctx).answer != _harnessruntime.YES:
+        # C-673: the code used to test `!= YES` here, which folded `unknown` into "no" --
+        # and `codex_harness_reach` answers `unknown` for EVERY config on a build outside
+        # `ORACLE_MIN..ORACLE_MAX`, so each OpenClaw release made B353 PASS. The gates below
+        # (activation, exec mode) are stated facts and still answer "no" whatever the reach.
+        reach = _harness_reach(ctx)
+        if reach.answer == _harnessruntime.NO:
             return "no", ["the Codex plugin is not installed/enabled "
                           "(plugins.entries.codex)"], []
         codex_entry = {}
+        if reach.answer != _harnessruntime.YES:
+            reach_hedge = (
+                "there is no plugins.entries.codex block, and this audit cannot determine, on "
+                "this OpenClaw build, whether any agent runs the Codex app-server harness (" +
+                "; ".join(reach.reasons[:2]) + ")")
     plugins_cfg = cfg.get("plugins")
     blocked = (_plugin_activation_blocked(plugins_cfg, _CODEX_PLUGIN_ID)
                if isinstance(plugins_cfg, dict) else None)
@@ -3903,6 +4903,8 @@ def _codex_appserver_yolo_reach(ctx: Context) -> "tuple[str, list[str], list[str
     answer, reasons, hedges = _codex_appserver_posture(codex_entry)
     if answer == "no":
         return "no", reasons, []
+    if reach_hedge:
+        hedges.insert(0, reach_hedge)
     if closed:
         # B-831 round 2 (item 3, reviewed and left as-is): a mixed roster (e.g. one
         # agent's exec mode "full", another non-full) stays hedged to "unknown" here on
@@ -4116,7 +5118,11 @@ def check_mcp_codex_preapproved_tools(ctx: Context) -> Finding:
             " Whether that posture actually applies here also cannot be fully determined: "
             + "; ".join(appserver_hedges) + "."
         ) if appserver_hedges else ""
-        appserver_hedge += " " + _CODEX_APPSERVER_RUNTIME_CAVEAT
+        appserver_hedge += " " + (
+            _CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ
+            if getattr(ctx, "exec_approvals_sqlite_read", False)
+            else _CODEX_APPSERVER_RUNTIME_CAVEAT
+        )
         if reach.answer == _harnessruntime.YES:
             return _finding(
                 "B353", WARN,
@@ -5859,8 +6865,9 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     this check was the one left blind, not the vendor schema.
 
     Deliberately NOT scanned: the deprecated WHOLE-AGENT spelling
-    (``agents.defaults.agentRuntime.id`` / ``agents.entries.<id>.agentRuntime.id``, still
-    read defensively by the vendor's ``resolveAgentScopedRuntimeOverride`` at run time).
+    (``agents.defaults.agentRuntime.id`` / ``agents.entries.<id>.agentRuntime.id``; the
+    vendor once read it defensively through ``resolveAgentScopedRuntimeOverride``, which no
+    longer exists on openclaw@2026.10.2 -- zero matches in dist/*.mjs, read 2026-10-12).
     Confirmed via ``OpenClawSchema.safeParse()``: neither ``AgentDefaultsSchema`` nor
     ``AgentEntryBaseSchema`` declares an ``agentRuntime`` field at that level - both are
     ``.strict()``, so a config authoring that key is REJECTED WHOLESALE at load time
@@ -5963,8 +6970,10 @@ def check_agent_runtime_id_inventory(ctx: Context) -> Finding:
     return _finding(
         "B370", WARN, "; ".join(found[:8]),
         "One or more model entries name an explicit agentRuntime.id \u2014 confirm each "
-        "value is the CLI backend / plugin harness you intend, since it decides which "
-        "external process actually runs that model's turns.",
+        "value is the runtime you intend, since it decides what runs that model's "
+        "turns. 'openclaw' is OpenClaw's own built-in agent and tools, not a separate "
+        "process; any other value selects another runtime (a plugin harness, a CLI "
+        "backend, or a fallback mode) in its place.",
         evidence=found[:8],
     )
 
@@ -6860,6 +7869,7 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
         )
     offenders = []
     unresolved = []
+    switched_off = []
     for name, entry in plugins.items():
         if not isinstance(entry, dict):
             continue
@@ -6887,6 +7897,8 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
             malformed.append("allowConversationAccess")
         if grants:
             offenders.append(f"plugins.entries.{name}.hooks.{'/'.join(grants)}")
+            if entry.get("enabled") is False:
+                switched_off.append(str(name))
         if malformed:
             unresolved.append(f"plugins.entries.{name}.hooks.{'/'.join(malformed)}")
     if offenders:
@@ -6902,7 +7914,12 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
             "Confirm each listed plugin genuinely needs the grant. Set "
             "hooks.allowPromptInjection: false to withdraw the default prompt-mutation "
             "grant; leave hooks.allowConversationAccess unset (or false) unless the "
-            "plugin genuinely needs transcript access.",
+            "plugin genuinely needs transcript access."
+            + (f" Of the listed plugins, {', '.join(repr(n) for n in switched_off[:6])} "
+               f"{'carries' if len(switched_off) == 1 else 'carry'} enabled: false, so "
+               "OpenClaw is not expected to load "
+               f"{'it' if len(switched_off) == 1 else 'them'}; the grant matters only "
+               "if that flag is turned back on." if switched_off else ""),
             evidence=offenders,
         )
     if unresolved:
@@ -6936,9 +7953,13 @@ def check_plugin_hook_grants(ctx: Context) -> Finding:
 _MEMORY_SLOT_DEFAULT_OWNER = "memory-core"
 
 # B-421 (corrected post-review, see below): OpenClaw's own built-in plugin-id alias table
-# (config-state-CtMlHVRM.js:6-9, BUILT_IN_PLUGIN_ALIAS_FALLBACKS) -- normalizePluginId
+# (config-state-CtMlHVRM.js:6-9, BUILT_IN_PLUGIN_ALIAS_FALLBACKS, 2026.9.x) -- normalizePluginId
 # folds an alias to its canonical id before any allow/deny/activation comparison. NOTE
-# what the real normalizer does NOT do: it does not lowercase ids outside this table --
+# what the 2026.9.x normalizer did NOT do (re-measured on openclaw@2026.10.2, 2026-10-12, by
+# executing it: config-state-wnnTmmuG.mjs:19-23 now LOWERCASES on a miss, so
+# normalizePluginId("Memory-Core") === "memory-core" -- this mirror below still keeps the
+# case, a known drift left unchanged here because changing it moves B342's verdicts):
+# it did not lowercase ids outside this table --
 # normalizePluginIdWithLookup (same file :17-23) looks the LOWERCASED id up in the alias
 # map, but on a miss falls back to the CASE-PRESERVED trimmed string, not the lowercased
 # one. So a bare case difference like "Memory-Core" vs "memory-core" is never folded
@@ -6969,8 +7990,9 @@ _PLUGIN_ID_ALIASES = {
 
 
 def _normalize_plugin_id(raw: str) -> str:
-    """B-421: replicate OpenClaw's ``normalizePluginId`` (config-state-CtMlHVRM.js:17-23)
-    closely enough for allow/deny comparison -- trim, fold a KNOWN alias to its canonical
+    """B-421: replicate OpenClaw's ``normalizePluginId`` (config-state-CtMlHVRM.js:17-23 on
+    2026.9.x; config-state-wnnTmmuG.mjs:19-23 on 2026.10.2 lowercases a miss -- see the
+    comment above ``_PLUGIN_ID_ALIASES``) closely enough for allow/deny comparison -- trim, fold a KNOWN alias to its canonical
     id (the lookup itself is case-insensitive), otherwise return the trimmed value AS-IS.
     Deliberately NOT lowercased on a miss -- that matches the real fallback, not a
     stronger case-insensitive comparison the real normalizer does not perform."""
@@ -6985,19 +8007,22 @@ def _memory_default_owner_blocked(plugins: dict) -> bool:
 
     Two real functions gate this; either one blocking is enough to suppress disclosure:
 
-    * ``resolvePluginActivationDecisionShared`` (config-normalization-shared-w2iz0aeC.js
-      :70-100, general plugin activation) returns ``activated:false`` on
-      ``!config.enabled`` (:70, cause ``"plugins-disabled"``),
-      ``config.deny.includes(id)`` (:77, ``"blocked-by-denylist"``), or
-      ``entry?.enabled === false`` (:85, ``"disabled-in-config"``) -- each checked
-      BEFORE the slot-selection grant at :100, so any one of the three wins over slot
+    * ``resolvePluginActivationStateShared`` (config-activation-shared-DnNUje5Q.mjs
+      :117-182 on openclaw@2026.10.2, read 2026-10-12; named
+      ``resolvePluginActivationDecisionShared`` in config-normalization-shared-w2iz0aeC.js
+      :70-100 on 2026.9.x, general plugin activation) returns a disabled decision on
+      ``!config.enabled`` (:137, reason ``"plugins disabled"``),
+      ``config.deny.includes(policyId)`` (:139, ``"blocked by denylist"``), or
+      ``entry?.enabled === false`` (:141, ``"disabled in config"``) -- each checked
+      BEFORE the memory-slot grant at :145, so any one of the three wins over slot
       ownership, including the implicit default.
-    * ``resolveMemorySlotStartupPluginId`` (gateway-startup-plugin-ids-COmsQTCi.js
-      :603-614) -- the function that actually resolves which plugin id backs the memory
+    * ``resolveMemorySlotStartupPluginId`` (gateway-startup-plugin-config-4WJh5_BE.mjs
+      :630-640 on openclaw@2026.10.2; gateway-startup-plugin-ids-COmsQTCi.js:603-614 on
+      2026.9.x) -- the function that actually resolves which plugin id backs the memory
       slot at gateway startup when ``plugins.slots.memory`` is left unset -- has its OWN
       extra guard on the implicit-default fallback specifically: a non-empty
       ``plugins.allow`` that omits the default id means the implicit default is never
-      even selected as a candidate (:610) -- this is exactly ``fixtures/home_safe``'s
+      even selected as a candidate (:635) -- this is exactly ``fixtures/home_safe``'s
       shape (``plugins.allow: ["trentclaw"]``, no ``memory-core`` entry anywhere).
 
     Only the UNSET/blank ``plugins.slots.memory`` path is gated by this helper -- an
@@ -7011,9 +8036,11 @@ def _memory_default_owner_blocked(plugins: dict) -> bool:
 def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
     """The ``plugins.*`` setting that keeps *plugin_id* from activating, or None.
 
-    The four disabling legs of ``resolvePluginActivationDecisionShared`` (grounded for
+    The four disabling legs of ``resolvePluginActivationStateShared`` (grounded for
     B-421 above, re-read for B-831 against openclaw@2026.9.5
-    ``dist/config-normalization-shared-*.mjs:82-102``): ``plugins.enabled`` false,
+    ``dist/config-normalization-shared-*.mjs:82-102`` where it was still called
+    ``resolvePluginActivationDecisionShared``; re-read on openclaw@2026.10.2 in
+    ``config-activation-shared-DnNUje5Q.mjs:137-141``): ``plugins.enabled`` false,
     *plugin_id* in ``plugins.deny``, ``plugins.entries.<id>.enabled`` false, and a
     non-empty ``plugins.allow`` that omits it. Factored out of
     ``_memory_default_owner_blocked`` unchanged (same order) so both callers share one
@@ -7021,13 +8048,13 @@ def _plugin_activation_blocked(plugins: dict, plugin_id: str) -> "str | None":
 
     B-831 round 2: the comparison on all three of ``deny``/``entries``/``allow`` is now
     case-insensitive (trimmed + lowercased), matching the real
-    ``normalizePluginPolicyId`` (``plugin-policy-id-C9JZrwYv.mjs:9-11``) that
-    ``resolvePluginActivationDecisionShared`` actually compares *plugin_id* against -
+    ``normalizePluginPolicyId`` (``plugin-policy-id-1GfPFu0U.mjs:10-12``, 2026.10.2) that
+    ``resolvePluginActivationStateShared`` actually compares *plugin_id* against -
     verbatim: "Canonicalizes a plugin id for comparison against ``plugins.allow``,
     ``plugins.deny``, and ``plugins.entries``, which are lowercase-normalized when config
     is normalized." This is deliberately a PLAIN case fold, not
     ``_normalize_plugin_id``'s alias table (``google-gemini-cli`` -> ``google``,
-    ``config-state-BxYVV2MR.mjs:19-22``'s ``normalizePluginId``) -- that is a different
+    ``config-state-wnnTmmuG.mjs:19-23``'s ``normalizePluginId``, 2026.10.2) -- that is a different
     function for a different comparison (the B342 allow/deny CONTRADICTION check), and
     replicating its alias table here would be fabricating a codex/memory-core alias that
     does not exist. A case-only variant of a NON-alias id (``Memory-Core`` vs
@@ -7087,10 +8114,14 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
 
     B-401 - the ``memory`` slot has the SAME "unset is not the safe state" defect as
     B341, grounded independently against the normalization layer (not just the schema):
-    ``config-normalization-shared-w2iz0aeC.js:314-323`` -
-    ``memory: memorySlot === void 0 ? defaultSlotIdForKey("memory") : memorySlot`` -
+    ``config-normalization-shared-w2iz0aeC.js:314-323`` on 2026.9.x -
+    ``memory: memorySlot === void 0 ? defaultSlotIdForKey("memory") : memorySlot`` (on
+    openclaw@2026.10.2, read 2026-10-12, the same default is applied by
+    ``resolveSlotSelection``, slots-DarSawuQ.mjs:44-49, called from
+    ``normalizePluginsConfigWithResolverCore``, config-activation-shared-DnNUje5Q.mjs:80) -
     where ``defaultSlotIdForKey("memory")`` resolves to the literal bundled plugin id
-    ``"memory-core"`` (``DEFAULT_SLOT_BY_KEY``, slots-kpL659LX.js:6-8; the plugin itself
+    ``"memory-core"`` (``DEFAULT_SLOT_BY_KEY``, slots-kpL659LX.js:6-8 on 2026.9.x,
+    slots-DarSawuQ.mjs:8-11 on 2026.10.2; the plugin itself
     ships from ``src/plugin-sdk/memory-core-bundled-runtime.ts``). ``memorySlot`` comes
     from ``normalizeSlotValue``, same file, which folds ANY non-string value - absent,
     JSON ``null``, or a non-``"none"`` empty/whitespace string - to ``undefined``. So an
@@ -7116,7 +8147,8 @@ def check_plugin_slots_and_deny(ctx: Context) -> Finding:
     means that default never actually takes effect (``plugins.enabled: false``,
     ``memory-core`` denied, its entry explicitly disabled, or a non-empty
     ``plugins.allow`` that omits it -- see ``_memory_default_owner_blocked`` above,
-    grounded against ``resolvePluginActivationDecisionShared`` and
+    grounded against ``resolvePluginActivationStateShared`` (formerly
+    ``resolvePluginActivationDecisionShared``) and
     ``resolveMemorySlotStartupPluginId`` in the installed dist). It fired WARN on this
     project's own ``fixtures/home_safe`` (``plugins.allow: ["trentclaw"]``) for exactly
     this reason. The implicit-default disclosure is now gated on all four conditions;
@@ -7492,23 +8524,26 @@ def _walk_hook_shell_refs(node, event_name: str | None, out: list[tuple[str, str
             out.append((event_name or "<unknown event>", node))
 
 
-def _codex_plugin_doc_cache_dirs(ctx: Context) -> list[Path]:
-    """agents/<agent>/agent/codex-home/.tmp/plugins/plugins/ dirs under ctx.home, if any."""
-    agents_root = ctx.home / "agents"
+def _codex_plugin_doc_cache_dirs(ctx: Context, unreadable: "list | None" = None) -> list[Path]:
+    """agents/<agent>/agent/codex-home/.tmp/plugins/plugins/ dirs under ctx.home, if any.
+
+    C-727: a directory on the way that cannot be read is appended to *unreadable* (when given)
+    as a home-relative path, instead of raising; the caller must not read it as "no cache".
+    """
+    note: list = unreadable if unreadable is not None else []
     out: list[Path] = []
-    if not agents_root.is_dir():
-        return out
-    try:
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
-    except OSError:
-        return out
-    for agent_dir in agent_dirs:
+    for agent_dir in _shared._agent_dirs_noting(ctx.home, note):
         cache_dir = agent_dir
         for part in _C015_CODEX_PLUGIN_MARKER:
             cache_dir = cache_dir / part
-        if cache_dir.is_dir():
+        if _shared._probe_noting(pathprobe.is_dir, cache_dir, ctx.home, note):
             out.append(cache_dir)
     return out
+
+
+_HOOKS_TOO_DEEP_FIX = (
+    " hooks.json in {} is nested too deeply for this scan to read in full; inspect it by hand."
+)
 
 
 def check_codex_plugin_hooks(ctx: Context) -> Finding:
@@ -7524,8 +8559,12 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
     WARN    - at least one hooks.json wires a shell script to an event.
     UNKNOWN - no codex-home doc-cache directory found, or no hooks.json within it.
     """
-    cache_dirs = _codex_plugin_doc_cache_dirs(ctx)
+    unreadable: list[str] = []
+    cache_dirs = _codex_plugin_doc_cache_dirs(ctx, unreadable)
     if not cache_dirs:
+        if unreadable:
+            return _shared._unreadable_dirs_finding(
+                "B151", "the Codex CLI plugin doc-cache", unreadable)
         return _finding(
             "B151",
             UNKNOWN,
@@ -7535,35 +8574,66 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
             "No action needed unless Codex CLI connectors are adopted later.",
         )
 
-    import json as _json
 
     any_hooks_file = False
     shell_ev: list[str] = []
     clean_connectors: list[str] = []
+    too_deep: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
 
     for cache_dir in cache_dirs:
         try:
-            connector_dirs = sorted(p for p in cache_dir.iterdir() if p.is_dir() and not p.is_symlink())
+            connector_dirs = sorted(p for p in cache_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
         except OSError:
+            unreadable.append(_detail_path(cache_dir, ctx.home))
             continue
         for connector_dir in connector_dirs:
             hooks_path = connector_dir / "hooks.json"
-            if not hooks_path.is_file() or hooks_path.is_symlink():
+            shown_path = _detail_path(hooks_path, ctx.home)
+            kind = _shared._probe_kind(hooks_path, ctx.home, unreadable)
+            if kind == "absent":
+                continue
+            if kind != "file":
+                # C-731: a link / directory / pipe is present but not read - never "no hooks".
+                not_understood.append((shown_path, _shared._NOT_UNDERSTOOD_REASONS[kind]))
                 continue
             any_hooks_file = True
             try:
-                data = _json.loads(hooks_path.read_text(encoding="utf-8", errors="replace"))
-            except (OSError, ValueError):
+                shallow = loads_shallow(_shared._read_regular_text(hooks_path))
+            except OSError as exc:
+                reason = _shared._read_failure_reason(exc)
+                if reason:
+                    not_understood.append((shown_path, reason))
+                else:
+                    unreadable.append(shown_path)  # C-727: not a clean skip
+                continue
+            except ValueError:
+                # C-731: empty / binary / truncated / not JSON - the file was never understood.
+                not_understood.append((shown_path, "could not be parsed as JSON"))
                 continue
             refs: list[tuple[str, str]] = []
-            _walk_hook_shell_refs(data, None, refs)
+            _walk_hook_shell_refs(shallow.value, None, refs)
+            if not isinstance(shallow.value, dict) and not refs:
+                # C-731: a list / string / number with no wiring the walk can see is a file
+                # that was not understood, not a clean one. Wiring it DOES see (the walk is
+                # shape-tolerant on purpose) is reported below as before.
+                not_understood.append((shown_path, "is not a JSON object"))
+                continue
+            if shallow.elided:
+                too_deep.append(connector_dir.name)  # C-664: partly read - never "clean"
             if refs:
                 for event_name, script in refs[:3]:
                     shell_ev.append(
                         f"{connector_dir.name}/hooks.json: {event_name} -> {script}"
                     )
-            else:
+            elif not shallow.elided:
                 clean_connectors.append(connector_dir.name)
+
+    # C-727: a WARN found in a readable connector stands; otherwise an unreadable part of the
+    # cache means neither "clean" nor "no hooks.json" can be said.
+    if (unreadable or not_understood) and not shell_ev:
+        return _shared._not_understood_finding(
+            "B151", "the Codex CLI plugin doc-cache", not_understood, unreadable)
 
     if not any_hooks_file:
         return _finding(
@@ -7585,8 +8655,20 @@ def check_codex_plugin_hooks(ctx: Context) -> Finding:
             "surface disclosed for awareness \u2014 not proof of malice; many legitimate "
             "connectors do this.",
             "Review the referenced script(s) before trusting the connector, and confirm "
-            "they only run with your consent (e.g. as part of an explicit workflow).",
+            "they only run with your consent (e.g. as part of an explicit workflow)."
+            + (_HOOKS_TOO_DEEP_FIX.format(", ".join(too_deep[:6])) if too_deep else ""),
             evidence=shell_ev[:6],
+        )
+
+    if too_deep:
+        return _finding(
+            "B151",
+            UNKNOWN,
+            "Codex connector hooks.json file(s) nested too deeply to be read in full "
+            f"({', '.join(too_deep[:6])}) \u2014 no shell-hook wiring was found in the part "
+            "that was read, and the rest was not examined.",
+            _HOOKS_TOO_DEEP_FIX.format(", ".join(too_deep[:6])).strip(),
+            evidence=too_deep[:6],
         )
 
     return _finding(
@@ -7616,33 +8698,99 @@ _NPM_PROJECTS_REL = ("npm", "projects")
 _AGENT_PLUGINS_REL = ("agent", "plugins")
 
 
-def _npm_projects_plugin_ids(ctx: Context) -> dict[str, Path]:
+def _manifest_unread_kind(fp: Path) -> str | None:
+    """C-665: why the manifest at ``fp`` is never opened, else ``None``.
+
+    Only a NAMED PIPE: opening one that has no writer blocks forever, and no scan budget can
+    fire inside a blocked ``open()``. A manifest is the one place a symlink is followed (the
+    locator accepts a link to a regular file), so a link that resolves to a pipe is a pipe;
+    ``lstat`` alone cannot see that. ``lstat`` and ``stat`` classify the path and do not open
+    the file. Everything else reports ``None`` and keeps the handling it always had: a device
+    is opened and read through a ceiling (``_read_plugin_manifest_text``), so ``/dev/null`` is
+    an empty manifest and ``/dev/zero`` ends as an oversized one; a directory, a dangling
+    link, a link to a directory, a regular file, a socket and an absent path read, or fail at
+    once.
+    """
+    try:
+        mode = os.lstat(fp).st_mode
+        if _stat.S_ISFIFO(mode):
+            return "named pipe"
+        if _stat.S_ISLNK(mode) and _stat.S_ISFIFO(os.stat(fp).st_mode):
+            return "symlink to a named pipe"
+    except OSError:
+        return None
+    return None
+
+
+def _wrapper_unread_manifest_kind(wrapper_dir: Path) -> str | None:
+    """C-665: the kind of a named-pipe manifest sitting where the wrapper locator looks.
+
+    Same three places as ``_locate_plugin_root_or_reason`` (the wrapper itself,
+    ``node_modules/<pkg>`` and ``node_modules/@<scope>/<pkg>``), and nothing else: this
+    names the one reason a wrapper's manifest went unread, it is not a tree walk, so a pipe
+    under ``.git`` or ``__pycache__`` never reaches it.
+    """
+    cands = [wrapper_dir / _PLUGIN_MANIFEST]
+    nm = wrapper_dir / "node_modules"
+    try:
+        cands += sorted(nm.glob("*/" + _PLUGIN_MANIFEST))
+        cands += sorted(nm.glob("@*/*/" + _PLUGIN_MANIFEST))
+    except OSError:
+        pass
+    for fp in cands:
+        kind = _manifest_unread_kind(fp)
+        if kind:
+            return kind
+    return None
+
+
+def _npm_projects_plugin_ids(
+    ctx: Context, unread: "list[tuple[str, str]] | None" = None,
+    unreadable: "list | None" = None,
+) -> dict[str, Path]:
     """{plugin-id: wrapper-dir} for each ~/.openclaw/npm/projects/<wrapper>/ whose
-    manifest (found via the shared _locate_plugin_root helper) declares an id."""
+    manifest (found via the shared _locate_plugin_root helper) declares an id.
+
+    C-665: a wrapper whose manifest is a named pipe (or a link to one) is never opened (the
+    read refuses it; a TOP-LEVEL pipe is not even a located manifest) and, when ``unread`` is
+    given, is appended to it as ``(wrapper name, kind)``. The manifest read is bounded, so a
+    link to an endless device ends as an unreadable manifest. Both fall back to the wrapper's
+    own directory name below, so the caller must not read that fallback as a verified plugin
+    id.
+    """
     out: dict[str, Path] = {}
+    note: list = unreadable if unreadable is not None else []  # C-727
     npm_projects = ctx.home
     for part in _NPM_PROJECTS_REL:
         npm_projects = npm_projects / part
-    if not npm_projects.is_dir():
+    if not _shared._probe_noting(pathprobe.is_dir, npm_projects, ctx.home, note):
         return out
     try:
-        wrapper_dirs = sorted(p for p in npm_projects.iterdir() if p.is_dir() and not p.is_symlink())
+        wrapper_dirs = sorted(p for p in npm_projects.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
     except OSError:
+        note.append(_detail_path(npm_projects, ctx.home))
         return out
-    import json as _json
 
     for wrapper_dir in wrapper_dirs:
         root = _locate_plugin_root(wrapper_dir)
         pid: str | None = None
         if root is not None:
-            try:
-                manifest = _json.loads(
-                    (root / _PLUGIN_MANIFEST).read_text(encoding="utf-8", errors="replace")
-                )
-            except (OSError, ValueError):
-                manifest = None
+            kind = _manifest_unread_kind(root / _PLUGIN_MANIFEST)
+            manifest = None
+            if kind is None:
+                try:
+                    # C-664: only `id` is read, and it sits at the first level, so a padded
+                    # manifest still yields its id exactly as unpadded and an elided subtree
+                    # cannot change the answer - no disclosure needed (nothing here vets the file).
+                    manifest = loads_shallow(_read_plugin_manifest_text(root / _PLUGIN_MANIFEST)).value
+                except (OSError, ValueError):
+                    manifest = None
             if isinstance(manifest, dict) and isinstance(manifest.get("id"), str) and manifest["id"]:
                 pid = manifest["id"]
+        else:
+            kind = _wrapper_unread_manifest_kind(wrapper_dir)
+        if kind and unread is not None:
+            unread.append((wrapper_dir.name, kind))
         if pid is None:
             # No manifest / unresolvable id - fall back to the wrapper dir name itself so
             # the on-disk presence is still surfaced (never silently dropped, F-061 spirit).
@@ -7651,25 +8799,23 @@ def _npm_projects_plugin_ids(ctx: Context) -> dict[str, Path]:
     return out
 
 
-def _agent_plugins_ids(ctx: Context) -> dict[str, Path]:
-    """{plugin-id: plugin-dir} for each agents/<agent>/agent/plugins/<name>/ directory."""
+def _agent_plugins_ids(ctx: Context, unreadable: "list | None" = None) -> dict[str, Path]:
+    """{plugin-id: plugin-dir} for each agents/<agent>/agent/plugins/<name>/ directory.
+
+    C-727: a directory that cannot be read is appended to *unreadable* (when given).
+    """
     out: dict[str, Path] = {}
-    agents_root = ctx.home / "agents"
-    if not agents_root.is_dir():
-        return out
-    try:
-        agent_dirs = sorted(p for p in agents_root.iterdir() if p.is_dir() and not p.is_symlink())
-    except OSError:
-        return out
-    for agent_dir in agent_dirs:
+    note: list = unreadable if unreadable is not None else []
+    for agent_dir in _shared._agent_dirs_noting(ctx.home, note):
         plugins_dir = agent_dir
         for part in _AGENT_PLUGINS_REL:
             plugins_dir = plugins_dir / part
-        if not plugins_dir.is_dir():
+        if not _shared._probe_noting(pathprobe.is_dir, plugins_dir, ctx.home, note):
             continue
         try:
-            plugin_dirs = sorted(p for p in plugins_dir.iterdir() if p.is_dir() and not p.is_symlink())
+            plugin_dirs = sorted(p for p in plugins_dir.iterdir() if pathprobe.is_dir(p) and not pathprobe.is_symlink(p))
         except OSError:
+            note.append(_detail_path(plugins_dir, ctx.home))
             continue
         for plugin_dir in plugin_dirs:
             out.setdefault(plugin_dir.name, plugin_dir)
@@ -7688,12 +8834,21 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     PASS    - on-disk plugin cache directories found, all match a declared entry.
     WARN    - at least one on-disk plugin cache directory has no matching
               plugins.entries key.
-    UNKNOWN - no on-disk plugin cache directory found at either known location.
+    UNKNOWN - no on-disk plugin cache directory found at either known location; OR
+              (C-665) every cache matches a declared entry, but a wrapper's plugin
+              manifest is a named pipe (or a link to one) and was not read, so that
+              cache is keyed by directory name rather than its declared
+              id (a WARN in the same situation says so in its ``fix``).
     """
-    npm_ids = _npm_projects_plugin_ids(ctx)
-    agent_ids = _agent_plugins_ids(ctx)
+    unread: list[tuple[str, str]] = []
+    unreadable: list[str] = []
+    npm_ids = _npm_projects_plugin_ids(ctx, unread, unreadable)
+    agent_ids = _agent_plugins_ids(ctx, unreadable)
 
     if not npm_ids and not agent_ids:
+        if unreadable:
+            return _shared._unreadable_dirs_finding(
+                "B152", "the on-disk plugin caches", unreadable)
         return _finding(
             "B152",
             UNKNOWN,
@@ -7708,6 +8863,18 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
     on_disk.update(agent_ids)
 
     orphaned = sorted(pid for pid in on_disk if pid not in declared)
+
+    # C-665: a manifest that is a pipe was never opened, so its wrapper is keyed by
+    # directory name, not by the id it declares. Said in `fix` (the `detail` of the existing
+    # WARN is fingerprinted), and the PASS below cannot stand over an id nobody read.
+    unread_txt = ", ".join(f"{n!r} ({k})" for n, k in unread[:6])
+    unread_txt += f" (+{len(unread) - 6} more)" if len(unread) > 6 else ""
+    unread_fix = (
+        f" The plugin manifest of {unread_txt} was not read (this check does not open a "
+        "named pipe), so that cache is listed by directory name, not by its "
+        "declared id; replace it with a regular file and re-run."
+        if unread else ""
+    )
 
     if orphaned:
         # C-456 FU (B-819): on_disk[pid] is always ctx.home-relative (built
@@ -7725,8 +8892,25 @@ def check_orphaned_plugin_caches(ctx: Context) -> Finding:
             "under a different key \u2014 not proof of malice.",
             "Review each undeclared plugin cache: if it is stale, remove it; if it is "
             "an intentional plugin, ensure it is declared under plugins.entries so it "
-            "is covered by plugin-permission and supply-chain checks.",
+            "is covered by plugin-permission and supply-chain checks." + unread_fix,
             evidence=ev,
+        )
+
+    # C-727: an orphaned cache found in what was readable WARNed above; past this point an
+    # unreadable plugin-cache directory means neither "all declared" nor a pipe-only UNKNOWN
+    # can be the whole story.
+    if unreadable:
+        return _shared._unreadable_dirs_finding(
+            "B152", "the on-disk plugin caches", unreadable)
+
+    if unread:
+        return _finding(
+            "B152",
+            UNKNOWN,
+            "Plugin manifest(s) not read, so the on-disk cache id(s) could not be matched "
+            f"against plugins.entries: {unread_txt}.",
+            unread_fix.strip(),
+            evidence=sorted(on_disk)[:6],
         )
 
     return _finding(
@@ -7792,7 +8976,6 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
 
     from ..skilldiscovery import config_plugin_load_paths
 
-    import json as _json
 
     load_paths = config_plugin_load_paths(ctx.home, cfg)
     declared = set(_plugins(cfg))
@@ -7800,13 +8983,16 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
     undeclared: list[str] = []
     checked_any = False
     for load_path in load_paths:
-        if not load_path.is_dir():
+        if not pathprobe.is_dir(load_path):
             continue
         manifest_file = load_path / _PLUGIN_MANIFEST
-        if not manifest_file.is_file():
+        if not pathprobe.is_file(manifest_file):
             continue
         try:
-            manifest = _json.loads(manifest_file.read_text(encoding="utf-8", errors="replace"))
+            # C-664: as in `_npm_projects_plugin_ids`, only the first-level `id` is read; a
+            # padded manifest still yields its id, so an elided subtree changes nothing and
+            # this id comparison needs no disclosure.
+            manifest = loads_shallow(_read_plugin_manifest_text(manifest_file)).value
         except (OSError, ValueError):
             continue
         if not isinstance(manifest, dict):
@@ -7855,6 +9041,23 @@ def check_undeclared_plugin_load_path(ctx: Context) -> Finding:
         "plugins.load.paths plugin(s) all have a matching plugins.entries record.",
         "Keep plugins.entries in sync with plugins.load.paths as load paths change.",
     )
+
+
+_PLUGIN_ELIDED_FIX = (
+    " Note: part of the persisted plugin data nests deeper than the audit reads, so "
+    "content below that depth was never examined. Remove the deeply nested padding "
+    "from ~/.openclaw/state/openclaw.sqlite so all of it can be read, then re-run the "
+    "audit."
+)
+
+
+def _plugin_elided_note(finding: Finding, elided: bool) -> Finding:
+    """C-680: a FAIL/WARN found in the part of the plugin data that WAS read stands; when
+    the document was also cut short by the depth limit, say so in the finding's ``fix`` (never
+    ``detail``, which a fingerprint hashes)."""
+    if elided:
+        finding.fix += _PLUGIN_ELIDED_FIX
+    return finding
 
 
 # ---------- B177 (B-240): OpenClaw's own persisted per-plugin ClawHub trust verdict ----------
@@ -7991,17 +9194,33 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
     ``inspectShippedPluginInstallConfigRecords(...).status === "valid"``, never on
     ``--fix``/``--yes``/``shouldRepair`` - and it copies each config-authored record
     into the persisted install index for any plugin id NOT ALREADY present there
-    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). This importer is not
-    reachable from ``openclaw doctor`` alone: at least one other caller invokes it too -
-    ``automatic-startup-config-repair-<hash>.mjs`` (its own gateway-startup config-repair
-    path) also calls ``importShippedPluginInstallConfigForDoctor`` unconditionally under
-    the same status-gate, so the route runs on at least every ``openclaw doctor`` pass
-    and every startup config-repair pass, and possibly other unaudited callers of the
-    same exported symbol. So the reachable route for a FAIL-qualifying "blocked" record is the retired
+    (``if (!persisted || !Object.hasOwn(persisted, pluginId))``). Through 2026.9.6 this
+    importer was not reachable from ``openclaw doctor`` alone: at least one other caller
+    invoked it too - ``automatic-startup-config-repair-<hash>.mjs`` (its own
+    gateway-startup config-repair path) also called ``importShippedPluginInstallConfigForDoctor``
+    unconditionally under the same status-gate, so the route ran on at least every
+    ``openclaw doctor`` pass and every startup config-repair pass, and possibly other
+    unaudited callers of the same exported symbol. C-645 (2026-09-30): 2026.9.7 REMOVED the
+    startup pass (``resolveStartupConfigSnapshot`` is declared nowhere in that dist; the
+    file is now ``automatic-config-repair-<hash>.mjs`` and its
+    ``importAutomaticConfigRepairInstallRecords`` is called from Doctor's own preflight,
+    ``doctor-config-flow-<hash>.mjs``), so on 2026.9.7 and later the route is Doctor's,
+    plus whatever unaudited callers remain (the update-activation recovery bundle
+    ``package-update-activation-recovery.mjs`` also names the symbol). The FAIL's ``fix``
+    text below is dated to "OpenClaw 2026.9.5" and stays true of that build. So the
+    reachable route for a FAIL-qualifying "blocked" record is the retired
     ``plugins.installs`` config key surviving into a ``doctor`` run, not a live
     ClawHub verdict - the FAIL is still correct (it is still OpenClaw's own
     persisted record, per the ladder above), just reached by a different door than
     originally assumed.
+
+    C-686: that route is closed on OpenClaw 2026.10.1 and later. The two importer symbols
+    named above occur in no bundle of the installed 2026.10.2 dist, and ``plugins.installs``
+    is on the vendor's retired list (``findRetiredConfigUpgradeRequirement``, EXECUTED), so
+    Doctor refuses a config that holds it instead of importing it. The verdict is
+    unaffected (it reads the persisted record); the FAIL ``fix`` says, on those builds, that
+    the route into a "blocked" record is not established. Whether another writer of such a
+    disposition exists on 2026.10.x was not established.
 
     (2b) Once written, does a "blocked" (or any) verdict get rewritten cleanly on
     the next re-scan, or can stale sibling fields (``clawhubTrustModerationState``,
@@ -8155,26 +9374,41 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             len(warn_ev) - len(warn_ev[: max(0, 6 - len(blocked_ev[:6]))])
         )
         extra = f" (+{extra_n} more)" if extra_n > 0 else ""
-        return _finding(
+        return _plugin_elided_note(_finding(
             "B177",
             FAIL,
             "OpenClaw's own ClawHub trust verdict marks installed plugin(s) as "
             f"'blocked': {'; '.join(ev)}{extra}.",
             "Uninstall or replace the blocked plugin(s) immediately \u2014 this is not a "
             "heuristic, it is a 'blocked' verdict persisted in OpenClaw's own "
-            "install-record store. On OpenClaw 2026.9.5, no live ClawHub scan can write "
-            "this value; the only known route into it is a retired "
-            "plugins.installs.<id>.clawhubTrustDisposition config record imported by a "
-            "doctor or startup config-repair pass, so also check openclaw.json (and its "
-            "history) for that record. Do not override or acknowledge the verdict "
+            "install-record store. "
+            + (
+                # C-686: the importer this sentence names is gone from the 2026.10.2 dist
+                # (`importShippedPluginInstallConfigForDoctor` and
+                # `importAutomaticConfigRepairInstallRecords` occur in no bundle) and
+                # `plugins.installs` is on the vendor's retired list, so Doctor refuses a
+                # config that holds it. Whether another writer exists was not established.
+                "On OpenClaw 2026.10.1 and later the config-record import that was the only "
+                "known route into this value on 2026.9.5 no longer exists, and a "
+                "plugins.installs key in openclaw.json now makes Doctor refuse the config, "
+                "so how this record got here is not established: check openclaw.json (and "
+                "its history) and the plugin's install history. "
+                if _doctor_refuses_retired_formats(ctx) else
+                "On OpenClaw 2026.9.5, no live ClawHub scan can write this value; the only "
+                "known route into it is a retired "
+                "plugins.installs.<id>.clawhubTrustDisposition config record imported by a "
+                "doctor or startup config-repair pass, so also check openclaw.json (and its "
+                "history) for that record. "
+            )
+            + "Do not override or acknowledge the verdict "
             "without independently re-verifying provenance.",
             evidence=ev,
-        )
+        ), ctx.plugin_trust_elided)
 
     if warn_ev:
         ev = warn_ev[:6]
         extra = f" (+{len(warn_ev) - 6} more)" if len(warn_ev) > 6 else ""
-        return _finding(
+        return _plugin_elided_note(_finding(
             "B177",
             WARN,
             "OpenClaw's own ClawHub trust verdict flags installed plugin(s) as "
@@ -8184,7 +9418,7 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             "verdict is not proof of malice, but it means ClawHub has not (yet) "
             "cleared the install.",
             evidence=ev,
-        )
+        ), ctx.plugin_trust_elided)
 
     detail = (
         "No installed plugin in the persisted plugin index carries an adverse "
@@ -8239,6 +9473,21 @@ def check_plugin_clawhub_trust(ctx: Context) -> Finding:
             "path, the scan has not run yet, or no install record is on file for "
             "them) \u2014 this reflects absence of a bad verdict for those, not a positive "
             "clean scan, and says nothing about their trust status."
+        )
+    if ctx.plugin_trust_elided:
+        # C-680: part of the trust document nests deeper than the audit reads. A verdict
+        # found in what WAS read stands (above); only the clean answer is unsound, because
+        # padding of unbounded depth can hold anything the reader never saw.
+        return _finding(
+            "B177",
+            UNKNOWN,
+            "No adverse ClawHub trust verdict was found in the part of OpenClaw's persisted "
+            "plugin index that the audit reads \u2014 but part of the index nests deeper than "
+            "the audit reads, so that content was never examined. A clean bill of health "
+            "cannot be given over it.",
+            "Remove the deeply nested padding from ~/.openclaw/state/openclaw.sqlite so the "
+            "whole plugin index can be read, then re-run the audit.",
+            engine_degraded=True,
         )
     return _finding(
         "B177",
@@ -8330,7 +9579,7 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
     if hits:
         ev = hits[:6]
         extra = f" (+{len(hits) - 6} more)" if len(hits) > 6 else ""
-        return _finding(
+        return _plugin_elided_note(_finding(
             "B187",
             WARN,
             "Non-bundled installed plugin(s) declare the agentToolResultMiddleware "
@@ -8342,8 +9591,22 @@ def check_plugin_tool_result_middleware(ctx: Context) -> Finding:
             "with this level of interception, especially for a plugin whose FAIL/PASS "
             "output you rely on elsewhere.",
             evidence=ev,
-        )
+        ), ctx.plugin_index_elided)
 
+    if ctx.plugin_index_elided:
+        # C-680: same contract as B177 above - a WARN found in what was read stands, a clean
+        # PASS over a depth-limited read does not.
+        return _finding(
+            "B187",
+            UNKNOWN,
+            "No non-bundled installed plugin in the part of the persisted plugin index "
+            "that the audit reads declares the agentToolResultMiddleware contract \u2014 but "
+            "part of the index nests deeper than the audit reads, so that content was never "
+            "examined. A clean bill of health cannot be given over it.",
+            "Remove the deeply nested padding from ~/.openclaw/state/openclaw.sqlite so the "
+            "whole plugin index can be read, then re-run the audit.",
+            engine_degraded=True,
+        )
     return _finding(
         "B187",
         PASS,

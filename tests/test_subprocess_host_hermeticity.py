@@ -106,6 +106,21 @@ _UNTRACEABLE_ARGV: dict[str, str] = {
         "`python -m clawseccheck[.cli]` spawn no matter what the opaque `staged` spread "
         "contains. Hand-verified 2026-09-21 (deptree guard) / re-confirmed 2026-09-23 "
         "(this guard) by reading both `_replay_staged_tree` and `_staged_paths`.",
+    "tests/test_c725_watch_rescan.py:"
+    "test_the_child_launch_ignores_a_decoy_package_in_the_working_directory":
+        "The argv is `[sys.executable, *entry, \"--version\"]` with `entry` from "
+        "`watch._child_launch()`, which returns either `[\"-m\", \"clawseccheck\"]` or "
+        "`[<the bundled audit.py shim>]` -- both start this CLI, and `--version` is "
+        "argparse's own version action, which prints and exits inside `parse_args()` "
+        "before any audit runs (the same reason `--version` is in _SAFE_MODE_FLAGS). "
+        "Hand-verified 2026-10-14 by reading `_child_launch` and the test.",
+    "tests/test_c726_cron_recipe_commands.py:"
+    "test_every_emitted_command_runs_against_copies_and_stays_in_the_given_store":
+        "The commands are the ones the cron recipe emits, parsed at run time, so this "
+        "guard cannot see them; the test appends the flags itself: "
+        "`argvs = [_argv(c) + [\"--no-deptree\", \"--no-host\"] for c in cmds]`, and "
+        "every spawn in it runs one of those `argvs`. Hand-verified 2026-10-14 by "
+        "reading the test.",
 }
 
 

@@ -12,13 +12,15 @@ current-value preference, not a tamper-evident audit trail, so (unlike
 ``history.jsonl`` / ``ledger.py``'s ``record_run``) writes are a plain overwrite: no
 ``journal_lock``, no hash chain, no ``_schema`` stamp.
 
-Local-only. No network. Pure stdlib. Python 3.9+.
+Local-only. No network. Pure stdlib. Python 3.10+.
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+from . import pathprobe
+from .configloader import loads_bounded
 from .safeio import secure_dir, secure_write_text
 
 DEFAULT_PRESCAN = "~/.clawseccheck/prescan.json"
@@ -42,7 +44,7 @@ def _path(home: str | None = None) -> Path:
     """
     if home is not None:
         return Path(home) / ".clawseccheck" / "prescan.json"
-    return Path(DEFAULT_PRESCAN).expanduser()
+    return pathprobe.expand_user(DEFAULT_PRESCAN)
 
 
 def read_last_mode(home: str | None = None) -> str:
@@ -60,7 +62,7 @@ def read_last_mode(home: str | None = None) -> str:
     """
     p = _path(home)
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = loads_bounded(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return DEFAULT_MODE
     if not isinstance(data, dict):

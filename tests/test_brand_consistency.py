@@ -720,6 +720,25 @@ def _visible_text(html: str) -> str:
     return _HTML_TAG_RE.sub(" ", _HTML_DROP_RE.sub(" ", html))
 
 
+_FINDING_ID_SPAN_RE = _re.compile(r'<span class="finding-id">[^<]*</span>')
+
+
+def _without_finding_ids(html: str) -> str:
+    """The HTML page with its per-finding id element removed.
+
+    Not a second exception to "never internal codes" - the same one, in its HTML form.
+    The text report's by-subject inventory index is a roster of lines that pair each
+    check id with its title; on the HTML page that roster and the finding cards are one
+    and the same list (the cards sit under their subject), so the id rides the card's
+    title line in a single quiet element. Without it the page gave the reader no way to
+    name a finding for `--explain`, `.clawseccheckignore` or an issue. Exempting exactly
+    that element, and nothing else on the page, keeps the allowance as narrow as the text
+    one: an id anywhere else in the HTML prose still fails the guard.
+    `tests/test_c717_html_check_ids_and_version.py` pins that the element is present.
+    """
+    return _FINDING_ID_SPAN_RE.sub("", html)
+
+
 def _audit_fixture():
     """A real audit of the vulnerable fixture home — read-only, offline, no network.
 
@@ -781,8 +800,9 @@ def _owner_facing_surfaces(ctx, findings, score) -> dict:
         "render_dashboard [ungraded]": render_dashboard(findings, ungraded_score),
         "render_card": render_card(score, findings),
         "render_monitor": render_monitor([("HIGH", "a check changed")], score),
-        "render_html": _visible_text(render_html(findings, score)),
-        "render_html [ungraded]": _visible_text(render_html(findings, ungraded_score)),
+        "render_html": _visible_text(_without_finding_ids(render_html(findings, score))),
+        "render_html [ungraded]": _visible_text(
+            _without_finding_ids(render_html(findings, ungraded_score))),
         # A standalone CLI surface in its own right (`--next`, and appended to the
         # default run), so the voice contract has to hold over it too.
         "render_next_actions": render_next_actions(suggest_actions(findings, score)),

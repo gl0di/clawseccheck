@@ -39,6 +39,7 @@ from clawseccheck.checks import check_installed_skills
 from clawseccheck.collector import (
     LIMIT_DOMAIN_CRON,
     LIMIT_DOMAIN_SKILL,
+    LIMIT_DOMAIN_STATE_DB,
     LIMIT_DOMAINS,
     Context,
     LimitHit,
@@ -206,6 +207,7 @@ def test_domain_constants_are_registered():
     """A new domain must be added to LIMIT_DOMAINS so the roster stays discoverable."""
     assert LIMIT_DOMAIN_SKILL in LIMIT_DOMAINS
     assert LIMIT_DOMAIN_CRON in LIMIT_DOMAINS
+    assert LIMIT_DOMAIN_STATE_DB in LIMIT_DOMAINS
     assert len(set(LIMIT_DOMAINS)) == len(LIMIT_DOMAINS)
 
 

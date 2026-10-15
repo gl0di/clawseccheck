@@ -533,3 +533,332 @@ def test_unreadable_target_does_not_raise(tmp_path):
     home = tmp_path / "h"
     home.mkdir()
     assert _other_can_reach_write(home, home / "gone" / "missing") is False
+
+
+# --------------------------------------------------------------------------------------
+# C-629: (1) the retained-copy walk is bounded, and a walk cut by that bound must not read as
+# a "verified" PASS; (2) retained copies are inspected even when the live database is absent.
+# --------------------------------------------------------------------------------------
+
+_NO_DB_DETAIL = (
+    "No state database found at ~/.openclaw/state/openclaw.sqlite \u2014 cannot assess "
+    "its at-rest permissions."
+)
+
+
+def _fill(directory: Path, n: int, *, mode: int = 0o600, prefix: str = "f",
+          suffix: str = ".md") -> None:
+    """Drop *n* tiny regular files into *directory* (created if missing) at *mode*."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        f = directory / f"{prefix}{i:04d}{suffix}"
+        f.write_bytes(b"x")
+        os.chmod(f, mode)
+
+
+def _open_dir(path: Path, mode: int = 0o755) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, mode)
+
+
+def _cut_home(tmp_path, *, n_backups=205, backups_mode=0o755, n_state=0, state_mode=0o755,
+              file_mode=0o600):
+    """A reachable-shaped home (home 0755) with a tight live DB and filler trees sized to sit
+    on either side of the 200-file bound. Every filler file is tight (0600), so any non-PASS
+    verdict comes from the CUT, never from an exposed file."""
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=state_mode, db_mode=0o600)
+    if n_backups:
+        _fill(ctx.home / "backups", n_backups, mode=file_mode)
+        _open_dir(ctx.home / "backups", backups_mode)
+    if n_state:
+        _fill(ctx.home / "state" / "openclaw-task-delivery-recovery-x", n_state,
+              mode=file_mode, prefix="openclaw.sqlite.", suffix="")
+        os.chmod(ctx.home / "state" / "openclaw-task-delivery-recovery-x", 0o755)
+        os.chmod(ctx.home / "state", state_mode)
+    return ctx
+
+
+def test_c629_cap_constant_is_the_documented_200():
+    import clawseccheck.checks._egress as _egress
+    assert _egress._B188_COPY_CAP == 200
+
+
+def test_c629_collector_reports_truncation_only_past_the_cap(tmp_path):
+    """Boundary: exactly ``cap`` qualifying files is a COMPLETE walk; one more is a cut one.
+    Both collectors, and a tree of non-qualifying entries never counts toward the cap."""
+    import clawseccheck.checks._egress as _egress
+
+    home = tmp_path / "h"
+    (home / "backups").mkdir(parents=True)
+    state = home / "state"
+    state.mkdir()
+
+    _fill(home / "backups", 3)
+    files, failed, truncated = _egress._b188_collect_backups(home, cap=3)
+    assert (len(files), failed, truncated) == (3, False, False)
+    _fill(home / "backups", 1, prefix="g")
+    files, failed, truncated = _egress._b188_collect_backups(home, cap=3)
+    assert (len(files), failed, truncated) == (3, False, True)
+
+    _fill(state / "rec", 3, prefix="c.sqlite.", suffix="")
+    for name in _egress._B188_DB_NAMES:  # the primary trio never counts toward the cap
+        (state / name).write_bytes(b"x")
+    files, failed, truncated = _egress._b188_collect_state_copies(
+        state, _egress._B188_DB_NAMES, cap=3
+    )
+    assert (len(files), failed, truncated) == (3, False, False)
+    _fill(state / "rec", 1, prefix="d.sqlite.", suffix="")
+    files, failed, truncated = _egress._b188_collect_state_copies(
+        state, _egress._B188_DB_NAMES, cap=3
+    )
+    assert (len(files), failed, truncated) == (3, False, True)
+
+
+def test_c629_non_qualifying_entries_never_count_toward_the_cap(tmp_path):
+    """Symlinks and directories are not retained copies: 250 of them must not flag a cut."""
+    import clawseccheck.checks._egress as _egress
+
+    home = tmp_path / "h"
+    backups = home / "backups"
+    backups.mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"x")
+    for i in range(250):
+        (backups / f"link{i}").symlink_to(target)
+        (backups / f"dir{i}").mkdir()
+    files, failed, truncated = _egress._b188_collect_backups(home, cap=200)
+    assert (files, failed, truncated) == ([], False, False)
+
+
+def test_c629_listing_failure_and_truncation_are_independent(tmp_path, monkeypatch):
+    """A walk that raised is a listing failure, not a truncation - the flags are not merged."""
+    import clawseccheck.checks._egress as _egress
+
+    home = tmp_path / "h"
+    (home / "backups").mkdir(parents=True)
+    (home / "state").mkdir()
+
+    def _boom(self, pattern):
+        raise PermissionError("simulated")
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+    assert _egress._b188_collect_backups(home) == ([], True, False)
+    assert _egress._b188_collect_state_copies(home / "state", _egress._B188_DB_NAMES) == (
+        [], True, False
+    )
+
+
+def test_c629_cut_backups_walk_on_a_reachable_tree_is_unknown_not_verified(
+    tmp_path, reachable_ancestors
+):
+    """THE regression test. 205 tight files in a reachable ``backups/``: the walk stops at 200
+    and an exposed copy could sit among the rest. On main this returned PASS/verified."""
+    ctx = _cut_home(tmp_path)
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert f.pass_confidence != "verified"
+    assert "200" in f.detail
+    assert "backups" in f.detail
+    assert "state/" not in f.detail.replace("state database", "")
+    assert "find ~/.openclaw/backups" in f.fix
+    assert f.detail.isascii() and f.fix.isascii()
+
+
+def test_c629_cut_state_tree_on_a_reachable_tree_is_unknown(tmp_path, reachable_ancestors):
+    ctx = _cut_home(tmp_path, n_backups=0, n_state=205)
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert "200" in f.detail
+    assert "state/" in f.detail
+    assert "backups" not in f.detail
+
+
+def test_c629_exactly_at_the_cap_is_a_complete_walk_and_passes(tmp_path, reachable_ancestors):
+    ctx = _cut_home(tmp_path, n_backups=200)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS
+    assert f.pass_confidence == "verified"
+    assert ctx.limit_hits == []
+
+
+def test_c629_cut_in_a_sealed_tree_is_moot_and_passes(tmp_path, reachable_ancestors):
+    """The other direction: a 0700 ``backups/`` (or ``state/``) cannot be reached by anyone
+    else, so files past the cap are moot and the verdict is the unchanged PASS."""
+    ctx = _cut_home(tmp_path / "b", backups_mode=0o700)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS and f.pass_confidence == "verified"
+    assert ctx.limit_hits == []
+
+    ctx = _cut_home(tmp_path / "s", n_backups=0, n_state=205, state_mode=0o700)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS and f.pass_confidence == "verified"
+    assert ctx.limit_hits == []
+
+
+def test_c629_cut_in_a_tree_sealed_by_the_real_ancestor_gate_passes(tmp_path):
+    """No ``reachable_ancestors`` fixture: pytest's own 0700 tmp root seals the chain, so a
+    cut walk under a 0755 ~/.openclaw is moot. This is the default-install shape."""
+    ctx = _cut_home(tmp_path)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS and f.pass_confidence == "verified"
+    assert ctx.limit_hits == []
+
+
+def test_c629_the_cut_gate_is_per_tree(tmp_path, reachable_ancestors):
+    """A cut in ``backups/`` is judged on ``backups/`` itself, not on ``state/``."""
+    # backups cut + reachable, state/ sealed: still UNKNOWN
+    ctx = _cut_home(tmp_path / "a", state_mode=0o700)
+    assert check_state_db_atrest(ctx).status == UNKNOWN
+    # backups cut but sealed, state/ reachable and uncut: PASS
+    ctx = _cut_home(tmp_path / "b", backups_mode=0o700, state_mode=0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == PASS and f.pass_confidence == "verified"
+    # state cut + reachable while backups/ is sealed: still UNKNOWN
+    ctx = _cut_home(tmp_path / "c", n_backups=205, backups_mode=0o700, n_state=205)
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert "state/" in f.detail and "backups" not in f.detail
+
+
+def test_c629_exposed_copy_still_wins_over_a_cut_walk(tmp_path, reachable_ancestors):
+    """Positive evidence outranks an incomplete walk: every collected file is world-readable
+    (so it is exposed whichever 200 the walk kept), and the verdict is the C-555 WARN."""
+    ctx = _cut_home(tmp_path, file_mode=0o644)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert "retained copy" in f.detail.lower()
+    # the cut is still disclosed as a machine-readable limit
+    assert len([h for h in ctx.limit_hits if h.domain == "state_db"]) == 1
+
+
+def test_c629_live_db_fail_is_not_suppressed_by_a_cut_walk(tmp_path, reachable_ancestors):
+    ctx = _cut_home(tmp_path)
+    os.chmod(ctx.home / "state" / "openclaw.sqlite", 0o644)
+    f = check_state_db_atrest(ctx)
+    assert f.status == FAIL
+    assert "impersonate a paired device" in f.detail
+
+
+def test_c629_listing_failure_unknown_text_is_unchanged_when_a_cut_also_exists(
+    tmp_path, reachable_ancestors, monkeypatch
+):
+    """Nothing is dropped when both incompleteness signals fire: the pre-existing
+    listing-failed UNKNOWN keeps its wording."""
+    import clawseccheck.checks._egress as _egress
+
+    ctx = _cut_home(tmp_path)
+    real = _egress._b188_collect_backups
+    monkeypatch.setattr(
+        _egress, "_b188_collect_backups", lambda home, cap=200: (real(home, cap)[0], True, True)
+    )
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert "could not list" in f.detail
+
+
+def test_c629_cut_is_recorded_once_in_its_own_limit_domain(tmp_path, reachable_ancestors):
+    from clawseccheck.collector import LIMIT_DOMAIN_SKILL, LIMIT_DOMAIN_STATE_DB, limit_hits_for
+
+    ctx = _cut_home(tmp_path)
+    check_state_db_atrest(ctx)
+    check_state_db_atrest(ctx)  # a second run on the same ctx adds no duplicate
+    hits = [h for h in ctx.limit_hits if h.domain == LIMIT_DOMAIN_STATE_DB]
+    assert len(hits) == 1
+    assert "200" in hits[0] and "backups" in hits[0]
+    assert str(ctx.home) not in hits[0]  # ~/.openclaw, never the absolute home
+    assert "text scan of skill" not in hits[0]  # monitor's skill-limit regex must not match
+    # B13 isolation: the skill domain must not see a state-DB walk cut
+    assert limit_hits_for(ctx, LIMIT_DOMAIN_SKILL) == []
+
+
+def test_c629_no_cut_leaves_limit_hits_empty(tmp_path, reachable_ancestors):
+    ctx = _cut_home(tmp_path, n_backups=10)
+    assert check_state_db_atrest(ctx).status == PASS
+    assert ctx.limit_hits == []
+
+
+def test_c629_cut_detail_number_is_the_walk_bound(tmp_path, reachable_ancestors, monkeypatch):
+    """The number in the message is the number the walk stops at, for BOTH trees."""
+    import functools
+    import clawseccheck.checks._egress as _egress
+
+    for coll in ("_b188_collect_backups", "_b188_collect_state_copies"):
+        monkeypatch.setattr(_egress, coll, functools.partial(getattr(_egress, coll), cap=5))
+    monkeypatch.setattr(_egress, "_B188_COPY_CAP", 5)
+
+    for name, kwargs in (("backups", {"n_backups": 8}), ("state", {"n_backups": 0, "n_state": 8})):
+        f = check_state_db_atrest(_cut_home(tmp_path / name, **kwargs))
+        assert f.status == UNKNOWN, name
+        assert "limit of 5 files" in f.detail and "first 5 files" in f.detail, name
+
+
+# --- gap 2: retained copies with no live database ------------------------------------------
+
+def test_c629_no_live_db_readable_backups_copy_is_warn(tmp_path, reachable_ancestors):
+    ctx = _home(tmp_path, home_mode=0o755, make_db=False)
+    _add_file(ctx.home, "backups/pre-repair", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    os.chmod(ctx.home / "backups", 0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert "retained copy" in f.detail.lower()
+    assert any("backups/pre-repair/openclaw.sqlite.bak" in e for e in f.evidence)
+
+
+def test_c629_no_live_db_readable_state_recovery_copy_is_warn(tmp_path, reachable_ancestors):
+    ctx = _home(tmp_path, home_mode=0o755, make_db=False)
+    _add_file(ctx.home / "state", "openclaw-task-delivery-recovery-x", "openclaw.sqlite",
+              file_mode=0o644, dir_mode=0o755)
+    os.chmod(ctx.home / "state", 0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert any("openclaw-task-delivery-recovery-x" in e for e in f.evidence)
+
+
+def test_c629_copy_warn_text_is_identical_with_and_without_a_live_db(tmp_path, reachable_ancestors):
+    """The WARN text feeds baseline.fingerprint(): the no-live-DB path must reuse the exact
+    C-555 wording, not a lookalike."""
+    with_db = _home(tmp_path / "a", home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    _add_file(with_db.home, "backups/pre-repair", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    no_db = _home(tmp_path / "b", home_mode=0o755, make_db=False)
+    _add_file(no_db.home, "backups/pre-repair", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    a, b = check_state_db_atrest(with_db), check_state_db_atrest(no_db)
+    assert a.status == b.status == WARN
+    assert (a.detail, a.fix, a.evidence) == (b.detail, b.fix, b.evidence)
+
+
+def test_c629_no_live_db_tight_copy_keeps_the_exact_unknown(tmp_path, reachable_ancestors):
+    """A 0600 copy in a 0700 chain, and the measured heartbeat-migration shape (0664 file in a
+    0700 subdir): no exposure, so the historical UNKNOWN stands word for word."""
+    ctx = _home(tmp_path, home_mode=0o755, make_db=False)
+    _add_file(ctx.home, "backups/pre-repair", "openclaw.sqlite.bak",
+              file_mode=0o600, dir_mode=0o700)
+    _add_file(ctx.home, "backups/heartbeat-migration", "main-deadbeef.md",
+              file_mode=0o664, dir_mode=0o700)
+    os.chmod(ctx.home / "backups", 0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _NO_DB_DETAIL
+
+
+def test_c629_no_live_db_readable_copy_sealed_by_the_real_ancestor_gate_is_unknown(tmp_path):
+    """No ``reachable_ancestors`` fixture: pytest's 0700 tmp root seals the chain."""
+    ctx = _home(tmp_path, home_mode=0o755, make_db=False)
+    _add_file(ctx.home, "backups/pre-repair", "openclaw.sqlite.bak",
+              file_mode=0o644, dir_mode=0o755)
+    os.chmod(ctx.home / "backups", 0o755)
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _NO_DB_DETAIL
+
+
+def test_c629_no_live_db_and_a_cut_walk_stays_the_plain_unknown(tmp_path, reachable_ancestors):
+    """With no live DB the verdict is already UNKNOWN; the cut adds no second wording there."""
+    ctx = _cut_home(tmp_path)
+    for p in (ctx.home / "state").glob("openclaw.sqlite*"):
+        p.unlink()
+    f = check_state_db_atrest(ctx)
+    assert f.status == UNKNOWN
+    assert f.detail == _NO_DB_DETAIL

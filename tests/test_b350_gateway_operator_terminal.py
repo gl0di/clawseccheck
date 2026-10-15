@@ -1,11 +1,14 @@
 """B350 — the gateway operator terminal, a PTY-backed shell served to Control UI/mobile.
 
-Grounded against the installed dist (openclaw@2026.7.1-2):
-`gateway.terminal` is `{enabled?: boolean, shell?: string,
+Grounded against the installed dist (openclaw@2026.7.1-2, re-grounded C-640 against
+2026.9.7): `gateway.terminal` is `{enabled?: boolean, shell?: string,
 detachedSessionTimeoutSeconds?: number}` — `plugin-sdk/config-schema.d.ts:4499-4503`.
 An object only, with no boolean shorthand, so unlike `tools.codeMode` there is no second
-shape to read. `schema-DRyO1XBt.js:130` gives the default as false and states enabling it
-"exposes a browser/mobile shell with the gateway process environment".
+shape to read. The DEFAULT is build-dependent (C-640): 2026.7.1 - 2026.7.35 leave an unset
+`enabled` OFF (`=== true` gates; schema help "default: false"), 2026.8.1 and later turn it ON
+(`enabled-*.js:3`, `!== false`; schema help "default: true"). The build fork, its verdict
+matrix and the unset-key cases live in `test_c640_terminal_default_flip.py`; the tests here
+that need an unset key to PASS therefore inject a measured default-off build.
 
 The design point these tests exist to pin: the VERDICT does not branch on the bind.
 `_gateway_remote_exposure_reason` returns None for BOTH "proven loopback" and "cannot be
@@ -30,15 +33,25 @@ def _f(name: str):
     return check_gateway_operator_terminal(collect(FIXTURES / name))
 
 
-# ------------------------------------------------------------------ the default is quiet
-@pytest.mark.parametrize("name", [
-    "clean_b350_terminal_absent",
-    "clean_b350_terminal_disabled",
-])
-def test_clean_fixtures_pass(name):
-    f = _f(name)
-    assert f.status == PASS, f"{name}: expected PASS, got {f.status}: {f.detail}"
-    assert "not enabled" in f.detail
+# ------------------------------------------------------------------ explicit false is quiet
+def test_disabled_fixture_passes():
+    f = _f("clean_b350_terminal_disabled")
+    assert f.status == PASS, f"expected PASS, got {f.status}: {f.detail}"
+    assert "explicitly disabled" in f.detail
+
+
+def test_absent_fixture_is_unknown_when_hermetic_and_pass_on_a_default_off_build():
+    """`clean_b350_terminal_absent` keeps its (unset-key) data and its name - renaming it
+    would reshuffle the fingerprint manifest. Hermetically no build is known, so C-640
+    makes its verdict UNKNOWN, not the old PASS; with a measured default-off build injected
+    it is a real PASS, and on a default-on build it is a WARN."""
+    ctx = collect(FIXTURES / "clean_b350_terminal_absent")
+    f = check_gateway_operator_terminal(ctx)
+    assert f.status == UNKNOWN, f"{f.status}: {f.detail}"
+    ctx.installed_dist_version = "2026.7.35"
+    assert check_gateway_operator_terminal(ctx).status == PASS
+    ctx.installed_dist_version = "2026.9.7"
+    assert check_gateway_operator_terminal(ctx).status == WARN
 
 
 # ------------------------------------------------------------------ it fires when on
@@ -127,28 +140,36 @@ def test_catalog_entry_matches_what_the_check_emits():
 
 
 # ------------------------------------------------------------------ what must NOT fire
-def _ctx(gateway, tmp_path):
+# A measured default-off build: the only kind on which an UNSET key is a PASS (C-640).
+_OFF_BUILD = "2026.7.35"
+
+
+def _ctx(gateway, tmp_path, version=_OFF_BUILD):
     """A Context whose config locus counts as READ — otherwise every branch below would
     land on the no-gateway-config UNKNOWN instead of the one under test."""
-    return Context(home=tmp_path, config={"gateway": gateway}, config_found=True)
+    return Context(home=tmp_path, config={"gateway": gateway}, config_found=True,
+                   installed_dist_version=version)
 
 
 def test_a_present_terminal_block_without_enabled_is_quiet(tmp_path):
-    """The dist default is false, so a block that only sets the timeout is not a finding."""
+    """On a default-off build (<= 2026.7.35) a block that only sets the timeout is not a
+    finding; on 2026.8.1+ the same config is a WARN (see the C-640 tests)."""
     ctx = _ctx({"terminal": {"detachedSessionTimeoutSeconds": 300}}, tmp_path)
     assert check_gateway_operator_terminal(ctx).status == PASS
 
 
 def test_a_gateway_with_no_terminal_key_is_a_real_pass(tmp_path):
     """Distinguishes a genuine PASS from the UNKNOWN above: the gateway block WAS read
-    and simply carries no terminal config, which is the shipped default."""
+    and simply carries no terminal config, which is off by default on a default-off build."""
     ctx = _ctx({"bind": "127.0.0.1:8080"}, tmp_path)
     assert check_gateway_operator_terminal(ctx).status == PASS
 
 
 def test_only_a_real_boolean_true_counts(tmp_path):
     """`enabled` is ZodBoolean; a truthy non-bool is a config OpenClaw would reject, so
-    reading it as "on" would be asserting something about a config that never loads."""
+    reading it as "on" would be asserting something about a config that never loads. It is
+    read as UNSET, which on a default-off build is a PASS (on a default-on build every
+    non-bool is UNSET too, and UNSET is a WARN - the C-640 tests pin that side)."""
     for truthy in ("true", 1, "yes"):
         ctx = _ctx({"terminal": {"enabled": truthy}}, tmp_path)
         assert check_gateway_operator_terminal(ctx).status == PASS, truthy
@@ -167,6 +188,7 @@ def test_a_malformed_gateway_value_is_unknown_not_pass(tmp_path):
 
 def test_a_read_config_with_no_gateway_block_is_a_PASS_not_an_unknown(tmp_path):
     """Found by an independent adversarial pass, and it was a real defect.
+    (On a measured default-off build; C-640: hermetically it is UNKNOWN, on 2026.8.1+ WARN.)
 
     The first version of this check collapsed "gateway absent" into the malformed-gateway
     UNKNOWN, whose detail said "No gateway config was read" — about a config that HAD been
@@ -174,21 +196,27 @@ def test_a_read_config_with_no_gateway_block_is_a_PASS_not_an_unknown(tmp_path):
     while `{"tools": {...}}` with no gateway returned UNKNOWN, though both encode the same
     fact. 72 of the fixture homes are this shape, so it was not hypothetical.
 
-    An absent gateway block cannot enable the terminal: the vendor gates the feature on
-    `gateway?.terminal?.enabled === true`, which nothing absent can satisfy.
+    On a default-off build (<= 2026.7.35) an absent gateway block cannot enable the
+    terminal: the vendor gates the feature on `gateway?.terminal?.enabled === true`, which
+    nothing absent can satisfy. (On 2026.8.1+ the gate is `!== false` and it can.)
     """
-    ctx = Context(home=tmp_path, config={"tools": {"profile": "minimal"}}, config_found=True)
+    ctx = Context(home=tmp_path, config={"tools": {"profile": "minimal"}}, config_found=True,
+                  installed_dist_version=_OFF_BUILD)
     f = check_gateway_operator_terminal(ctx)
     assert f.status == PASS, f"got {f.status}: {f.detail}"
     assert "was read" not in f.detail, "must not claim the config went unread"
 
 
 def test_an_empty_gateway_object_and_an_absent_one_agree(tmp_path):
-    """The inconsistency the adversarial pass named: both encode "default false"."""
-    absent = Context(home=tmp_path, config={"tools": {}}, config_found=True)
-    empty = Context(home=tmp_path, config={"gateway": {}}, config_found=True)
-    assert (check_gateway_operator_terminal(absent).status
-            == check_gateway_operator_terminal(empty).status == PASS)
+    """The inconsistency the adversarial pass named: both encode "key unset", so they must
+    agree on EVERY build class (off -> PASS, on -> WARN, undeterminable -> UNKNOWN)."""
+    for version, expected in ((_OFF_BUILD, PASS), ("2026.9.7", WARN), (None, UNKNOWN)):
+        absent = Context(home=tmp_path, config={"tools": {}}, config_found=True,
+                         installed_dist_version=version)
+        empty = Context(home=tmp_path, config={"gateway": {}}, config_found=True,
+                        installed_dist_version=version)
+        assert (check_gateway_operator_terminal(absent).status
+                == check_gateway_operator_terminal(empty).status == expected), version
 
 
 def test_a_malformed_gateway_names_the_type_it_found(tmp_path):

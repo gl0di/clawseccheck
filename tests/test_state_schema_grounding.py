@@ -132,6 +132,20 @@ SCHEMA_SQL_CONST_MARKER = 'const OPENCLAW_STATE_SCHEMA_SQL = "'
 # case) into false failures, trading a narrow, never-yet-observed risk for a guaranteed one.
 # Pinned by test_a_lone_ambiguous_anchor_cannot_be_told_from_a_step_precondition_guard,
 # not fixed.
+#
+# THE LIMIT BIT ON 2026.9.7, and the narrower fix is the one the note above did NOT reject.
+# `if (readStateSchemaContentVersion(database) !== 1 || tableExists(database,
+# "config_machine_state") || ...)` is a legacy-migration precondition ("is this the pre-
+# `config_machine_state` database?"), so the content-version guard read {1, 19} beside the
+# ladder top 19 and both `--write-state-*` regenerators failed. Requiring corroboration for a
+# LONE match is still rejected (it would break the single-anchor states named above); what
+# is added is a ranking when the evidence is plentiful: the two anchors that spell the
+# vendor's own "highest version I understand" (`_HIGHEST_VERSION_ANCHORS`) are authoritative
+# once they agree on one value, and every `!== N` guard must then be at or below it, with at
+# least one AT it. A guard ABOVE the top, or a top no guard corroborates, is still a loud
+# disagreement, and so is any state where the two authority anchors are absent or differ.
+_HIGHEST_VERSION_ANCHORS = ("named constant (<= 2026.9.4)", "newer-schema error")
+_STEP_GUARD_ANCHORS = ("content-version guard", "migration-version guard")
 _SCHEMA_VERSION_ANCHORS = (
     ("named constant (<= 2026.9.4)",
      re.compile(r"\bOPENCLAW_STATE_SCHEMA_VERSION\s*=\s*(\d+)(?![\w.])")),
@@ -341,31 +355,27 @@ def _extract_vendor_schema_sql(js_text: str) -> str:
 # rather than silently returning literal `${...}` text as if it were SQL.
 # --------------------------------------------------------------------------------------
 
-_WORKER_TEMPLATE_MARKER_RE = re.compile(r"\bOPENCLAW_STATE_SCHEMA_SQL\s*=\s*`")
+# C-683 (2026.10.1): the build moved the worker's copy out of `worker/worker.mjs` (a template
+# literal) into `state/openclaw-state-read.worker.js`, where it is a DOUBLE-QUOTED string
+# assigned after a bare `var OPENCLAW_STATE_SCHEMA_SQL;`. A filename is build output, so the
+# copy is located the way the primary definition is: by the constant, anywhere in the dist,
+# in either spelling. A `const`/`let` declaration is the primary definition, not a copy.
+_WORKER_TEMPLATE_MARKER_RE = re.compile(r"\bOPENCLAW_STATE_SCHEMA_SQL\s*=\s*([`\"])")
+_DECLARATION_BEFORE_RE = re.compile(r"\b(?:const|let)\s+$")
 
 
-def _extract_worker_template_schema_sql(js_text: str) -> str:
-    """The unescaped SQL text of the worker thread's `OPENCLAW_STATE_SCHEMA_SQL = \\`...\\``
-    template-literal copy (`worker/worker.mjs`, grounded against the installed 2026.9.5
-    dist, where the assignment is minified: no `const`, no spaces around `=`). The regex
-    tolerates optional spacing either way, not because spacing has been observed to vary
-    on its own, but because nothing about this proof depends on it staying minified.
-
-    Reuses `_unescape_js_double_quoted` for the escape table: `\\n`/`\\t`/`\\\\`/`\\uXXXX`/
-    the JS fallback rule are the same set for a template literal as for a double-quoted
-    string (ECMA-262 11.8.6). A raw, unescaped newline needs no special handling either --
-    the unescape pass only transforms backslash-prefixed sequences and leaves it as-is.
-    """
-    m = _WORKER_TEMPLATE_MARKER_RE.search(js_text)
-    if m is None:
-        raise AssertionError(
-            f"{_WORKER_TEMPLATE_MARKER_RE.pattern!r} not found in the text -- the worker "
-            "thread no longer embeds the state schema as a template literal the way this "
-            "guard expects; re-ground it against the current bundle before trusting "
-            "anything downstream."
-        )
+def _read_assigned_schema_literal(js_text: str, m: "re.Match") -> str:
+    """The unescaped SQL of the literal opening just past *m* (a `_WORKER_TEMPLATE_MARKER_RE`
+    match). A template literal fails loudly on a `${...}`; a double-quoted string cannot
+    interpolate. Both spellings share one escape table (ECMA-262 11.8.4 / 11.8.6)."""
     start = m.end()
     i, n = start, len(js_text)
+    if m.group(1) == '"':
+        while i < n and js_text[i] != '"':
+            i += 2 if js_text[i] == "\\" else 1
+        if i >= n:
+            raise AssertionError("unterminated worker-thread double-quoted schema string in the dist")
+        return _unescape_js_double_quoted(js_text[start:i])
     while i < n:
         c = js_text[i]
         if c == "\\":
@@ -385,39 +395,94 @@ def _extract_worker_template_schema_sql(js_text: str) -> str:
     return _unescape_js_double_quoted(js_text[start:i])
 
 
+def _extract_worker_template_schema_sql(js_text: str) -> str:
+    """The unescaped SQL of the first `OPENCLAW_STATE_SCHEMA_SQL = <backtick or double-quote
+    literal>` assignment in *js_text* -- the worker thread's copy of the schema (a template literal in
+    `worker/worker.mjs` through 2026.9.9, a double-quoted string in
+    `state/openclaw-state-read.worker.js` on 2026.10.1). The regex tolerates optional spacing
+    either way, not because spacing has been observed to vary on its own, but because nothing
+    about this proof depends on it staying minified.
+
+    Reuses `_unescape_js_double_quoted` for the escape table: `\\n`/`\\t`/`\\\\`/`\\uXXXX`/
+    the JS fallback rule are the same set for a template literal as for a double-quoted
+    string. A raw, unescaped newline needs no special handling either -- the unescape pass
+    only transforms backslash-prefixed sequences and leaves it as-is.
+    """
+    m = _WORKER_TEMPLATE_MARKER_RE.search(js_text)
+    if m is None:
+        raise AssertionError(
+            f"{_WORKER_TEMPLATE_MARKER_RE.pattern!r} not found in the text -- the worker "
+            "thread no longer embeds the state schema as a literal the way this "
+            "guard expects; re-ground it against the current bundle before trusting "
+            "anything downstream."
+        )
+    return _read_assigned_schema_literal(js_text, m)
+
+
+def _worker_copy_sqls(js_text: str) -> "list[str]":
+    """The SQL of every assignment of the constant that is NOT its `const`/`let` declaration."""
+    return [
+        _read_assigned_schema_literal(js_text, m)
+        for m in _WORKER_TEMPLATE_MARKER_RE.finditer(js_text)
+        if not _DECLARATION_BEFORE_RE.search(js_text[max(0, m.start() - 16):m.start()])
+    ]
+
+
+def _worker_schema_copies(dist_dir: Path) -> "list[tuple[Path, str]]":
+    """(file, SQL) for every non-declaration copy of the schema constant anywhere in the dist.
+    An unreadable regular file fails loudly (it could be the one that holds the copy)."""
+    copies = []
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while looking for the worker's copy of the state "
+                    f"schema: {exc}. An unreadable bundle could be the one that holds it.") from exc
+            if "OPENCLAW_STATE_SCHEMA_SQL" not in text:
+                continue
+            copies.extend((path, sql) for sql in _worker_copy_sqls(text))
+    return copies
+
+
 def _assert_worker_template_copy_matches_primary(dist_dir: Path, primary_sql: str) -> None:
     """C-580: the second half of `_find_state_schema_defining_js`'s identity proof --
-    verifying, not merely asserting in a docstring, that `worker/worker.mjs`'s
-    template-literal copy of the schema is the SAME schema as *primary_sql* (the text that
-    function already proved every double-quoted definition agrees on).
+    verifying, not merely asserting in a docstring, that the worker thread's copy of the
+    schema is the SAME schema as *primary_sql* (the text that function already proved every
+    primary definition agrees on).
+
+    C-683: the copy is found by the constant, in any bundle of the dist and in either
+    spelling, never by `worker/worker.mjs` -- 2026.10.1 moved it. At least one copy must
+    exist and EVERY copy must equal the primary; none found is a loud failure, never a skip.
 
     Deliberately a standalone function, not folded into `_find_state_schema_defining_js`
     itself: that function's own synthetic unit tests build tiny tmp_path dists with none
-    of the surrounding bundle layout, and requiring a `worker/worker.mjs` fixture in every
-    one of them to keep constructing a valid dist would test this proof's plumbing, not
-    its logic. Called only where a real dist -- or a synthetic stand-in built specifically
-    to exercise this function -- is already in hand.
+    of the surrounding bundle layout, and requiring a worker bundle in every one of them
+    to keep constructing a valid dist would test this proof's plumbing, not its logic.
     """
-    worker_path = dist_dir / "worker" / "worker.mjs"
-    if not worker_path.is_file():
+    copies = _worker_schema_copies(dist_dir)
+    if not copies:
         raise AssertionError(
-            f"{worker_path} does not exist -- the worker thread embedded a template-"
-            "literal copy of the state schema on every release 8.2 through 9.5; re-ground "
-            "this guard against the current bundle layout before trusting anything "
-            "downstream."
+            f"no worker-thread copy of the state schema (an `OPENCLAW_STATE_SCHEMA_SQL = ...` "
+            f"assignment outside its const declaration) was found in any bundle under "
+            f"{dist_dir} -- the worker thread embedded one on every release 8.2 through "
+            "10.1; re-ground this guard against the current bundle layout before trusting "
+            "anything downstream."
         )
-    worker_text = worker_path.read_text(encoding="utf-8", errors="replace")
-    worker_sql = _extract_worker_template_schema_sql(worker_text)
-    if worker_sql != primary_sql:
-        # surrogatepass: matches _find_state_schema_defining_js's own digest comparison.
-        primary_digest = hashlib.sha256(primary_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-        worker_digest = hashlib.sha256(worker_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
-        raise AssertionError(
-            f"{worker_path}'s template-literal copy of the state schema ({worker_digest}) "
-            f"does NOT match the primary definition ({primary_digest}). Byte-identical on "
-            "every release 8.2 through 9.5 until now -- decide which the runtime actually "
-            "uses before trusting a snapshot taken from either."
-        )
+    # surrogatepass: matches _find_state_schema_defining_js's own digest comparison.
+    primary_digest = hashlib.sha256(primary_sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+    for path, sql in copies:
+        if sql != primary_sql:
+            copy_digest = hashlib.sha256(sql.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+            raise AssertionError(
+                f"{path}'s copy of the state schema ({copy_digest}) does NOT match the "
+                f"primary definition ({primary_digest}). Byte-identical on every release 8.2 "
+                "through 10.1 until now -- decide which the runtime actually uses before "
+                "trusting a snapshot taken from either."
+            )
 
 
 def _dist_table_ddl_texts(sql_text: str) -> "dict[str, str]":
@@ -499,6 +564,12 @@ def _state_schema_version_from(dist_dir: Path) -> int:
     them is describing something else."""
     evidence = _state_schema_version_evidence(dist_dir)
     values = {v for found in evidence.values() for v in found}
+    highest = {v for name in _HIGHEST_VERSION_ANCHORS for v in evidence.get(name, ())}
+    if len(highest) == 1:
+        top = next(iter(highest))
+        guards = {v for name in _STEP_GUARD_ANCHORS for v in evidence.get(name, ())}
+        if all(g <= top for g in guards) and (not guards or top in guards):
+            return top
     if not values:
         raise AssertionError(
             f"could not read the state-schema version from any {len(_SCHEMA_VERSION_ANCHORS)} "
@@ -887,6 +958,12 @@ _CONFIG_MACHINE_STATE_LOOSE_LEGACY = (
     "constraint on the vendor table; not a subset since every real column is nullable "
     "here, not merely a fewer-columns slice."
 )
+_CONFIG_MACHINE_STATE_UPDATED_AT_LEGACY = (
+    "carries `updated_at INTEGER` where the vendor's config_machine_state has `updated_at_ms "
+    "INTEGER NOT NULL`, and `state_key` without the vendor's NOT NULL -- a column the vendor "
+    "table does not have, so not a subset. The test reads only the cron.store row's "
+    "value_json, never the timestamp column."
+)
 _AUTH_PROFILE_TABLES_DIFFERENT_DB = (
     "auth_profile_store/auth_profile_state (F-187) live in the PER-AGENT database "
     "(agents/<agent>/agent/openclaw-agent.sqlite), never in the state database "
@@ -988,7 +1065,7 @@ _REGISTRY: "dict[str, _Entry]" = {
         "the 'neither generation matches' negative path -- never meant to resolve against "
         "any real cron_jobs shape.",
     ),
-    "tests/test_limit_hit_domains.py:53": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
+    "tests/test_limit_hit_domains.py:54": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     # CLAWSECCHECK test-suite-drift sweep (2026-09-24): B-909's own state-DB cron_jobs
     # fixture (test_collect_also_creates_state_db_sidecars_from_nothing, run through the
     # real collect() path, unlike the per-agent-DB entries above) -- never previously
@@ -1001,7 +1078,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     # ---- cron_run_logs (retired table) ----
     "tests/test_b294_cron_run_logs.py:49": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
     "tests/test_b709_cron_run_logs_shapes.py:43": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
-    "tests/test_limit_hit_domains.py:57": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
+    "tests/test_limit_hit_domains.py:58": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
 
     # ---- installed_plugin_index (retired table) ----
     "tests/test_b177_installed_index_shapes.py:68": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
@@ -1011,7 +1088,9 @@ _REGISTRY: "dict[str, _Entry]" = {
     "tests/test_b187_plugin_tool_result_middleware.py:82": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
     "tests/test_b187_plugin_tool_result_middleware.py:332": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
     "tests/test_f150_plugin_sweep.py:82": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
-    "tests/test_f153_dashboard_full.py:351": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
+    "tests/test_f153_dashboard_full.py:352": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
+    # C-654: the plugin-vet FIFO tests build the same retired-table home as test_f150_plugin_sweep.
+    "tests/test_c654_plugin_tree_fifo.py:620": _Entry(LEGACY_TABLE, _INSTALLED_PLUGIN_INDEX_RETIRED),
 
     # ---- config_machine_state (F-183) ----
     "tests/test_b177_installed_index_shapes.py:55": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
@@ -1023,6 +1102,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     # classifications, same reasons.
     "tests/test_b704_state_db_shm_sidecar.py:42": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "tests/test_b704_state_db_shm_sidecar.py:46": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    # C-680c: the cron.store machine-state key test builds a config_machine_state with the
+    # column `updated_at` (the vendor's is `updated_at_ms`) and no NOT NULL on state_key --
+    # a hand-written shape no OpenClaw release ever shipped.
+    "tests/test_c680c_elided_disclosure.py:168": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_UPDATED_AT_LEGACY),
     # B-889 round 1: the decoy table a `CREATE VIEW config_machine_state AS SELECT ...
     # FROM decoy_secrets` view-masquerade fixture projects from -- never a real
     # OpenClaw table, same shape as every other _UNRELATED_DECOY entry above/below. The
@@ -1030,11 +1113,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     # `CREATE TABLE`), so only this one site needs registering. (Line renumbered from
     # :342 to :925 by the merge that placed the B-845 per-agent test class earlier in
     # this file, ahead of B-889's own class.)
-    "tests/test_b749_auth_profile_store_presence.py:925": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    "tests/test_b749_auth_profile_store_presence.py:1050": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
     # B-889 round 2: the embedded-NUL-byte regression fixture -- same loose (no NOT
     # NULL) 3-column shape as tests/test_b177_installed_index_shapes.py:55, same DDL
     # text verbatim, same classification. (Renumbered from :409 to :992, same reason.)
-    "tests/test_b749_auth_profile_store_presence.py:992": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    "tests/test_b749_auth_profile_store_presence.py:1117": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
     # B-977: the decoy table a `CREATE VIEW config_machine_state AS SELECT ... FROM
     # decoy_state` view-masquerade fixture projects from -- never a real OpenClaw
     # table, same shape/reason as B-889's own decoy_secrets entry above. The extractor
@@ -1145,8 +1228,8 @@ _REGISTRY: "dict[str, _Entry]" = {
     # from test_f187's own `_add_agent_db()`), same per-agent-DB reasoning. Shifted
     # 354->357, 459->462 by the C-135-rejection follow-up's new imports (threading/time/
     # trajectorystore) above them -- same DDL, keys renamed to match.
-    "tests/test_b749_auth_profile_store_presence.py:357": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_b749_auth_profile_store_presence.py:462": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:386": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:508": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # CLAWSECCHECK-B-845 follow-up (2026-09-23): a third, `_make_agent_auth_db()`'s own
     # helper -- the cap-disclosure test's fixture builder -- same DDL text again, same
     # per-agent-DB reasoning. (The recursive-VIEW hang-guard fixture right above it uses
@@ -1157,7 +1240,17 @@ _REGISTRY: "dict[str, _Entry]" = {
     # widened VIEW-fixture docstring, the C-135-status comment, the new stat-guard
     # commentary) -- same DDL, key renamed to match; the FIFO-guard tests added in the
     # same change reuse this same helper rather than any new literal DDL.
-    "tests/test_b749_auth_profile_store_presence.py:606": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:731": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    # 4.4.0 schema-refusal pins (2026-10-05): the same file gained two more DDL sites and
+    # every key above and below moved (357->386, 462->508, 606->731, 925->1050,
+    # 992->1117); same DDL text at each moved site, keys renamed to match.
+    #   :702 is the per-agent `auth_profile_store` with a GENERATED column that the
+    #   reader must refuse -- same table name, same per-agent DB file, so the same
+    #   different-DB reason applies (the snapshot covers the shared state DB only).
+    #   :671 is `unrelated_table`, the decoy a VIEW named auth_profile_store projects
+    #   from -- never a real OpenClaw table.
+    "tests/test_b749_auth_profile_store_presence.py:702": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:671": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
     # B-813/B-811: plain-string-literal copies of test_f187's own f-string DDL (invisible
@@ -1228,12 +1321,18 @@ _REGISTRY: "dict[str, _Entry]" = {
     # reader (_collect_paired_devices_sqlite) B176 already exercises above, so its own
     # two view-masquerade tests build the identical `decoy` table backing a VIEW named
     # `device_pairing_paired` -- same entry, same reasoning, new call sites.
-    "tests/test_b396_paired_node_skill_coverage.py:487": _Entry(
+    "tests/test_b396_paired_node_skill_coverage.py:529": _Entry(
         LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
     ),
-    "tests/test_b396_paired_node_skill_coverage.py:505": _Entry(
+    "tests/test_b396_paired_node_skill_coverage.py:547": _Entry(
         LEGACY_TABLE, _B176_VIEW_MASQUERADE_DECOY
     ),
+
+    # ---- exec_approvals_config (B172 reads the state-database exec-approvals store) ----
+    # MODERN since the 2026.9.7 re-baseline (state schema v19): the regenerated snapshot
+    # carries exec_approvals_config and this DDL equals the vendor's column for column. It
+    # was registered LEGACY_TABLE only while the shipped snapshot still predated the table.
+    "tests/test_c643_exec_approvals_sqlite_store.py:904": _Entry(MODERN),
 }
 
 # B-889: +2 (69, was 67) -- round 1's view-masquerade decoy-table DDL site
@@ -1254,7 +1353,14 @@ _REGISTRY: "dict[str, _Entry]" = {
 # build the identical `decoy` table backing a VIEW named `device_pairing_paired` B176's
 # own tests already register above; new call sites, same _B176_VIEW_MASQUERADE_DECOY
 # reason. 78, was 76.
-assert len(_REGISTRY) == 78, f"registry has {len(_REGISTRY)} entries, expected 78"
+# B172 (exec-approvals store moved into the state database): +1 -- the vendor-shaped
+# `exec_approvals_config` DDL in tests/test_c643_exec_approvals_sqlite_store.py, registered
+# LEGACY_TABLE while the shipped snapshot predated the table, MODERN since the 2026.9.7
+# re-baseline. 79, was 78.
+# 81, was 79: the two test_b749 sites registered above (:702 and :671).
+# 82, was 81: the one test_c654 site registered above (:605).
+# 83, was 82: the one test_c680c_elided_disclosure site registered above (:168).
+assert len(_REGISTRY) == 83, f"registry has {len(_REGISTRY)} entries, expected 83"
 
 
 # ========================================================================================
@@ -1604,8 +1710,58 @@ def test_assert_worker_template_copy_matches_primary_raises_when_it_diverges(tmp
 
 
 def test_assert_worker_template_copy_matches_primary_raises_when_the_file_is_missing(tmp_path):
-    with pytest.raises(AssertionError, match="does not exist"):
+    with pytest.raises(AssertionError, match="no worker-thread copy"):
         _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE t (a TEXT);")
+
+
+# ---- C-683: the 2026.10.1 layout -- a double-quoted copy in state/*.worker.js -------------
+
+_T = "CREATE TABLE t (a TEXT);\n"
+_V101_COPY = 'var OPENCLAW_STATE_SCHEMA_SQL;\nfoo();\n\tOPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE t (a TEXT);\\n";\n'
+
+
+def test_extract_worker_template_schema_sql_reads_a_double_quoted_assignment():
+    assert _extract_worker_template_schema_sql(_V101_COPY) == _T
+
+
+def test_a_double_quoted_copy_in_any_bundle_is_found_and_compared(tmp_path):
+    _write_dist(tmp_path, {"state/openclaw-state-read.worker.js": _V101_COPY})
+    _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_a_double_quoted_copy_that_diverges_is_refused(tmp_path):
+    _write_dist(tmp_path, {"state/openclaw-state-read.worker.js": _V101_COPY})
+    with pytest.raises(AssertionError, match="does NOT match"):
+        _assert_worker_template_copy_matches_primary(tmp_path, "CREATE TABLE u (b TEXT);\n")
+
+
+def test_one_diverging_copy_among_agreeing_ones_is_refused(tmp_path):
+    _write_dist(tmp_path, {
+        "a/one.js": _V101_COPY,
+        "b/two.mjs": 'OPENCLAW_STATE_SCHEMA_SQL=`CREATE TABLE u (b TEXT);\n`',
+    })
+    with pytest.raises(AssertionError, match="does NOT match"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_a_const_declaration_alone_is_the_primary_not_a_copy(tmp_path):
+    """The primary definition must not satisfy the copy check: a dist whose only assignment is
+    the `const` declaration has NO worker copy, and that fails loudly instead of passing."""
+    _write_dist(tmp_path, {"main.mjs": 'const OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE t (a TEXT);\\n";'})
+    with pytest.raises(AssertionError, match="no worker-thread copy"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_a_non_literal_assignment_is_not_mistaken_for_a_copy(tmp_path):
+    _write_dist(tmp_path, {"x.mjs": "OPENCLAW_STATE_SCHEMA_SQL = build();\nif (OPENCLAW_STATE_SCHEMA_SQL == 1) {}"})
+    with pytest.raises(AssertionError, match="no worker-thread copy"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
+
+
+def test_an_unterminated_double_quoted_copy_fails_loudly(tmp_path):
+    _write_dist(tmp_path, {"x.js": 'OPENCLAW_STATE_SCHEMA_SQL = "CREATE TABLE t (a TEXT);'})
+    with pytest.raises(AssertionError, match="unterminated"):
+        _assert_worker_template_copy_matches_primary(tmp_path, _T)
 
 
 # ---- B-834: the version reader ---------------------------------------------------------
@@ -1672,6 +1828,59 @@ def test_state_schema_version_fails_loudly_when_anchors_disagree(tmp_path):
         "openclaw-state-db-contract-X.mjs": "const OPENCLAW_STATE_SCHEMA_VERSION = 16;\n",
         "openclaw-state-db-DS2iNFy4.mjs":
             "if (readStateSchemaContentVersion(database) !== 17) throw 1;\n",
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_a_step_precondition_guard_below_the_ladder_top_does_not_break_the_reader(tmp_path):
+    """2026.9.7, measured: the ladder top is 19 (`contentVersion !== 19`, the migration guard
+    and the newer-schema error all say so), while a legacy-migration precondition in the same
+    chunk reads `readStateSchemaContentVersion(database) !== 1 || tableExists(...)`. The
+    reader used to see {1, 19} and refuse to stamp anything."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-uBGB4L5P.mjs":
+            'if (readStateSchemaContentVersion(database) !== 1 || tableExists(database, "t")) x();\n'
+            "if (readStateSchemaContentVersion(database) !== 19) migrate();\n"
+            "const needsRepair = readStateSchemaMigrationVersion(database) !== 19;\n",
+        "openclaw-state-db-schema-version-CXDs-azs.mjs":
+            'if (contentVersion > 19) throw createNewerSqliteSchemaVersionError('
+            '"OpenClaw state database", pathname, contentVersion, 19);\n',
+    })
+    assert _state_schema_version_evidence(dist)["content-version guard"] == {1, 19}
+    assert _state_schema_version_from(dist) == 19
+
+
+def test_the_step_guard_ranking_does_not_hide_a_guard_above_the_ladder_top(tmp_path):
+    """The ranking is a tolerance for guards BELOW the top, not a licence to ignore a guard
+    that says the schema is newer than the named top: that is a real disagreement."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-a.mjs": "if (readStateSchemaContentVersion(db) !== 20) x();\n",
+        "openclaw-state-db-schema-version-b.mjs":
+            'throw createNewerSqliteSchemaVersionError("OpenClaw state database", p, v, 19);\n',
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_the_step_guard_ranking_needs_a_guard_at_the_top_when_any_guard_exists(tmp_path):
+    """Guards that all sit below the top and none corroborates it describe some earlier step,
+    not the current schema: nothing has confirmed the top, so the run must fail loudly."""
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-a.mjs": "if (readStateSchemaContentVersion(db) !== 1) x();\n",
+        "openclaw-state-db-schema-version-b.mjs":
+            'throw createNewerSqliteSchemaVersionError("OpenClaw state database", p, v, 19);\n',
+    })
+    with pytest.raises(AssertionError, match="anchors disagree"):
+        _state_schema_version_from(dist)
+
+
+def test_the_step_guard_ranking_needs_the_two_authority_anchors_to_agree(tmp_path):
+    dist = _write_dist(tmp_path, {
+        "openclaw-state-db-contract-X.mjs": "const OPENCLAW_STATE_SCHEMA_VERSION = 18;\n",
+        "openclaw-state-db-schema-version-b.mjs":
+            'throw createNewerSqliteSchemaVersionError("OpenClaw state database", p, v, 19);\n',
+        "openclaw-state-db-a.mjs": "if (readStateSchemaContentVersion(db) !== 19) x();\n",
     })
     with pytest.raises(AssertionError, match="anchors disagree"):
         _state_schema_version_from(dist)
@@ -2008,11 +2217,16 @@ def test_a_wrong_state_schema_stamp_is_reported_and_a_right_one_is_not(tmp_path)
 # state_db_drift_gate.py already applies to its `unread col` line.
 #
 # WHAT THIS DOES NOT CLAIM. Being in the baseline says the vendor DECLARES a table, not
-# that any database has one: measured on this machine, 13 declared tables (the whole
-# skill_library family among them) are absent from the live DB even though the DDL is all
-# `CREATE TABLE IF NOT EXISTS`. So a check built on this surface must treat an absent
-# table as UNKNOWN and never as a clean PASS -- "the table is not here" is not evidence
-# the feature is unused.
+# that any database has one: measured on this machine (2026.9.9), 25 declared tables (the
+# whole skill_library family among them) are absent from the live DB even though the DDL is
+# all `CREATE TABLE IF NOT EXISTS`; the vendor lists them itself as FIRST_USE_STATE_TABLES /
+# LAZY_ADDITIVE_STATE_TABLES in `openclaw-state-db-contract-*`. So a check built on this
+# surface must treat an absent table as UNKNOWN and never as a clean PASS -- "the table is
+# not here" is not evidence the feature is unused.
+#
+# C-679: the set is NOT only `OPENCLAW_STATE_SCHEMA_SQL`. Three live tables (user_profiles,
+# user_profile_emails, worker_environment_session_attachments) are created by satellite
+# constants applied to the same database; the section below reads the allowlisted ones.
 # ========================================================================================
 
 VENDOR_TABLES_FILE = Path(__file__).resolve().parent / "vendor_state_tables.txt"
@@ -2061,6 +2275,16 @@ _DIFFERENT_DB_TABLES_STILL_READ = {
         "baseline is not drift. Live and current (grounded against the installed "
         "dist, 2026.9.5), not retired."
     ),
+    "transcript_events": (
+        "transcript_events (CLAWSECCHECK-C-699) lives in the PER-AGENT database "
+        "(agents/<agent-id>/agent/openclaw-agent.sqlite), never in the shared state "
+        "database (state/openclaw.sqlite) this baseline enumerates -- a different SQLite "
+        "file, so its absence from the baseline is not drift. Live and current (measured "
+        "on a 2026.10.2 per-agent database: session_id, seq, event_json, created_at, "
+        "event_zstd, event_utf8_bytes, navigation_json); read for a row/session COUNT "
+        "only, the payload columns are never selected "
+        "(trajectorystore._count_transcript_events)."
+    ),
 }
 
 # B-811: a SEPARATE, honestly-named exemption from _RETIRED_TABLES_STILL_READ, not a
@@ -2073,6 +2297,382 @@ _DIFFERENT_DB_TABLES_STILL_READ = {
 # distinguish a real TABLE from a VIEW before trusting a name -- see that function's
 # own docstring for why the check exists.
 _SQLITE_BUILTIN_CATALOG_TABLES = {"sqlite_master"}
+
+# --------------------------------------------------------------------------------------
+# C-679: the state database is declared by MORE than one constant.
+#
+# `OPENCLAW_STATE_SCHEMA_SQL` is the bulk, but on 2026.9.9 three live tables
+# (user_profiles, user_profile_emails, worker_environment_session_attachments) come from
+# SATELLITE constants that the vendor applies to the same state database at first use. A
+# generator that read only the main constant would never name a table a future release
+# adds the same way -- the exact blindness B-721 was written to remove.
+#
+# A blanket `*_SCHEMA_SQL` pattern over-collects (per-agent DB, workboard, memory index,
+# retired shapes), so classification is by EXPLICIT NAME, in two lists. A `*_SCHEMA_SQL`
+# name found anywhere in the dist that is in neither list stops the generator: a new
+# constant has to be classified by someone who read where it is applied. Camel-case
+# constants and constants not spelled `*_SCHEMA_SQL` are NOT covered by this net.
+# --------------------------------------------------------------------------------------
+
+_PRIMARY_STATE_SCHEMA_CONSTANT = "OPENCLAW_STATE_SCHEMA_SQL"
+
+# name -> evidence: the write path that applies the DDL to the STATE database (grounded
+# against the installed 2026.9.9 dist; function names, not rotating bundle hashes).
+_STATE_SATELLITE_CONSTANTS = {
+    "USER_PROFILES_SCHEMA_SQL": (
+        "user-profiles-internal-*.mjs: ensureUserProfilesSchema -> runUserProfileWriteTransaction "
+        "-> runOpenClawStateWriteTransaction, `db.exec(USER_PROFILES_SCHEMA_SQL)`; opens the "
+        "database with openOpenClawStateDatabase"
+    ),
+    "WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL": (
+        "openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema -> "
+        "runOpenClawStateWriteTransaction, `db.exec(SSH_FALLBACK_PORTS + SESSION_ATTACHMENTS)`"
+    ),
+}
+
+_NOT_STATE_DB = "NOT the state database: "
+_ALREADY_IN_MAIN = (
+    "applied to the state database; declares only tables OPENCLAW_STATE_SCHEMA_SQL already "
+    "lists (measured 2026.9.9), and is PARSED on every run to keep that true: "
+)
+
+# name -> what it re-declares. Applied to the state database but, today, adding no table of
+# its own. They are parsed with the same extractor as the satellites and every table they
+# declare must already be in the main constant: a table that is not stops the generator, so
+# promoting the constant to _STATE_SATELLITE_CONSTANTS is a deliberate act, not a miss.
+_STATE_REDECLARING_CONSTANTS = {
+    "WORKER_ENVIRONMENT_SSH_FALLBACK_PORTS_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "worker_environment_ssh_fallback_ports "
+        "(openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema)",
+    "STANDING_GRANT_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "operator_approval_standing_grants, "
+        "operator_approval_standing_grant_generations "
+        "(operator-approval-standing-grants-*.mjs: ensureStandingGrantSchema)",
+    "OPERATOR_APPROVAL_EXECUTION_IDENTITY_SCHEMA_SQL":
+        _ALREADY_IN_MAIN + "operator_approval_execution_identities "
+        "(operator-approval-store.operations-*.mjs: database.db.exec)",
+}
+
+# name -> evidence. C-683 (2026.10.1): applied to the state database, and defined NOT as a literal
+# but as `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>)`, so it declares a
+# table the main constant already lists BY CONSTRUCTION. A distinct classification from the
+# literal re-declarers above: the definition shape is parsed (`_DERIVED_DEFINITION_RE`), the
+# named table must be in the main set, and any other shape of definition stops the generator.
+_STATE_DERIVED_CONSTANTS = {
+    "CRON_RUNTIME_AUTHORITY_SCHEMA_SQL":
+        "applied to the state database (runtime-authority-store-*.mjs: "
+        "replaceCronRuntimeAuthorityRows, same db as cron_jobs); 2026.10.1 derives it from the "
+        "main constant for CRON_RUNTIME_AUTHORITY_TABLE = \"cron_job_runtime_authorities\"",
+}
+
+# name -> why it is not read.
+_STATE_EXCLUDED_CONSTANTS = {
+    **dict.fromkeys((
+        "OPENCLAW_AGENT_SCHEMA_SQL", "OPENCLAW_AGENT_BOARD_SCHEMA_SQL",
+        "AGENT_PROGRESS_CARD_SCHEMA_SQL", "AGENT_V14_BOARD_SCHEMA_SQL",
+        "AGENT_V14_SESSION_SHARING_SCHEMA_SQL", "AGENT_V14_ADDITIVE_SCHEMA_SQL",
+        "AGENT_V14_CORE_SCHEMA_SQL",
+    ), _NOT_STATE_DB + "the per-agent database (agents/<id>/agent/openclaw-agent.sqlite)"),
+    "WORKBOARD_SCHEMA_SQL": _NOT_STATE_DB + "the workboard extension's own sqlite store",
+    "DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL": (
+        _NOT_STATE_DB + "a legacy debug-proxy sidecar; its capture_* tables are listed by the "
+        "main constant in their current shape (the B-710 trap)"),
+    **dict.fromkeys((
+        "MEMORY_INDEX_CHUNKS_SCHEMA_SQL", "MEMORY_INDEX_CHUNK_PROVENANCE_SCHEMA_SQL",
+        "MEMORY_INDEX_CHUNK_RECALL_METADATA_SCHEMA_SQL",
+    ), _NOT_STATE_DB + "the memory index database; table names are interpolated"),
+    **dict.fromkeys((
+        "RETIRED_COMMITMENTS_SCHEMA_SQL", "SHIPPED_RETIRED_COMMITMENTS_SCHEMA_SQL",
+        "RETIRED_AGENT_STATE_LEASE_SCHEMA_SQL",
+    ), "retired shape, kept by the vendor only to migrate old databases away"),
+}
+
+_SCHEMA_SQL_NAME_RE = re.compile(r"\b[A-Z][A-Z0-9_]*_SCHEMA_SQL\b")
+_CREATE_TABLE_RE = re.compile(r"\bCREATE\s+TABLE\b", re.IGNORECASE)
+# The negative lookahead stops `CREATE TABLE IF NOT EXISTS ${name}` from reading "IF" as a
+# table name once the optional group backtracks.
+_CREATE_TABLE_NAMED_RE = re.compile(
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?!IF\s+NOT\s+EXISTS\b)(\w+)", re.IGNORECASE)
+# The one interpolation shape an allowlisted constant may carry: a table spliced from the
+# MAIN constant. Anything else is unmodelled composition and stops the generator.
+_STATE_TABLE_SPLICE_RE = re.compile(
+    r"""\s*extractSqliteTableSchema\(\s*OPENCLAW_STATE_SCHEMA_SQL\s*,\s*(["'`])(\w+)\1\s*\)\s*""")
+
+
+def _skip_js_expression(js_text: str, i: int) -> int:
+    """Index of the `}` closing a `${` whose body starts at *i* (strings and nested
+    template literals inside the expression are stepped over)."""
+    depth, n = 1, len(js_text)
+    while i < n:
+        c = js_text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "\"'":
+            j = i + 1
+            while j < n and js_text[j] != c:
+                j += 2 if js_text[j] == "\\" else 1
+            i = j + 1
+            continue
+        if c == "`":
+            i = _scan_js_template(js_text, i + 1)[2] + 1
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise AssertionError("unterminated ${...} interpolation in a template literal")
+
+
+def _scan_js_template(js_text: str, i: int) -> "tuple[list, list, int]":
+    """(static pieces, interpolation expressions, index of the closing backtick) for the
+    template literal whose body starts at *i*. `len(pieces) == len(exprs) + 1`. Unlike
+    `_extract_worker_template_schema_sql`, an interpolation is TOLERATED here -- reported,
+    not refused -- because the caller decides whether it understands each one."""
+    pieces, exprs, start, n = [], [], i, len(js_text)
+    while i < n:
+        c = js_text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "`":
+            pieces.append(js_text[start:i])
+            return pieces, exprs, i
+        if c == "$" and js_text[i:i + 2] == "${":
+            pieces.append(js_text[start:i])
+            end = _skip_js_expression(js_text, i + 2)
+            exprs.append(js_text[i + 2:end])
+            i = start = end + 1
+            continue
+        i += 1
+    raise AssertionError("unterminated template literal in the dist")
+
+
+def _extract_satellite_schema_sql(js_text: str, start: int, delim: str, const: str) -> "tuple[str, list]":
+    """(canonical SQL, tables spliced in from the main constant) for the literal opening at
+    *start* (just past its delimiter). Each understood `${extractSqliteTableSchema(
+    OPENCLAW_STATE_SCHEMA_SQL, "t")}` becomes a fixed marker, so the readable copy and the
+    minified worker copy of the same constant compare equal; any other interpolation
+    raises."""
+    if delim != "`":
+        i, n = start, len(js_text)
+        while i < n and js_text[i] != delim:
+            i += 2 if js_text[i] == "\\" else 1
+        if i >= n:
+            raise AssertionError(f"unterminated string literal for {const} in the dist")
+        return _unescape_js_double_quoted(js_text[start:i]), []
+    pieces, exprs, _ = _scan_js_template(js_text, start)
+    spliced, out = [], [_unescape_js_double_quoted(pieces[0])]
+    for expr, piece in zip(exprs, pieces[1:]):
+        m = _STATE_TABLE_SPLICE_RE.fullmatch(expr)
+        if m is None:
+            raise AssertionError(
+                f"{const} interpolates `${{{expr.strip()[:100]}}}` -- not the one shape this "
+                "extractor models (a table spliced from OPENCLAW_STATE_SCHEMA_SQL). The "
+                "constant composes its DDL in a way nothing here has read; re-ground it.")
+        spliced.append(m.group(2))
+        out.append(f"/*splice:{m.group(2)}*/" + _unescape_js_double_quoted(piece))
+    return "".join(out), spliced
+
+
+def _survey_schema_sql_constants(dist_dir: Path, wanted) -> "tuple[set, dict]":
+    """(every `*_SCHEMA_SQL` name appearing in any dist bundle, name -> [(path, canonical
+    SQL, spliced tables)] for each literal definition of a *wanted* constant). One read per
+    file; an unreadable bundle fails loudly, as in `_state_schema_defining_files`."""
+    seen: set = set()
+    found: dict = {name: [] for name in wanted}
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while classifying *_SCHEMA_SQL constants: {exc}. An "
+                    "unreadable bundle could define a state-schema constant.") from exc
+            if "_SCHEMA_SQL" not in text:
+                continue
+            seen.update(_SCHEMA_SQL_NAME_RE.findall(text))
+            for name in wanted:
+                if name not in text:
+                    continue
+                for m in re.finditer(rf"\b{name}\s*=\s*([`\"'])", text):
+                    sql, spliced = _extract_satellite_schema_sql(text, m.end(), m.group(1), name)
+                    found[name].append((path, sql, spliced))
+    return seen, found
+
+
+_DERIVED_DEFINITION_RE = re.compile(
+    r"extractSqliteTableSchema\(\s*OPENCLAW_STATE_SCHEMA_SQL\s*,\s*"
+    r"(?:\"([^\"\\\n]*)\"|([A-Za-z_$][\w$]*))\s*\)\s*;")
+
+
+def _survey_derived_state_constants(dist_dir: Path, derived) -> "dict[str, list]":
+    """name -> [(path, table)] for every definition of a *derived* constant. A definition is
+    understood only as `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>);`
+    where <table> is a string literal or an identifier bound once, in the same file, to one.
+    Any other right-hand side (a literal, a different source constant, an options argument, a
+    computed table) raises: the constant composes its DDL in a way nothing here has read."""
+    found: dict = {name: [] for name in derived}
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while classifying derived *_SCHEMA_SQL constants: "
+                    f"{exc}. An unreadable bundle could define one.") from exc
+            for name in derived:
+                if name not in text:
+                    continue
+                for m in re.finditer(rf"\b{name}\s*=(?!=)\s*", text):
+                    d = _DERIVED_DEFINITION_RE.match(text, m.end())
+                    if d is None:
+                        raise AssertionError(
+                            f"{name} is classified as derived from OPENCLAW_STATE_SCHEMA_SQL but "
+                            f"{path} defines it as `{text[m.end():m.end() + 100].strip()}...` -- "
+                            "not the one shape this guard models (`extractSqliteTableSchema("
+                            "OPENCLAW_STATE_SCHEMA_SQL, <table>);`). Re-ground the classification.")
+                    table = d.group(1)
+                    if table is None:
+                        bound = set(re.findall(
+                            rf"\b(?:const|let|var)\s+{re.escape(d.group(2))}\s*=\s*\"([^\"\\\n]*)\"\s*[;,]",
+                            text))
+                        if len(bound) != 1:
+                            raise AssertionError(
+                                f"{name}: the table argument `{d.group(2)}` is not bound to exactly "
+                                f"one string literal in {path} ({sorted(bound)}); re-ground.")
+                        table = next(iter(bound))
+                    found[name].append((path, table))
+    return found
+
+
+def _check_derived_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> None:
+    if not defs:
+        raise AssertionError(
+            f"{name} is classified as derived from OPENCLAW_STATE_SCHEMA_SQL but no bundle under "
+            f"{dist_dir} defines it -- the vendor renamed, moved or rewrote it; re-ground.")
+    tables = sorted({t for _, t in defs})
+    if len(tables) != 1:
+        raise AssertionError(f"{name} is derived for DIFFERENT tables ({tables}); decide which "
+                             "one the runtime applies before trusting either.")
+    if tables[0] not in set(main_tables):
+        raise AssertionError(
+            f"{name} is derived from OPENCLAW_STATE_SCHEMA_SQL for {tables[0]!r}, which the main "
+            "constant does not declare -- the derivation would fail at runtime; re-ground.")
+
+
+def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> dict:
+    """{"tables", "adds", "bundle", "copies"} for one allowlisted constant's definitions."""
+    if not defs:
+        raise AssertionError(
+            f"{name} is allowlisted as a state-database schema constant but no bundle under "
+            f"{dist_dir} defines it as a string or template literal -- the vendor renamed, "
+            "moved or rewrote it; re-ground the allowlist entry.")
+    by_digest: "dict[str, list[Path]]" = {}
+    for path, sql, _ in defs:
+        by_digest.setdefault(
+            hashlib.sha256(sql.encode("utf-8", "surrogatepass")).hexdigest()[:12], []).append(path)
+    if len(by_digest) != 1:
+        listing = "; ".join(f"{d}: {[str(p.relative_to(dist_dir)) for p in ps]}"
+                            for d, ps in sorted(by_digest.items()))
+        raise AssertionError(
+            f"{name} is defined with DIFFERENT schemas ({listing}); decide which one the "
+            "runtime applies before trusting a table set taken from either.")
+    _, sql, spliced = defs[0]
+    named = _CREATE_TABLE_NAMED_RE.findall(sql)
+    if not named or len(named) != len(_CREATE_TABLE_RE.findall(sql)):
+        raise AssertionError(
+            f"{name}: {len(_CREATE_TABLE_RE.findall(sql))} CREATE TABLE statement(s) but "
+            f"{len(named)} table name(s) read -- a quoted or computed name is not a bare "
+            "identifier, so this extractor cannot name that table. Re-ground it.")
+    absent = sorted(set(spliced) - set(main_tables))
+    if absent:
+        raise AssertionError(
+            f"{name} splices {absent} from OPENCLAW_STATE_SCHEMA_SQL, which declares no "
+            "such table -- the splice would fail at runtime; re-ground.")
+    paths = [p for p, _, _ in defs]
+    bundle = min(paths, key=lambda p: (len(p.relative_to(dist_dir).parts), p.stat().st_size, str(p)))
+    tables = sorted(set(named))
+    return {
+        "tables": tables,
+        "adds": sorted(set(tables) - set(main_tables)),
+        "bundle": bundle.name,
+        "copies": len(paths),
+    }
+
+
+def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, excluded=None,
+                            redeclaring=None, derived=None) -> "dict[str, dict]":
+    """name -> {"tables", "adds", "bundle", "copies"} for every allowlisted satellite.
+
+    Raises on: a `*_SCHEMA_SQL` name in no list; an allowlisted constant with no literal
+    definition (the vendor moved or renamed it); definitions that are not the same schema
+    (any number of identical copies is fine -- the rule `_find_state_schema_defining_js`
+    uses); a `CREATE TABLE` whose name is not a literal; a spliced table the main constant
+    does not declare; a satellite that declares nothing; and a REDECLARING constant that
+    declares a table the main constant does not (it must then be promoted to the allowlist
+    deliberately). Redeclaring constants add no name, so they are checked, not returned. A
+    DERIVED constant (`NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>)`)
+    is checked the same way: its definition shape must be that one, its table must be in the
+    main set, and anything else raises."""
+    satellites = _STATE_SATELLITE_CONSTANTS if satellites is None else satellites
+    excluded = _STATE_EXCLUDED_CONSTANTS if excluded is None else excluded
+    redeclaring = _STATE_REDECLARING_CONSTANTS if redeclaring is None else redeclaring
+    derived = _STATE_DERIVED_CONSTANTS if derived is None else derived
+    seen, found = _survey_schema_sql_constants(dist_dir, set(satellites) | set(redeclaring))
+    unclassified = sorted(seen - {_PRIMARY_STATE_SCHEMA_CONSTANT} - set(satellites)
+                          - set(redeclaring) - set(derived) - set(excluded))
+    if unclassified:
+        raise AssertionError(
+            f"unclassified *_SCHEMA_SQL constant(s) in {dist_dir}: {unclassified}. Read where "
+            "each is applied. If the DDL reaches the STATE database "
+            "(runOpenClawStateWriteTransaction / openOpenClawStateDatabase), add it to "
+            "_STATE_SATELLITE_CONSTANTS (or _STATE_REDECLARING_CONSTANTS if it adds no table) "
+            "with that evidence; otherwise add it to _STATE_EXCLUDED_CONSTANTS with the "
+            "reason. Guessing here is how a vendor table goes unnamed.")
+    for name in sorted(redeclaring):
+        extra = _resolve_state_constant(name, found[name], dist_dir, main_tables)["adds"]
+        if extra:
+            raise AssertionError(
+                f"{name} is listed as re-declaring only tables OPENCLAW_STATE_SCHEMA_SQL already "
+                f"has, but it declares {extra}, which the main constant does not. Read where it "
+                "is applied and move it to _STATE_SATELLITE_CONSTANTS deliberately.")
+    derived_defs = _survey_derived_state_constants(dist_dir, set(derived)) if derived else {}
+    for name in sorted(derived):
+        _check_derived_state_constant(name, derived_defs[name], dist_dir, main_tables)
+    return {name: _resolve_state_constant(name, found[name], dist_dir, main_tables)
+            for name in sorted(satellites)}
+
+
+def _vendor_state_table_surface(dist_dir: Path, satellites=None, excluded=None,
+                                redeclaring=None, derived=None) -> "tuple[set, dict, Path]":
+    """(every state-database table name the dist declares, per-satellite provenance, the
+    bundle the main constant was read from). The one function the generator AND the
+    dist-comparison test call, so they cannot disagree about what the file covers."""
+    js_path = _find_state_schema_defining_js(dist_dir)
+    main = set(_dist_table_ddl_texts(_extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))))
+    provenance = _satellite_state_tables(dist_dir, main, satellites, excluded, redeclaring, derived)
+    return main | {t for p in provenance.values() for t in p["tables"]}, provenance, js_path
+
+
+def _satellite_header_block(provenance: "dict[str, dict]") -> str:
+    """`#` comment lines naming each satellite, the bundle it was read from and the tables it
+    adds. Provenance lives in the header, never on a data line: the reader treats a whole data
+    line as a table name."""
+    lines = []
+    for name, p in sorted(provenance.items()):
+        adds = ", ".join(p["adds"]) or "(none beyond the main constant)"
+        lines.append(f"#   {name}  [{p['bundle']}, {p['copies']} cop{'y' if p['copies'] == 1 else 'ies'}]"
+                     f"\n#     adds: {adds}")
+    return "\n".join(lines)
+
 
 _VENDOR_TABLES_HEADER = """\
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
@@ -2088,10 +2688,21 @@ _VENDOR_TABLES_HEADER = """\
 #
 # What this is
 # ------------
-# Every table name the installed OpenClaw's `OPENCLAW_STATE_SCHEMA_SQL` declares -- the
-# vendor's whole state-SQLite surface, NOT the part this tree models. Its sibling
+# Every table name the installed OpenClaw declares for its STATE SQLite database
+# (state/openclaw.sqlite) -- the vendor's whole state-SQLite surface, NOT the part this tree
+# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the allowlisted
+# satellite constants below, each applied to the same database through the state-database
+# write path (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
 # state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
 # tables we read.
+#
+# Not covered: the per-agent database, the workboard store, the memory index, the debug-proxy
+# capture sidecar and the retired shapes (the explicit exclusions in
+# tests/test_state_schema_grounding.py). A name here means the vendor DECLARES a table, not
+# that a given database has it yet: many are created on first use.
+#
+# Satellite constants read (bundle it came from, tables it adds beyond the main constant):
+{satellite_block}
 #
 # Why it exists
 # -------------
@@ -2136,12 +2747,12 @@ def _write_vendor_table_baseline() -> int:
             "vacuous table baseline. Run this on a machine with the matching OpenClaw "
             "installed."
         )
-    js_path = _find_state_schema_defining_js(OPENCLAW_DIST)
+    all_tables, provenance, js_path = _vendor_state_table_surface(OPENCLAW_DIST)
     sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
     # C-580: same reasoning as _write_state_snapshot -- verify the worker.mjs copy before
     # trusting this text to build a baseline.
     _assert_worker_template_copy_matches_primary(OPENCLAW_DIST, sql_text)
-    tables = sorted(_dist_table_ddl_texts(sql_text))
+    tables = sorted(all_tables)
     if not tables:
         raise RuntimeError(
             "extracted ZERO tables from the vendor schema -- refusing to write an empty "
@@ -2153,6 +2764,7 @@ def _write_vendor_table_baseline() -> int:
         generated=date.today().isoformat(),
         count=len(tables),
         source_file=js_path.name,
+        satellite_block=_satellite_header_block(provenance),
         regen_cmd=REGENERATE_TABLES_CMD,
     )
     VENDOR_TABLES_FILE.write_text(header + "\n".join(tables) + "\n", encoding="utf-8")
@@ -2288,9 +2900,9 @@ def test_vendor_table_baseline_matches_the_installed_dist():
     upgrade, where both existing state-DB oracles came back clean.
     """
     dist_dir = _require_dist()
-    js_path = _find_state_schema_defining_js(dist_dir)
-    sql_text = _extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))
-    vendor = set(_dist_table_ddl_texts(sql_text))
+    # C-679: the main constant PLUS the allowlisted satellites; an unclassified
+    # `*_SCHEMA_SQL` constant raises here, so this test also stops on one.
+    vendor, _, _ = _vendor_state_table_surface(dist_dir)
 
     text, names = _read_vendor_table_baseline()
     added, removed = _table_set_delta(vendor, names)

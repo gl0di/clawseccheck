@@ -207,8 +207,10 @@ class TestMediaDirectiveWiring:
         monkeypatch.chdir(fake_home)
         audited = fake_home / "oc_home"
         audited.mkdir()
+        # C-621: a bare --pdf falls back into the --data-dir store, so the store must sit
+        # under the (redirected) home for the host MEDIA line to collapse to ``~``.
         return main(["--home", str(audited), "--no-history",
-                     "--data-dir", str(tmp_path / "store"), "--dashboard",
+                     "--data-dir", str(fake_home / ".clawseccheck"), "--dashboard",
                      "--pdf", *extra])
 
     def test_sandboxed_media_line_never_starts_with_tilde(self, tmp_path, monkeypatch, capsys):

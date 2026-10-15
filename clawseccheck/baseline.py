@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from . import pathprobe
 from .safeio import secure_append_text
 
 # The exact shape fingerprint() produces: <id>:<8 lowercase hex chars>. Used by
@@ -138,11 +139,14 @@ def load_ignore_entries(home: Path | str) -> "list[IgnoreEntry]":
     empty list when the file is absent or unreadable, same fail-open-to-nothing shape
     ``load_ignore()`` always had.
     """
-    p = Path(home).expanduser() / ".clawseccheckignore"
-    if not p.is_file():
+    p = pathprobe.expand_user(home) / ".clawseccheckignore"
+    if not pathprobe.is_file(p):
         return []
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        # utf-8-sig drops ONE leading byte-order mark (C-716): an editor that saves the file
+        # with a BOM would otherwise glue it to the first line and that entry (or the comment
+        # that heads the file) would never match. A mark anywhere else stays content.
+        text = p.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return []
     out: "list[IgnoreEntry]" = []
@@ -215,7 +219,7 @@ def append_entries(home: Path | str, entries, *, comment: str | None = None) -> 
     any change to this file is still visible to ``--monitor`` (``ignore_hash``).
     Returns the number of entries actually written (0 if none were new).
     """
-    p = Path(home).expanduser() / ".clawseccheckignore"
+    p = pathprobe.expand_user(home) / ".clawseccheckignore"
     existing = load_ignore(home)
     new_entries = [e for e in entries if e and e not in existing]
     if not new_entries:

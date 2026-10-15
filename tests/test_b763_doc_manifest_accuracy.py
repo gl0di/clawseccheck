@@ -46,7 +46,9 @@ _SKILL_MD = _REPO / "SKILL.md"
 # ─────────────────────────────────────────────────────── 1. SKILL.md write promise
 
 def test_frontmatter_no_longer_undercounts_the_write_paths():
-    text = _SKILL_MD.read_text(encoding="utf-8")
+    from _skillcorpus import skill_corpus
+
+    text = skill_corpus()
     # The old, inaccurate clause named exactly ONE writer and called it the only one.
     assert "except through one opt-in" not in text, (
         "SKILL.md's frontmatter still claims a single write path into the OpenClaw "
@@ -72,11 +74,16 @@ def test_frontmatter_names_both_writers_into_the_openclaw_home():
 
 def test_frontmatter_never_modifies_config_skill_or_bootstrap_claim_survives():
     """The one absolute claim in the promise -- config/skill/bootstrap files are never
-    touched -- must stay, worded exactly as the body's own (already-accurate) write-
-    boundary paragraph puts it, so the two do not drift into two different promises.
+    touched -- must stay in the front matter AND in the body's write-boundary paragraph,
+    so the two do not drift into two different promises. (The front matter was reworded
+    when the description stopped calling ClawSecCheck's own state writes "nothing"; the
+    pin follows the wording, the claim is the same.)
     """
     text = _SKILL_MD.read_text(encoding="utf-8")
-    assert "ever changes your OpenClaw config, a skill, or a bootstrap file" in text
+    frontmatter = text.split("---", 2)[1]
+    assert "It changes no OpenClaw config, skill or bootstrap file" in frontmatter
+    body = text.split("---", 2)[2]
+    assert "never modifies `openclaw.json`, your skills, or your bootstrap files" in body
 
 
 # ─────────────────────────────────────────────────────── 2. --help / --monitor exit codes

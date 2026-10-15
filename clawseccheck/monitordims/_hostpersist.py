@@ -7,8 +7,11 @@ B-483 found seven copies of one table in this tree and three of them had drifted
 
 from __future__ import annotations
 from ..hostpersist import FAMILY_LABELS as _hp_FAMILY_LABELS  # noqa: F401
+from ..hostpersist import FAMILY_LABELS_NOT_LOADED as _hp_FAMILY_LABELS_NOT_LOADED  # noqa: F401
 from ..hostpersist import FAMILY_SYSTEM_CRON as _hp_FAMILY_SYSTEM_CRON  # noqa: F401
 from ..hostpersist import FAMILY_SYSTEMD as _hp_FAMILY_SYSTEMD  # noqa: F401
+from ..hostpersist import FAMILY_SYSTEMD_NOT_LOADED as _hp_FAMILY_SYSTEMD_NOT_LOADED  # noqa: F401
+from ..hostpersist import is_systemd_unit_name as _hp_is_systemd_unit_name  # noqa: F401
 from ._shared import (  # noqa: F401
     NOTE_INSPECTION_CAPPED,
     NOTE_NO_PRIOR_RECORD,
@@ -22,7 +25,7 @@ from ._shared import (  # noqa: F401
 # severity purposes. Sourced from `hostpersist.FAMILY_LABELS` rather than retyped, so a
 # family renamed in the leaf cannot silently stop matching here - B-483 found seven copies
 # of one table in this tree and three of them had drifted.
-_HOST_PERSIST_LABELS = dict(_hp_FAMILY_LABELS)
+_HOST_PERSIST_LABELS = {**_hp_FAMILY_LABELS, **_hp_FAMILY_LABELS_NOT_LOADED}
 
 
 # systemd units and system cron are edited rarely and every line in them can start a
@@ -73,8 +76,24 @@ def _diff_host_persist(_hp_pair, alerts, curr, note, prev) -> None:
             def _dig(entry: object) -> str:
                 return entry.get("digest", "") if isinstance(entry, dict) else ""
 
+            def _stored_family(path: str, family: str) -> str:
+                """The family a stored entry belongs to NOW (C-676). A baseline recorded
+                before this family existed files an updater's `x.service.bak` under
+                `systemd_user`; read it as the family the leaf would give it today, so its
+                removal is not called a removed "systemd user service". Only a DIRECT child
+                of the unit directory (`~/.config/systemd/user/<name>`, as `_rel` stores it)
+                is reclassified - `x.service.d/override.conf` and `*.wants/` links are
+                deeper and keep the family they were recorded under.
+                """
+                prefix = "~/.config/systemd/user/"
+                if family == _hp_FAMILY_SYSTEMD and path.startswith(prefix):
+                    name = path[len(prefix):]
+                    if name and "/" not in name and not _hp_is_systemd_unit_name(name):
+                        return _hp_FAMILY_SYSTEMD_NOT_LOADED
+                return family
+
             def _label(path: str, entry: object) -> str:
-                fam = _HOST_PERSIST_LABELS.get(_fam(entry))
+                fam = _HOST_PERSIST_LABELS.get(_stored_family(path, _fam(entry)))
                 return "{0} ({1})".format(path, fam) if fam else path
 
             def _say(level: str, verb: str, items: "list[str]") -> None:
@@ -92,6 +111,36 @@ def _diff_host_persist(_hp_pair, alerts, curr, note, prev) -> None:
             _added = [p for p in _ce if p not in _pe]
             _removed = [p for p in _pe if p not in _ce]
             _changed = [p for p in (set(_pe) & set(_ce)) if _dig(_pe[p]) != _dig(_ce[p])]
+
+            # C-676: a file systemd does not load is reported, at INFO (the lowest level
+            # there is), in its own sentence - "These run code" above is false for it.
+            # Everything is keyed by PATH, so a baseline recorded before this family
+            # existed (the same path under `systemd_user`) is neither "removed" nor
+            # "appeared" on the first run after the upgrade.
+            def _inert(p: str, entry: object) -> bool:
+                return _stored_family(p, _fam(entry)) == _hp_FAMILY_SYSTEMD_NOT_LOADED
+
+            def _say_inert(verb: str, items: "list[str]", why: str) -> None:
+                if not items:
+                    return
+                shown = sorted(items)[:_DIMENSION_NAME_CAP]
+                more = len(items) - len(shown)
+                tail = ", and {0} more".format(more) if more > 0 else ""
+                alerts.append(("INFO", "File(s) {0} in the systemd user unit directory that "
+                                       "systemd does not load: {1}{2}. {3}"
+                               .format(verb, ", ".join(shown), tail, why)))
+
+            _say_inert("appeared", [p for p in _added if _inert(p, _ce[p])],
+                       "They start nothing as they are, but a unit staged this way can be "
+                       "renamed into place later; a rename to a new unit name shows up as a "
+                       "new service, and one over an existing unit as a changed unit.")
+            _say_inert("were removed", [p for p in _removed if _inert(p, _pe[p])],
+                       "systemd was not loading them, so nothing that runs has changed.")
+            _say_inert("changed", [p for p in _changed if _inert(p, _ce[p])],
+                       "systemd does not load them, so nothing that runs has changed.")
+            _added = [p for p in _added if not _inert(p, _ce[p])]
+            _removed = [p for p in _removed if not _inert(p, _pe[p])]
+            _changed = [p for p in _changed if not _inert(p, _ce[p])]
 
             _say("MEDIUM", "appeared", [_label(p, _ce[p]) for p in _added])
             _say("INFO", "were removed", [_label(p, _pe[p]) for p in _removed])

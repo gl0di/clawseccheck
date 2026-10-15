@@ -96,6 +96,7 @@ import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from . import pathprobe
 
 # Bounds. A persistence surface is small by nature; anything past these is either a
 # pathological machine or something that is not really this surface, and in both cases a
@@ -130,6 +131,14 @@ USER_CRON_SPOOLS = (
 )
 
 FAMILY_SYSTEMD = "systemd_user"
+# C-676: a file directly inside the systemd user unit directory whose name carries no unit
+# suffix. systemd loads a unit only from a name ending in one of SYSTEMD_UNIT_SUFFIXES (or
+# from a drop-in / `.wants/` directory), so an updater's `x.service.bak` or
+# `x.service.reconcile-<id>.receipt.bak` starts nothing. It is still recorded - a staged
+# unit can be renamed into place later - but it is NOT an execution entry point, so it is
+# deliberately outside FAMILIES (the families that are execution entry points) and has its
+# own label table; `monitordims/_hostpersist.py` places its appearance on the INFO side.
+FAMILY_SYSTEMD_NOT_LOADED = "systemd_user_not_loaded"
 FAMILY_SHELL_RC = "shell_rc"
 FAMILY_SYSTEM_CRON = "system_cron"
 FAMILY_PYTHON_AUTOEXEC = "python_autoexec"
@@ -146,6 +155,26 @@ FAMILY_LABELS = {
     FAMILY_SHELL_RC: "shell startup file",
     FAMILY_SYSTEM_CRON: "system cron entry",
 }
+
+# Label for the family above that is not in FAMILIES (C-676). Kept apart from
+# FAMILY_LABELS because that table is pinned to FAMILIES one-to-one.
+FAMILY_LABELS_NOT_LOADED = {
+    FAMILY_SYSTEMD_NOT_LOADED:
+        "file in the systemd user unit directory that systemd does not load",
+}
+
+# systemd.unit(5): the unit-name suffixes. A name that ends in none of these is never
+# loaded as a unit. Case-sensitive on purpose - systemd's own match is.
+SYSTEMD_UNIT_SUFFIXES = (
+    ".service", ".socket", ".device", ".mount", ".automount", ".swap",
+    ".target", ".path", ".timer", ".slice", ".scope",
+)
+
+
+def is_systemd_unit_name(name: str) -> bool:
+    """True when *name* ends in a systemd unit suffix (derived from the suffix list, never
+    from a tool's or a unit's name)."""
+    return name.endswith(SYSTEMD_UNIT_SUFFIXES)
 
 
 @dataclass(frozen=True)
@@ -177,9 +206,9 @@ def _digest(path: Path) -> "str | None":
     unreadable/undetermined path depends on.
     """
     try:
-        if path.is_symlink() and not path.exists():
+        if pathprobe.is_symlink(path) and not pathprobe.exists(path):
             return None  # a dangling symlink is not a readable file
-        if not path.is_file():
+        if not pathprobe.is_file(path):
             return None
         if path.stat().st_size > MAX_FILE_BYTES:
             # Digest the bounded prefix and mark it, rather than silently digesting a
@@ -219,7 +248,7 @@ def scan(home: "str | Path | None" = None,
     The remaining parameters exist so tests can point the system-wide halves at a
     ``tmp_path`` instead of the real ``/etc``; production callers pass none of them.
     """
-    home_path = Path(home).expanduser() if home else Path(os.path.expanduser("~"))
+    home_path = pathprobe.expand_user(home) if home else Path(os.path.expanduser("~"))
     crons = SYSTEM_CRON_PATHS if system_cron_paths is None else system_cron_paths
     spools = USER_CRON_SPOOLS if user_cron_spools is None else user_cron_spools
 
@@ -248,12 +277,12 @@ def scan(home: "str | Path | None" = None,
 
     # ---- systemd user units, timers, and the symlinks that arm them ----------------
     systemd_root = home_path / ".config" / "systemd" / "user"
-    if systemd_root.is_dir():
+    if pathprobe.is_dir(systemd_root):
         if FAMILY_SYSTEMD not in families_seen:
             families_seen.append(FAMILY_SYSTEMD)
         try:
             for child in sorted(systemd_root.iterdir()):
-                if child.is_dir():
+                if pathprobe.is_dir(child):
                     # `*.target.wants/` holds the enable symlinks. A unit file that
                     # exists but is not linked here is inert; the link IS the arming, so
                     # a link appearing with no new unit file is the interesting case.
@@ -262,15 +291,18 @@ def scan(home: "str | Path | None" = None,
                             add(FAMILY_SYSTEMD, link)
                     except OSError:
                         unreadable.append(_rel(child, home_path))
-                else:
+                elif is_systemd_unit_name(child.name):
                     add(FAMILY_SYSTEMD, child)
+                else:
+                    # C-676: recorded, not suppressed, but never called a service.
+                    add(FAMILY_SYSTEMD_NOT_LOADED, child)
         except OSError:
             unreadable.append(_rel(systemd_root, home_path))
 
     # ---- shell startup files -------------------------------------------------------
     for name in SHELL_RC_NAMES:
         candidate = home_path / name
-        if candidate.exists() or candidate.is_symlink():
+        if pathprobe.exists(candidate) or pathprobe.is_symlink(candidate):
             if FAMILY_SHELL_RC not in families_seen:
                 families_seen.append(FAMILY_SHELL_RC)
             add(FAMILY_SHELL_RC, candidate)
@@ -278,11 +310,11 @@ def scan(home: "str | Path | None" = None,
     # ---- system-wide cron (world-readable) -----------------------------------------
     for raw in crons:
         p = Path(raw)
-        if not p.exists():
+        if not pathprobe.exists(p):
             continue
         if FAMILY_SYSTEM_CRON not in families_seen:
             families_seen.append(FAMILY_SYSTEM_CRON)
-        if p.is_dir():
+        if pathprobe.is_dir(p):
             try:
                 for child in sorted(p.iterdir()):
                     add(FAMILY_SYSTEM_CRON, child)
@@ -297,7 +329,7 @@ def scan(home: "str | Path | None" = None,
     for raw in spools:
         p = Path(raw)
         try:
-            if not p.exists():
+            if not pathprobe.exists(p):
                 continue
             readable = os.access(str(p), os.R_OK)
         except OSError:

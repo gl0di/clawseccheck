@@ -20,6 +20,24 @@ Three tables, each entry a full record - not a bare string:
 - **`PUBLISHERS`** - known-bad publisher/author accounts (empty today - see below).
 - **`HOSTS`** - C2, drop, and exfiltration hosts/IPs.
 
+The table shape anticipates more ecosystems than the contents cover. What each one holds
+today (a test pins these counts to the shipped data, so a row cannot go stale):
+
+| Table / ecosystem | Entries | What a source in it gets |
+| --- | --- | --- |
+| clawhub | 5 | exact-match check by slug |
+| npm | 0 | no identity signal |
+| pypi | 0 | no identity signal |
+| git | 0 | no name check; its host is still checked against `HOSTS` |
+| hosts | 3 | exact-match check by host (this is what a URL source is judged on) |
+| publishers | 0 | no identity signal |
+
+For an ecosystem with no entries, `--vet-source` says so on its result
+(`no identity signal for this ecosystem (the dataset holds no npm entries)`), in the same
+notes block that already reports what a run did not assess. That line is a statement about
+the dataset, not about the source: an UNKNOWN there means "nothing is known here", never
+"checked and clean". It never changes the verdict.
+
 Every record carries `value`, `type`, `first_seen`, `source_url`, `source_name`, and
 `note`. There is **no CVE table and no version-gate** here on purpose - that is a
 different, already-covered surface (see the CVE advisories carried as prose in

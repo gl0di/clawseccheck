@@ -18,7 +18,8 @@ from __future__ import annotations
 # An adversarial pass produced six false positives from one omission: `_plugins_sig` stored
 # raw strings and the arm did a raw set difference, while OpenClaw compares ids through
 # `normalizePluginId` - trim, lowercase, then an alias table
-# (`dist/config-state-CtMlHVRM.js`). Every identity-preserving re-spelling therefore looked
+# (`dist/config-state-CtMlHVRM.js` on 2026.9.x; config-state-wnnTmmuG.mjs:19-23 on
+# openclaw@2026.10.2, read 2026-10-12). Every identity-preserving re-spelling therefore looked
 # like a set difference, and always on a LOOSENING arm, because a re-spelling adds the new
 # form to `allow` and removes the old form from `deny` in the same edit.
 #
@@ -122,7 +123,11 @@ def _plugins_sig(ctx) -> dict:
     entries = dig(cfg, "plugins.entries")
     if isinstance(entries, dict):
         # id -> whether it is switched on. OpenClaw treats an absent `enabled` as on
-        # (`config-normalization-shared-w2iz0aeC.js`: `enabled: config?.enabled !== false`),
+        # (`config-normalization-shared-w2iz0aeC.js`: `enabled: config?.enabled !== false`
+        # on 2026.9.x; `normalizePluginEntries` / `normalizePluginsConfigWithResolverCore`
+        # in config-activation-shared-DnNUje5Q.mjs on openclaw@2026.10.2, read 2026-10-12,
+        # where the top-level default is `enabled: config?.enabled ?? true`, :82, and an
+        # entry is disabled only by a literal `entry?.enabled === false`, :141),
         # so absent is recorded as True rather than as unknown.
         out["entries"] = {
             _plugin_id(k): (not (isinstance(v, dict) and v.get("enabled") is False))

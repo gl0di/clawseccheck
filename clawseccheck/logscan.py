@@ -66,7 +66,6 @@ import base64
 import binascii
 import gzip
 import io
-import json
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -92,6 +91,7 @@ from .checks import (
 # (`_escape_embedded_header_lines`, `_is_own_source`, ...). collector.py does not import
 # this module (or checks/), so there is no import cycle.
 from .collector import _read_with_limit as _read_stream_capped
+from .configloader import loads_shallow
 from .logdiscovery import LogSink
 from .scanbudget import DEFAULT_LIMITS, ScanLimits, audit_budget_exceeded
 from .textnorm import normalize_for_scan
@@ -909,7 +909,12 @@ def _scan_trajectory_record(result: LogScanResult, line: str, last_seq, last_ts)
     Returns the updated ``(last_seq, last_ts)`` state for the next call.
     """
     try:
-        rec = json.loads(line)
+        # C-680 (C-664): read to 64 levels like json.loads (a deeper subtree is ELIDED, never a
+        # RecursionError). Everything read below sits within three levels of the root, so
+        # padding cannot change it. A line over _MAX_LINE_LEN never reaches this function
+        # (it is windowed and skipped above), so every line parsed here was regex-scanned
+        # whole, every nested level, by _scan_line_content before this record parse.
+        rec = loads_shallow(line).value
     except ValueError:
         return last_seq, last_ts
     if not isinstance(rec, dict):

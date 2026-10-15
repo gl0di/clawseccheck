@@ -74,9 +74,9 @@ def _installed_dist_version(binary_name="openclaw"):
     return _openclawdist._read_version(root) or None
 
 
-__version__ = "4.3.1"
+__version__ = "4.4.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-09-29"
+__released__ = "2026-10-12"
 
 
 def build_context(home: Path | str = "~/.openclaw",
@@ -121,7 +121,11 @@ def build_context(home: Path | str = "~/.openclaw",
     if include_dist:
         ctx.installed_dist_version = _installed_dist_version()
     if attestation:
-        ctx.attestation = attestation
+        # C-714: a library caller gets the same vetting the CLI applies (an unusable
+        # roster or name list reads as absent). The CLI has already vetted and warned;
+        # a vetted attestation comes back unchanged.
+        from .attest import vet_attestation  # noqa: PLC0415
+        ctx.attestation = vet_attestation(attestation)[0]
     ctx.exhaustive = exhaustive
     return ctx
 

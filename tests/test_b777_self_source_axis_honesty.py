@@ -39,6 +39,12 @@ bisects exactly one line either side of it — pinning the MECHANISM (one marker
 flips `_is_own_source`) rather than a number that drifts with every edit to the file.
 
 Both tests are offline and read/write only `tmp_path` / bundled fixtures.
+
+C-636 (Dave, 2026-09-30): the canned B13 PASS this file was written against is gone. The
+own-source skip now returns an engine-degraded B13 UNKNOWN ("NOT SCANNED ...") that rolls
+up to CAUTION, because the layout match is a content heuristic anyone can write. The
+DANGER axis therefore reads UNKNOWN too (it was the one axis that used to read PASS); the
+other four axes are unchanged - UNKNOWN, never the false "no executable code" claim.
 """
 from __future__ import annotations
 
@@ -56,7 +62,7 @@ _FIXTURES = _REPO / "fixtures"
 _VET_SRC = _REPO / "clawseccheck" / "checks" / "_vet.py"
 
 _NO_CODE = "no executable code to analyze"
-_SELF_SOURCE_PHRASE = "This is ClawSecCheck's own source"
+_SELF_SOURCE_PHRASE = "NOT SCANNED. This directory matched ClawSecCheck's own-source layout"
 
 
 def _axis(profile, name):
@@ -87,7 +93,10 @@ def test_self_scan_fixture_axes_are_honest_not_no_code_or_unearned_pass():
 
     profile = build_profile(finding, str(target), "skill")
     danger = _axis(profile, "danger")
-    assert danger.status == PASS, danger.reason
+    # C-636: danger was the one axis that read PASS here; it is now an honest UNKNOWN.
+    assert danger.status == UNKNOWN, danger.reason
+    assert "NOT SCANNED" in danger.reason, danger.reason
+    assert profile.verdict == "CAUTION"
 
     for name in ("build", "behavior", "persistence", "connections"):
         axis = _axis(profile, name)
@@ -99,7 +108,7 @@ def test_self_scan_fixture_axes_are_honest_not_no_code_or_unearned_pass():
             f"{name} denies the existence of code that is, in fact, present in "
             f"quantity (B-628): {axis.reason!r}"
         )
-        assert "own source" in axis.reason, (
+        assert "own-source layout" in axis.reason, (
             f"{name} must name WHY it is unmeasured (self-source policy), not a bare "
             f"unmeasurable fallback: {axis.reason!r}"
         )
@@ -116,7 +125,8 @@ def test_self_scan_on_the_real_repo_root_is_honest():
         f"the real repo root must trip _is_own_source: {finding.detail!r}"
     )
     profile = build_profile(finding, str(_REPO), "skill")
-    assert _axis(profile, "danger").status == PASS
+    assert _axis(profile, "danger").status == UNKNOWN  # C-636: not a PASS any more
+    assert profile.verdict == "CAUTION"
     for name in ("build", "behavior", "persistence", "connections"):
         axis = _axis(profile, name)
         assert axis.status == UNKNOWN

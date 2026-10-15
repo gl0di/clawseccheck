@@ -68,7 +68,7 @@ Snapshot output carries no absolute paths -- skill directory NAMES and check ids
 Local, read-only, offline: no network, no subprocess, nothing in the audited setup is
 written. Native fold-in (`openclaw security audit`) is deliberately OFF -- it is the
 one part of a normal CLI run that shells out, and a gate must not launch the audited
-software. Stdlib only, Python 3.9+.
+software. Stdlib only, Python 3.10+.
 """
 from __future__ import annotations
 

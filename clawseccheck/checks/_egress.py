@@ -8,10 +8,12 @@ import ipaddress
 import os
 import re
 import socket
+import stat
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .. import pathprobe
 from ..catalog import (
     FAIL,
     MEDIUM,
@@ -21,12 +23,21 @@ from ..catalog import (
     Finding,
 )
 from ..collector import (
+    CONFIG_HEALTH_EMPTY,
+    CONFIG_HEALTH_OK,
+    CONFIG_HEALTH_UNREADABLE,
     LIMIT_DOMAIN_CONFIG,
+    LIMIT_DOMAIN_STATE_DB,
     Context,
     agent_roster,
     dig,
+    note_limit,
+    read_config_health_entries,
 )
+from ..collector import ConfigHealthRead as _ConfigHealthRead
+from .. import configjournal as _configjournal
 from .. import trajectorystore as _trajectorystore
+from ..configloader import loads_bounded as _loads_bounded
 from . import _shared
 from ._shared import (
     LOOPBACK,
@@ -40,15 +51,22 @@ from ._shared import (
     _openclaw_generation,
     _pattern_hits_real_secret,
     _retired_key_note,
+    _effective_gateway_bind,  # C-653
     _finding,
     _has_approval_gate,
     _hint,
     _KNOWN_EXFIL_HOST_RE,
+    _doctor_refuses_retired_formats,
+    _doctor_whole_config_hedge,
+    _legacy_ssrf_alias_consequence,
+    _legacy_ssrf_alias_fact,
+    _legacy_ssrf_alias_order,
+    _legacy_ssrf_alias_startup_blocked,
     _mcp_has_remote,
     _mcp_servers,
     _mcp_url_is_local,
     _plugins,
-    _read_jsonl_tail,
+    _JSONL_SCAN_CAP,
     _surface_absent,
     correlation_indicators,
     parse_bind_host,
@@ -335,6 +353,10 @@ def check_browser_ssrf(ctx: Context) -> Finding:
               OR noSandbox == true). Either private-network flag is a CRITICAL-class primitive:
               private-network access enables cloud-metadata credential theft;
               no-sandbox means the headless browser can escape OS isolation.
+              The legacy alias stays a FAIL on every build (Dave, 2026-09-30, C-645) but its
+              WORDING is version-aware: through 2026.9.6 it is live today (startup repairs
+              it in memory); on 2026.9.7 and later the gateway will not start with it and
+              `openclaw doctor --fix` would turn it into a live bypass.
     WARN    - browser is configured but ssrfPolicy.allowedHostnames /
               ssrfPolicy.hostnameAllowlist (the runtime merges both into one combined
               allowlist -- B-515) are both absent/empty (open egress surface - the
@@ -371,7 +393,32 @@ def check_browser_ssrf(ctx: Context) -> Finding:
         )
 
     ssrf_policy = browser.get("ssrfPolicy") if isinstance(browser.get("ssrfPolicy"), dict) else {}
-    # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist:
+    # C-645 (2026-09-30) -- READ THIS FIRST, the note below is the 2026.9.4-2026.9.6 story.
+    # 2026.9.7 REMOVED the boot-time self-heal it describes: `resolveStartupConfigSnapshot`
+    # is declared nowhere in the 2026.9.7 dist, pre-bootstrap's invalid-snapshot branch just
+    # returns, the startup preflight documents "legacy imports and repair receipts belong to
+    # Doctor" (startup-config-preflight-*.mjs), and an invalid config stops the gateway
+    # (config-guard-*.mjs, exit 78). The strict schema rejects the legacy key on 9.6 and 9.7
+    # alike (EXECUTED: `unrecognized_keys@browser.ssrfPolicy`), so on 2026.9.7+ a config
+    # carrying ONLY the legacy key is NOT a live bypass -- the gateway will not start with
+    # it. It is one Doctor run from live: Doctor's migration (doctor-config-flow-*.mjs)
+    # writes `dangerouslyAllowPrivateNetwork = legacy === true || current === true`, so a
+    # true legacy value wins even over an explicit `false`. Dave ruled (2026-09-30): keep
+    # FAIL, and make the wording version-aware -- the verdict is untouched; the detail and
+    # fix say "will not start / doctor would make it live" on 2026.9.7+ (a build we could
+    # not read keeps the original wording, conservatively). B38 and RISK-05/RISK-15 share
+    # `_LEGACY_SSRF_ALIAS_970_FACT` so they cannot drift.
+    #
+    # C-686: from 2026.10.1 the "doctor would make it live" half is gone -- the key is on the
+    # vendor's retired list, Doctor and `openclaw update` refuse the config, and the
+    # migration no longer exists (EXECUTED on 2026.10.2, see `_LEGACY_SSRF_ALIAS_1010_FACT`).
+    # `_legacy_ssrf_alias_fact(ctx)` picks the sentence by the installed build; the verdict
+    # stays FAIL. The detail text for a >= 2026.10.1 reader therefore differs from the
+    # 2026.9.7-2026.9.9 text (a fingerprint moves for that reader only); older and
+    # unknown builds are byte-identical.
+    #
+    # C-135 adversarial pass, 2026-09-16, grounded against the installed 2026.9.4 dist
+    # (STILL TRUE through 2026.9.6, superseded from 2026.9.7 by the note above):
     # the browser's own config resolver, resolveBrowserSsrFPolicy (config-Dc3xLSSD.mjs:
     # 117-130), ORs a LEGACY flat `allowPrivateNetwork` alias into
     # `dangerouslyAllowPrivateNetwork` before the browser ever uses the policy --
@@ -408,6 +455,9 @@ def check_browser_ssrf(ctx: Context) -> Finding:
     dangerously_allow_private = ssrf_policy.get("dangerouslyAllowPrivateNetwork")
     legacy_allow_private = ssrf_policy.get("allowPrivateNetwork")
     allow_private = dangerously_allow_private is True or legacy_allow_private is True
+    # C-645: True only for a legacy `true` on a build KNOWN to have dropped the startup
+    # self-heal (2026.9.7+). Unknown build -> False -> the original (pre-9.7) wording.
+    legacy_startup_blocked = _legacy_ssrf_alias_startup_blocked(ctx, cfg)
     no_sandbox = browser.get("noSandbox")
     # B-515: the installed dist honours TWO sibling allowlist keys and merges them at
     # runtime -- allowedHostnames (current) and hostnameAllowlist (legacy/alternate).
@@ -426,10 +476,19 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             trigger_keys.append("dangerouslyAllowPrivateNetwork")
         if legacy_allow_private is True:
             trigger_keys.append("allowPrivateNetwork (legacy alias)")
-        fail_ev.append(
-            f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 "
-            "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
-        )
+        if legacy_startup_blocked:
+            # C-645: the legacy key means this config does not start on this build, so
+            # "the browser can reach internal IPs" is not true TODAY -- say what is.
+            fail_ev.append(
+                f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 retired key. "
+                f"{_legacy_ssrf_alias_fact(ctx)}"
+                f"{_legacy_ssrf_alias_consequence(ctx, dangerously_allow_private is True)}"
+            )
+        else:
+            fail_ev.append(
+                f"browser.ssrfPolicy.{'/'.join(trigger_keys)}=true \u2014 "
+                "agent browser can reach internal/metadata IPs (169.254.169.254 cloud-credential theft)"
+            )
     if no_sandbox is True:
         fail_ev.append(
             "browser.noSandbox=true \u2014 headless browser runs without OS sandbox "
@@ -444,13 +503,33 @@ def check_browser_ssrf(ctx: Context) -> Finding:
             "(or the legacy browser.ssrfPolicy.hostnameAllowlist) to restrict which "
             "hosts the browser may reach."
         )
-        if legacy_allow_private is True:
+        if legacy_startup_blocked:
+            # C-645 (2026.9.7+): do NOT tell the reader to "run doctor --fix to migrate it"
+            # -- with the key still true that is exactly the step that makes it live.
+            if _doctor_refuses_retired_formats(ctx):
+                # C-686: the "so ...=false alone does not close this" half rests on a Doctor
+                # migration that no longer exists on this build; do not carry it over.
+                fix += (
+                    " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                    f"same flag. {_legacy_ssrf_alias_fact(ctx)}. "
+                    f"{_legacy_ssrf_alias_order(ctx)}"
+                )
+            else:
+                fix += (
+                    " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
+                    f"same flag. {_legacy_ssrf_alias_fact(ctx)}, so "
+                    "dangerouslyAllowPrivateNetwork=false alone does not close this. "
+                    f"{_legacy_ssrf_alias_order(ctx)}"
+                )
+        elif legacy_allow_private is True:
             fix += (
                 " browser.ssrfPolicy.allowPrivateNetwork is the retired alias for the "
                 "same flag \u2014 OpenClaw ORs it into dangerouslyAllowPrivateNetwork before "
                 "the browser ever uses the policy, so dangerouslyAllowPrivateNetwork=false "
                 "alone will not close this while allowPrivateNetwork stays true. Set it to "
-                "false too, or remove it and run 'openclaw doctor --fix' to migrate it."
+                "false too, or remove it by hand. (Through OpenClaw 2026.9.6 'openclaw doctor "
+                "--fix' also migrates it; OpenClaw 2026.10.1 and later refuses a config that "
+                "holds it, so there the key has to be deleted by hand.)"
             )
         # B-722: only add the blockedHostnames lever when the private-network flag
         # is the (or one of the) actual triggers -- B38 can also FAIL on noSandbox alone,
@@ -2146,7 +2225,11 @@ def _b82_env_override(ctx: Context) -> "Finding | None":
 
     Returns a Finding that REPLACES the config-derived PASS, or None to let it stand.
 
-    ``resolveCacheTraceConfig`` (dist/selection-JInn13lc.js:1047-1055) computes::
+    ``resolveCacheTraceConfig`` (dist/selection-JInn13lc.js:1047-1055 on 2026.9.x; inlined into ``createCacheTrace``,
+    builtin-openclaw-DkEpBBN1.mjs:15551-15556 on openclaw@2026.10.2, read 2026-10-12, which
+    spells it ``env.OPENCLAW_CACHE_TRACE`` parsed ?? ``params.cfg?.diagnostics?.cacheTrace?.enabled``
+    ?? false and takes its file ONLY from ``env.OPENCLAW_CACHE_TRACE_FILE`` or the state-dir default --
+    it no longer reads a config ``filePath``) computes::
 
         enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
 
@@ -2277,7 +2360,8 @@ def check_cachetrace_redaction(ctx: Context) -> Finding:
         rejected outright. Reading it made this check's "not configured" branch an
         affirmative FALSE claim for every user who actually HAD cache tracing on.
 
-    The enable gate is ``enabled``, NOT ``filePath`` - ``resolveCacheTraceConfig`` reads::
+    The enable gate is ``enabled``, NOT ``filePath`` - ``resolveCacheTraceConfig`` (inlined
+    into ``createCacheTrace`` on openclaw@2026.10.2, see the B282 helper above) reads::
 
         enabled = parseBooleanValue(env.OPENCLAW_CACHE_TRACE) ?? config?.enabled ?? false
 
@@ -2444,135 +2528,223 @@ _B77_WINDOW_NOTE = (
 )
 
 
-def check_config_audit_log(ctx: Context) -> Finding:
-    import json as _json
+# C-674: the SQLite-era wording. The legacy-file strings below are unchanged byte for byte
+# - a fingerprint hashes `detail` - so only inputs that reach a NEW situation (a
+# state-database journal, or both containers at once) get new text.
+_B77_FIX_NOT_FOUND = (
+    "Keep OpenClaw's config-write audit journal enabled so config writes stay attributable "
+    "and reviewable: current OpenClaw records it in the state database "
+    "(state/openclaw.sqlite, table diagnostic_events, scope config-audit); older versions "
+    "wrote logs/config-audit.jsonl."
+)
+_B77_DB_WHERE = "the state-database config-audit journal"
+_B77_DB_WINDOW_NOTE = (
+    " Only the most recent journal rows within this scan's budget were read, so earlier "
+    "writes were not scanned."
+)
+_B77_WARN_FIX = (
+    "Review each flagged config write. A write you did not initiate \u2014 or one "
+    "carrying a suspicious marker \u2014 may indicate config tampering; restore from a "
+    "known-good backup and rotate any exposed credentials."
+)
 
-    log_path = ctx.home / "logs" / "config-audit.jsonl"
-    if not log_path.is_file():
-        return _finding(
-            "B77",
-            UNKNOWN,
-            "config audit log not found \u2014 cannot verify config change history.",
-            "Keep the config-io audit log (logs/config-audit.jsonl) enabled so config "
-            "writes stay attributable and reviewable.",
-        )
-    try:
-        raw, truncated = _read_jsonl_tail(log_path)
-    except OSError:
-        return _finding(
-            "B77",
+
+def _b77_db_unread_reasons(journal) -> str:
+    """Why part of a state-database journal was not examined, or "" when all of it was."""
+    parts = []
+    if journal.truncated:
+        parts.append("the journal is larger than this scan's budget and earlier writes were "
+                     "not read")
+    if journal.unparsable_lines:
+        parts.append(f"{journal.unparsable_lines} row(s) could not be read as a "
+                     "config-write record")
+    if journal.oversized_rows:
+        parts.append(f"{journal.oversized_rows} row(s) exceeded this scan's size budget and "
+                     "were not read")
+    return "; ".join(parts)
+
+
+def _b77_judge(journal):
+    """``(status, detail, fix, evidence)`` for ONE container's journal."""
+    in_db = journal.container == _configjournal.CONTAINER_STATE_DB
+    if journal.unreadable:
+        if in_db:
+            return (
+                UNKNOWN,
+                "config audit journal in the state database present but unreadable "
+                "\u2014 cannot verify config change history.",
+                "Ensure state/openclaw.sqlite is a regular, owner-readable SQLite file whose "
+                "diagnostic_events entry is a real table.",
+                [],
+            )
+        return (
             UNKNOWN,
             "config audit log present but unreadable \u2014 cannot verify config change history.",
             "Ensure logs/config-audit.jsonl is readable by the owner.",
+            [],
         )
+    truncated = journal.truncated
 
     evidence: list[str] = []
-    total = 0
-    for ln in raw.splitlines():
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            rec = _json.loads(ln)
-        except ValueError:
-            continue
-        if not isinstance(rec, dict):
-            continue
-        total += 1
-
-        suspicious = rec.get("suspicious")
-        if isinstance(suspicious, list) and suspicious:
-            event = str(rec.get("event", "config.write"))
-            labels = ", ".join(str(s) for s in suspicious[:5])
-            evidence.append(f"{event}: flagged suspicious [{labels}]")
-
-        argv = rec.get("argv")
-        if isinstance(argv, list) and argv:
-            if not any("openclaw" in str(a).lower() for a in argv):
-                proc = os.path.basename(str(argv[0]))
-                evidence.append(f"config written by unexpected process: {proc}")
+    total = len(journal.writes)
+    for w in journal.writes:
+        if w.suspicious:
+            labels = ", ".join(w.suspicious[:5])
+            evidence.append(f"{w.event}: flagged suspicious [{labels}]")
+        if w.argv_names_openclaw is False:
+            evidence.append(f"config written by unexpected process: {w.argv_label}")
 
     if total == 0:
-        return _finding(
-            "B77",
+        if in_db:
+            return (
+                UNKNOWN,
+                f"{_B77_DB_WHERE} holds {journal.rows_seen} row(s) but none could be read "
+                "as a config-write record within this scan's budget.",
+                _B77_FIX_NOT_FOUND,
+                [],
+            )
+        return (
             UNKNOWN,
             "config audit log present but contains no parseable config-write records.",
             "Keep the config-io audit log (logs/config-audit.jsonl) enabled so config "
             "writes stay attributable and reviewable.",
+            [],
         )
     if evidence:
         n = len(evidence)
-        return _finding(
-            "B77",
-            WARN,
-            f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
-            f"across {total} recorded write(s): suspicious markers and/or writes from an "
-            "unexpected process." + (_B77_WINDOW_NOTE if truncated else ""),
-            "Review each flagged config write. A write you did not initiate \u2014 or one "
-            "carrying a suspicious marker \u2014 may indicate config tampering; restore from a "
-            "known-good backup and rotate any exposed credentials.",
-            evidence=evidence[:10],
+        if in_db:
+            unread = _b77_db_unread_reasons(journal)
+            detail = (
+                f"config-write audit journal (state database) shows {n} "
+                f"entr{'y' if n == 1 else 'ies'} of concern across {total} recorded "
+                "write(s): suspicious markers and/or writes from an unexpected process."
+                + (_B77_DB_WINDOW_NOTE if truncated else "")
+                + (f" Not examined: {unread}." if unread else "")
+            )
+        else:
+            detail = (
+                f"config-write audit log shows {n} entr{'y' if n == 1 else 'ies'} of concern "
+                f"across {total} recorded write(s): suspicious markers and/or writes from an "
+                "unexpected process." + (_B77_WINDOW_NOTE if truncated else "")
+            )
+        return WARN, detail, _B77_WARN_FIX, evidence[:10]
+    if in_db and _b77_db_unread_reasons(journal):
+        # Same rule as the file branch below (B-727): a count over a window, or over the
+        # rows that happened to parse, is not a claim about the whole journal.
+        return (
+            UNKNOWN,
+            f"the {total} readable config write(s) in the state database are clean and "
+            f"openclaw-originated, but {_b77_db_unread_reasons(journal)} \u2014 cannot "
+            "verify the full config change history.",
+            "Review the config-audit rows of state/openclaw.sqlite (table diagnostic_events, "
+            "scope config-audit) directly for the writes this scan did not read.",
+            [],
         )
     if truncated:
-        # B-727: `_read_jsonl_tail` is bounded at `_JSONL_SCAN_CAP` because these journals
+        # B-727: the file reader is bounded at `_JSONL_SCAN_CAP` because these journals
         # reach GB (B-104). The bound is right; claiming completeness over it is not.
         # "all N recorded config write(s) are clean" was false in both halves on an
         # over-cap file - `total` counts the window, "all" covers only what was read - so
         # a write from an unexpected process before the window was reported as absent.
         # Golden Rule #4: the check cannot determine the file's state, so it says so.
-        return _finding(
-            "B77",
+        return (
             UNKNOWN,
             f"the {total} most recent config write(s) are clean and openclaw-originated, "
             "but the audit log is larger than this scan's budget and earlier writes were "
             "not read \u2014 cannot verify the full config change history.",
             "Review logs/config-audit.jsonl directly for writes older than the most "
             "recent 1 MB, or rotate it so a full scan fits.",
+            [],
         )
-    return _finding(
-        "B77",
+    if in_db:
+        return (
+            PASS,
+            f"all {total} recorded config write(s) in the state database are clean and "
+            "openclaw-originated.",
+            "Periodically review the config-audit journal (state database, diagnostic_events "
+            "scope config-audit) for unexpected config writers.",
+            [],
+        )
+    return (
         PASS,
         f"all {total} recorded config write(s) are clean and openclaw-originated.",
         "Periodically review logs/config-audit.jsonl for unexpected config writers.",
+        [],
+    )
+
+
+# Most severe first. A WARN is a finding; an UNKNOWN is "could not tell" and must never be
+# outvoted by a clean PASS from a different container.
+_B77_RANK = {WARN: 2, UNKNOWN: 1, PASS: 0}
+
+
+def check_config_audit_log(ctx: Context) -> Finding:
+    journals = _configjournal.read_journals(ctx.home, cap=_JSONL_SCAN_CAP)
+    if not journals:
+        return _finding(
+            "B77",
+            UNKNOWN,
+            "config audit log not found \u2014 cannot verify config change history.",
+            _B77_FIX_NOT_FOUND,
+        )
+    if len(journals) == 1:
+        status, detail, fix, evidence = _b77_judge(journals[0])
+        return _finding("B77", status, detail, fix, evidence=evidence)
+
+    # C-674: BOTH containers exist (an OpenClaw rollback re-created the file beside a
+    # database that already holds rows). Neither one speaks for the other: judge each, take
+    # the most severe verdict, and name both in the detail so a clean database can never
+    # hide a suspicious file (or the reverse).
+    judged = [(j, _b77_judge(j)) for j in journals]
+    judged.sort(key=lambda item: -_B77_RANK[item[1][0]])
+    status, _, fix, _ = judged[0][1]
+    if status == PASS:
+        fix = ("Periodically review both config-write journals (the config-audit rows of "
+               "state/openclaw.sqlite and logs/config-audit.jsonl) for unexpected config "
+               "writers; keep only the one your OpenClaw version writes.")
+    parts, evidence = [], []
+    for journal, (_, detail, _, ev) in judged:
+        in_db = journal.container == _configjournal.CONTAINER_STATE_DB
+        tag = "state database" if in_db else "legacy file logs/config-audit.jsonl"
+        parts.append(f"{tag}: {detail}")
+        evidence.extend(f"[{'state database' if in_db else 'legacy file'}] {e}" for e in ev)
+    return _finding(
+        "B77",
+        status,
+        "config-write audit journals exist in two places and were each checked \u2014 "
+        + " ".join(parts),
+        fix,
+        evidence=evidence[:10],
     )
 
 
 # ---------------------------------------------------------------------------
 # B78 - Config-health integrity tracker review
 # ---------------------------------------------------------------------------
-def check_config_health_integrity(ctx: Context) -> Finding:
-    import json as _json
+# C-687: the SQLite-era wording. The legacy-file strings below are unchanged byte for byte
+# - a fingerprint hashes `detail` - so only inputs that reach a NEW situation (a state-database
+# record, or both containers at once) get new text; the advice (`fix`) is not hashed.
+_B78_FIX_KEEP = (
+    "Keep config-health tracking enabled so OpenClaw can detect and flag suspicious config "
+    "states: current OpenClaw records it in the state database (state/openclaw.sqlite, table "
+    "config_health_entries); older versions wrote logs/config-health.json."
+)
+_B78_WARN_FIX = (
+    "Treat this as possible config tampering: compare the live config against the "
+    "last-known-good, restore from a trusted backup if it diverged, and rotate any "
+    "credentials that may have been exposed."
+)
+_B78_PASS_FIX = "Keep config-health tracking enabled and review it after any unexpected config change."
+_B78_DB_SCOPE = " in the state database"
+# Most severe first, as for B77: an UNKNOWN must never be outvoted by a clean PASS from the
+# other container.
+_B78_RANK = {WARN: 2, UNKNOWN: 1, PASS: 0}
 
-    health_path = ctx.home / "logs" / "config-health.json"
-    if not health_path.is_file():
-        return _finding(
-            "B78",
-            UNKNOWN,
-            "config-health integrity file not found \u2014 cannot evaluate config integrity history.",
-            "Keep config-health tracking (logs/config-health.json) enabled so OpenClaw can "
-            "detect and flag suspicious config states.",
-        )
-    try:
-        data = _json.loads(health_path.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, ValueError):
-        return _finding(
-            "B78",
-            UNKNOWN,
-            "config-health integrity file present but unreadable or malformed \u2014 cannot "
-            "evaluate config integrity history.",
-            "Ensure logs/config-health.json is valid JSON and owner-readable.",
-        )
 
-    entries = data.get("entries") if isinstance(data, dict) else None
-    if not isinstance(entries, dict) or not entries:
-        return _finding(
-            "B78",
-            UNKNOWN,
-            "config-health file has no tracked config entries \u2014 nothing to evaluate.",
-            "Keep config-health tracking (logs/config-health.json) enabled so OpenClaw can "
-            "detect and flag suspicious config states.",
-        )
-
+def _b78_judge_entries(entries: dict, scope: str = "", unread_note: str = "") -> tuple:
+    """``(status, detail, fix, evidence)`` for one container's ``entries`` object. *scope* is
+    empty for the legacy file (its text is unchanged byte for byte) and names the state
+    database otherwise; *unread_note* is non-empty when part of the container was not read."""
     evidence: list[str] = []
     for path, info in entries.items():
         if not isinstance(info, dict):
@@ -2583,22 +2755,172 @@ def check_config_health_integrity(ctx: Context) -> Finding:
 
     if evidence:
         n = len(evidence)
-        return _finding(
-            "B78",
+        fix = _B78_WARN_FIX
+        if unread_note:
+            fix += f" Also: {unread_note}, so other entries may be affected."
+        return (
             WARN,
-            f"config integrity alert: {n} tracked config(s) recorded a suspicious signature "
-            "\u2014 OpenClaw observed a config state it could not verify as known-good.",
-            "Treat this as possible config tampering: compare the live config against the "
-            "last-known-good, restore from a trusted backup if it diverged, and rotate any "
-            "credentials that may have been exposed.",
-            evidence=evidence[:10],
+            f"config integrity alert: {n} tracked config(s){scope} recorded a suspicious "
+            "signature \u2014 OpenClaw observed a config state it could not verify as known-good.",
+            fix,
+            evidence[:10],
         )
-    return _finding(
-        "B78",
+    if unread_note:
+        # A record that was not read is not a clean record (Golden Rule #4).
+        return (
+            UNKNOWN,
+            f"{len(entries)} tracked config(s){scope} show no suspicious signature, but "
+            f"{unread_note} \u2014 cannot confirm the record is clean.",
+            "Review state/openclaw.sqlite (table config_health_entries) directly for the "
+            "rows or columns this scan did not read.",
+            [],
+        )
+    if scope:
+        # The vendor sets the signature only for four structural anomalies (size drop, missing
+        # meta, missing gatewayMode, update-channel-only root) and clears it on any healthy
+        # observation, so a clean row says "the latest observation was healthy" - not that the
+        # config's history is clean. The legacy-file wording below predates this and is
+        # byte-identical (a fingerprint hashes it).
+        return (
+            PASS,
+            f"OpenClaw's own record for {len(entries)} tracked config(s){scope} shows no "
+            "suspicious signature on its latest observation (it records only structural "
+            "anomalies and clears the mark after a healthy observation; it is not a "
+            "content-integrity history).",
+            _B78_PASS_FIX,
+            [],
+        )
+    return (
         PASS,
         f"all {len(entries)} tracked config(s) have a clean integrity history "
         "(no suspicious signatures observed).",
-        "Keep config-health tracking enabled and review it after any unexpected config change.",
+        _B78_PASS_FIX,
+        [],
+    )
+
+
+def _b78_judge_file(health_path: Path) -> tuple:
+    try:
+        # C-731: the caller has lstat-ed this path as a regular file; the open itself stays
+        # `read_text` (test_c687 pins the unreadable branch through it).
+        data = _loads_bounded(health_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return (
+            UNKNOWN,
+            "config-health integrity file present but unreadable or malformed \u2014 cannot "
+            "evaluate config integrity history.",
+            "Ensure logs/config-health.json is valid JSON and owner-readable.",
+            [],
+        )
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict) or not entries:
+        return (
+            UNKNOWN,
+            "config-health file has no tracked config entries \u2014 nothing to evaluate.",
+            _B78_FIX_KEEP,
+            [],
+        )
+    return _b78_judge_entries(entries)
+
+
+def _b78_judge_db(status: str, entries: dict, unread: int, truncated: bool) -> tuple:
+    if status == CONFIG_HEALTH_UNREADABLE:
+        return (
+            UNKNOWN,
+            "the state database is present but its config-health record (table "
+            "config_health_entries) could not be read \u2014 cannot evaluate config "
+            "integrity history.",
+            "Check that state/openclaw.sqlite is a valid, owner-readable SQLite database "
+            "and that config_health_entries is a real table, not a view.",
+            [],
+        )
+    if status == CONFIG_HEALTH_EMPTY:
+        return (
+            UNKNOWN,
+            "the state database's config-health table has no tracked config entries "
+            "\u2014 nothing to evaluate.",
+            _B78_FIX_KEEP,
+            [],
+        )
+    reasons = []
+    if unread:
+        reasons.append(f"{unread} stored fingerprint value(s) could not be read")
+    if truncated:
+        reasons.append("more rows exist than this scan's row limit")
+    return _b78_judge_entries(entries, _B78_DB_SCOPE, " and ".join(reasons))
+
+
+def check_config_health_integrity(ctx: Context) -> Finding:
+    health_path = ctx.home / "logs" / "config-health.json"
+    # A Context the collector filled carries the state-database read; a bare one (a unit test,
+    # a caller that built it by hand) is read here, never assumed absent.
+    if ctx.config_health_status:
+        db = _ConfigHealthRead(ctx.config_health_status, ctx.config_health_entries,
+                               ctx.config_health_unread, ctx.config_health_truncated)
+    else:
+        db = read_config_health_entries(ctx.home)
+
+    # Judge whichever container exists, by presence - never by a version string. A state
+    # database that is present but unreadable is a container that could not be judged (UNKNOWN),
+    # not an absent one; a database without the table is simply a legacy install.
+    judged: list[tuple] = []
+    logs_unreadable: list[str] = []
+    not_understood: list[tuple[str, str]] = []  # C-731: (home-relative path, why)
+    try:
+        health_kind = _shared._file_kind_resolved(health_path)
+    except OSError:
+        # C-727: logs/ cannot be entered, so the legacy file was not looked for. The state
+        # database below is still read, and a WARN from it stands.
+        logs_unreadable.append(_detail_path(health_path.parent, ctx.home))
+        health_kind = "absent"
+    if health_kind in ("symlink-unusable", "directory", "special"):
+        # C-731: present but no regular file is there - not opened, never "absent". (A link
+        # to a regular file is read as it always was.)
+        not_understood.append(
+            (_detail_path(health_path, ctx.home), _shared._NOT_UNDERSTOOD_REASONS[health_kind]))
+    health_file = health_kind == "file"
+    if health_file:
+        judged.append(("legacy file logs/config-health.json", "legacy file",
+                       _b78_judge_file(health_path)))
+    if db.status in (CONFIG_HEALTH_OK, CONFIG_HEALTH_EMPTY, CONFIG_HEALTH_UNREADABLE):
+        judged.append(("state database", "state database",
+                       _b78_judge_db(db.status, db.entries, db.unread, db.truncated)))
+
+    if (logs_unreadable or not_understood) and not any(item[2][0] == WARN for item in judged):
+        return _shared._not_understood_finding(
+            "B78", "the config-health record (logs/config-health.json)", not_understood,
+            logs_unreadable, engine_degraded=bool(logs_unreadable))
+    if not judged:
+        return _finding(
+            "B78",
+            UNKNOWN,
+            "config-health integrity file not found \u2014 cannot evaluate config integrity history.",
+            _B78_FIX_KEEP,
+        )
+    if len(judged) == 1:
+        status, detail, fix, evidence = judged[0][2]
+        return _finding("B78", status, detail, fix, evidence=evidence)
+
+    # Both containers exist (a rollback re-created the file beside a database that already holds
+    # the record): neither speaks for the other. Judge each, take the most severe verdict, and
+    # name both so a clean database can never hide a suspicious file, or the reverse.
+    judged.sort(key=lambda item: -_B78_RANK[item[2][0]])
+    status, _, fix, _ = judged[0][2]
+    if status == PASS:
+        fix = ("Keep config-health tracking enabled and review it after any unexpected config "
+               "change; keep only the container your OpenClaw version writes (the state "
+               "database record or logs/config-health.json).")
+    parts, evidence = [], []
+    for long_name, tag, (_, detail, _, ev) in judged:
+        parts.append(f"{long_name}: {detail}")
+        evidence.extend(f"[{tag}] {e}" for e in ev)
+    return _finding(
+        "B78",
+        status,
+        "config-health records exist in two places and were each checked \u2014 "
+        + " ".join(parts),
+        fix,
+        evidence=evidence[:10],
     )
 
 
@@ -2658,14 +2980,14 @@ def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
     out: list[Path] = []
 
     def _grab(root: Path, pattern: str) -> None:
-        if len(out) >= cap or not root.is_dir():
+        if len(out) >= cap or not pathprobe.is_dir(root):
             return
         try:
             for f in root.rglob(pattern):  # generator - early break bounds the walk
                 if len(out) >= cap:
                     break
                 try:
-                    if f.is_file() and not f.is_symlink():
+                    if pathprobe.is_file(f) and not pathprobe.is_symlink(f):
                         out.append(f)
                 except OSError:
                     continue
@@ -2674,11 +2996,11 @@ def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
 
     try:
         agents = home / "agents"
-        if agents.is_dir():
+        if pathprobe.is_dir(agents):
             for agent_dir in sorted(agents.iterdir()):
                 if len(out) >= cap:
                     break
-                if not agent_dir.is_dir() or agent_dir.is_symlink():
+                if not pathprobe.is_dir(agent_dir) or pathprobe.is_symlink(agent_dir):
                     continue
                 _grab(agent_dir / "sessions", "*.jsonl")
                 _grab(agent_dir / "agent" / "codex-home" / "sessions", "*.jsonl")
@@ -2686,6 +3008,48 @@ def _collect_atrest_transcripts(home: Path, cap: int = 200) -> list[Path]:
         pass
     _grab(home / ".openclaw-install-backups", "*")
     return sorted(out)
+
+
+def _sealed_below_home(home: Path, target: Path) -> bool:
+    """True only when PROVEN: *target* lies under *home* and some directory on the way down
+    (the home itself included, nothing above it) has NEITHER the group nor the other execute
+    bit, so no user but the owner can traverse to it (C-703). Group membership is not
+    consulted - a g+x or o+x ancestor counts as reachable, the conservative reading. The
+    leaf's own mode never seals it.
+
+    Every element of the path, *target* included, must be a real (non-symlink) entry that
+    ``lstat`` can read: a symlink points at a location whose own parents were never judged,
+    and an unreadable one is a mode this check cannot determine - both return False, so the
+    caller keeps today's WARN (never a PASS from an unknown). A non-directory *target* with
+    more than one hard link is likewise not sealed. The whole chain is walked even
+    after a blocker is seen, because a symlink BELOW the blocker still escapes it.
+    POSIX stat-only; never reads content; never raises."""
+    try:
+        rel = target.relative_to(home)
+    except ValueError:
+        return False
+    chain: list[Path] = [home]
+    cur = home
+    for part in rel.parts[:-1]:
+        cur = cur / part
+        chain.append(cur)
+    blocked = False
+    for d in chain + [target]:
+        try:
+            st = os.lstat(d)
+        except OSError:
+            return False
+        m = st.st_mode
+        if stat.S_ISLNK(m):
+            return False
+        if d is target:
+            # A file with a second name can be reached through that other path, which this
+            # walk never judged. (A directory's link count is not a second name.)
+            if not stat.S_ISDIR(m) and st.st_nlink > 1:
+                return False
+        elif not (m & 0o011):
+            blocked = True
+    return blocked
 
 
 # ---------- B19: data at-rest protection (POSIX only) ----------
@@ -2703,18 +3067,24 @@ def check_data_atrest(ctx: Context) -> Finding:
         )
 
     loose: list[str] = []
+    # C-703: loose-mode entries that no other user can reach (a directory at or above them
+    # has no g+x/o+x). `loose` = the reachable ones (they decide WARN); `sealed` = the rest;
+    # `loose_all` = both, in discovery order - the WARN's detail and evidence keep listing it
+    # so a mixed home's text (and fingerprint) is what it was before the reachability rule.
+    sealed: list[str] = []
+    loose_all: list[str] = []
 
     # Candidate directories: workspace*/memory, workspace*/logs, <home>/logs
     candidates_dirs: list[Path] = []
     try:
         for entry in ctx.home.iterdir():
-            if entry.name.startswith("workspace") and entry.is_dir():
+            if entry.name.startswith("workspace") and pathprobe.is_dir(entry):
                 for sub in ("memory", "logs"):
                     d = entry / sub
-                    if d.is_dir():
+                    if pathprobe.is_dir(d):
                         candidates_dirs.append(d)
         logs_dir = ctx.home / "logs"
-        if logs_dir.is_dir():
+        if pathprobe.is_dir(logs_dir):
             candidates_dirs.append(logs_dir)
     except OSError:
         pass
@@ -2723,18 +3093,22 @@ def check_data_atrest(ctx: Context) -> Finding:
         try:
             mode = d.stat().st_mode & 0o777
             if mode & 0o077:
-                loose.append(f"{d.relative_to(ctx.home)} (mode {oct(mode)[-3:]})")
+                entry = f"{d.relative_to(ctx.home)} (mode {oct(mode)[-3:]})"
+                loose_all.append(entry)
+                (sealed if _sealed_below_home(ctx.home, d) else loose).append(entry)
         except OSError:
             pass
 
     # *.log files directly under <home>
     try:
         for f in ctx.home.iterdir():
-            if f.is_file() and f.suffix.lower() == ".log":
+            if pathprobe.is_file(f) and f.suffix.lower() == ".log":
                 try:
                     mode = f.stat().st_mode & 0o777
                     if mode & 0o077:
-                        loose.append(f"{f.name} (mode {oct(mode)[-3:]})")
+                        entry = f"{f.name} (mode {oct(mode)[-3:]})"
+                        loose_all.append(entry)
+                        (sealed if _sealed_below_home(ctx.home, f) else loose).append(entry)
                 except OSError:
                     pass
     except OSError:
@@ -2755,26 +3129,63 @@ def check_data_atrest(ctx: Context) -> Finding:
             except OSError:
                 continue
             loose.append(f"{rel} (mode {oct(mode)[-3:]})")
+            loose_all.append(loose[-1])
 
-    if not loose and not candidates_dirs and not transcripts:
-        return _finding("B19", UNKNOWN, "No memory/log/transcript stores found to inspect.", "\u2014")
+    # C-699: on current OpenClaw the live transcripts are rows of the per-agent SQLite
+    # database, not files this check can stat. Said only when such rows exist (a home with
+    # none keeps its text byte for byte); no permission is judged for that file here.
+    sqlite_note = ""
+    n_sqlite = _trajectorystore.transcript_store_summary(ctx.home).rows
+    if n_sqlite:
+        sqlite_note = (
+            f" Session transcripts ({n_sqlite} row(s)) are also stored inside the per-agent "
+            "SQLite database(s) (agents/*/agent/openclaw-agent.sqlite, transcript_events); "
+            "this check does not judge those files' permissions."
+        )
+    if not loose and not sealed and not candidates_dirs and not transcripts:
+        return _finding(
+            "B19", UNKNOWN, "No memory/log/transcript stores found to inspect." + sqlite_note,
+            "\u2014")
     if loose:
-        joined = "; ".join(loose[:8])
-        extra = f" (+{len(loose) - 8} more)" if len(loose) > 8 else ""
+        joined = "; ".join(loose_all[:8])
+        extra = f" (+{len(loose_all) - 8} more)" if len(loose_all) > 8 else ""
+        sealed_note = ""
+        if sealed:
+            sealed_note = (
+                f" Entries {'; '.join(sealed)} are not reachable by other users (no "
+                "group/other execute bit on a directory at or above them); the exposed "
+                f"one(s): {'; '.join(loose)}."
+            )
         return _finding(
             "B19",
             WARN,
             f"Conversation data/PII at rest is group/world-readable (memory/logs, session "
             f"transcripts, or install backups): {joined}{extra}",
             "Run `chmod 700` on the memory/log/session directories and `chmod 600` on the "
-            "files (or `chmod 700 ~/.openclaw`) to restrict access to the owner only.",
-            evidence=loose,
+            "files (or `chmod 700 ~/.openclaw`) to restrict access to the owner only."
+            + sealed_note + sqlite_note,
+            evidence=loose_all,
+        )
+    if sealed:
+        joined = "; ".join(sealed[:8])
+        extra = f" (+{len(sealed) - 8} more)" if len(sealed) > 8 else ""
+        return _finding(
+            "B19",
+            PASS,
+            f"{joined}{extra}: group/world-accessible by mode, but no other user can "
+            "traverse to them (no group or other execute bit on a directory at or above "
+            "them). Nothing else this check inspects is both reachable and readable by "
+            "other users." + sqlite_note,
+            "Keep memory/log/session directories at chmod 700 and their files at 600. The "
+            "listed modes are harmless only while there is no group/other execute bit on a "
+            "directory at or above them; tightening them as well removes the dependence.",
         )
     return _finding(
         "B19",
         PASS,
         "Memory/log directories, session transcripts, and install backups are not reachable "
-        "and readable by other users (owner-only, or sealed inside a tight home).",
+        "and readable by other users (owner-only, or sealed inside a tight home)."
+        + sqlite_note,
         "Keep memory/log/session directories at chmod 700 and their files at 600.",
     )
 
@@ -2881,11 +3292,15 @@ def _ancestors_allow_other_access(home: Path, stop: "Path | None" = None) -> boo
 # <stateDir>/state/openclaw.sqlite) and against the real file. The -wal sibling matters as
 # much as the DB: it holds recently written rows that have not yet been checkpointed in.
 _B188_DB_NAMES = ("openclaw.sqlite", "openclaw.sqlite-wal", "openclaw.sqlite-shm")
+# The per-tree file bound for the retained-copy scans below (state/**/*.sqlite* and backups/**).
+# One constant, read by both collectors and interpolated into the cut-walk UNKNOWN text, so the
+# number a user is told cannot drift from the number the walk actually stops at.
+_B188_COPY_CAP = 200
 
 
 def _b188_collect_state_copies(
-    state_dir: Path, primary_names: "tuple[str, ...]", cap: int = 200
-) -> "tuple[list[Path], bool]":
+    state_dir: Path, primary_names: "tuple[str, ...]", cap: int = _B188_COPY_CAP
+) -> "tuple[list[Path], bool, bool]":
     """Bounded, symlink-safe scan for sqlite-shaped files under ``state/`` beyond the
     primary DB/-wal/-shm trio ``_B188_DB_NAMES`` already covers (C-555). Exists because
     OpenClaw's own 9.5
@@ -2896,31 +3311,38 @@ def _b188_collect_state_copies(
     ``cap`` mirrors the 200-file bound ``_collect_atrest_transcripts`` uses for the same
     reason: a pathological tree must not turn a permission check into an unbounded walk.
 
-    Returns ``(files, listing_failed)``. ``listing_failed`` is True only when the recursive
-    walk itself raised (e.g. a permission-denied subdirectory partway through), which the
-    caller turns into UNKNOWN rather than a silent PASS - Golden Rule #4: a walk that could
-    not complete is not evidence that nothing is there."""
+    Returns ``(files, listing_failed, truncated)``. ``listing_failed`` is True only when the
+    recursive walk itself raised (e.g. a permission-denied subdirectory partway through),
+    which the caller turns into UNKNOWN rather than a silent PASS - Golden Rule #4: a walk
+    that could not complete is not evidence that nothing is there. ``truncated`` is True only
+    when at least one further QUALIFYING file existed past ``cap`` (a tree with exactly
+    ``cap`` qualifying files is complete); the two flags are independent and must not be
+    merged - a cut walk is the same kind of unfinished walk, but it has its own UNKNOWN text."""
     out: list[Path] = []
-    if not state_dir.is_dir():
-        return out, False
+    truncated = False
+    if not pathprobe.is_dir(state_dir):
+        return out, False, False
     try:
         for f in state_dir.rglob("*.sqlite*"):
-            if len(out) >= cap:
-                break
             try:
-                if not f.is_file() or f.is_symlink():
+                if not pathprobe.is_file(f) or pathprobe.is_symlink(f):
                     continue
                 if f.parent == state_dir and f.name in primary_names:
                     continue  # already covered by the primary FAIL-capable check above
+                if len(out) >= cap:
+                    truncated = True
+                    break
                 out.append(f)
             except OSError:
                 continue
     except OSError:
-        return out, True
-    return sorted(out), False
+        return out, True, truncated
+    return sorted(out), False, truncated
 
 
-def _b188_collect_backups(home: Path, cap: int = 200) -> "tuple[list[Path], bool]":
+def _b188_collect_backups(
+    home: Path, cap: int = _B188_COPY_CAP
+) -> "tuple[list[Path], bool, bool]":
     """Bounded, symlink-safe scan of ``<home>/backups/**`` - OpenClaw's own pre-repair and
     migration backup tree (C-555). Distinct from F-120's ``.openclaw-install-backups/**``
     (covered by B19 above): measured on the reference machine, ``backups/`` holds a full
@@ -2928,24 +3350,26 @@ def _b188_collect_backups(home: Path, cap: int = 200) -> "tuple[list[Path], bool
     ``heartbeat-migration/*.md``) side by side, so this walks every file under it rather than
     filtering by name - any of them can be a retained copy of something sensitive, and the
     directory is a deliberate backup location, not an incidental one. Same cap and
-    listing-failure contract as ``_b188_collect_state_copies``."""
+    ``(files, listing_failed, truncated)`` contract as ``_b188_collect_state_copies``."""
     out: list[Path] = []
+    truncated = False
     backups_dir = home / "backups"
-    if not backups_dir.is_dir():
-        return out, False
+    if not pathprobe.is_dir(backups_dir):
+        return out, False, False
     try:
         for f in backups_dir.rglob("*"):
-            if len(out) >= cap:
-                break
             try:
-                if not f.is_file() or f.is_symlink():
+                if not pathprobe.is_file(f) or pathprobe.is_symlink(f):
                     continue
+                if len(out) >= cap:
+                    truncated = True
+                    break
                 out.append(f)
             except OSError:
                 continue
     except OSError:
-        return out, True
-    return sorted(out), False
+        return out, True, truncated
+    return sorted(out), False, truncated
 
 
 def _b188_dir_traversable_by_other(home: Path, target_dir: Path) -> bool:
@@ -2979,6 +3403,32 @@ def _b188_dir_traversable_by_other(home: Path, target_dir: Path) -> bool:
         if not world_ok and not group_ok:
             return False
     return True
+
+
+def _b188_retained_copy_warn(exposed_extra: "list[str]") -> Finding:
+    """The C-555 retained-copy WARN, shared by the live-DB path and the no-live-DB path.
+
+    One builder, so the detail/fix/evidence text cannot drift between the two call sites:
+    ``baseline.fingerprint()`` hashes ``detail``, so these strings are load-bearing for every
+    ``.clawseccheckignore`` entry a user has already written. WARN-only by design - never
+    escalated to the device-keys FAIL wording, since a copy's provenance and freshness are
+    less certain than the live database."""
+    joined = "; ".join(exposed_extra[:8])
+    more = f" (+{len(exposed_extra) - 8} more)" if len(exposed_extra) > 8 else ""
+    return _finding(
+        "B188",
+        WARN,
+        "A retained copy of the state database is readable by another local user: "
+        + joined + more + ". OpenClaw's own recovery snapshots (state/**) and "
+        "pre-repair/migration backups (~/.openclaw/backups/**) default to the same "
+        "0600/0700 protection as the live database, so a readable copy means that "
+        "protection slipped somewhere \u2014 and a copy can carry the same device keys and "
+        "auth tokens as the original.",
+        "Run `chmod 600` on the listed file(s) and `chmod 700` on their containing "
+        "directory. If the copy is no longer needed, delete it instead of just "
+        "tightening it.",
+        evidence=exposed_extra,
+    )
 
 
 def check_state_db_atrest(ctx: Context) -> Finding:
@@ -3042,10 +3492,13 @@ def check_state_db_atrest(ctx: Context) -> Finding:
               because a copy's provenance and freshness are less certain than the live DB -
               same ancestor-reach gate, so a 0600 copy sealed inside a 0700 chain does not
               fire, only a group/world-readable one does.
-    UNKNOWN - no state DB present, non-POSIX (NTFS ACLs make st_mode meaningless), or a
-              subdirectory under ``state/`` or ``backups/`` could not be listed (permission
-              denied) while itself being reachable by other users - never a false PASS over
-              a walk that could not complete.
+    UNKNOWN - no state DB present AND no exposed retained copy (a readable copy is still a
+              WARN with the live DB missing: it is inspected first), non-POSIX (NTFS ACLs
+              make st_mode meaningless), a subdirectory under ``state/`` or ``backups/``
+              could not be listed (permission denied) while itself being reachable by other
+              users, or the retained-copy walk was cut by its per-tree file limit
+              (``_B188_COPY_CAP``) while that tree is reachable by other users - never a
+              false PASS over a walk that could not complete.
     PASS    - present and not reachable-and-readable by others. Loose in-tree modes sealed
               by a restrictive parent directory PASS with a distinct message that names the
               seal, rather than silently reading like a clean 0600 install.
@@ -3064,14 +3517,64 @@ def check_state_db_atrest(ctx: Context) -> Finding:
 
     state_dir = ctx.home / "state"
     present: list[Path] = []
+    db_unlooked = False  # C-727: the database could not be looked for (state/ not searchable)
     for name in _B188_DB_NAMES:
         p = state_dir / name
         try:
-            if p.is_file() and not p.is_symlink():
+            if pathprobe.is_file(p) and not pathprobe.is_symlink(p):
                 present.append(p)
         except OSError:
+            db_unlooked = True
             continue
+
+    # Reachability of the chain above ~/.openclaw. Proven, not assumed: `_other_can_reach_read`
+    # stops at ctx.home, so on its own it would call a 0644 file under a 0755 ~/.openclaw
+    # "exposed" even when $HOME above it is 0700 and denies o+x to every non-owner. That is a
+    # false positive, and B188 is a HIGH scored check, so every WARN/FAIL below proves the
+    # whole chain first.
+    ancestors_open = _ancestors_allow_other_access(ctx.home)
+
+    # C-555: retained copies of the state database - a recovery snapshot under state/, or a
+    # file under ~/.openclaw/backups/ - are exactly as exposed as their parent chain, so this
+    # reuses the same path-aware `_other_can_reach_read` + ancestor gate as the primary DB
+    # below. Capped at WARN regardless of what is found (never the device-keys FAIL wording):
+    # a copy's provenance and freshness are less certain than the live DB. The inspection
+    # runs BEFORE the no-live-DB return: a recovery copy is the one artefact that outlives a
+    # missing live database, so "no live DB" must not mean "nobody looked at the copies".
+    extra_files, state_listing_failed, state_truncated = _b188_collect_state_copies(
+        state_dir, _B188_DB_NAMES
+    )
+    backup_files, backups_listing_failed, backups_truncated = _b188_collect_backups(ctx.home)
+    listing_failed = state_listing_failed or backups_listing_failed
+
+    exposed_extra: list[str] = []
+    for p in extra_files + backup_files:
+        if _other_can_reach_read(ctx.home, p):
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError:
+                continue
+            try:
+                rel = p.relative_to(ctx.home)
+            except ValueError:
+                rel = p
+            exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
+
     if not present:
+        if exposed_extra and ancestors_open:
+            # Capped at WARN: with no live DB the only reachable evidence is a retained copy.
+            return _b188_retained_copy_warn(exposed_extra)
+        if db_unlooked:
+            return _finding(
+                "B188",
+                UNKNOWN,
+                "The state database at ~/.openclaw/state/openclaw.sqlite could not be looked "
+                "for \u2014 the state directory could not be read \u2014 so its at-rest "
+                "permissions were not assessed.",
+                "Make ~/.openclaw/state readable and searchable by the user running this "
+                "audit (check its permissions, or run the audit as the account that owns it), "
+                "then re-run.",
+            )
         return _finding(
             "B188",
             UNKNOWN,
@@ -3096,34 +3599,41 @@ def check_state_db_atrest(ctx: Context) -> Finding:
                 continue
             exposed.append(f"state/{p.name} (mode {oct(mode)[-3:]}) is readable by other users")
 
-    # `_other_can_reach_read` stops at ctx.home, so on its own it would call a 0644 database
-    # under a 0755 ~/.openclaw "exposed" even when $HOME above it is 0700 and denies o+x to
-    # every non-owner. That is a false positive, and B188 is a HIGH scored FAIL, so it must
-    # prove the whole chain before asserting it.
-    ancestors_open = _ancestors_allow_other_access(ctx.home)
     writable_dir = _other_can_reach_write(ctx.home, state_dir)
 
-    # C-555: retained copies of the state database - a recovery snapshot under state/, or a
-    # file under ~/.openclaw/backups/ - are exactly as exposed as their parent chain, so this
-    # reuses the same path-aware `_other_can_reach_read` + ancestor gate as the primary DB
-    # above. Capped at WARN below regardless of what is found (never the device-keys FAIL
-    # wording): a copy's provenance and freshness are less certain than the live DB.
-    extra_files, state_listing_failed = _b188_collect_state_copies(state_dir, _B188_DB_NAMES)
-    backup_files, backups_listing_failed = _b188_collect_backups(ctx.home)
-    listing_failed = state_listing_failed or backups_listing_failed
-
-    exposed_extra: list[str] = []
-    for p in extra_files + backup_files:
-        if _other_can_reach_read(ctx.home, p):
-            try:
-                mode = p.stat().st_mode & 0o777
-            except OSError:
-                continue
-            try:
-                rel = p.relative_to(ctx.home)
-            except ValueError:
-                rel = p
-            exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
+    # C-629: a retained-copy walk that hit its per-tree file limit did not look at every file.
+    # It matters only when that tree is itself reachable by another user (same per-tree gate
+    # the listing-failed UNKNOWN uses, so a cut in backups/ is not silenced or triggered by
+    # the state of state/): a 0700 tree, or any 0700 ancestor, makes the unchecked files moot
+    # and the PASS below stands unchanged.
+    state_cut = bool(
+        ancestors_open and state_truncated
+        and _b188_dir_traversable_by_other(ctx.home, state_dir)
+    )
+    backup_cut = bool(
+        ancestors_open and backups_truncated
+        and _b188_dir_traversable_by_other(ctx.home, ctx.home / "backups")
+    )
+    cut_matters = state_cut or backup_cut
+    cut_trees = " and ".join(
+        t for t, hit in (
+            ("~/.openclaw/state/ (files named *.sqlite*)", state_cut),
+            ("~/.openclaw/backups/ (any file)", backup_cut),
+        ) if hit
+    )
+    cut_detail = (
+        "A directory tree checked for retained copies of the state database holds more "
+        f"than the fixed scan limit of {_B188_COPY_CAP} files: {cut_trees}. This audit "
+        f"stopped after the first {_B188_COPY_CAP} files of each and did not check the "
+        "rest, and that tree is reachable by other local users, so whether an unchecked "
+        "file is an exposed copy of the state database cannot be determined."
+    )
+    if cut_matters and not any(
+        getattr(h, "domain", None) == LIMIT_DOMAIN_STATE_DB for h in ctx.limit_hits
+    ):
+        # Recorded before any verdict branch so the disclosure survives when a FAIL/WARN
+        # wins; once per run, so a second invocation on the same ctx adds no duplicate.
+        note_limit(ctx.limit_hits, LIMIT_DOMAIN_STATE_DB, cut_detail)
 
     if exposed and ancestors_open:
         return _finding(
@@ -3166,22 +3676,7 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     # WARN-only by design - never escalated to the device-keys FAIL wording above, since a
     # copy's provenance and freshness are less certain than the live database.
     if exposed_extra and ancestors_open:
-        joined = "; ".join(exposed_extra[:8])
-        more = f" (+{len(exposed_extra) - 8} more)" if len(exposed_extra) > 8 else ""
-        return _finding(
-            "B188",
-            WARN,
-            "A retained copy of the state database is readable by another local user: "
-            + joined + more + ". OpenClaw's own recovery snapshots (state/**) and "
-            "pre-repair/migration backups (~/.openclaw/backups/**) default to the same "
-            "0600/0700 protection as the live database, so a readable copy means that "
-            "protection slipped somewhere \u2014 and a copy can carry the same device keys and "
-            "auth tokens as the original.",
-            "Run `chmod 600` on the listed file(s) and `chmod 700` on their containing "
-            "directory. If the copy is no longer needed, delete it instead of just "
-            "tightening it.",
-            evidence=exposed_extra,
-        )
+        return _b188_retained_copy_warn(exposed_extra)
 
     # C-555: a directory under state/ or backups/ could not be listed (permission denied)
     # while itself being reachable by other users - an incomplete walk must not read as a
@@ -3200,6 +3695,19 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             "be determined.",
             "Check permissions on the unreadable subdirectory yourself, or run this audit "
             "as the account that owns ~/.openclaw.",
+        )
+
+    # C-629: the copy walk was cut by its file limit while that tree is reachable. No exposed
+    # copy was found among the files that WERE checked (a FAIL/WARN above would have won), but
+    # a "verified" PASS over a walk that stopped early is a fake PASS (Golden Rule #4).
+    if cut_matters:
+        return _finding(
+            "B188",
+            UNKNOWN,
+            cut_detail,
+            f"Trim old backups and recovery copies so each directory tree holds at most "
+            f"{_B188_COPY_CAP} files, or check the files past the limit yourself: "
+            "`find ~/.openclaw/backups ~/.openclaw/state -type f -perm /044`.",
         )
 
     names = ", ".join(f"state/{p.name}" for p in present)
@@ -3413,7 +3921,21 @@ def check_discovery_mdns_mode(ctx: Context) -> Finding:
             "Keep discovery.mdns.mode at 'minimal' or 'off' when the gateway is exposed "
             "beyond loopback.",
         )
-    bind_host = parse_bind_host(dig(cfg, "gateway.bind", ""))
+    # C-653: a templated bind is resolved by the one shared rule or is unknown (never a host).
+    bind_raw, bind_unres = _effective_gateway_bind(ctx, cfg, dig(cfg, "gateway.bind", ""))
+    if bind_unres:
+        return _finding(
+            "B73",
+            UNKNOWN,
+            f"discovery.mdns.mode is 'full' and {bind_unres}, so whether the gateway is "
+            "bound beyond loopback (broadly advertising the agent on the local network) "
+            "is unknown.",
+            "Write gateway.bind literally in openclaw.json (e.g. \"loopback\"), or verify its "
+            "value in the gateway's environment; or set discovery.mdns.mode to 'minimal' "
+            "or 'off'.",
+            config_field_paths=frozenset({"gateway.bind"}),
+        )
+    bind_host = parse_bind_host(bind_raw)
     if bind_host in LOOPBACK:
         return _finding(
             "B73",
@@ -3627,7 +4149,9 @@ def check_leak(ctx: Context) -> Finding:
     hands `cfg?.redactPatterns` straight through, and the shared `resolvePatterns()` it
     feeds REPLACES `DEFAULT_REDACT_PATTERNS` outright for a non-empty list -- that is the
     console-output, warnings, and `openclaw logs` path. Identical on OpenClaw 2026.9.4
-    (`dist/redact-Ck-hjLec.mjs:1432-1441`) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
+    (`dist/redact-Ck-hjLec.mjs:1432-1441`), on 2026.10.2 (`resolvePatterns`,
+    `dist/redact-DJ8j6ADa.mjs:2609-2629`: a non-empty custom list is parsed on its own
+    and only the AWS secret-access-key matcher is appended; read 2026-10-12) and 2026.9.5 (`dist/redact-CrCCqliq.mjs:1977-
     1987`, `:2327-2333`) -- B-836; an earlier version of this docstring
     described the union as universal, which it is not. An empty list falls through to
     the defaults on every path. No env var disables it either -- the only
@@ -3666,7 +4190,10 @@ def check_leak(ctx: Context) -> Finding:
             "built-in patterns on console output, warnings, and `openclaw logs` (it only "
             "adds to them for transcripts/tool payloads) -- include the built-in shapes "
             "in your list, or leave the field unset, unless you have verified your "
-            "list's own coverage.",
+            "list's own coverage. A pattern of your own is also matched in 16 KiB chunks "
+            "once the text exceeds 32 KiB, so a credential that straddles a chunk "
+            "boundary can survive it; on OpenClaw 2026.10.2 the built-in patterns are "
+            "scanned over the whole text.",
         )
     # A PRESENT value keeps its original verdict on every build. An earlier version of this
     # fix collapsed "off" and "tools" into one WARN on a modern build, reasoning that an
@@ -3679,6 +4206,10 @@ def check_leak(ctx: Context) -> Finding:
     # fact stays, only the framing changes.
     stale = (" On OpenClaw 2026.8.1 and later this key was removed, so the value is not "
              "in effect \u2014 delete it (`openclaw doctor --fix` does)." if modern else "")
+    # C-686: the fix (never the detail, which a fingerprint hashes) also carries the
+    # whole-config caveat on a build whose Doctor refuses any retired key.
+    stale_fix = stale + (f" {_doctor_whole_config_hedge(ctx)}" if modern and
+                         _doctor_refuses_retired_formats(ctx) else "")
     if redact == "off":
         return _finding(
             "B9",
@@ -3686,7 +4217,7 @@ def check_leak(ctx: Context) -> Finding:
             'logging.redactSensitive is "off" \u2014 secrets/system prompt can surface in '
             "tool output/logs." + stale,
             'Set logging.redactSensitive to "tools" to redact secrets from tool output '
-            "and logs." + stale,
+            "and logs." + stale_fix,
         )
     if redact is None:
         # B-128: the OpenClaw default when the field is unset is already "tools"
@@ -3708,7 +4239,7 @@ def check_leak(ctx: Context) -> Finding:
             "B9",
             PASS,
             'Sensitive redaction is enabled (logging.redactSensitive="tools").' + stale,
-            "Keep redaction on." + stale,
+            "Keep redaction on." + stale_fix,
         )
     # Unexpected value - be conservative
     return _finding(
@@ -3716,7 +4247,7 @@ def check_leak(ctx: Context) -> Finding:
         WARN,
         f'logging.redactSensitive has unexpected value {redact!r} \u2014 expected "tools" '
         'or "off".' + stale,
-        'Set logging.redactSensitive to "tools".' + stale,
+        'Set logging.redactSensitive to "tools".' + stale_fix,
     )
 
 
@@ -4007,6 +4538,47 @@ def _log_hunt_budget_remedy(lim) -> str:
     )
 
 
+def _sqlite_transcript_disclosure(home) -> str:
+    """C-699: the sentence B164 owes when session transcripts live in SQLite.
+
+    On current OpenClaw the live transcripts are ``transcript_events`` rows of the
+    per-agent database, not ``*.jsonl`` files, so the file scan above can say "N sinks
+    scanned" while none of them is a live transcript. Owner ruling: disclose only. The rows
+    and sessions are COUNTED (trajectorystore.transcript_store_summary - event_json /
+    event_zstd / navigation_json are never selected) and named as unexamined; the verdict is
+    not changed (the B-817 trajectory precedent: PASS keeps its disclosure, an empty sink
+    list stays UNKNOWN). A database that could not be opened, a table that is not a real
+    table, or a roster beyond the reader's cap makes the count a lower bound and is said so
+    - never a silent zero. pipeline.py parses the two figures below into the run's
+    ``not_checked``; reword them together. Returns "" when there is nothing to say.
+    """
+    if not isinstance(home, Path):
+        return ""
+    summary = _trajectorystore.transcript_store_summary(home)
+    out = ""
+    if summary.rows:
+        out += (
+            " session transcripts live in the same per-agent SQLite databases "
+            "(agents/*/agent/openclaw-agent.sqlite, transcript_events; event_json and "
+            "event_zstd are never opened, by design) \u2014 "
+            f"{summary.rows} transcript row(s) across {summary.sessions} session(s) "
+            "unexamined."
+        )
+    if summary.dbs_unexamined:
+        out += (
+            f" {summary.dbs_unexamined} per-agent database(s) could not be examined for "
+            "transcripts (agents/*/agent/openclaw-agent.sqlite), so transcripts may exist "
+            "there that are not counted above."
+        )
+    if out:
+        out += (
+            " Incognito sessions are held in memory by OpenClaw "
+            "(incognito-openclaw-agent.sqlite is a reserved sentinel path, not a file) "
+            "and are not examined."
+        )
+    return out
+
+
 def check_log_threat_hunt(ctx: Context) -> Finding:
     """B164 - threats surfaced in the agent's own log corpus (content scan, advisory).
 
@@ -4054,7 +4626,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     from ..scanbudget import audit_deadline, limits_for  # noqa: PLC0415
 
     unreadable_sinks: list = []
-    sinks = discover_log_sinks(ctx, unreadable_sinks)
+    unreadable_transcripts: list = []  # C-727
+    sinks = discover_log_sinks(ctx, unreadable_sinks, unreadable_transcripts)
 
     # B-817: this discovery has no notion of the SQLite-backed trajectory store
     # (trajectorystore.py) - a `kind="trajectory"` sink here is a JSONL sidecar only.
@@ -4076,8 +4649,13 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
                 f"is never opened, by design) \u2014 {corro.sqlite_rows} row(s) across "
                 f"{corro.sqlite_sessions} session(s) unexamined."
             )
+    # C-699: the transcript table is a second SQLite store, disclosed in the same place and
+    # independent of the branch above - a home with live JSONL trajectory sidecars can
+    # still hold every transcript in SQLite.
+    sqlite_trajectory_disclosure += _sqlite_transcript_disclosure(getattr(ctx, "home", None))
 
     if not sinks:
+        unreadable_sinks = unreadable_sinks + unreadable_transcripts
         # B-913: an unreadable source dir (e.g. a `chmod 000` workspace's memory/) is a
         # distinct fact from "nothing configured" - name it rather than letting the
         # reader assume there is genuinely no log corpus.
@@ -4112,6 +4690,7 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
     corroborated: dict[str, set] = {}
     all_samples: list[str] = []
     all_results: list = []
+    unread_sinks: list[str] = []  # C-727: has bytes, could not be read
     any_scanned = False
     isolated_hits = 0
     skipped_for_time = 0
@@ -4154,6 +4733,8 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
         result = scan_log_file(sink, deadline, skill_iocs, limits=lim)
         all_results.append(result)
         if result.bytes_scanned == 0:
+            if _shared._sink_unreadable(sink.path):
+                unread_sinks.append(_detail_path(sink.path, ctx.home))  # C-727
             continue
         any_scanned = True
 
@@ -4286,6 +4867,13 @@ def check_log_threat_hunt(ctx: Context) -> Finding:
             f" {isolated_hits} low-confidence signal(s) suppressed (isolated, not corroborated)."
         )
     detail += note
+    # C-727: a transcript directory that could not be read was not scanned, so the sinks that
+    # WERE scanned cannot stand for a clean result (a WARN above is unaffected).
+    if unreadable_transcripts or unreadable_sinks or unread_sinks:
+        return _shared._unreadable_dirs_finding(
+            "B164", "the agent logs, session transcripts, install backups and memory files",
+            unreadable_transcripts + [_detail_path(u, ctx.home) for u in unreadable_sinks]
+            + unread_sinks)
     return _finding(
         "B164",
         PASS,
@@ -4371,13 +4959,18 @@ def check_browser_executable_path(ctx: Context) -> Finding:
         (checks/_host.py check_bundled_root_override).
     (B) profiles.<name>.mcpCommand (existing-session driver only) overrides the
         subprocess binary OpenClaw hands the Chrome DevTools MCP session to -
-        normalizeChromeMcpOptions (chrome-mcp-BZM3Tb7R.js:174-183) passes it through
-        with zero validation of any kind (no trustedDirs-style scoping, no existence
-        check). The vendor default is itself an unpinned `npx -y
-        chrome-devtools-mcp@latest` (DEFAULT_CHROME_MCP_COMMAND/
-        DEFAULT_CHROME_MCP_PACKAGE_ARGS, chrome-mcp-BZM3Tb7R.js:35-36) - so an explicit,
-        non-default mcpCommand is at least as plausibly a *hardening* move (pinning a
-        known binary instead of trusting an unpinned npx auto-install) as a downgrade.
+        normalizeChromeMcpOptions (chrome-mcp-options-BBANJrqD.mjs:815-855, read and
+        EXECUTED in node on openclaw@2026.10.2, 2026-10-12) passes it through with zero
+        validation of any kind (no trustedDirs-style scoping, no existence check). The
+        vendor default is NOT an npx auto-install: with no mcpCommand, or with
+        mcpCommand "npx", it returns node (process.execPath) running the
+        chrome-devtools-mcp copy bundled inside the OpenClaw package
+        (require.resolve("chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js");
+        the 2026.10.2 package carries chrome-devtools-mcp 1.10.1) - only a custom
+        command bypasses it. So an explicit, non-default mcpCommand replaces a pinned,
+        vendor-shipped copy with a binary OpenClaw has not vetted; that is at least as
+        plausibly a *hardening* move (pinning a known binary of the operator's own) as
+        a downgrade, and a config cannot tell which.
         WARN-only, and `scored=False` on that specific branch (this check's CheckMeta
         otherwise stays scored - see the FAIL branch above), mirroring B192/B324's
         precedent for a legitimate, commonly-wanted customization a FAIL would punish.
@@ -4447,7 +5040,8 @@ def check_browser_executable_path(ctx: Context) -> Finding:
             if isinstance(mcp_cmd, str) and mcp_cmd.strip() and mcp_cmd.strip() != "npx":
                 mcp_warn_ev.append(
                     f"browser.profiles.{name}.mcpCommand={mcp_cmd.strip()!r} overrides "
-                    "the vendor default (npx -y chrome-devtools-mcp@latest) \u2014 OpenClaw "
+                    "the vendor default (the chrome-devtools-mcp copy bundled with "
+                    "OpenClaw, run by node) \u2014 OpenClaw "
                     "does not validate this command/path before spawning it"
                 )
             # B-653: mcpArgs, mcpCommand's sibling - see the module comment above for
@@ -4505,9 +5099,9 @@ def check_browser_executable_path(ctx: Context) -> Finding:
 
     fail_ev: list[str] = []
     for label, raw_path in candidates:
-        p = Path(raw_path).expanduser()
+        p = pathprobe.expand_user(raw_path)
         try:
-            found = p.exists()
+            found = pathprobe.exists(p)
         except OSError:
             found = False
         if not found:
@@ -4890,10 +5484,11 @@ def check_browser_existing_session_profile(ctx: Context) -> Finding:
     """B322 - browser.profiles.*.{cdpUrl,userDataDir,driver:"existing-session"}.
 
     driver:"existing-session" switches OpenClaw from launching its own managed Chrome to
-    spawning a third-party `chrome-devtools-mcp` subprocess (vendor default `npx -y
-    chrome-devtools-mcp@latest`, chrome-mcp-BZM3Tb7R.js:35-36) and handing it cdpUrl /
-    userDataDir as raw CLI args (chrome-mcp-BZM3Tb7R.js normalizeChromeMcpOptions /
-    buildChromeMcpConnectionArgs - confirmed against the installed dist). Two distinct
+    spawning a third-party `chrome-devtools-mcp` subprocess (vendor default: node running
+    the copy bundled in the OpenClaw package, not an npx download - normalizeChromeMcpOptions,
+    chrome-mcp-options-BBANJrqD.mjs:815-855, executed on openclaw@2026.10.2, 2026-10-12)
+    and handing it cdpUrl / userDataDir as raw CLI args (same function, `connectionArgs` -
+    confirmed against the installed dist). Two distinct
     concerns live under this one check ID:
 
     * userDataDir pointed at a real (non-dedicated) browser profile directory would hand

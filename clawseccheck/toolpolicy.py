@@ -456,18 +456,40 @@ def any_confinement_undecided(labels) -> bool:
 
 
 def _default_agent_id(cfg: dict) -> str:
-    """``resolveDefaultAgentId``: the entry marked ``default``, else the first one.
+    """The agent the un-scoped ("global") surface runs as.
 
-    Needed because "non-main" is defined against THIS id, not against the literal string
-    "main" - a config whose only agent is `{"id": "bot"}` has `bot` as its main agent, so
-    `non-main` does not sandbox it.
+    Needed because "main" is defined against THIS id, not against the literal string
+    "main" - a config whose only agent is `{"id": "bot"}` has `bot` as its main agent.
+
+    C-684. Where OpenClaw has an answer this IS it: ``resolveSessionAgentIdStrict`` with no
+    selected agent is ``tryResolveLegacyDataOwnerAgentId(cfg) ?? resolveDefaultAgentId(cfg)``,
+    i.e. the one entry whose ``default`` is the boolean ``true`` (``"yes"`` and ``1`` do not
+    count; under ``agents.ownership: "explicit"`` the marker is not consulted), else the SOLE
+    agent. Executed across a generated battery in
+    ``tests/test_c684_default_agent_differential.py``; before C-684 a truthy non-boolean marker
+    ahead of the real one (``"yes"`` before ``true``) picked a different agent. (A marker under
+    explicit ownership with two or more agents is in the throwing set below, unchanged.)
+
+    Where it has none, OpenClaw THROWS (``AgentSelectionRequiredError``: two or more agents and
+    no unique ``default: true``, or a roster that is present but empty). That is not an id to
+    port, and none is invented: that set keeps the rule this module always had - the first
+    entry with a truthy ``default``, else the first entry, else ``main`` - and the differential
+    test enumerates the set so it stays visible. What a "global" surface should mean there
+    (undecidable, rather than attributed to a guessed agent) is an owner decision.
     """
-    entries = [e for _, e in _agent_entries(cfg)]
-    for entry in entries:
+    rows = _agent_entries(cfg)
+    agents = cfg.get("agents") if isinstance(cfg, dict) else None
+    explicit = isinstance(agents, dict) and agents.get("ownership") == "explicit"
+    marked = [name for name, e in rows if e.get("default") is True]
+    if len(marked) == 1 and not explicit:
+        return marked[0]
+    if len(rows) == 1:
+        return rows[0][0]
+    for name, entry in rows:
         if entry.get("default"):
-            return _normalize_agent_id(entry.get("id"))
-    if entries:
-        return _normalize_agent_id(entries[0].get("id"))
+            return name
+    if rows:
+        return rows[0][0]
     return _DEFAULT_AGENT_ID
 
 
@@ -484,7 +506,13 @@ def _sandbox_confines(cfg: dict, agent_id: str, entry) -> "bool | None":
 
     B-712. This used to return a confident boolean for a property the config does not
     determine. The vendor's own predicate is four lines and says exactly where the boundary
-    falls (``runtime-status-*.js``)::
+    falls (``runtime-status-*.js``, 2026.9.x; inlined into
+    ``resolveSandboxRuntimeStatusForClassification`` at runtime-status-BrQA2iWu.mjs:138 on
+    openclaw@2026.10.2, read 2026-10-12, where ``sandboxed`` is true when the session key is
+    present and (``sandboxRequired``, or the session entry's ``sandboxMode`` is not "off" and
+    ``mode`` is not "off" and (``mode === "all"`` or the session key differs from the main one))
+    -- on 2026.10.2 it also honours a per-session ``sandboxMode: "off"`` override, which has no
+    representation in ``openclaw.json``)::
 
         function shouldSandboxSession(cfg, sessionKey, mainSessionKey, sandboxRequired) {
             if (sandboxRequired) return true;

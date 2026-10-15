@@ -6,7 +6,7 @@ what was actually verified, not assumed.
 
 ## 1. The constraint
 
-ClawSecCheck ships zero runtime dependencies (Python 3.9+, stdlib only - see `pyproject.toml`'s
+ClawSecCheck ships zero runtime dependencies (Python 3.10+, stdlib only - see `pyproject.toml`'s
 empty `dependencies = []` and this project's own golden rule). A real file-change notification
 API on Linux is `inotify(7)`, but the Python standard library has no binding for it - the usual
 third-party answer is a package like `inotify_simple` or `watchdog`, both of which are exactly
@@ -82,9 +82,14 @@ module handles that by hand:
   followed - the same discipline `safeio.walk_dir_safely` already applies to file walks
   elsewhere in this codebase). A tree that would need more watches than the cap is disclosed
   (`watch_dirs_capped: true` in the heartbeat) rather than silently watching only part of it.
-- A directory created *after* start-up is caught via its own `IN_CREATE | IN_ISDIR` event on its
-  parent's watch, and a watch is added for it immediately - so a new subdirectory is never a
-  permanent blind spot, only a brief one between its creation and the next event drain.
+- A directory that appears *after* start-up - created (`IN_CREATE | IN_ISDIR`) or moved in
+  (`IN_MOVED_TO | IN_ISDIR`) - is caught by that event on its parent's watch, and a watch is
+  added for it **and for every real directory already below it** (`_watch_new_tree`, the same
+  cap and the same no-symlink rule as start-up; a tree that passes the cap sets
+  `watch_dirs_capped`). The walk below the top is the point: `mkdir -p a/b/c`, `cp -r` and `mv`
+  of a whole skill deliver one event for the top, and everything under it exists by the time the
+  watch is added, so watching only the top left every deeper change unseen. The gap between the
+  creation and the next event drain is covered by the re-scan the creation event itself triggers.
 - `IN_Q_OVERFLOW` (the kernel dropped events because they were not read fast enough) is treated
   as "something changed" unconditionally, never silently absorbed - under-reporting here would
   reopen exactly the gap this module exists to close.
@@ -112,21 +117,51 @@ inside a 1s debounce window; the heartbeat's `cycles` counter advanced by exactl
 ## 7. Detection stays a single implementation
 
 `run_watch()` never re-implements drift comparison. On a debounced change it shells out to
-`python3 -m clawseccheck --monitor --verbose --home ... --state ... --events ... --history ...` -
-the identical invocation `scripts/monitor_detection_gate.py` already uses to drive this tool
-from outside the library - so the alert text, severity mapping and the tamper-evident event
+`<entry> --monitor --verbose --home ... --state ... --events ... --history ...` - the identical
+invocation `scripts/monitor_detection_gate.py` already uses to drive this tool from outside the
+library. `<entry>` is chosen so the child imports THIS package whatever its working directory is:
+the bundled `audit.py` (by absolute path, so its refusal of stray importable files runs again)
+when the watcher itself was started that way, otherwise `-m clawseccheck` with the package's own
+parent directory first on `PYTHONPATH`. A re-scan that exits with anything but `0` or `3` is
+announced with its full output and a `RE-SCAN FAILED` heading, and the watcher keeps watching. The
+alert text, severity mapping and the tamper-evident event
 journal are exactly what `--monitor --verbose` produces on its own. This also means `--watch`
 inherits every property `--monitor` already has (baseline corruption handling, config-blind
 degradation, the coverage/freshness notes) with no separate code path to keep in sync.
 
 ## 8. Liveness
 
-A watcher that dies silently is worse than no watcher. `run_watch()` writes a heartbeat file
-under the caller's store directory (`<data-dir>/watch_heartbeat.json`) on start, on every
-completed re-scan, and periodically (default every 30s) while idle, recording `pid`, `mode`
-(`inotify`/`poll`), `status` (`starting`/`running`/`stopped`), `cycles`, and the last re-scan's
-timestamp/exit code. `--watch-status` reads it back and reports one of four states - `ALIVE`,
-`STALE` (heartbeat older than three of its own intervals), `STOPPED` (a clean shutdown was
-recorded, or the pid is confirmed gone), or `NOT RUNNING` (no heartbeat file at all) - the same
-"don't collapse absence into a single ambiguous answer" discipline `--verify-baseline` already
-applies to a missing vs. corrupt state file.
+A watcher that dies silently is worse than no watcher. Two files under the caller's store
+directory carry its liveness:
+
+- `<data-dir>/watch.lock` - an empty file on which the running watcher holds an exclusive
+  advisory `flock` for its whole life; the kernel drops it when the process exits for any reason,
+  `kill -9` included. This, and only this, decides "a watcher is running", and it decides whether a
+  second `--watch` on the same store is refused. A start that can take the lock proceeds whatever
+  the heartbeat says (a heartbeat is a plain file anyone with write access to the store can plant).
+- `<data-dir>/watch_heartbeat.json`, written on start, on every completed re-scan and periodically
+  (default every 30s) while idle: `pid`, `mode` (`inotify`/`poll`), `status`
+  (`starting`/`running`/`stopped`), `cycles`, and the last re-scan's timestamp/exit code. It is
+  information; every field is range- and type-checked on read, and a wrong value makes the whole
+  record corrupt rather than raising.
+
+Every open of a store file is non-blocking and accepts only a regular file, so a planted pipe,
+socket, device or directory can neither hang `--watch` nor `--watch-status`.
+
+`--watch-status` probes the lock for an instant (it never leaves it held) and reports one of
+eight states: `ALIVE` (lock held and the heartbeat agrees), `LOCK HELD` (lock held but the
+heartbeat does not back it: missing, corrupt, `stopped`, or naming a pid that is not running or is
+not the one `/proc/locks` shows holding the lock), `STALE` (lock held, heartbeat older than three
+of its own intervals - possibly hung), `STOPPED` (lock free, clean shutdown recorded),
+`STALE RECORD` (lock free, but the heartbeat claims a watcher was running), `UNREADABLE` (lock
+free, heartbeat path corrupt, not a regular file or unreadable), `NOT RUNNING` (lock free, no
+heartbeat file) and `UNKNOWN` (the lock cannot be probed - not a regular file, a symbolic link, or
+no `fcntl` - so whether a watcher runs cannot be determined; the heartbeat is then shown only as
+an unverified claim). `ALIVE` is never printed on a heartbeat's say-so. It is the same "don't
+collapse absence into a single ambiguous answer" discipline `--verify-baseline` already applies to
+a missing vs. corrupt state file.
+
+The limit: the watcher runs with the user's own rights, so a process running as that user - the
+agent being watched, if it can run commands - can stop it, hold its lock or imitate its files. The
+lock and heartbeat guard against accidents and against tampering by file write alone;
+`--watch-status` is a convenience, not proof.

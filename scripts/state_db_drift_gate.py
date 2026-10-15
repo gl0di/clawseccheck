@@ -18,6 +18,7 @@ SURFACE THAT ORACLE READS.
 
     python3 scripts/state_db_drift_gate.py            # audit the installed state DB
     python3 scripts/state_db_drift_gate.py --db PATH  # audit a specific database
+    python3 scripts/state_db_drift_gate.py --agent-db PATH  # a specific per-agent database
 
 Exit codes: 0 = no drift, 1 = drift found, 2 = could not run the comparison.
 
@@ -37,6 +38,18 @@ string constant still found two ("C", "well") from prose inside docstrings and
 user-facing messages. Only a string actually handed to sqlite3 is a query. Python
 concatenates adjacent literals at parse time, so a SELECT split across source lines
 arrives as a single constant and needs no re-joining.
+
+WHICH DATABASE A READER TARGETS
+-------------------------------
+OpenClaw keeps SQLite files besides the state database. The scan above is not
+file-scoped, so a reader of a different file would be judged against the state database
+and reported BLIND on a healthy build (C-668: `auth_profile_store` lives in each agent's
+`agents/<id>/agent/openclaw-agent.sqlite`, not in `state/openclaw.sqlite`). Such readers
+are DECLARED in `PER_AGENT_DB_READERS` -- by reader function, never by table name, so a
+state-database table that happens to share a name is still judged -- and are compared
+with a per-agent database instead (`--agent-db`, default the first
+`agents/*/agent/openclaw-agent.sqlite`). With none to read they are reported on their
+own line as unchecked, never as OK. Do not point `--db` at a per-agent database.
 
 WHAT THIS CANNOT CATCH
 ----------------------
@@ -79,6 +92,14 @@ _SELECT_RE = re.compile(r"SELECT\s+(.+?)\s+FROM\s+([A-Za-z_][A-Za-z0-9_]*)", re.
 # database) than the one this gate is about. Same exemption reasoning as
 # tests/test_state_schema_grounding.py's `_SQLITE_BUILTIN_CATALOG_TABLES`.
 _SQLITE_RESERVED_TABLE_PREFIX = "sqlite_"
+# Readers whose SELECTs target a per-agent database, not the state database. Keyed exactly as
+# `expected_reads` keys them (`file.py:function`) so the declaration is scoped to one function
+# in one file. A name added here must still exist in the package: tests/test_c668_*.py.
+PER_AGENT_DB_READERS = frozenset({
+    "collector.py:_collect_agent_auth_profile_store_presence",
+    # C-699: the session-transcript row/session COUNT (transcript_events).
+    "trajectorystore.py:_count_transcript_events",
+})
 # Bare identifiers inside the column list, minus SQL noise words.
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # A single-quoted SQL string literal, with the '' escape. Its CONTENT is data, not schema:
@@ -256,17 +277,45 @@ def live_schema(db_path: Path) -> dict[str, set]:
         conn.close()
 
 
+def _unsatisfied(stmt, live):
+    """What stops this statement running against `live`: a table, or columns."""
+    table = stmt["table"]
+    if table not in live:
+        return f"table '{table}' does not exist"
+    missing = sorted(c for c in stmt["columns"] if c not in live[table])
+    if missing:
+        return f"{table} is missing {', '.join(missing)}"
+    return None
+
+
+def judge_readers(readers: dict, live: dict):
+    """(blind, dual_shape) for `readers` judged against ONE database's schema."""
+    blind, dual_shape = [], []
+    for reader in sorted(readers):
+        reasons = [_unsatisfied(s, live) for s in readers[reader]]
+        if any(r is None for r in reasons):
+            # At least one statement runs, so this reader can see its surface.
+            # The statements that cannot are its other-generation branches.
+            if any(r for r in reasons):
+                dual_shape.append((reader, [r for r in reasons if r]))
+            continue
+        blind.append((reader, sorted(set(reasons))))
+    return blind, dual_shape
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--db", type=Path, default=None,
                     help="state database (default: ~/.openclaw/state/openclaw.sqlite)")
+    ap.add_argument("--agent-db", type=Path, default=None,
+                    help="per-agent database for the readers in PER_AGENT_DB_READERS "
+                         "(default: the first ~/.openclaw/agents/*/agent/openclaw-agent.sqlite)")
     ap.add_argument("--package", type=Path, default=None,
                     help="package root to scan (default: ./clawseccheck)")
     args = ap.parse_args()
 
-    db_path = args.db or Path(
-        os.environ.get("OPENCLAW_HOME", Path.home() / ".openclaw")
-    ) / "state" / "openclaw.sqlite"
+    home = Path(os.environ.get("OPENCLAW_HOME", Path.home() / ".openclaw"))
+    db_path = args.db or home / "state" / "openclaw.sqlite"
     pkg_root = args.package or Path(__file__).resolve().parent.parent / "clawseccheck"
 
     if not pkg_root.is_dir():
@@ -288,30 +337,31 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
+    # Readers of a different database are judged against that one, never against this.
+    per_agent = {r: v for r, v in expected.items() if r in PER_AGENT_DB_READERS}
+    expected = {r: v for r, v in expected.items() if r not in PER_AGENT_DB_READERS}
+    agent_db = args.agent_db
+    if per_agent and agent_db is None:
+        found = sorted(home.glob("agents/*/agent/openclaw-agent.sqlite"))
+        agent_db = found[0] if found else None
+    agent_live, agent_note = None, "no per-agent database found; pass --agent-db"
+    if agent_db is not None:
+        if not agent_db.is_file():
+            print(f"cannot compare: no per-agent database at {agent_db}", file=sys.stderr)
+            return 2
+        try:
+            agent_live = live_schema(agent_db)
+        except sqlite3.Error as exc:
+            print(f"cannot compare: {agent_db} is unreadable ({exc})", file=sys.stderr)
+            return 2
+
     live = live_schema(db_path)
 
-    blind, dual_shape = [], []
-    for reader in sorted(expected):
-        statements = expected[reader]
-
-        def _unsatisfied(stmt):
-            """What stops this statement running here: a table, or columns."""
-            table = stmt["table"]
-            if table not in live:
-                return f"table '{table}' does not exist"
-            missing = sorted(c for c in stmt["columns"] if c not in live[table])
-            if missing:
-                return f"{table} is missing {', '.join(missing)}"
-            return None
-
-        reasons = [_unsatisfied(s) for s in statements]
-        if any(r is None for r in reasons):
-            # At least one statement runs, so this reader can see its surface.
-            # The statements that cannot are its other-generation branches.
-            if any(r for r in reasons):
-                dual_shape.append((reader, [r for r in reasons if r]))
-            continue
-        blind.append((reader, sorted(set(reasons))))
+    blind, dual_shape = judge_readers(expected, live)
+    if agent_live is not None:
+        agent_blind, agent_dual = judge_readers(per_agent, agent_live)
+        blind += [(r, [f"{x} [in {agent_db.name}]" for x in xs]) for r, xs in agent_blind]
+        dual_shape += agent_dual
 
     # The column half of bucket C. The docstring's first limit routes a table we do
     # not read AT ALL to the schema walk, so that gap has a home. A column we do not
@@ -341,6 +391,8 @@ def main() -> int:
     print(f"state database : {db_path}")
     print(f"package        : {pkg_root}")
     print(f"state-DB readers: {len(expected)}   tables present: {len(live)}")
+    if per_agent:
+        print(f"per-agent database: {agent_db if agent_live is not None else 'not checked'}")
     print()
 
     for reader, reasons in dual_shape:
@@ -353,7 +405,12 @@ def main() -> int:
         print("            -> bucket C, on a table we already read. Nothing we read "
               "broke, so this is not drift -- but confirm none of these carries a "
               "signal we should be reading before closing the upgrade.")
-    if grew or (dual_shape and not blind):
+    for reader in sorted(per_agent):
+        print(f"per-agent   {reader}")
+        print("            -> per-agent database reader, " + (
+            f"checked against {agent_db.name}." if agent_live is not None
+            else f"not checked by this gate ({agent_note})."))
+    if grew or per_agent or (dual_shape and not blind):
         print()
 
     if not blind:

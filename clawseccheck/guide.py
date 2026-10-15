@@ -275,74 +275,63 @@ def suggest_actions(
             priority=5,
         ))
 
-    # C-428: both of these always-on actions promised a grade. On an ungraded run
-    # (fewer than five layers ran) `--trend` plots nothing for it and the badge
-    # renders "no grade yet" - so the promise was one the tool could not keep.
-    # Same fact, wording that matches what the user will actually get.
+    # C-428: both of these actions promised a grade. On an ungraded run (fewer than five
+    # layers ran) `--trend` plots nothing for it and the badge renders "no grade yet".
+    # C-428 reworded them; C-704 drops them: advice that cannot work on this run is
+    # noise on the first screen. A graded run keeps both, in the same order.
     graded = bool(getattr(score, "graded", True))
 
-    # track_trend: ALWAYS
-    actions.append(Action(
-        id="track_trend",
-        title=("Track your security score over time" if graded
-               else "Track your posture over time"),
-        # B-873: --data-dir only. --trend reads history.jsonl (and prints/records
-        # against it), which --data-dir moves; --home plays no part in which rows are
-        # shown (each row already carries its own recorded `home` as metadata, and the
-        # baseline/history store is keyed by --data-dir alone -- same B-781 fact
-        # setup_monitoring's comment above cites).
-        command=cmd("--trend" + _state_flags(
-            home, data_dir, wants_home=False, wants_data_dir=True)),
-        why=("See if you're getting safer or drifting." if graded else
-             "Only graded runs plot on the trend \u2014 this run is recorded, not plotted. "
-             "Complete all five layers to put a point on the line."),
-        priority=8,
-    ))
+    if graded:
+        # track_trend: graded runs only
+        actions.append(Action(
+            id="track_trend",
+            title="Track your security score over time",
+            # B-873: --data-dir only. --trend reads history.jsonl (and prints/records
+            # against it), which --data-dir moves; --home plays no part in which rows are
+            # shown (each row already carries its own recorded `home` as metadata, and the
+            # baseline/history store is keyed by --data-dir alone -- same B-781 fact
+            # setup_monitoring's comment above cites).
+            command=cmd("--trend" + _state_flags(
+                home, data_dir, wants_home=False, wants_data_dir=True)),
+            why="See if you're getting safer or drifting.",
+            priority=8,
+        ))
 
-    # share_grade: ALWAYS
-    actions.append(Action(
-        id="share_grade",
-        title=("Share your grade (safe \u2014 findings stay private)" if graded
-               else "Share your result (safe \u2014 findings stay private)"),
-        # B-873: needs BOTH, and more than the others above -- the `why` text right below
-        # already explains that this command STARTS A FRESH AUDIT (badge export never
-        # rides the run that produced `score`; see B-586/C-428 in that text). A fresh
-        # audit means the bare command re-targets the DEFAULT --home outright, not just a
-        # side write, which is the sharpest version of this whole bug: a badge for a
-        # setup the user never asked about. --data-dir alongside it for the same reason
-        # setup_monitoring's command carries it -- this also records a history point.
-        command=cmd("--badge grade.svg" + _state_flags(
-            home, data_dir, wants_home=True, wants_data_dir=True)),
-        why=(
-            # C-428 follow-up: the second sentence used to be carried over verbatim from
-            # the graded branch - "Only the grade + score is ever shared" two words after
-            # "this run has no grade". The privacy promise is load-bearing, so it is
-            # reworded to what the badge actually contains (measured: its only text nodes
-            # are "OpenClaw Security" and "no grade yet"), never dropped.
-            #
-            # C-428 fixed the ungraded branch's PROSE and left the graded branch's
-            # COMMAND promising what it cannot deliver. A grade needs all five layers,
-            # and per B-586 an export never honours `--full` on its own - it rides the
-            # run that genuinely completed those layers. So the bare command below opens
-            # a NEW, ungraded audit: on a run that had just earned "Grade A · 96/100" it
-            # wrote aria-label="OpenClaw Security: no grade yet" (measured). Telling a
-            # user to share the grade they just earned, with a command that cannot carry
-            # it, is worse than saying nothing.
-            # The wording deliberately does not quote the ungraded badge's own text
-            # here: tests/test_b604_dashboard_next_actions.py discriminates the two
-            # blocks by that phrase, and it is right to - a graded block that quotes
-            # it reads like an ungraded one to a user skimming.
-            ("Only the grade + score is shared, never your findings. As written this "
-             "command starts a fresh audit that will not complete all five layers, so "
-             "its badge would not carry this grade \u2014 add `--badge grade.svg` to the "
-             "same command that produced it. " if graded else
-             "This run has no grade, so the badge reads \"no grade yet\" \u2014 that phrase "
-             "is the whole of what it carries. Your findings are never in it. ")
-            + "This writes a real SVG file \u2014 attach grade.svg itself, do not redraw "
-              "or regenerate the badge image yourself."
-        ),
-        priority=9,
-    ))
+        # share_grade: graded runs only
+        actions.append(Action(
+            id="share_grade",
+            title="Share your grade (safe \u2014 findings stay private)",
+            # B-873: needs BOTH, and more than the others above -- the `why` text right
+            # below already explains that this command STARTS A FRESH AUDIT (badge export
+            # never rides the run that produced `score`; see B-586/C-428 in that text). A
+            # fresh audit means the bare command re-targets the DEFAULT --home outright,
+            # not just a side write, which is the sharpest version of this whole bug: a
+            # badge for a setup the user never asked about. --data-dir alongside it for
+            # the same reason setup_monitoring's command carries it -- this also records a
+            # history point.
+            command=cmd("--badge grade.svg" + _state_flags(
+                home, data_dir, wants_home=True, wants_data_dir=True)),
+            why=(
+                # C-428 follow-up: C-428 fixed the ungraded branch's PROSE and left the
+                # graded branch's COMMAND promising what it cannot deliver. A grade needs
+                # all five layers, and per B-586 an export never honours `--full` on its
+                # own - it rides the run that genuinely completed those layers. So the
+                # bare command below opens a NEW, ungraded audit: on a run that had just
+                # earned "Grade A · 96/100" it wrote aria-label="OpenClaw Security: no
+                # grade yet" (measured). The wording deliberately does not quote the
+                # ungraded badge's own text here: tests/test_b604_dashboard_next_actions.py
+                # discriminates the two blocks by that phrase, and it is right to - a
+                # graded block that quotes it reads like an ungraded one to a user
+                # skimming.
+                "Only the grade + score is shared, never your findings. As written this "
+                "command starts a fresh audit that will not complete all five layers, so "
+                "its badge would not carry this grade \u2014 add `--badge grade.svg` to the "
+                "same command that produced it. "
+                "This writes a real SVG file \u2014 attach grade.svg itself, do not redraw "
+                "or regenerate the badge image yourself."
+            ),
+            priority=9,
+        ))
 
     actions.sort(key=lambda a: (a.priority, a.id))
     return actions
@@ -464,7 +453,7 @@ _CRON_TRIGGER_JS = r"""// ClawSecCheck drift probe. Runs on every poll; the agen
 // This fails OPEN on purpose: anything it cannot determine returns fire:true, because
 // OpenClaw treats a trigger error or timeout as fire:false, and a watch that goes
 // quiet on error is worse than one that occasionally wakes you for nothing.
-const CMD = "__CSCCMD__ --monitor --probe --exit-code --fail-on __FAILON__ --data-dir __DATADIR__ >/dev/null 2>&1; echo CSC_RC=$?";
+const CMD = "__CSCCMD__ --monitor --probe --exit-code --fail-on __FAILON____STATE__ >/dev/null 2>&1; echo CSC_RC=$?";
 try {
   const hits = await tools.search("run a shell command");
   if (!hits || !hits.length) {
@@ -506,7 +495,8 @@ def _json_str(value: str) -> str:
 
 
 def render_cron_recipe(ascii_only: bool = False,
-                       data_dir: str = "~/.clawseccheck") -> str:
+                       data_dir: str = "~/.clawseccheck",
+                       home: "str | None" = None) -> str:
     """A copy-paste OpenClaw cron job that runs the drift check on a schedule.
 
     Prints only. This never writes a file, never edits openclaw.json and never invokes
@@ -515,17 +505,28 @@ def render_cron_recipe(ascii_only: bool = False,
     has helped itself to a decision that was not offered.
 
     Deterministic: no clock, no randomness, so the same input always prints the same text.
+
+    C-622: the job must watch the setup the user asked about, so a non-default *home* is
+    written into every `--monitor` command (`--home` is omitted at the tool default, which
+    keeps the default output byte-identical). *data_dir* is always named - consent needs
+    the real store path (F-172) - and both values are shell-quoted, then JSON-escaped for
+    the hand-built message fields and the JS literal they land in.
     """
+    # `_state_flags` is used for --home only: it drops --data-dir at the default, which
+    # would delete `--data-dir ~/.clawseccheck` from the default recipe.
+    state = (_state_flags(home, None, wants_home=True, wants_data_dir=False)
+             + " --data-dir " + _quote_cli_path(data_dir))
     job = (
         '{\n'
         f'  "name": "{_CRON_JOB_NAME}",\n'
         f'  "schedule": {{ "kind": "every", "everyMs": {_CRON_EVERY_MS} }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
-        f'--data-dir {data_dir}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
+        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON}'
+        f'{_json_inner(state)}\\nExit 0 means nothing at {_CRON_FAIL_ON} severity or above '
         'was recorded \u2014 say nothing and stop; anything below that is advisory and is '
-        f'counted by `{_json_inner(machine_command_prefix())} --brief`. Exit 3 means drift was '
+        f'counted by `{_json_inner(machine_command_prefix())} --brief{_json_inner(state)}`. '
+        'Exit 3 means drift was '
         'recorded: report what '
         'changed, quoting the tool\'s own output. Exit 1 means monitoring is NOT established '
         '(the run could not write its state) \u2014 say so, it is more urgent than drift. '
@@ -547,7 +548,9 @@ def render_cron_recipe(ascii_only: bool = False,
     trigger_script = (_CRON_TRIGGER_JS
                       .replace("__CSCCMD__", machine_command_prefix())
                       .replace("__FAILON__", _CRON_FAIL_ON)
-                      .replace("__DATADIR__", data_dir))
+                      # Keep this LAST: it is the only replacement carrying user-controlled
+                      # text, so nothing after it can re-scan that text for a placeholder.
+                      .replace("__STATE__", _json_inner(state)))
     fast_job = (
         '{\n'
         f'  "name": "{_CRON_JOB_NAME}-now",\n'
@@ -555,8 +558,8 @@ def render_cron_recipe(ascii_only: bool = False,
         f'  "trigger": {{ "script": {_json_str(trigger_script)}, "once": false }},\n'
         '  "payload": {\n'
         '    "kind": "agentTurn",\n'
-        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON} '
-        f'--data-dir {data_dir}\\nThe probe that woke you already saw drift but did NOT '
+        f'    "message": "Run: {_json_inner(machine_command_prefix())} --monitor --exit-code --fail-on {_CRON_FAIL_ON}'
+        f'{_json_inner(state)}\\nThe probe that woke you already saw drift but did NOT '
         'record it, so this run is the one that reports and records it. Exit 3 means drift: '
         "report what changed, quoting the tool's own output. Exit 1 means monitoring is NOT "
         'established \u2014 say so, it is more urgent than drift. Exit 0 here means the change '

@@ -169,11 +169,26 @@ def test_vet_mcp_json_dangerous(tmp_path, capsys):
 
 def test_vet_mcp_json_no_servers_is_unknown(tmp_path, capsys):
     rc = main(["--vet-mcp", "--home", str(tmp_path), "--json"])
-    assert rc == 0
     data = json.loads(capsys.readouterr().out)
     # C427: an inconclusive (not-assessable) target reads CAUTION -- never a green light --
     # the same conservative default --advise already used for UNKNOWN before this change.
     assert data["verdict"] == "CAUTION"
+    # The home has no openclaw.json at all, so whether any MCP server is configured was
+    # never established. That CAUTION exits 1 like every other one (this pinned 0 until
+    # the exit code was made to follow the verdict word).
+    assert rc == 1
+
+
+def test_vet_mcp_readable_config_with_no_servers_is_not_applicable(tmp_path, capsys):
+    """The control for the test above: a config that WAS read and holds no MCP server is
+    "nothing to vet" - N/A, exit 0 - not a CAUTION."""
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text("{}", encoding="utf-8")
+    cfg.chmod(0o600)
+    rc = main(["--vet-mcp", "--home", str(tmp_path), "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["verdict"] == "N/A"
+    assert rc == 0
 
 
 def test_vet_mcp_sarif_rule_is_self_consistent(tmp_path):

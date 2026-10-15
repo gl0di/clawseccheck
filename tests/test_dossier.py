@@ -96,7 +96,16 @@ def test_clean_skill_profile_has_no_failing_axis(skill_dir):
     p = build_profile(vet_skill(str(skill_dir)), str(skill_dir), "skill")
     failing = [a.axis for a in p.axes if a.status in (FAIL, WARN)]
     assert not failing, f"{skill_dir.relative_to(_FIX)} → failing axes {failing} (grade {p.overall_grade})"
-    assert p.overall_status in (PASS, UNKNOWN)
+    if p.overall_status == WARN:
+        # The one clean fixture that may roll up to CAUTION, and only for this reason: a
+        # genuine own-source copy is skipped whole, so it is reported NOT SCANNED on every
+        # axis instead of being handed a clean bill. No other fixture is exempt.
+        assert skill_dir.relative_to(_FIX).parts[0] == "clean_ownname_genuine_clawseccheck"
+        assert p.verdict == "CAUTION"
+        assert all(a.status == UNKNOWN for a in p.axes)
+        assert any(f.engine_degraded and f.detail.startswith("NOT SCANNED.") for f in p.findings)
+    else:
+        assert p.overall_status in (PASS, UNKNOWN)
     assert p.overall_grade != "F"
 
 

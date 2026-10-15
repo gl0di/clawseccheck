@@ -165,7 +165,11 @@ _EXEMPT = {
                           "schema-verification layer (~900 lines would remain, per "
                           "B-845's own analysis) — either narrows this file with no "
                           "import cycle.",
-    "checks/_config.py": "~8,019 lines (restated 2026-09-26, B397 — was ~6,986, +15% "
+    "checks/_config.py": "~9,732 lines (restated 2026-10-13, C-700 — was ~9,230, +5% "
+                         "stale: the importance-ordered C015 home walk and its budget "
+                         "passes; earlier 2026-10-11, C-681 — was ~8,600, +7% "
+                         "stale; earlier 2026-10-08, C-653 — was ~8,019, +7% "
+                         "stale; earlier 2026-09-26, B397 — was ~6,986, +15% "
                          "stale; earlier 2026-09-21 for the 4.3.0 wave build — was "
                          "~6,302, +11% stale; earlier 2026-09-18, B382 — ~5,743) — the "
                          "config-hardening topic (30 checks + helpers); topic-faithful "
@@ -179,14 +183,23 @@ _EXEMPT = {
     # says it is not alone — `checks/_mcp.py` sits at 97% of its own tolerance, and five
     # more modules are past 70%. That whole table needs a restate-and-reconsider pass, not
     # one entry at a time as each next commit trips it.
-    "checks/_lifecycle.py": "~8,208 lines (restated 2026-09-26, B396 — was ~7,329; "
+    "checks/_lifecycle.py": "~9,828 lines (restated 2026-10-14, C-727/C-731 — was ~9,258; "
+                            "unreadable and not-understood files answer UNKNOWN in B79/B136/"
+                            "B176/B356/B104, and B136 reads every valid spelling of a "
+                            "trusted project. Restated 2026-10-08, C-648 — was ~8,208; B176's "
+                            "bounded-JSON nesting handling for devices/paired.json and the "
+                            "unread-device disclosure added ~60 lines. Restated 2026-09-26, "
+                            "B396 — was ~7,329; "
                             "check_paired_node_skill_coverage plus its own faithful-port "
                             "helpers and a dense dist-grounding comment block added "
                             "~880 lines) — the approval / update-pinning / "
                             "self-modification / supply-chain topic (18 checks + "
                             "helpers); topic-faithful and over budget by design. A finer "
                             "split is a later cycle.",
-    "checks/_content.py": "~17,155 lines (restated 2026-09-26 on integration/4.3.0 after the "
+    "checks/_content.py": "~17,895 lines (restated 2026-10-14, C-730 — was ~17,155; the "
+                          "one-pass scanners that replaced five quadratic patterns, each kept "
+                          "beside its scanner as the definition it is tested against. "
+                          "Restated 2026-09-26 on integration/4.3.0 after the "
                           "fleet-FP fixes — B63 post-compound anchor, B63 tell-directive "
                           "residual disclosure, B58 occurrence count; was ~16,589, and "
                           "~16,459 before B-886's fence leg) — the "
@@ -217,7 +230,7 @@ _EXEMPT = {
                           "own change with its own verification (byte-identical audit "
                           "output at every step, as I-022-R2 did); this entry's job is to "
                           "stop recording a non-reason as a decision.",
-    "checks/_vet.py": "~10,236 lines (restated 2026-09-26 on integration/4.3.0 after "
+    "checks/_vet.py": "~10,751 lines (restated 2026-10-13 after the empty-pool coverage note, ~16 lines; was ~10,236, restated 2026-09-26 on integration/4.3.0 after "
                       "merging three fleet-FP fixes — was ~9,185: the vet-example-prohibition "
                       "round 2 scoping of the scanner-finding-line recognizer into a caller-"
                       "opt-in `scanner_finding_line_ok` parameter plus its WARN-not-PASS "
@@ -315,8 +328,16 @@ _EXEMPT = {
     # `_mcp.py` has owed since I-022 is still owed and is now the second-largest piece of
     # structural debt in the tree after `_content.py`; vet_plugin alone (the dispatcher,
     # its tree sweep and the plugin sweep) is a coherent unit that could leave.
-    "checks/_mcp.py": "~9,871 lines — the MCP / plugin checks + vet_mcp / vet_plugin; "
-                      "topic-faithful and over budget by design. Restated 2026-09-24 "
+    "checks/_mcp.py": "~11,150 lines (restated 2026-10-11, C-682 — was ~10,564, +6% stale) — the MCP / plugin checks + vet_mcp / vet_plugin; "
+                      "topic-faithful and over budget by design. Restated 2026-10-05 "
+                      "(C-632: vet_plugin dispatches a SKILL.md the manifest does not list "
+                      "and discloses executable code beside a wrapper's node_modules, +~443 "
+                      "lines, most of it the self-contained wrapper-scan helpers "
+                      "and their docstrings. Those helpers share only the _PLUGIN_* "
+                      "constants with vet_plugin, which the existing tests monkeypatch on "
+                      "this module, so moving them is a split to plan, not a fix-up; they "
+                      "are the first candidate if vet_plugin leaves). Previously restated "
+                      "2026-09-24 "
                       "(+515 lines since the 2026-09-23 restatement below, accumulated "
                       "across many small fixes landing in the 4.3.0 wave rather than one "
                       "large change — B-948's normalize-before-scan fix among the most "
@@ -346,8 +367,9 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~5,267 lines (restated 2026-09-21 for the 4.3.0 wave build — "
-                         "was ~4,736) — the "
+    "checks/_egress.py": "~5,781 lines (restated 2026-10-05 for the 4.4.0 build - "
+                         "was ~5,267; B390 and the B188 extension to retained state-DB "
+                         "copies landed here since) — the "
                          "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
                          "web-fetch/log checks). Crossed the budget with B178's "
                          "check_provider_baseurl (models.providers.<id>.baseUrl "
@@ -355,7 +377,13 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~6,205 lines (restated 2026-09-24, B-879 round 7 — was ~6,074; "
+    "checks/_shared.py": "~7,499 lines (restated 2026-10-05, C-646 - was ~6,205, and dev was at "
+                         "~6,505 when it landed; the SecretRef / env-reference predicate block "
+                         "(_credential_is_plaintext, _is_secret_ref_object, the env-block walk, "
+                         "_has_env_template; ~290 net lines) is read by checks/_config.py (B1, B2) "
+                         "and by risk.py (RISK-16) through the aggregator, so under CLAUDE.md 3.1 "
+                         "it belongs in this leaf rather than in one topic module) and before that "
+                         "(restated 2026-09-24, B-879 round 7 — was ~6,074; "
                          "generalized (d′)'s cloud-recovery principle from INVERTING verbs "
                          "to ordinary EXEC verbs (_pb_chunk_raw_pre/_pb_strip_chunk_openers/"
                          "_PB_COORD and _sentence_directed's new (d″) loop) to close a "
@@ -398,7 +426,7 @@ _EXEMPT = {
                          "and risk.py, the same cross-topic-leaf shape B-247 already "
                          "established. A finer split (the grounding prose into a doc, the "
                          "tables kept here) is a later cycle, not this one.",
-    "checks/_capability.py": "~3,514 lines (restated 2026-09-25, B-942 — was ~2,977) — "
+    "checks/_capability.py": "~4,097 lines (restated 2026-10-13, C-723, was ~3,514 and before that ~2,977) — "
                              "the declared-vs-effective capability /"
                              "manifest topic (B44/B55/B68/B84/B326 + helpers). Crossed the "
                              "budget with CLAWSECCHECK-B-376/B-369's B55 WARN->FAIL "
@@ -431,7 +459,7 @@ _EXEMPT = {
                              "own inline copy) resolve confinement per scope instead, with "
                              "the grounding comments that decision needed to stay auditable. "
                              "A finer split is a later cycle.",
-    "checks/_agents.py": "~2,239 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
+    "checks/_agents.py": "~2,751 lines (restated 2026-09-19, B-833 — was ~1,798 on 2026-09-11, ~1,358 before C-411) — "
                         "the multi-agent / subagent-exposure topic "
                         "(check_agent_separation, check_untrusted_context, "
                         "check_subagents_allow_agents, etc.). Crossed the budget with "
@@ -491,7 +519,25 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~17,660 lines (further restated 2026-09-25, merging two concurrent "
+    "skillast.py": "~19,024 lines (restated 2026-10-05 for C-630, +~1022: the plaintext "
+                   "reverse-shell detector. Two crit rules in the two analyzers this file "
+                   "already owns -- SHELL_REVERSE_SHELL in `analyze_shell` (a scan with bounded "
+                   "work per candidate token: quote mask, unquoted-delimiter and evidence "
+                   "positions computed once per logical line, one bisect per candidate "
+                   "token, at most 16 option words and a 600-character look-back; closed "
+                   "shapes "
+                   "for a bare shell bound to /dev/tcp, nc/ncat exec flag, socat exec:, "
+                   "an exec N<>/dev/tcp fd) and SOCKET_STDIO_SHELL in `analyze_python` "
+                   "(a socket-name fixpoint plus the dup2/stdin= wiring test). Unlike the "
+                   "lines below this DOES add a new detector family, so the split was "
+                   "reconsidered rather than the number just bumped: it stays here because "
+                   "both halves lean on skillast-private helpers "
+                   "(`_sh_nc_command_position`, `_SH_NC_METACHAR_RE`, "
+                   "`_sh_loop_join_continuations`, `_dotted_path`) that this file's other "
+                   "consumers also import, so a leaf module would need those extracted "
+                   "first -- a separate refactor, not a rider on a FAIL-capable rule. "
+                   "Earlier restatement follows) "
+                   "~17,660 lines (further restated 2026-09-25, merging two concurrent "
                    "growth lines from a common 16,439-line baseline: B-998 (+676, landed "
                    "on integration/4.3.0 first) added `hardcoded_env_secret_is_inert` and "
                    "its G0-G4 helper functions -- a self-contained positive reachability "
@@ -687,7 +733,7 @@ _EXEMPT = {
     # means — the table needs one restate-and-reconsider pass, not an entry bumped each
     # time the next commit trips it — and this bump is exactly the pattern it warned about.
     # Recorded rather than quietly corrected: the split below is now owed twice over.
-    "report.py": "~6,699 lines — the output renderers; grew further with F-131's "
+    "report.py": "~7,716 lines (restated 2026-10-14 — was ~7,215; C-717's HTML ids and version footer, C-718's coverage wording and C-726's probe and tracker-id sweep) — earlier restated 2026-09-30, C-618 — was ~6,699; the shared suppressed-notice helper and its five surface call sites — the output renderers; grew further with F-131's "
                  "Inventory-by-subject block (its own additive presentation layer, not "
                  "branching check logic), then with the B-617 inert-disclosure channel "
                  "and the B-547 scope-note rewiring, then with B-758's three report "
@@ -697,11 +743,14 @@ _EXEMPT = {
                  "disclosure/scope layer they share) is still deferred, but it is no "
                  "longer only an I-022 secondary target — it is the second-largest "
                  "structural debt after checks/_content.py.",
-    "catalog.py": "~3,916 lines (restated 2026-09-12, C-526/C-527 — was ~3,404) — the "
+    "catalog.py": "~4,417 lines (restated 2026-10-05 for the 4.4.0 build - was ~3,916; "
+                  "20 entries added since) — the "
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~8,787 lines (restated 2026-09-25 — was ~8,254) — the read-only "
+    "collector.py": "~10,350 lines (restated 2026-10-05, C-616 - was ~8,787; C-616 bounds the "
+                    "own-source engine directory by file count, total bytes and file type, "
+                    "+94 lines, and its residual disclosure is most of the prose) - the read-only "
                     "collection layer (config / bootstrap / skill "
                     "collection + the Context dataclass + byte-format classify_bytes); a "
                     "cohesive foundational module. Crossed the budget with F-116 (.ipynb->AST "
@@ -787,18 +836,9 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    # B-983 (2026-09-24): 1,199 -> 1,209 lines (net +10). `_declared_file_bars_measurability`'s
-    # sh/js branch gained the same try/except its py branch already had (a SyntaxError from a
-    # malformed declared file was already caught there) -- analyze_shell/analyze_javascript are
-    # large recursive parsers with no general depth bound, so an adversarial declared file could
-    # raise RecursionError (or SyntaxError/ValueError/MemoryError/OverflowError) the same way a
-    # malformed Python file already could. 9 lines over budget, not trimmed: the new comment is
-    # the reasoning for why this mirrors the py branch, and shortening it to slip under would
-    # remove that, not the risk. No split candidate: this is one function's guard clause, not a
-    # cohesive sub-concern that could move to its own module.
-    "dossier.py": "~1,209 lines — the vet-dossier renderer; _declared_file_bars_measurability's "
-                  "sh/js analyzer call now mirrors its py branch's exception containment. Over "
-                  "budget by 9 lines since B-983. Tracked debt, not a design statement.",
+    "dossier.py": "~1,233 lines - the vet-dossier renderer; over budget again after the "
+                  "C-633 partial-read Danger reason landed beside the C-636 own-source rework. "
+                  "Tracked debt, not a design statement.",
     # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
     # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
     # each restatement filing the split rather than doing it, and the file grew again

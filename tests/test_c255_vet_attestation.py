@@ -350,7 +350,8 @@ def test_cross_run_replayed_attestation_verdicts_are_rejected(capsys):
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_SKILL_MD_TEXT = (_REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
+# C-709: the vet judge panel moved verbatim from SKILL.md to this playbook file.
+_SKILL_MD_TEXT = (_REPO_ROOT / "docs" / "playbook" / "VET_JUDGE_PANEL.md").read_text(encoding="utf-8")
 
 
 def _c255_section() -> str:
@@ -359,7 +360,7 @@ def _c255_section() -> str:
     so a stable-phrase match survives incidental markdown line-rewrapping — the
     prose content is what's being pinned, not its exact line breaks."""
     start = _SKILL_MD_TEXT.index("Pre-install prose attestation (C-255)")
-    end = _SKILL_MD_TEXT.index("## Guided conversational flow")
+    end = len(_SKILL_MD_TEXT)
     assert start < end
     return " ".join(_SKILL_MD_TEXT[start:end].split())
 

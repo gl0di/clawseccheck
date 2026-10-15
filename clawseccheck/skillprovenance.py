@@ -50,10 +50,11 @@ made a scan target, are user-chosen.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from . import pathprobe
+from .configloader import ELIDED, loads_shallow
 
 # The workspace directory names OpenClaw uses, in the order `collector.WORKSPACE_DIRS`
 # lists them. Duplicated as a literal rather than imported, deliberately: this module is a
@@ -237,7 +238,17 @@ class ProvenanceScan:
 
 
 def _load_json(p: Path, *, max_bytes: int) -> "dict | None":
-    """A bounded JSON object read, or None. Never raises.
+    """A bounded JSON object read, or None. Never raises. See :func:`_load_json_shallow`."""
+    return _load_json_shallow(p, max_bytes=max_bytes)[0]
+
+
+def _load_json_shallow(p: Path, *, max_bytes: int) -> "tuple[dict | None, int]":
+    """``(object or None, subtrees too deep to follow)``. Never raises.
+
+    C-664: read by ``loads_shallow``, so a record padded past any fixed depth is still read
+    field for field, and a subtree below the depth it follows is ``ELIDED`` and counted.
+    The older ``json.loads`` raised ``RecursionError`` out of the monitor on a deep enough
+    file, and a fixed depth limit here would have turned padding into "no record at all".
 
     Bounded because this reads a file the audited agent writes: a 4 MB ceiling is roughly
     150x the real 27 KB lock file, generous enough never to fire in normal use and tight
@@ -246,11 +257,11 @@ def _load_json(p: Path, *, max_bytes: int) -> "dict | None":
     """
     try:
         if p.stat().st_size > max_bytes:
-            return None
-        data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+            return None, 0
+        shallow = loads_shallow(p.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+        return None, 0
+    return (shallow.value, shallow.elided) if isinstance(shallow.value, dict) else (None, 0)
 
 
 def _digest_pair(rec: dict) -> "tuple[str, str]":
@@ -400,26 +411,24 @@ def _normalize_agent_id(value) -> str:
     return normalized.strip("-")[:64] or DEFAULT_AGENT_ID
 
 
-def _default_agent_id(agents_list) -> str:
-    """The entry flagged `default`, else the FIRST entry, else `main`.
+def _default_agent_id(agents_list, explicit_ownership: bool = False) -> "str | None":
+    """The agent whose workspace is the plain one: the leaf's copy of the collector's rule.
 
-    The "else the first entry" half matters: with one entry in `agents.list`, that entry IS
-    the default agent and its workspace is the plain `workspace` directory, so nothing is
-    derived for it at all.
+    ``tryResolveRawLegacyDefaultAgentId(cfg) ?? tryResolveSoleAgentId(cfg)`` as
+    ``resolveAgentWorkspaceDir`` uses it (C-684, executed in node): the one entry with
+    ``default`` equal to boolean ``true`` and only when exactly one carries it (never under
+    ``agents.ownership: "explicit"``), else the sole agent, else NOBODY - ``None``, and every
+    agent's directory is then derived. Compared with the collector's copy over a battery in
+    ``tests/test_c684_default_agent_differential.py``.
     """
-    chosen = None
-    for entry in agents_list:
-        if isinstance(entry, dict) and entry.get("default"):
-            chosen = entry
-            break
-    if chosen is None and agents_list:
-        # `agents[0]` unconditionally, NOT the first dict. A truthy non-object entry survives
-        # JS's own `listAgentEntries` filter (it drops only falsy ones), and `"junk"?.id` is
-        # `undefined`, which normalises to the default id. Skipping to the first dict picked a
-        # different default agent than the product does, and therefore derived a different set
-        # of workspaces.
-        chosen = agents_list[0]
-    return _normalize_agent_id(chosen.get("id") if isinstance(chosen, dict) else None)
+    if not explicit_ownership:
+        marked = [e for e in agents_list if isinstance(e, dict) and e.get("default") is True]
+        if len(marked) == 1:
+            return _normalize_agent_id(marked[0].get("id"))
+    if len(agents_list) == 1:
+        sole = agents_list[0]
+        return _normalize_agent_id(sole.get("id") if isinstance(sole, dict) else None)
+    return None
 
 
 def _agent_entries(config: dict) -> "list[dict]":
@@ -470,7 +479,8 @@ def _derived_agent_workspaces(config: dict) -> "list[str]":
     fallback = ""
     if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
         fallback = defaults["workspace"].strip()
-    default_id = _default_agent_id(listed)
+    default_id = _default_agent_id(
+        listed, explicit_ownership=isinstance(agents, dict) and agents.get("ownership") == "explicit")
     out: list[str] = []
     for entry in listed:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
@@ -508,12 +518,12 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
         if isinstance(agents, dict):
             defaults = agents.get("defaults")
             if isinstance(defaults, dict) and isinstance(defaults.get("workspace"), str):
-                extra.append(Path(defaults["workspace"]).expanduser())
+                extra.append(pathprobe.expand_user(defaults["workspace"]))
             for entry in _agent_entries(config):  # B-699: both roster shapes
                 if isinstance(entry.get("workspace"), str):
-                    extra.append(Path(entry["workspace"]).expanduser())
+                    extra.append(pathprobe.expand_user(entry["workspace"]))
         # B-610: the two rules OpenClaw applies to an agent with no explicit workspace.
-        extra.extend(Path(w).expanduser() for w in _derived_agent_workspaces(config))
+        extra.extend(pathprobe.expand_user(w) for w in _derived_agent_workspaces(config))
     # A RELATIVE workspace string is resolved against *home*, never against the process's
     # working directory - matching `collector._config_workspace_dirs` (B-161), which is the
     # established precedent for exactly this key and says so in its own docstring. The first
@@ -545,7 +555,7 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
             continue
         seen.add(key)
         try:
-            if r.is_dir():
+            if pathprobe.is_dir(r):
                 out.append(r)
         except OSError:
             continue
@@ -555,7 +565,7 @@ def workspace_roots(home: Path, config: "dict | None" = None, *,
 def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = None, *,
                     max_skills: int = MAX_SKILLS) -> ProvenanceScan:
     """Every installed skill's install record, corroborated where a second source exists."""
-    home = Path(home).expanduser()
+    home = pathprobe.expand_user(home)
     notes: list[str] = []
     skills: dict = {}
     # name -> the ordered root identities that held a record under it, winner first.
@@ -570,10 +580,14 @@ def read_provenance(home: Path | str = "~/.openclaw", config: "dict | None" = No
     per_root: dict = {}
     for root in workspace_roots(home, config, searched=searched):
         root_id = _root_identity(home, root)
-        lock = _load_json(root / ".clawhub" / "lock.json", max_bytes=MAX_LOCK_BYTES)
+        lock, lock_elided = _load_json_shallow(root / ".clawhub" / "lock.json",
+                                               max_bytes=MAX_LOCK_BYTES)
         if lock is None:
             continue
         present = True
+        if lock_elided:
+            notes.append("the install record is nested deeper than this reader follows; "
+                         "part of it was not examined")
         records = lock.get("skills")
         if not isinstance(records, dict):
             notes.append("the install record has no skills section")
@@ -658,14 +672,62 @@ def _corroborate(root: Path, name: str, rec: dict) -> "bool | None":
     separate writes, and building a mismatch signal on clock equality is how a benign
     millisecond becomes an accusation.
     """
-    origin = _load_json(root / "skills" / name / ".clawhub" / "origin.json",
-                        max_bytes=MAX_LOCK_BYTES)
+    origin, origin_elided = _load_json_shallow(
+        root / "skills" / name / ".clawhub" / "origin.json", max_bytes=MAX_LOCK_BYTES)
     if origin is None:
         return None
     o_artifact, o_skill_file = _digest_pair(origin)
     l_artifact, l_skill_file = _digest_pair(rec)
-    o_version = origin.get("installedVersion")
-    l_version = rec.get("version")
-    return (o_artifact == l_artifact
-            and o_skill_file == l_skill_file
-            and o_version == l_version)
+    # C-664: a compared value holding an ELIDED marker was cut at a depth that differs
+    # between the two files (the lock record sits deeper than the origin), so it can
+    # neither confirm nor refute: `_compare` answers None for it unless the visible part
+    # already differs. A mismatch on any other, fully visible field is still False (the
+    # monitor alerts on `False`), and a match is only ever reported when nothing was cut.
+    results = [
+        _compare(o_artifact, l_artifact),
+        _compare(o_skill_file, l_skill_file),
+        _compare(origin.get("installedVersion"), rec.get("version")),
+    ]
+    if False in results:
+        return False
+    if None in results or origin_elided:
+        return None
+    return True
+
+
+def _holds_elided(value) -> bool:
+    """True when an ELIDED marker sits anywhere inside *value* (shallow, so no recursion)."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if item is ELIDED:
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def _surely_differ(a, b) -> bool:
+    """True when *a* and *b* differ in a part that was read in full. ELIDED stands for an
+    array or object of unknown content, so against a scalar it is a sure difference and
+    against another container (or ELIDED) it is unknown."""
+    if a is ELIDED or b is ELIDED:
+        other = b if a is ELIDED else a
+        return not (other is ELIDED or isinstance(other, (list, dict)))
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) != len(b) or any(_surely_differ(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() != b.keys() or any(_surely_differ(a[k], b[k]) for k in a)
+    if isinstance(a, (list, dict)) or isinstance(b, (list, dict)):
+        return True
+    return a != b
+
+
+def _compare(a, b) -> "bool | None":
+    """``a == b`` as before when both were read in full; otherwise False only where a
+    fully-read part already differs, else None (neither confirmed nor refuted)."""
+    if not (_holds_elided(a) or _holds_elided(b)):
+        return a == b
+    return False if _surely_differ(a, b) else None

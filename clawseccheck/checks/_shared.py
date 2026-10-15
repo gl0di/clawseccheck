@@ -14,7 +14,8 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
+from .. import pathprobe
 from ..catalog import (
     BY_ID,
     UNKNOWN,
@@ -25,6 +26,7 @@ from ..collector import (
     agent_roster,
     dig,
     limit_hits_for,
+    persistent_env_evidence,
 )
 # _escape_embedded_header_lines lives in collector.py (the sole legitimate emitter of
 # the "# file: <name>" header convention) - reused here so MCP tool descriptions get
@@ -38,6 +40,7 @@ from ..collector import (  # noqa: F401
     _OWN_ENGINE_MARKERS,
     _OWN_SKILL_NAMES,
     _is_own_source,
+    _own_source_symlinks,
 )
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
@@ -45,6 +48,7 @@ from .. import toolpolicy as _toolpolicy
 from .. import toolgrant as _toolgrant
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist
+from .. import retiredformats as _retiredformats
 
 
 def _is_posix() -> bool:
@@ -127,7 +131,7 @@ def _username_safe_path(path) -> str:
     """
     try:
         p = Path(path)
-        p = p.resolve() if p.exists() else Path(os.path.normpath(str(p)))
+        p = p.resolve() if pathprobe.exists(p) else Path(os.path.normpath(str(p)))
     except OSError:
         p = Path(path)
     try:
@@ -501,9 +505,59 @@ SECRET_PATTERNS = [
 # values under a secret-shaped key. No handling needed here for that shape.
 _SECRET_REF_ENV_ID = r"[A-Z][A-Z0-9_]{0,127}"
 
+# C-646: the config env-substitution TEMPLATE forms, `${ID}` and `${ID:-}`.
+#
+# `${ID:-}` (an EMPTY fallback) is accepted by OpenClaw 2026.9.7+ only. Grounded against
+# the installed 2026.9.7 dist, `redact-P3Hzn-ce.mjs` (src/config/env-substitution.ts):
+# `DEFAULT_VALUE_OPERATOR = ":-"` (:56) and `parseEnvTokenBody` (:74-86), which splits
+# the body at the first `:-`, requires the name to match `[A-Z_][A-Z0-9_]*`, and refuses a
+# fallback containing `$` or `{`. A set variable resolves to its value; an unset or empty
+# one resolves to the fallback - here the empty string. Either way the config text
+# carries NO secret material, so `${ID:-}` is a pure env reference exactly like `${ID}`.
+#
+# It is deliberately ONLY the EMPTY fallback. `${ID:-anything}` is a reference PLUS an
+# inline literal, and the literal is whatever the config text says - `${TOKEN:-hunter2}`
+# is a plaintext credential with a decorative wrapper. That shape does not match here, so
+# it keeps flowing through the ordinary secret-shape logic (C015 / `_secret_paths` /
+# the named-credential test in `_credential_is_plaintext`) unchanged.
+#
+# Older builds (checked: 2026.7.1-2, 8.1, 9.1, 9.3-9.6 - `env-substitution-*` /
+# `redact-*`) have NO default operator: the body `ID:-` fails `ENV_VAR_NAME_PATTERN`, the
+# token is not recognised, and the string is passed through verbatim (`parseEnvTokenAt`
+# tests the whole body `ID:-` against the name pattern). So on those builds `${ID:-}` is
+# the literal text `${ID:-}` - a PUBLIC, guessable string - and a credential field holding
+# it authenticates with that text.
+#
+# THE PREDICATES BELOW STAY BUILD-INDEPENDENT, because what they answer is "is a secret
+# held in the file", and on every build the text `${ID:-}` holds none: C015, the generic
+# secret scan and `_secret_paths` ask only that, and none of them reads the installed
+# build. The build decision lives in `check_secrets` (B1) alone, at its two unconditional
+# credential paths (`gateway.auth.password`, `hooks.token`), because there the question is
+# the other one - does the credential IN EFFECT come from the environment? - and for a
+# whole-value `${ID:-}` the answer depends on the build. `_env_default_operator` (below)
+# gives it as "yes" / "no" / "unknown": yes keeps the reference reading (PASS), no is the
+# same FAIL a plaintext value at that path gets, unknown is a B1 UNKNOWN. Only the
+# EMPTY-fallback form is gated; markers, shorthand, embedded references, non-empty
+# fallbacks and the env-block lookup are untouched.
+#
+# The same residue exists on 2026.9.7 for the PLAIN `${ID}` form at `hooks.token` (a plain
+# string in the vendor schema, read verbatim): when ID is unset or empty in the gateway's
+# environment `onMissing` only warns and the text `${ID}` itself becomes the bearer token
+# (measured on the installed dist, C-135 round 3). The predicates here only answer "is a
+# secret held in the file"; `check_secrets` (B1) answers UNKNOWN for a whole-value PLAIN
+# `${ID}` at `hooks.token`, always, because a static scan cannot see the gateway process
+# environment. An evidence model over unit and dotenv files was tried and retracted
+# (C-135 round 4): enumerating the ways a file can define a variable failed once per
+# surface it forgot. On 2026.9.7 and later the EMPTY-fallback `${ID:-}` form is a
+# reference: unset, it substitutes to "" and 2026.9.7 refuses to enable hooks, so no
+# literal token exists.
+_ENV_TEMPLATE_REF = r"\$\{%(id)s(?::-)?\}" % {"id": _SECRET_REF_ENV_ID}
+
+_ENV_SUBSTITUTION_REFERENCE_RE = re.compile(_ENV_TEMPLATE_REF)
+
 _SECRET_REFERENCE_RE = re.compile(
-    r"(?:\$\{%(id)s\}|\$%(id)s|secretref-env:%(id)s|__env__:%(id)s)"
-    % {"id": _SECRET_REF_ENV_ID}
+    r"(?:%(tpl)s|\$%(id)s|secretref-env:%(id)s|__env__:%(id)s)"
+    % {"id": _SECRET_REF_ENV_ID, "tpl": _ENV_TEMPLATE_REF}
 )
 
 
@@ -512,10 +566,429 @@ def _is_secret_reference(value: str) -> bool:
     indirection shorthand - never a substring or a prefix of something longer, so any
     real secret material appended (or prepended) to a reference shape still counts as
     a plaintext secret (C-226 adversarial requirement: the exclusion must stay narrow).
+    C-646: ``${ID:-}`` (EMPTY fallback only) counts too; ``${ID:-x}`` does not.
     """
     if not isinstance(value, str):
         return False
     return bool(_SECRET_REFERENCE_RE.fullmatch(value.strip()))
+
+
+# C-646: the first release whose config env-substitution understands the `:-` default
+# operator (`${ID:-}`). Grounded against the installed 2026.9.7 dist (`redact-P3Hzn-ce.mjs`:
+# `parseEnvTokenBody` + `DEFAULT_VALUE_OPERATOR`) and the unpacked 2026.9.6 dist
+# (`redact-B5EGyLvV.mjs`, `parseEnvTokenAt`: no operator, so the body `ID:-` fails the name
+# pattern and the string passes through verbatim). The series floor only says "this string
+# is a YYYY.M.P calendar release": "0.0.0" or "1.2.3" cannot be placed on the timeline.
+_ENV_DEFAULT_OPERATOR_MIN = (2026, 9, 7)
+_ENV_DEFAULT_OPERATOR_SERIES_YEAR = 2026
+
+
+def _env_default_operator(ctx) -> str:
+    """Does the audited OpenClaw understand the env-substitution default operator, so that
+    a whole-value ``${ID:-}`` is read as an environment reference?
+    ``"yes"`` / ``"no"`` / ``"unknown"``.
+
+    Three answers for the reason ``_terminal_default`` has three: "we could not see the
+    build" is not "the build reads it as a reference", and not "the build uses the text as
+    the credential" either. B1 (``check_secrets``) consumes this at its two credential
+    paths; since C-691 so do B323, both B326 sites and the exec-policy monitor dimension, to
+    decide whether ``${NAME:-x}`` is an env reference (the ``default_operator`` argument of
+    ``_b323_contains_env_var_reference``). The shape predicates above stay build-independent.
+
+    ONLY ``installed_dist_version`` answers, and it decides outright -- the installed build
+    is the one whose parser runs. A calendar release (``YYYY.M.P``, three or more numeric
+    parts, year at or after the series floor) at or after ``_ENV_DEFAULT_OPERATOR_MIN`` is
+    ``"yes"``; one below it is ``"no"``. Everything else is ``"unknown"``: no installed
+    version, a pre-release string (``_numeric_version``, not ``_parse_version``, B-264,
+    orders it as None), "0.0.0", a two-part version.
+
+    ``meta.lastTouchedVersion`` is deliberately NOT a source here, unlike in
+    ``_terminal_default`` and its siblings. There a stamp at or after the threshold can only
+    make the answer MORE alarming (the risky default is on). Here ``"yes"`` is the answer
+    that CLEARS a credential, and the stamp is written by whoever last saved the file: it
+    survives a downgrade, and it travels with a config copied from another machine. A
+    stamp saying 2026.9.7 beside an older or unseen build would turn the literal text into
+    a PASS. So an unseen build is ``"unknown"`` whatever the stamp says.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if len(installed) >= 3 and installed[0] >= _ENV_DEFAULT_OPERATOR_SERIES_YEAR:
+            return "yes" if tuple(installed[:3]) >= _ENV_DEFAULT_OPERATOR_MIN else "no"
+    return "unknown"
+
+
+# C-646: the structured SecretRef OBJECT form, ported from the vendor's own grammar
+# instead of "any dict with a `source` key", because the object form is only "no
+# plaintext here" when it really is nothing but a pointer. Grounded against the installed
+# 2026.9.7 dist: `ref-contract-D0kWy5jy.mjs` (`isSecretRef`: exactly three keys;
+# `isValidSecretRef`: provider alias, per-source id grammar, `validateExecSecretRefId`,
+# `isValidFileSecretRefId`), `zod-schema.core-ZkrXdN0m.mjs:357-385` (every variant is
+# `.strict()`; on openclaw@2026.10.2, read 2026-10-12, the SecretRef variants moved to
+# `zod-schema.sensitive-bEFwMmOC.mjs:5-21`: `createSecretRefSchema` builds each one with
+# `strictObject`, `SecretRefSchema` is the discriminated union of the four sources), and `types.secrets-BXEuin38.mjs` (`isLegacySecretRefWithoutProvider`, the
+# two-key `{source, id}` form the runtime still coerces).
+_SECRET_REF_SOURCES = ("env", "file", "exec", "store")
+_SECRET_REF_PROVIDER_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
+_SECRET_REF_ENV_ID_FULL_RE = re.compile(_SECRET_REF_ENV_ID)
+_SECRET_REF_EXEC_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}")
+_SECRET_REF_FILE_SEGMENT_RE = re.compile(r"(?:[^~]|~0|~1)*")
+
+
+def _secret_ref_id_ok(source: str, ref_id) -> bool:
+    if not isinstance(ref_id, str):
+        return False
+    if source in ("env", "store"):
+        return bool(_SECRET_REF_ENV_ID_FULL_RE.fullmatch(ref_id))
+    if source == "file":
+        if ref_id == "value":
+            return True
+        return ref_id.startswith("/") and all(
+            _SECRET_REF_FILE_SEGMENT_RE.fullmatch(seg) for seg in ref_id[1:].split("/")
+        )
+    # exec: pattern + no "." / ".." path segment
+    return bool(_SECRET_REF_EXEC_ID_RE.fullmatch(ref_id)) and not any(
+        seg in (".", "..") for seg in ref_id.split("/")
+    )
+
+
+def _is_secret_ref_object(value) -> bool:
+    """True only for a WELL-FORMED structured SecretRef: a dict whose keys are exactly
+    ``{source, provider, id}`` (or the legacy two-key ``{source, id}`` the runtime still
+    coerces), with a known ``source``, a valid provider alias and an id that satisfies
+    that source's grammar. Anything else - an extra key (a plaintext value smuggled next
+    to the pointer), an unknown source, a non-string or malformed id - is NOT a
+    reference, so a look-alike dict can never hide a credential (C-646).
+    """
+    if not isinstance(value, dict):
+        return False
+    keys = set(value)
+    if keys != {"source", "provider", "id"} and keys != {"source", "id"}:
+        return False
+    source = value.get("source")
+    if source not in _SECRET_REF_SOURCES:
+        return False
+    if "provider" in keys:
+        provider = value.get("provider")
+        if not isinstance(provider, str) or not _SECRET_REF_PROVIDER_RE.fullmatch(provider):
+            return False
+    return _secret_ref_id_ok(source, value.get("id"))
+
+
+# C-646 (C-135 round 2): a reference is only "no plaintext here" when the variable it
+# names is not itself defined in plaintext by the SAME config. OpenClaw applies the
+# config's own env block to the environment BEFORE `${...}` substitution runs
+# (2026.9.7 `io.read-helpers-DIatj3iW.mjs` `resolveConfigForRead`: `applyConfigEnvVars`,
+# then `resolveConfigEnvVars`; `config-env-vars-CcSZNwSV.mjs` `collectConfigRuntimeEnvVars`
+# reads BOTH `env.vars.<NAME>` and the flat `env.<NAME>` catch-all, skipping only
+# `shellEnv` and `vars`, keeps a non-blank string under a portable key, and lets a
+# variable the process already holds win - which a config-only audit cannot see, so the
+# plaintext is treated as live either way). `password: "${GW_PW}"` beside
+# `env.vars.GW_PW: "<text>"` is therefore a plaintext credential in a reference costume.
+_ENV_BLOCK_PORTABLE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The vendor treats these spellings as one variable (`ENV_NORMALIZATION_KEY_GROUPS`,
+# `env-D_k2xpwO.mjs`); Windows env names are also case-insensitive, so names are
+# compared upper-cased everywhere (the conservative direction: more names collide).
+_ENV_NAME_ALIAS_GROUPS = (("ZAI_API_KEY", "Z_AI_API_KEY"),)
+_ENV_BLOCK_CHAIN_DEPTH = 8
+# The string shapes the vendor's RUNTIME reads as a SecretRef in a SecretInput field
+# (`gateway.auth.password`): `coerceSecretRef` -> `parseEnvTemplateSecretRef`
+# (2026.9.7 `types.secrets-BXEuin38.mjs`) accepts `${NAME}` and `$NAME` and nothing else;
+# this project adds `${NAME:-}` (see `_ENV_TEMPLATE_REF`). NOT the retired
+# `secretref-env:NAME` / `__env__:NAME` markers that `_is_secret_reference` (C-226, a
+# generic secret scan) also treats as references: that module says they are "parsed only
+# by doctor migration", no runtime path rejects them for `gateway.auth.password` (the
+# web-provider credential reader, `provider-runtime-shared-*.mjs`, does reject markers
+# there - a different field), and `auth-resolve-*.mjs` uses a
+# non-reference `gateway.auth.password` AS the password - so the marker text is the
+# credential in effect, a public and guessable one (C-135 round 2). Reading it as a
+# pointer would turn a CRITICAL FAIL into a clean PASS.
+_SECRET_INPUT_STRING_REF_RE = re.compile(
+    r"(?:%(tpl)s|\$%(id)s)" % {"id": _SECRET_REF_ENV_ID, "tpl": _ENV_TEMPLATE_REF}
+)
+# One capture per accepted string form, so the NAME a reference points at can be read
+# back out. Same alternatives as `_SECRET_INPUT_STRING_REF_RE` / `_ENV_SUBSTITUTION_REFERENCE_RE`.
+_SECRET_INPUT_REFERENCE_NAME_RE = re.compile(
+    r"(?:\$\{(?P<t>%(id)s)(?::-)?\}|\$(?P<s>%(id)s))" % {"id": _SECRET_REF_ENV_ID}
+)
+_ENV_TEMPLATE_NAME_RE = re.compile(
+    r"\$\{(?P<t>%(id)s)(?::-)?\}" % {"id": _SECRET_REF_ENV_ID}
+)
+# ECMAScript `String.prototype.trim()` whitespace (WhiteSpace + LineTerminator). Python's
+# `str.strip()` is NOT the same set: it also strips U+001C..U+001F and U+0085 (which JS
+# keeps, so `<U+001F>$GW_PW` is a literal there and would read as a reference here) and it
+# keeps U+FEFF (which JS strips). Everything in this block that decides "is this a
+# pointer" trims the way the vendor does, so a look-alike never reads as a reference.
+_JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(value: str) -> str:
+    return value.strip(_JS_WHITESPACE)
+
+
+def _canonical_env_name(name: str) -> str:
+    upper = name.upper()
+    for group in _ENV_NAME_ALIAS_GROUPS:
+        if upper in group:
+            return group[0]
+    return upper
+
+
+def _config_env_block_entries(cfg) -> "dict[str, list[str]]":
+    """Canonical variable name -> the non-blank string values the config's own env block
+    (``env.vars.<NAME>`` and the flat ``env.<NAME>`` catch-all) declares for it.
+    """
+    env_cfg = cfg.get("env") if isinstance(cfg, dict) else None
+    out: "dict[str, list[str]]" = {}
+    if not isinstance(env_cfg, dict):
+        return out
+    pairs = []
+    vars_block = env_cfg.get("vars")
+    if isinstance(vars_block, dict):
+        pairs.extend(vars_block.items())
+    pairs.extend((k, v) for k, v in env_cfg.items() if k not in ("shellEnv", "vars"))
+    for raw_key, value in pairs:
+        if not isinstance(raw_key, str) or not isinstance(value, str) or not _js_trim(value):
+            continue
+        key = _js_trim(raw_key)
+        if not _ENV_BLOCK_PORTABLE_KEY_RE.fullmatch(key):
+            continue
+        out.setdefault(_canonical_env_name(key), []).append(value)
+    return out
+
+
+def _env_block_defines_plaintext(entries, name: str, _seen=None, _depth: int = 0) -> bool:
+    """True when the config's env block gives ``name`` a value that is not merely another
+    whole-value ``${OTHER}`` / ``${OTHER:-}`` template. A value that IS such a template is
+    followed (bounded, cycle-guarded), because the block can chain to a plaintext entry
+    that a later re-read would publish; a chain deeper than the bound fails CLOSED. Any
+    other non-blank text counts, including text with a template inside it: the file still carries the literal part, and reading a
+    look-alike as a pointer would be a false negative on a CRITICAL check.
+    """
+    key = _canonical_env_name(name)
+    seen = _seen if _seen is not None else set()
+    if key in seen:
+        return False  # a cycle adds no value of its own
+    if _depth > _ENV_BLOCK_CHAIN_DEPTH:
+        # The bound is exhausted, not the chain: what lies beyond was never read, and
+        # "never read" must not be reported as "no plaintext" on a CRITICAL check.
+        return True
+    seen.add(key)
+    for value in entries.get(key, ()):
+        m = _ENV_TEMPLATE_NAME_RE.fullmatch(_js_trim(value))
+        if m is None:
+            return True
+        if _env_block_defines_plaintext(entries, m.group("t"), seen, _depth + 1):
+            return True
+    return False
+
+
+def _reference_env_names(value, *, secret_input: bool) -> "list[str]":
+    """The environment-variable NAME(S) a whole-value SecretRef points at, or ``[]`` when
+    ``value`` is not an env-backed reference (a ``file`` / ``exec`` object resolves outside
+    the config's env block). Which string shapes count follows ``secret_input`` exactly as
+    in :func:`_credential_is_plaintext`.
+    """
+    if isinstance(value, dict):
+        # C-681: only an ``env`` object names an environment variable. A ``store`` object is
+        # resolved from OpenClaw's secret store, never from the environment, so a variable
+        # of the same name (in the config's env block or a unit) says nothing about it.
+        if _is_secret_ref_object(value) and value.get("source") == "env":
+            return [value["id"]]
+        return []
+    if isinstance(value, str):
+        pattern = _SECRET_INPUT_REFERENCE_NAME_RE if secret_input else _ENV_TEMPLATE_NAME_RE
+        m = pattern.fullmatch(_js_trim(value))
+        if m is not None:
+            return [next(g for g in m.groups() if g)]
+    return []
+
+
+def _empty_fallback_template(value, *, secret_input: bool) -> "str | None":
+    """The whole-value EMPTY-fallback template (``${NAME:-}``) as configured, trimmed, or
+    ``None`` when ``value`` is anything else. One definition for B1 and RISK-16: both ask
+    ``_env_default_operator`` what the audited build does with this text, and they must
+    agree on which text that is.
+    """
+    if not isinstance(value, str):
+        return None
+    trimmed = _js_trim(value)
+    for name in _reference_env_names(value, secret_input=secret_input):
+        if trimmed == "${" + name + ":-}":
+            return trimmed
+    return None
+
+
+def _credential_is_plaintext(value, *, secret_input: bool = True, cfg=None) -> bool:
+    """B1's per-path test: is a plaintext credential SET at a NAMED credential path?
+
+    B1 (``check_secrets``) names ``gateway.auth.password`` and ``hooks.token``
+    unconditionally, at any length. It used to test them with bare truthiness, so a
+    SecretRef - the very remedy B1 recommends - still FAILed as "set in config"
+    (C-646). This is that same truthiness minus references, and nothing else:
+
+    * falsy (``None`` / ``""`` / ``0`` / ``False`` / empty container) -> False, exactly
+      as before (nothing is set);
+    * a dict -> plaintext unless it is a well-formed structured SecretRef
+      (:func:`_is_secret_ref_object`); a malformed or over-keyed dict keeps the old
+      "set" verdict rather than being trusted as a pointer;
+    * a string -> plaintext unless it is a whole-value reference;
+    * any other truthy scalar -> plaintext (unchanged);
+    * a WHOLE-VALUE REFERENCE is still plaintext when ``cfg`` is given and the variable
+      it names is defined in plaintext by that same config's env block
+      (:func:`_env_block_defines_plaintext`) - the secret sits in the file, one hop away.
+      Callers that can see the config must pass it; ``cfg=None`` keeps the bare
+      "is this string a pointer" reading.
+
+    ``secret_input`` selects WHICH string shapes are references, because the two named
+    paths are not the same type in the vendor schema (2026.9.7 ``zod-schema-BRat_tFr.mjs``):
+    ``gateway.auth.password`` is ``SecretInputSchema`` (line 1087) - the runtime coerces
+    exactly ``${NAME}`` and the ``$NAME`` shorthand (``coerceSecretRef`` ->
+    ``parseEnvTemplateSecretRef``, ``types.secrets-BXEuin38.mjs``), so those (plus this
+    project's ``${NAME:-}``) are its string references. The retired ``secretref-env:`` /
+    ``__env__:`` markers are NOT: that module says they are "parsed only by doctor
+    migration", and ``auth-resolve-*.mjs`` (``passwordRef ? undefined : authConfig.password``)
+    then uses the marker text itself as the gateway password - a guessable literal, so it
+    keeps reading as "set" (C-135 round 2; C-226's generic scan treats markers as
+    references, which is a different question and is not changed here). ``hooks.token`` is
+    a PLAIN ``string()`` (line 1904), read verbatim after config env substitution
+    (``resolveHooksConfig``, ``hooks-DVyEYaaD.mjs:403-406``), so the ONLY reference is a
+    ``${ID}`` / ``${ID:-}`` template. There ``$HOOK_TOKEN`` is a guessable LITERAL token,
+    not a pointer, and must keep reading as "set" - a look-alike that reads as a reference
+    is a false negative on a CRITICAL check. (A structured object there is not a valid
+    ``hooks.token`` at all, but it carries no plaintext, so B1 - which asks only about
+    plaintext - does not FAIL it.) Whitespace around a string is trimmed the way
+    JavaScript's ``trim()`` does (:func:`_js_trim`), not Python's ``strip()``.
+
+    This answers ONLY "is plaintext SET in the file". A ``hooks.token`` reference whose
+    variable is unset in the gateway's environment is a different question (the text
+    ``${NAME}`` itself becomes the bearer token on 2026.9.7); ``check_secrets`` answers it
+    separately as UNKNOWN for the plain ``${NAME}`` form, with no environment lookup
+    (C-646).
+    """
+    if not value:
+        return False
+    if isinstance(value, dict):
+        if not _is_secret_ref_object(value):
+            return True
+    elif isinstance(value, str):
+        pattern = _SECRET_INPUT_STRING_REF_RE if secret_input else _ENV_SUBSTITUTION_REFERENCE_RE
+        if not pattern.fullmatch(_js_trim(value)):
+            return True
+    else:
+        return True
+    if cfg is None:
+        return False
+    names = _reference_env_names(value, secret_input=secret_input)
+    if not names:
+        return False
+    entries = _config_env_block_entries(cfg)
+    return any(_env_block_defines_plaintext(entries, n) for n in names)
+
+
+def _has_env_template(value) -> bool:
+    """True when a config STRING carries a `${...}` env-substitution token (C-646).
+
+    Used for the enum-typed reads (``gateway.bind``, ``gateway.auth.mode``,
+    ``gateway.tailscale.mode``): OpenClaw substitutes such a token at config load from
+    the GATEWAY'S environment, which a config-only audit cannot see, so the value is
+    neither the literal it appears to be nor any other specific value. It must read as
+    UNKNOWN, never as the text of the template (``${X:-loopback}`` is not a non-loopback
+    host, and ``${M:-none}`` is not an authenticated mode). ``${`` is checked as a bare
+    substring on purpose - no valid enum literal contains it, so nothing legitimate is
+    swallowed, and an unparseable or escaped (``$${``) token is just as undeterminable.
+    """
+    return isinstance(value, str) and "${" in value
+
+
+# C-653: a whole-value `${NAME}` / `${NAME:-default}` at `gateway.bind`. Extraction only -
+# whether a value IS a template stays `_has_env_template`'s question.
+_BIND_TEMPLATE_RE = re.compile(
+    r"\$\{(?P<id>%(id)s)(?::-(?P<dflt>[^${}]*))?\}" % {"id": _SECRET_REF_ENV_ID}
+)
+
+
+def _env_default_template(value) -> "tuple[str, str] | None":
+    """C-681: ``(NAME, default)`` for a whole-value ``${NAME:-default}`` whose default holds
+    something other than whitespace, else ``None``. The default is returned verbatim - the
+    vendor substitutes it unchanged (``substituteString``), so it is a literal, not a trimmed
+    one. ``${NAME}`` and the empty ``${NAME:-}`` are not default templates."""
+    if not isinstance(value, str):
+        return None
+    m = _BIND_TEMPLATE_RE.fullmatch(_js_trim(value))
+    if m is None or m.group("dflt") is None or not m.group("dflt").strip():
+        return None
+    return m.group("id"), m.group("dflt")
+
+
+def _is_bind_template(raw) -> bool:
+    """True for a ``gateway.bind`` string that is (or tries to be) an env template: anything
+    `_has_env_template` flags, plus a bare whole-value ``$NAME`` (no host, no substitution)."""
+    return _has_env_template(raw) or (
+        isinstance(raw, str) and re.fullmatch(r"\$" + _SECRET_REF_ENV_ID, _js_trim(raw)) is not None
+    )
+
+
+def _effective_gateway_bind(ctx, cfg, raw) -> "tuple[object, str | None]":
+    """C-653: the bind a ``gateway.bind`` value stands for, as ``(value, None)``, or
+    ``(None, note)`` when it is a ``${...}`` template whose value this audit cannot know.
+
+    A literal (`_is_bind_template` rejects it) is returned untouched. A whole-value template
+    is resolved to the first NON-loopback value the audit can SEE for the variable - the
+    gateway's persistent environment (`persistent_env_evidence`: unit, then dotenv), then the
+    config's own env block - else, for ``NAME:-default``, a NON-loopback default (so
+    ``${GW_BIND:-lan}`` stays the exposure it is). A visible LOOPBACK value never clears
+    anything: the unit view is partial (no drop-in handling, units overwrite each other) and
+    the process environment overrides the env block, so it is treated as not seen and the
+    note says so. Everything else - no default, a loopback default, an unseen variable, a
+    value that is itself a template, a malformed or embedded template, a bare ``$NAME`` (OpenClaw
+    substitutes only ``${...}``, ``iterateEnvTemplateTokens`` since 2026.9.7,
+    ``parseEnvTokenAt`` before) - is unresolved and the *note* names the
+    template verbatim, so a caller reports UNKNOWN instead of reading the template text as a
+    host (`parse_bind_host` would lowercase it and split it at its first colon).
+    """
+    if not _is_bind_template(raw):
+        return raw, None
+    note = (
+        f"gateway.bind is the environment template {raw!r}, whose value comes from the "
+        "gateway's environment or the config's own env block and cannot be read by this audit"
+    )
+    m = _BIND_TEMPLATE_RE.fullmatch(_js_trim(raw))
+    if m is None:
+        return None, note
+    # C-681: the default is trimmed, so ``${GW_BIND:- lan}`` is ``lan``, not ``" lan"``.
+    name, dflt = m.group("id"), _js_trim(m.group("dflt") or "")
+    seen, _src = persistent_env_evidence(ctx, name) if ctx is not None else (None, None)
+    block = _config_env_block_entries(cfg).get(_canonical_env_name(name), ())
+    loopback_seen = False
+    for value in ([seen] if isinstance(seen, str) else []) + sorted(block):
+        value = value.strip()
+        if not value or _has_env_template(value):
+            continue
+        if parse_bind_host(value) in LOOPBACK:
+            loopback_seen = True
+        else:
+            return value, None
+    if dflt and parse_bind_host(dflt) not in LOOPBACK:
+        return dflt, None
+    if loopback_seen:
+        note += (
+            "; a loopback value was seen for it, but that view is partial (the process "
+            "environment decides) and does not clear the bind"
+        )
+    return None, note
+
+
+def _cfg_with_bind(cfg, bind):
+    """A shallow copy of *cfg* whose ``gateway.bind`` is *bind* (the caller's config is
+    never mutated); *cfg* itself when it has no gateway object to put it in."""
+    gw = cfg.get("gateway") if isinstance(cfg, dict) else None
+    return cfg if not isinstance(gw, dict) else {**cfg, "gateway": {**gw, "bind": bind}}
 
 
 # F-180/B-666: moved here VERBATIM from checks/_config.py so `_trifecta_leg_sources`
@@ -551,6 +1024,14 @@ _C015_EXTRA_SECRET_PATTERNS = [
         r'"(?:password|secret|api[_-]?key|\w*token|private[_-]?key\w*)"\s*:\s*"([^"\s]{8,})"',
         re.I,
     ),
+    # C-688: the two config leaves whose NAME alone says "credential" but which the key-name
+    # pattern above does not know: OpenClaw's `passphrase` (TLS key / storage-encryption
+    # passphrase) and `identityData` (an inline SSH private key). Exact quoted key only, so
+    # `passphraseFile` (a path) does not match; the value is captured so a `${NAME}` reference
+    # is skipped the same way as for the pattern above. The ambiguous leaves (`key`, `value`,
+    # the env/header maps) cannot be matched by text and are handled by path in
+    # `_vendor_secret_slot_paths`.
+    re.compile(r'"(?:passphrase|identityData)"\s*:\s*"([^"\s]{8,})"', re.I),
 ]
 
 
@@ -580,6 +1061,111 @@ def _c015_has_secret(text: str) -> bool:
     return _pattern_hits_real_secret(SECRET_PATTERNS, text) or _pattern_hits_real_secret(
         _C015_EXTRA_SECRET_PATTERNS, text
     )
+
+
+# C-708: a markdown credential list (`- **Password:** `value``). The shared keyword pattern
+# captures the closing bold marker `**` that sits between the colon and the value, so it never
+# sees the value; widening SECRET_PATTERNS would also feed B1, A1 and the log redactor and
+# convict benign placeholders, so this shape lives here, is NOT in `_c015_has_secret` (A1 reads
+# that), and is called by C015's hit loop only. The rules are structural rather than word lists
+# (a substring list rejected the real password `Contest2024!x` because of "test"):
+#   label  - the markup `**L:**` / `**L**:` / `*L:*` / `__L:__`, split on whitespace, `_` and `-`;
+#            its LAST word is a credential noun, or its last two words are a key phrase
+#            (`DB_PASSWORD`, `gateway-token`, `OPENAI_API_KEY`; not `Token expires`, `Passwords`);
+#   value  - one code span right after the label, or the whole rest of the line as one token;
+#   secret - see `_c015_md_value_is_real_secret`.
+# Declared limits: English labels only, no markup-free `Password: x`, no table cell, no value on
+# the next line, no HTML, no quoted or letters-only value; a miss is a miss, never a PASS claim.
+_C015_MD_LINE_RE = re.compile(
+    r"^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|\d{1,3}[.)])[ \t]+)?(?:\[[ xX]\][ \t]+)?"
+    r"(?P<d>\*\*|__|\*)(?P<label>[^\n*:`]{1,64}?)(?:(?P=d)[ \t]*:|:(?P=d))[ \t]*(?P<value>[^\n]*)",
+    re.M,
+)
+_C015_MD_LABEL_SPLIT_RE = re.compile(r"[\s_-]+")
+_C015_MD_LABEL_LAST = frozenset({"password", "passphrase", "passcode", "secret", "token"})
+_C015_MD_LABEL_LAST_TWO = frozenset(
+    {("api", "key"), ("private", "key"), ("secret", "key"), ("access", "key")}
+)
+_C015_MD_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+_C015_MD_REFERENCE_RE = re.compile(
+    r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|<[^<>]*>|\{[^{}]*\}|\{\{.*\}\}|%[A-Za-z_][A-Za-z0-9_]*%"
+    r"|secretref-.*",
+    re.I,
+)
+_C015_MD_PLACEHOLDER_TOKENS = frozenset(
+    {"your", "example", "changeme", "placeholder", "redacted", "password", "passphrase", "secret",
+     "token", "sample", "dummy", "todo", "tbd", "here", "none", "null", "na"}
+)
+
+
+def _c015_md_label_is_credential(label: str) -> bool:
+    """C-708: *label* (the text between the markup) names a credential: at most 5 words, the last
+    one a credential noun or the last two a key phrase."""
+    words = [w for w in _C015_MD_LABEL_SPLIT_RE.split(label.strip().lower()) if w]
+    if not words or len(words) > 5:
+        return False
+    return words[-1] in _C015_MD_LABEL_LAST or tuple(words[-2:]) in _C015_MD_LABEL_LAST_TWO
+
+
+def _c015_md_value_is_real_secret(value: str) -> bool:
+    """C-708: does *value* (a markdown credential line's value) look like a real inline secret?
+    ASCII printable, 8-128 characters, no whitespace; a letter plus either a digit or three of the
+    four character classes; and none of:
+    a reference, an ALL-CAPS identifier, a mask, a URL or path or 0x address, code or a CLI flag
+    (brackets, parentheses, quotes, a backtick, a leading `-`), hyphen/underscore prose (3+ parts,
+    at most one with a digit), or a placeholder word as a WHOLE token."""
+    if not 8 <= len(value) <= 128 or not all("!" <= c <= "~" for c in value):
+        return False
+    if not any(c.isalpha() for c in value):
+        return False
+    # A digit, or three of the four character classes. Letters with one kind of separator and
+    # no digit are names, not secrets: a token pair (`USDC/WETH`), a two-word slug
+    # (`local-model`), a CamelCase identifier.
+    classes = (
+        any(c.islower() for c in value) + any(c.isupper() for c in value)
+        + any(c.isdigit() for c in value) + any(not c.isalnum() for c in value)
+    )
+    if not any(c.isdigit() for c in value) and classes < 3:
+        return False
+    if _C015_MD_REFERENCE_RE.fullmatch(value) or _is_secret_reference(value):
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9_]*", value):
+        return False
+    if re.search(r"(.)\1{3}|\*\*\*|\.\.\.", value, re.I):
+        return False
+    if (
+        "://" in value
+        or value.startswith(("/", "~/", "./", "../"))
+        or re.fullmatch(r"0[xX][0-9a-fA-F]{40,}", value)
+    ):
+        return False
+    if re.search(r"[\[\]()\"'`]", value) or value.startswith("-"):
+        return False
+    parts = re.split(r"[-_]", value)
+    if len(parts) >= 3 and sum(any(c.isdigit() for c in p) for p in parts) <= 1:
+        return False
+    tokens = {t for t in re.split(r"[^A-Za-z0-9]+", value.lower()) if t}
+    return not tokens & _C015_MD_PLACEHOLDER_TOKENS
+
+
+def _c015_md_credential_lines(text: str):
+    """C-708: yield ``(line_number, label, value)`` for every markdown credential-list line in
+    *text* whose label names a credential and whose value looks like a real secret."""
+    for m in _C015_MD_LINE_RE.finditer(text):
+        label = m.group("label")
+        if not _c015_md_label_is_credential(label):
+            continue
+        rest = m.group("value")
+        span = _C015_MD_CODE_SPAN_RE.match(rest)
+        value = span.group(1) if span else rest.rstrip()
+        if _c015_md_value_is_real_secret(value):
+            yield text.count("\n", 0, m.start()) + 1, label.strip(), value
+
+
+def _c015_md_credential_list_hit(text: str) -> bool:
+    """C-708: *text* has a markdown credential-list line (`- **Password:** `value``,
+    `**Token**: value`, `*API key:* value`) whose value is a real-looking inline secret."""
+    return next(_c015_md_credential_lines(text), None) is not None
 
 
 # Credential/secret access is only malicious when EXFILTRATED.
@@ -755,9 +1341,19 @@ def _build_known_exfil_host_re() -> re.Pattern:
         r"rentry\.co|rentry\.org|"
         r"beeceptor\.com|interactsh\.com|oast\.(?:pro|fun|me|live|site|online)|"
         r"canarytokens\.(?:com|net|org)|file\.io|localtunnel\.me|trycloudflare\.com|"
-        r"[a-z0-9-]+\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
-        r"[a-z0-9-]+\.pipedream\.net|pipedream\.net)\b"
+        r"[a-z0-9-]{1,63}\.ngrok(?:-free)?\.(?:io|app)|ngrok\.io|ngrok-free\.app|"
+        r"[a-z0-9-]{1,63}\.pipedream\.net|pipedream\.net)\b"
     )
+    # C-730: the two subdomain arms were `[a-z0-9-]+`. On a long run such as "a-a-a-..." every
+    # word boundary began an attempt that scanned to the run's end (quadratic: 12,000
+    # characters took 1.9 s inside one call). A DNS label is at most 63 octets (RFC 1035), so
+    # the label is bounded instead: every host that can exist is matched exactly as before.
+    # The one difference is a "label" LONGER than 63 characters, which names no reachable
+    # host: it is no longer swallowed whole into the match. `...ngrok.io` and
+    # `...pipedream.net` are then still convicted by the bare-domain arms next to them;
+    # an over-long label before `.ngrok.app` / `.ngrok-free.io` is matched from the last
+    # word boundary within 63 characters of the dot, or not at all when there is none
+    # (pinned in tests/test_c730_regex_equivalence.py).
     ioc_fragments = [
         _iocdb_host_fragment(value, typ)
         for value, typ in sorted(_iocdb_known_bad_host_records())
@@ -784,8 +1380,15 @@ _KNOWN_EXFIL_HOST_RE = _build_known_exfil_host_re()
 # recorded as trajectory tool-output content is exactly this shape. Accepted as a known
 # residual for Phase 1 (advisory/scored=False, WARN-only, never FAILs) - a future
 # precision pass on logscan.py's class 4 could adopt the same "/"-required discipline.
+#
+# C-730: linear time. Every keyword character is in the class, so a match is always the
+# whole maximal run of class characters that holds a keyword, and it always starts at the
+# run's first character; the `(?<![\w./~+-])` lookbehind lets only that start position
+# try, instead of every position inside a long run (which scanned to the run's end each
+# time: 20,000 characters of `x` took 10 s). Same spans, same text, no groups.
 _SECRET_PATH_RE = re.compile(
-    r"[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*", re.I
+    r"(?<![\w./~+-])[\w./~+-]*(?:secret|token|credential|password|api[_-]?key)[\w./~+-]*",
+    re.I,
 )
 
 
@@ -1269,6 +1872,154 @@ def _code_mode_default(ctx) -> str:
     return "unknown"
 
 
+# B350 (C-640): the build that FLIPPED an UNSET gateway.terminal.enabled from off to ON. The
+# config path did not move; only the gate line did. Gate lines read out of the cached
+# tarballs (npm cache, no network) and, for 2026.9.7, executed in node against the installed
+# dist:
+#
+#   2026.6.9, 6.10, 6.11, 6.34   no `gateway.terminal` string anywhere in dist (feature absent)
+#   2026.7.1, 7.1-2, 7.33-7.35   launch-*.js:109,120 `enabled !== true`; :154 `=== true`;
+#                                server.impl-*.js:1002 and control-ui-*.js:699 `=== true`;
+#                                schema help "when true (default: false)"     (unset = OFF)
+#   2026.8.1, 8.2, 9.1 - 9.7     enabled-*.js:3 `config?.gateway?.terminal?.enabled !== false`;
+#                                schema help "(default: true) ... set false to opt out"
+#                                                                                (unset = ON)
+#
+# So the flip lies in (2026.7.35, 2026.8.1]. Releases strictly between (2026.7.36 and later,
+# any 2026.8.0) were never cached, so the exact build is UNMEASURED and NOT attributed, and
+# the 8.1 CHANGELOG carries no line announcing a default change. 2026.7.2 - 7.32 were not
+# cached either, and they are NOT assumed off: the two cached 2026.7.2 PRE-releases (beta.5,
+# beta.7) already carry the `!== false` gate (unset = ON) while the stable 7.33 - 7.35 read
+# off again, so the default was not monotonic and nothing measured says which way an
+# uncached 7.2 - 7.32 build goes (owner ruling, 2026-09-30: UNKNOWN, not off). "off" is the
+# one answer that PASSes an unset key, so it is given only for the MEASURED stable spans
+# below (7.1, incl. 7.1-2, and 7.33 - 7.35); every other build before 8.1 answers
+# "unknown", and a pre-release string orders as None and answers "unknown" too.
+_TERMINAL_DEFAULT_ON_MIN = (2026, 8, 1)         # first release read with `!== false`
+_TERMINAL_OFF_MEASURED_MIN = (2026, 7, 1)       # oldest release read with `=== true`
+_TERMINAL_OFF_MEASURED_MAX = (2026, 7, 35)      # newest release read with `=== true`
+_TERMINAL_OFF_MEASURED_SPANS = (             # the stable builds actually read off
+    ((2026, 7, 1), (2026, 7, 1)),
+    ((2026, 7, 33), (2026, 7, 35)),
+)
+
+
+def _terminal_default(ctx) -> str:
+    """What does an UNSET ``gateway.terminal.enabled`` mean on the reader's OpenClaw?
+    ``"off"`` / ``"on"`` / ``"unknown"``.
+
+    Three answers for the reason ``_code_mode_default`` has three: "we could not see the
+    build" is not "the build leaves the terminal off", and collapsing them is how a
+    default-ON 2026.8.1+ install reported "the operator terminal is not enabled".
+
+    Sources are ``_cross_context_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose gate
+    runs. ``meta.lastTouchedVersion`` is consulted ONLY when it lands at 2026.8.1 or later:
+    that stamp proves an 8.1+ build once SAVED the config, so the default is on. A stamp
+    BELOW the threshold proves nothing about what is installed now (the user may have
+    upgraded five minutes ago and not re-saved), so it answers ``"unknown"``, never
+    ``"off"``. Parsing goes through ``_numeric_version`` (not ``_parse_version``, B-264): a
+    pre-release such as 2026.8.1-beta.1 orders as None and lands on ``"unknown"``.
+
+    ``"off"`` is only given for an installed version shaped like a calendar release
+    (``YYYY.M.P``, three or more numeric parts) whose first three parts fall inside one of
+    ``_TERMINAL_OFF_MEASURED_SPANS`` (2026.7.1 and 2026.7.33 - 2026.7.35, the stable builds
+    read off). A build older than the series (the terminal did not exist), an unmeasured
+    build (2026.7.2 - 7.32, and the window between 2026.7.35 and 2026.8.1), and a string
+    that cannot be placed on the timeline ("0.0.0", "2026.7") are all ``"unknown"``.
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _TERMINAL_DEFAULT_ON_MIN:
+            return "on"
+        if len(installed) >= 3 and any(
+                lo <= tuple(installed[:3]) <= hi for lo, hi in _TERMINAL_OFF_MEASURED_SPANS):
+            return "off"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _TERMINAL_DEFAULT_ON_MIN:
+        return "on"
+    return "unknown"
+
+
+# B372 (re-grounded): the build that FLIPPED channels.discord.allowBots and
+# channels.slack.allowBots from default-DENY to default-ACCEPT. The config path, the
+# `boolean | "mentions"` type and the schema enum did not move, so no path diff sees it.
+# The evidence is the vendor's own words, NOT an executed resolver:
+#
+#   * the channel-root help hint reads "(default: false)" in every release whose hint table
+#     was read (2026.7.1-2 through 2026.9.6) and "(default: true)" in 2026.9.7 --
+#     `dist/bundled-channel-config-metadata.generated-*.mjs`, Discord and Slack rows;
+#   * CHANGELOG.md (2026.9.7): "Discord and Slack: accept bot-authored messages by default
+#     when `allowBots` is omitted, still subject to existing access and mention rules
+#     (explicit `false` and "mentions" are unchanged)";
+#   * the 2026.9.7 docs (`channels/bot-loop-protection`, `channels/slack/access-control`)
+#     say the same.
+#
+# THE RESOLVER IS NOT IN THE TREE. The Discord and Slack channel code ships as the
+# out-of-tree `@openclaw/discord` / `@openclaw/slack` packages, so nothing here was executed
+# the way `_cross_context_default`'s `enforceCrossContextPolicy` was. Treat this as a
+# hint-and-changelog grounding: if a later release moves the default again, the hint text
+# is where it will show first. Matrix (hint still "(default: false)"), ClickClack, Feishu
+# and GoogleChat state no flipped default and are NOT covered by this constant.
+_ALLOW_BOTS_DEFAULT_ALLOW_MIN = (2026, 9, 7)        # unset -> accepted, on Discord and Slack
+# The oldest release whose hint was READ ("2026.7.1-2"; the plain 2026.7.1 was not, and
+# sorts below it). "deny" is the direction that PASSes, so it is never extrapolated below it.
+_ALLOW_BOTS_DENY_MEASURED_MIN = (2026, 7, 1, 2)
+# The two channels whose channel-root hint states the flipped default. Nested guild /
+# channel / account scopes carry no default statement of their own, so the inheritance from
+# the channel root is assumed rather than measured: the check decides on the root scope only.
+_ALLOW_BOTS_FLIPPED_CHANNELS = ("discord", "slack")
+
+
+def _allow_bots_default(ctx) -> str:
+    """What does an UNSET ``allowBots`` on a Discord or Slack channel mean on the reader's
+    OpenClaw? ``"deny"`` / ``"allow"`` / ``"unknown"``.
+
+    Three answers for the reason ``_cross_context_default`` has three: "we could not see the
+    build" is not "the build refuses bot-authored input", and collapsing them is what made
+    B372 report a default-accept 2026.9.7+ install as clean.
+
+    Sources are ``_cross_context_default``'s, in its order and with its asymmetry.
+    ``installed_dist_version`` decides outright -- the installed build is the one whose
+    channel plugin resolves the missing key. ``meta.lastTouchedVersion`` is consulted ONLY
+    when it lands at 2026.9.7 or later: that stamp proves a 2026.9.7+ build once SAVED the
+    config, so the default is ``"allow"``. A stamp BELOW the threshold proves nothing about
+    what is installed now (the user may have upgraded five minutes ago and not re-saved), so
+    it answers ``"unknown"``, never ``"deny"``. Parsing goes through ``_numeric_version``
+    (not ``_parse_version``, B-264): a pre-release such as 2026.9.7-beta.1 orders as None
+    and lands on ``"unknown"``.
+
+    ``"deny"`` is the one answer that PASSes an otherwise-unset channel, so it is only given
+    for an installed version shaped like a calendar release (``YYYY.M.P``, three or more
+    numeric parts) at or after ``_ALLOW_BOTS_DENY_MEASURED_MIN`` -- the oldest release whose
+    hint was read. Anything else that sorts below 2026.9.7 ("0.0.0", "2026.9", a build older
+    than the measured series) is ``"unknown"``.
+
+    Grounded on the vendor hint and changelog; the channel resolver is out-of-tree (see the
+    comment above ``_ALLOW_BOTS_DEFAULT_ALLOW_MIN``).
+
+    DELIBERATELY NOT a new value of ``_openclaw_generation`` -- see ``_cross_context_default``
+    for why a shared three-way predicate would flip two dozen unrelated call sites.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        if installed >= _ALLOW_BOTS_DEFAULT_ALLOW_MIN:
+            return "allow"
+        if len(installed) >= 3 and installed >= _ALLOW_BOTS_DENY_MEASURED_MIN:
+            return "deny"
+        return "unknown"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _ALLOW_BOTS_DEFAULT_ALLOW_MIN:
+        return "allow"
+    return "unknown"
+
+
 # B397: the build that FIRST shipped `gateway.portals` (and its only child,
 # `gateway.portals.ingress`) in the root config schema. Grounded against the installed
 # dist (openclaw@2026.9.6): `GatewayConfigSchema`, `zod-schema-B-u3AXjg.mjs:992-996`.
@@ -1348,6 +2099,48 @@ def _portal_model_version(ctx) -> str:
 # the dated note next to REJECTED_BY_2026_9_1 in test_b700_version_aware_advice.py for the
 # full readout). The table's 2026.9.1 floor was already right; 8.x is still unmeasured, so
 # the gate's lower bound is unchanged.
+#
+# C-645 (2026-09-30): `tools.toolSearch.codeTimeoutMs` left in 2026.9.7 ("Tool Search no
+# longer executes code"). EXECUTED, not read: the root zod schema's `safeParse` of
+# `{tools: {toolSearch: {codeTimeoutMs: 5000}}}` is ACCEPTED by the extracted 2026.9.6
+# package and REJECTED (`unrecognized_keys@tools.toolSearch`) by the installed 2026.9.7,
+# with a bogus sibling key rejected by both and the live sibling `enabled` accepted by
+# both as controls. Only the KEY is listed: the companion retirement of the VALUE
+# `tools.toolSearch.mode: "code"` is a value-level rule a key table cannot express.
+#
+# 2026-10-09: `silentReply.internal` left in 2026.9.8, in two places -- the agent defaults
+# and every surface's own block. EXECUTED, not read: the root zod schema's `safeParse` over
+# the extracted 2026.9.7 release package (sha512 equal to the registry's) and over the
+# installed 2026.9.8. `agents.defaults.silentReply.internal: "allow"` is ACCEPTED by 9.7 and
+# REJECTED by 9.8 (`unrecognized_keys@agents.defaults.silentReply[internal]`);
+# `surfaces.webchat.silentReply.internal` and `surfaces.telegram.silentReply.internal` the
+# same. Controls on both builds: the bare config and the live sibling `silentReply.group` are
+# accepted, a bogus sibling (`zzzBogus`) beside it is rejected, and
+# `surfaces.zzzNoSuchSurface.silentReply.group` is accepted -- the surface name is free-form,
+# which is why the second row is a pattern (one `*` segment, expanded over the keys the file
+# really holds by `_present_key_paths`) rather than a list of surface names. 2026.9.9's
+# generated config schema lists the same 5,408 paths as 9.8's (path lists compared; the root
+# schema was not executed on 9.9). Not added here, measured on the way: `silentReply.direct`
+# is rejected by 9.7 and by 9.8 alike, but the build that removed it was not measured (it is
+# in no saved schema path list back to 2026.7.1-2), so no min build can be stated for it and
+# B382 stays silent about it. The `channels.*.webhook*` paths that left the generated schema
+# in 2026.9.7 are not table material: the root schema still ACCEPTS them, and a bogus key
+# beside them too (that parent passes unknown keys through at this level).
+#
+# C-671 (2026-10-11): the four rows `agents.defaults.silentReply.direct`,
+# `surfaces.*.silentReply.direct`, `agents.defaults.silentReplyRewrite` and
+# `surfaces.*.silentReplyRewrite` carry the build 2026.9.7 as a FLOOR, not the removal build:
+# it is the EARLIEST build whose root schema was EXECUTED and rejected each of them (a valid
+# value, a live sibling `silentReply.group` / `workspace` accepted, a bogus sibling rejected,
+# and a free-form surface name accepted, on the extracted 2026.9.7 release package and on the
+# installed 2026.9.9; probed with an object and with a scalar so the verdict is the key, not
+# its value type). The four paths are in no saved generated-schema path list back to
+# 2026.7.1-2, so the build that actually removed them is older and unmeasured: on a build
+# between that unknown build and 2026.9.6 B382 stays silent about them, which is the safe
+# direction (quiet, never a false WARN). Owner ruling 2026-10-11; 2026.9.8 itself was not
+# re-executed for these four. Because the table follows measurements and not the vendor's
+# own retired-path lists (three lists, 111 paths counted on 2026.8.1), a PASS says only that
+# none of the keys in this table is present, and its text says exactly that.
 _RETIRED_CONFIG_KEYS = {
     "audit.enabled": ("logging.audit.enabled", (2026, 8, 1)),
     "gateway.nodes.allowCommands": ("gateway.nodes.commands.allow", (2026, 8, 1)),
@@ -1363,7 +2156,190 @@ _RETIRED_CONFIG_KEYS = {
     "browser.ssrfPolicy.hostnameAllowlist": ("browser.ssrfPolicy.allowedHostnames",
                                              (2026, 9, 1)),
     "skills.workshop.allowSymlinkTargetWrites": (None, _SYMLINK_KNOB_RETIRED_MIN),
+    "tools.toolSearch.codeTimeoutMs": (None, (2026, 9, 7)),
+    "agents.defaults.silentReply.internal": (None, (2026, 9, 8)),
+    "surfaces.*.silentReply.internal": (None, (2026, 9, 8)),
+    # C-671: the build is a measured FLOOR (see the comment above the table), not the removal.
+    "agents.defaults.silentReply.direct": (None, (2026, 9, 7)),
+    "surfaces.*.silentReply.direct": (None, (2026, 9, 7)),
+    "agents.defaults.silentReplyRewrite": (None, (2026, 9, 7)),
+    "surfaces.*.silentReplyRewrite": (None, (2026, 9, 7)),
 }
+
+# C-645: 2026.9.7 removed the boot-time config self-heal. Through 2026.9.6 the gateway's
+# pre-bootstrap step ran `resolveStartupConfigSnapshot`, repaired a config the strict schema
+# rejected IN MEMORY (the same migrations `openclaw doctor` applies) and booted with the
+# result. From 2026.9.7 that function is declared nowhere: startup validates the current
+# config WITHOUT rewriting legacy keys, an invalid one is left unchanged and the gateway
+# stops (exit 78) with the `openclaw doctor --fix` hint. Read from the 2026.9.7 dist
+# (`startup-config-preflight-*.mjs`: "legacy imports and repair receipts belong to Doctor";
+# `config-guard-*.mjs`: exit 78 plus the doctor --fix hint) and consistent with its bundled
+# docs/gateway/doctor/config-migrations.md ("run Doctor before using legacy inputs"), NOT
+# executed end to end (no gateway was started against a legacy file). What still
+# exists is Doctor's own preflight repair (`planAutomaticConfigRepair`), which declines a
+# config that uses $include (`canPlanAutomaticConfigRepair`, called
+# `admitAutomaticConfigRepairSnapshot` through 2026.9.9; the include clauses are unchanged,
+# the gate gained two others in 2026.10.1).
+_STARTUP_REPAIR_REMOVED_MIN = (2026, 9, 7)
+
+
+def _startup_repair_removed(ctx) -> bool:
+    """True only when the INSTALLED build is known to have dropped the boot-time self-heal.
+
+    Reads ONLY ``ctx.installed_dist_version`` (the build that will actually start the
+    config), and answers False for an unknown or pre-release build: "we could not see the
+    build" keeps the pre-9.7 wording rather than asserting a fact about a build nobody
+    read. ``meta.lastTouchedVersion`` is deliberately NOT consulted -- it names the build
+    that last SAVED the file, and a downgrade since would make "the gateway refuses to
+    start" false for the reader.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return installed is not None and installed >= _STARTUP_REPAIR_REMOVED_MIN
+
+
+# C-645, B38 / RISK-05 / RISK-15 (Dave, 2026-09-30: KEEP FAIL, version-aware wording).
+# The legacy flat `browser.ssrfPolicy.allowPrivateNetwork` alias is still a live SSRF bypass
+# on 2026.9.6 and earlier (the boot-time self-heal folds it into dangerouslyAllowPrivateNetwork
+# in memory), so those builds keep their original wording untouched. On 2026.9.7 and later it
+# is not live -- the strict schema rejects the key (EXECUTED: `unrecognized_keys@
+# browser.ssrfPolicy` on 2026.9.6 and 2026.9.7 alike) and nothing at startup repairs it, so
+# the gateway stops -- but it is one Doctor run from live: Doctor's migration
+# (`doctor-config-flow-*.mjs`, "Moved browser.ssrfPolicy.allowPrivateNetwork ->
+# dangerouslyAllowPrivateNetwork") sets the canonical key to `legacy === true || current ===
+# true`, so a true legacy value wins even over an explicit `dangerouslyAllowPrivateNetwork:
+# false`. The verdict is unchanged (FAIL); only the sentences that would otherwise assert
+# "the browser can reach internal IPs today" are corrected. The strings live HERE, once, so
+# B38, RISK-05 and RISK-15 cannot drift apart.
+_LEGACY_SSRF_ALIAS_970_FACT = (
+    "On OpenClaw 2026.9.7 and later the gateway will not start while the retired "
+    "browser.ssrfPolicy.allowPrivateNetwork key is present, and 'openclaw doctor --fix' "
+    "would migrate a true value into browser.ssrfPolicy.dangerouslyAllowPrivateNetwork=true "
+    "(even when that key is false), which is a live SSRF bypass"
+)
+_LEGACY_SSRF_ALIAS_970_ORDER = (
+    "Remove browser.ssrfPolicy.allowPrivateNetwork (or set it to false) BEFORE running "
+    "'openclaw doctor --fix'."
+)
+
+# C-686 (OpenClaw 2026.10.1): Doctor no longer migrates formats written before July 2026.
+# EXECUTED on the installed 2026.10.2, not read: `findRetiredConfigUpgradeRequirement` names
+# `browser.ssrfPolicy.allowPrivateNetwork` (and `plugins.installs`, `silentReply.direct`,
+# `silentReplyRewrite`), so `openclaw doctor --fix` and `openclaw update` STOP on a config
+# that holds one and tell the user to install a bridge release first; and
+# `applyLegacyDoctorMigrations` over that key returns no change at all (the migration that
+# folded it into dangerouslyAllowPrivateNetwork is gone from the dist). The 2026.9.7-2026.9.9
+# sentence above ("'openclaw doctor --fix' would migrate a true value ...") is therefore false
+# for an installed 2026.10.1 or later, and `_LEGACY_SSRF_ALIAS_1010_*` replace it on those
+# builds ONLY (the installed build; an unknown or older build keeps the 2026.9.7 text, which
+# is a fact about the builds that text names). The key is the vendor's own, so the bridge
+# release is `retiredformats.BRIDGE_DEFAULT`; a config that also holds a Discord voice or
+# guild-channel key is told 2026.9.7 instead, which the sentence discloses.
+_DOCTOR_REFUSES_RETIRED_MIN = (2026, 10, 1)
+
+#: The release the vendor tells the user to install first for a RETIRED STATE FILE (cron
+#: `jobs.json`, `jobs-state.json`, `runs/*.jsonl`; `credentials/auth-profiles/<32-hex>.json`
+#: OAuth sidecars; `delivery-queue/*.json`; the legacy plugin install index). Config keys
+#: name `retiredformats.BRIDGE_DEFAULT` / `BRIDGE_DISCORD` instead. Pinned against the
+#: vendor's `RetiredStateFormatError` message by tests/test_c686_doctor_advice_grounding.py.
+_RETIRED_STATE_BRIDGE_VERSION = "2026.9.7"
+
+_LEGACY_SSRF_ALIAS_1010_FACT = (
+    "On OpenClaw 2026.10.1 and later 'openclaw doctor --fix' and 'openclaw update' refuse a "
+    "config that holds the retired browser.ssrfPolicy.allowPrivateNetwork key until it is "
+    f"removed by hand; OpenClaw's own message names OpenClaw {_retiredformats.BRIDGE_DEFAULT} "
+    f"as the bridge release to install first ({_retiredformats.BRIDGE_DISCORD} when the "
+    "config also holds a retired Discord voice or guild-channel key)"
+)
+_LEGACY_SSRF_ALIAS_1010_ORDER = (
+    "Delete browser.ssrfPolicy.allowPrivateNetwork by hand (or set it to false); if you "
+    "take OpenClaw's bridge-release route instead, do that BEFORE running 'openclaw "
+    "doctor --fix' there."
+)
+# EXECUTED on 2026.10.2 (`resolveBrowserConfig`, tests/test_c686_doctor_advice_grounding.py):
+# `{ssrfPolicy: {allowPrivateNetwork: true}}` resolves to `{}` -- the installed browser policy
+# no longer reads the alias at all, while `dangerouslyAllowPrivateNetwork: true` still
+# resolves to itself. So on this build the alias alone opens nothing; the FAIL records a stale
+# request for private-network access that would become live if the key were carried into
+# `dangerouslyAllowPrivateNetwork`. Nothing here says who would carry it, nor that the gateway
+# refuses to start (no gateway-start importer of the retired list was found).
+_LEGACY_SSRF_ALIAS_1010_INERT = (
+    "the installed OpenClaw's browser policy ignores this alias, so on its own it does not "
+    "open private-network access on this build, but it is a stale request that would let "
+    "the agent browser reach internal/metadata IPs (169.254.169.254 cloud-credential theft) "
+    "if it were carried into browser.ssrfPolicy.dangerouslyAllowPrivateNetwork"
+)
+
+#: Appended to the `fix` of every piece of Doctor advice that is true per key (the key IS
+#: migrated or removed by `openclaw doctor --fix`) but that Doctor will not reach on a build
+#: that refuses the WHOLE config while any retired key or state file is present.
+_DOCTOR_WHOLE_CONFIG_HEDGE = (
+    "On OpenClaw 2026.10.1 and later Doctor refuses the whole config while any retired "
+    "pre-July-2026 key or state file is present, so if `openclaw doctor --fix` stops with a "
+    "message that names a release to install first, follow that message or delete the key "
+    "by hand."
+)
+
+
+def _doctor_refuses_retired_formats(ctx) -> bool:
+    """True only when the INSTALLED build is known to be OpenClaw 2026.10.1 or later, whose
+    Doctor and ``openclaw update`` refuse a config or state tree that holds a pre-July-2026
+    format (``retiredformats.find_retired`` for the config keys, ``RetiredStateFormatError``
+    for state files) instead of migrating it.
+
+    Reads ONLY ``ctx.installed_dist_version`` (the Doctor that will actually run), and
+    answers False for an unknown or pre-release build, exactly like
+    ``_startup_repair_removed``: a reader whose build we did not see keeps the earlier text.
+    The caller decides whether that earlier text needs a hedge; this predicate does not
+    know the key.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return installed is not None and installed >= _DOCTOR_REFUSES_RETIRED_MIN
+
+
+def _legacy_ssrf_alias_fact(ctx) -> str:
+    """The build-correct sentence about what Doctor does with the retired SSRF alias."""
+    return (_LEGACY_SSRF_ALIAS_1010_FACT if _doctor_refuses_retired_formats(ctx)
+            else _LEGACY_SSRF_ALIAS_970_FACT)
+
+
+def _legacy_ssrf_alias_order(ctx) -> str:
+    """The build-correct "remove it first" step for the retired SSRF alias."""
+    return (_LEGACY_SSRF_ALIAS_1010_ORDER if _doctor_refuses_retired_formats(ctx)
+            else _LEGACY_SSRF_ALIAS_970_ORDER)
+
+
+def _legacy_ssrf_alias_consequence(ctx, canonical_true: bool) -> str:
+    """The clause B38's evidence puts after the Doctor sentence for the retired alias.
+
+    Through 2026.10.0 (and on an unknown build) it is the original "once migrated" clause,
+    byte for byte. From 2026.10.1 the alias is inert on its own (``_LEGACY_SSRF_ALIAS_1010_INERT``);
+    when the canonical flag is ALSO ``true`` the reach is real regardless, and says so.
+    """
+    if not _doctor_refuses_retired_formats(ctx):
+        return ("; once migrated, the agent browser can reach internal/metadata IPs "
+                "(169.254.169.254 cloud-credential theft)")
+    if canonical_true:
+        return ("; dangerouslyAllowPrivateNetwork=true also lets the agent browser reach "
+                "internal/metadata IPs (169.254.169.254 cloud-credential theft)")
+    return f"; {_LEGACY_SSRF_ALIAS_1010_INERT}"
+
+
+def _doctor_whole_config_hedge(ctx) -> str:
+    """``_DOCTOR_WHOLE_CONFIG_HEDGE`` on an installed 2026.10.1 or later, else ``""``."""
+    return _DOCTOR_WHOLE_CONFIG_HEDGE if _doctor_refuses_retired_formats(ctx) else ""
+
+
+def _legacy_ssrf_alias_startup_blocked(ctx, cfg) -> bool:
+    """True when the legacy alias is literally ``true`` AND the installed build is known to
+    refuse it at startup (``_startup_repair_removed``).
+
+    ``is True`` -- not truthiness -- to match B38's own gate: no JS value other than the
+    boolean satisfies the runtime's ``=== true``. An unknown or pre-release build answers
+    False, so the pre-2026.9.7 wording is kept exactly for every reader whose build we did
+    not read.
+    """
+    return (dig(cfg, "browser.ssrfPolicy.allowPrivateNetwork") is True
+            and _startup_repair_removed(ctx))
 
 
 def _has_key_path(cfg, dotted: str) -> bool:
@@ -1375,6 +2351,31 @@ def _has_key_path(cfg, dotted: str) -> bool:
             return False
         node = node[part]
     return True
+
+
+def _present_key_paths(cfg, dotted: str) -> "list[str]":
+    """The concrete dotted paths of ``dotted`` that ``cfg`` holds, sorted.
+
+    A path with no ``*`` segment is exactly ``_has_key_path``: ``[dotted]`` when present, else
+    ``[]``. A segment that is exactly ``*`` stands for every key of the dict at that level
+    (a free-form name such as a surface), and is replaced by each real key, so the paths
+    returned name keys the file really holds -- never the pattern. A ``*`` over anything but
+    a dict (a list, a scalar, ``null``) finds nothing; ``a*`` or ``*a`` is a literal key
+    name, and a literal key named ``*`` is an ordinary key like any other.
+    """
+    parts = dotted.split(".")
+    if "*" not in parts:
+        return [dotted] if _has_key_path(cfg, dotted) else []
+    live = [([], cfg)]
+    for part in parts:
+        nxt = []
+        for trail, node in live:
+            if not isinstance(node, dict):
+                continue
+            names = list(node) if part == "*" else [part] if part in node else []
+            nxt.extend((trail + [name], node[name]) for name in names)
+        live = nxt
+    return sorted(".".join(trail) for trail, _node in live)
 
 
 def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
@@ -1392,7 +2393,7 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
 
     * ``ctx.config`` (read above) is what ``collector.collect()`` gets back from
       ``configloader.load_openclaw_config()`` -- already the fully ``$include``-resolved,
-      deep-merged dict, never the raw root file. So ``_has_key_path`` sees a retired key
+      deep-merged dict, never the raw root file. So ``_present_key_paths`` sees a retired key
       exactly the same way whether it sits in ``openclaw.json`` or in an included fragment;
       there is nothing for a presence flag to add here.
     * Confirmed live against the installed CLI too: a retired key placed directly in
@@ -1402,20 +2403,30 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
       `openclaw.json:<line>` citation prefix when the key resolves from a fragment, which
       is cosmetic (a *where*, never a *whether*). That is the schema-validity claim B382
       actually makes, and it is untouched by the file's shape either way.
-    * There IS a real, reproduced ``$include`` asymmetry, but at a layer B382 explicitly
-      disclaims: OpenClaw's own silent startup self-heal. The installed dist's
-      `admitAutomaticConfigRepairSnapshot` (`automatic-startup-config-repair-*.mjs`) --
-      wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) -- refuses
-      to engage whenever `containsConfigIncludeDirective(snapshot.parsed)` is true or any
-      include was actually resolved, so a plain `openclaw.json` with a retired key gets
-      silently auto-migrated and the gateway starts anyway, while the identical key behind
-      an ``$include`` leaves the gateway blocked on the same invalid config `config
-      validate` reports. This grounds (for the first time -- it shipped as an unverified
-      hedge in 10d766a) the existing `fix` text below: "a config that uses $include may be
-      refused automatic repair, so run the command explicitly". It is a fact about the
-      GATEWAY, which B382's own docstring already disclaims making any claim about, so it
-      changes no verdict here. See ``tests/test_f184_retired_key_config_invalid.py`` for
-      the ``$include``-invariance regression and the dist-grounding pin.
+    * There WAS a real, reproduced ``$include`` asymmetry on builds through 2026.9.6, at a
+      layer B382 explicitly disclaims: OpenClaw's own silent STARTUP self-heal. On those
+      builds `admitAutomaticConfigRepairSnapshot` (then `automatic-startup-config-repair-*.mjs`;
+      the name survived to 2026.9.9)
+      -- wired into the real `gateway run` bootstrap path (`pre-bootstrap-*.mjs`) via
+      `resolveStartupConfigSnapshot` -- refused to engage whenever
+      `containsConfigIncludeDirective(snapshot.parsed)` was true or any include was actually
+      resolved, so a plain `openclaw.json` with a retired key was silently auto-migrated in
+      memory and the gateway started anyway, while the identical key behind an ``$include``
+      left the gateway blocked on the same invalid config `config validate` reports. That
+      grounded the pre-9.7 `fix` text: "a config that uses $include may be refused
+      automatic repair, so run the command explicitly".
+    * C-645: that startup self-heal is GONE from 2026.9.7 (see
+      ``_STARTUP_REPAIR_REMOVED_MIN``). Startup no longer repairs legacy keys for any
+      config, ``$include`` or not; the only repair left is Doctor's own preflight
+      (`planAutomaticConfigRepair`, called from `doctor-config-flow-*.mjs`), which still
+      declines a config that uses ``$include`` (`admitAutomaticConfigRepairSnapshot` through
+      2026.9.9, `canPlanAutomaticConfigRepair` from 2026.10.1; the include clauses are the
+      same, now in `automatic-config-repair-*.mjs`). So on 2026.9.7 and later the `fix` text
+      says that startup does not repair a legacy file (only Doctor does, so a restart will
+      not fix it), and keeps an ``$include`` caveat scoped to Doctor's automatic repair. Both remain facts about the GATEWAY/Doctor, which
+      B382's own docstring disclaims making any claim about, so neither changes a verdict
+      here. See ``tests/test_f184_retired_key_config_invalid.py`` for the
+      ``$include``-invariance regression and the dist-grounding pin.
 
     Decision: no ``$include``-presence field is added to ``Context``. A separate, unstarted
     piece of work also touches ``collector.py``, but in the skill-content language-routing
@@ -1426,8 +2437,11 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
     cfg = getattr(ctx, "config", None)
     if installed is None or not isinstance(cfg, dict):
         return []
-    return [(key, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
-            if installed >= min_build and _has_key_path(cfg, key)]
+    # A row with a `*` segment yields one entry per concrete path the file holds (so the
+    # finding names `surfaces.telegram.silentReply.internal`, never `surfaces.*...`); every
+    # other row yields exactly `(key, repl)` when present, as before.
+    return [(path, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
+            if installed >= min_build for path in _present_key_paths(cfg, key)]
 
 
 def _meta(cid: str):
@@ -1733,9 +2747,21 @@ def _resolve_sandbox_scope(agent_sandbox: dict, default_sandbox: dict) -> str:
         if (typeof params.perSession === "boolean") return params.perSession ? "session" : "shared";
         return "agent";
 
+    C-645: the legacy boolean ``sandbox.perSession`` is DEAD on OpenClaw 2026.9.7 and later.
+    That build's resolver passes only ``scope`` (``resolveSandboxScope({scope:
+    agentSandbox?.scope ?? agent?.scope})``, ``config-*.mjs``) -- the ``perSession`` argument
+    quoted above is 2026.9.6 and earlier. The strict schema rejects a config carrying it on
+    both (executed: ``unrecognized_keys@agents.defaults.sandbox`` on 2026.9.6 and 2026.9.7),
+    but through 2026.9.6 the gateway's boot-time self-heal migrated such a file in memory and
+    ran it; from 2026.9.7 nothing at startup does (``_STARTUP_REPAIR_REMOVED_MIN``) and
+    Doctor's pre-June-keys gate (``assertPreJuneConfigMigrated``) hard-fails on it, so the
+    file cannot run there. The ``perSession`` branch below is kept unchanged, as behaviour:
+    it is only a 2026.9.6-and-earlier semantic, and on 2026.9.7 it can only fire for a file
+    that build will not run. Do not read it as live 2026.9.7 semantics.
+
     Used to gate the per-agent ``docker.network`` AND ``docker.binds`` checks (FP2 round
     4, widened to ``network`` by B-673): under ``scope: "shared"`` (or the legacy boolean
-    ``perSession: false``, at either level), OpenClaw discards this agent's OWN
+    ``perSession: false``, at either level, through 2026.9.6), OpenClaw discards this agent's OWN
     ``sandbox.docker`` object ENTIRELY (``scopedAgentDocker = scope === "shared" ? void 0
     : agentSandbox?.docker``, symbol ``scopedAgentDocker``, dist/config-*.js:150 - symbol
     re-verified present in openclaw@2026.9.1, line read on 2026.8.2) before
@@ -1830,6 +2856,222 @@ def _skill_corpus_complete(ctx: Context) -> bool:
     (``skills_capped_count == 0``). Either alone still leaves skills this audit never saw.
     """
     return not ctx.skills_frontier_partial and ctx.skills_capped_count == 0
+
+
+# ---------- C-727: a directory under the home that cannot be read ----------
+# The ``pathprobe`` predicates RAISE on a path they cannot stat (an unreadable parent), on
+# purpose: "could not look" is a different fact from "absent". A check that lets that escape
+# is reported by the runner as ``ERR:<function>`` ("the check crashed"). These helpers let a
+# check keep going with what it CAN read, remember what it could not, and say so at the end.
+def _probe_noting(pred, path, home, unreadable: list) -> bool:
+    """``pred(path)`` (a ``pathprobe`` predicate); False plus a note in *unreadable* on OSError.
+
+    The note is the home-relative path (``_detail_path``), never an absolute one.
+    """
+    try:
+        return pred(path)
+    except OSError:
+        unreadable.append(_detail_path(path, home))
+        return False
+
+
+def _agent_dirs_noting(home, unreadable: list) -> list:
+    """The ``agents/<id>`` directories under *home* (symlinks skipped), sorted.
+
+    An ``agents`` directory that cannot be listed is noted in *unreadable* and yields no
+    agents; the caller must not read that as "no agents".
+    """
+    agents_root = home / "agents"
+    try:
+        if not pathprobe.is_dir(agents_root):
+            return []
+        return sorted(
+            p for p in agents_root.iterdir()
+            if pathprobe.is_dir(p) and not pathprobe.is_symlink(p)
+        )
+    except OSError:
+        unreadable.append(_detail_path(agents_root, home))
+        return []
+
+
+def _sink_unreadable(path) -> bool:
+    """True when a log/memory sink that has bytes in it could not be read (C-727).
+
+    ``scan_log_file`` never raises: an unreadable file just yields ``bytes_scanned == 0``,
+    the same as an empty one. A scan loop that ``continue``s on that count must not treat the
+    first as the second.
+    """
+    try:
+        return os.stat(path).st_size > 0 and not os.access(path, os.R_OK)
+    except OSError:
+        return True
+
+
+def _unreadable_dirs_finding(cid: str, what: str, unreadable: list) -> "Finding":
+    """UNKNOWN for a check that could not read part of the home (C-727).
+
+    *what* names the role of the thing that was not examined ("the Codex session logs");
+    the paths come from *unreadable*: home-relative, or a bare name marked as outside the
+    home. ``engine_degraded`` is set as for the
+    other present-but-unread findings: the engine could not do its job here.
+    """
+    seen = sorted(set(unreadable))
+    shown = ", ".join(seen[:6]) + (f" (+{len(seen) - 6} more)" if len(seen) > 6 else "")
+    return _finding(
+        cid,
+        UNKNOWN,
+        f"Could not read {shown} (paths are relative to the audited home), so {what} could "
+        "not be fully checked and no clean result is claimed for it.",
+        "Make the listed path(s) readable by the user running this audit (check their permissions, "
+        "or run the audit as the account that owns them), then re-run.",
+        engine_degraded=True,
+    )
+
+
+# ---------- C-731: a file that is present but was not understood ----------
+# C-727 covers a path that cannot be READ (permissions). This is the sibling for what the path
+# IS and what is IN it: a symbolic link, a directory, a pipe or a device where a regular file
+# is expected, a file that does not parse, a document of the wrong top-level type. Each is
+# "present but not understood" - UNKNOWN under the check's own id, never a clean result and
+# never an `is_file()`-style "absent". Nothing here opens a path before `lstat` (or, for a
+# link a check has always read through, `stat`) has said a regular file is there.
+_FILE_KIND_ABSENT_ERRNOS = (errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP)
+
+_NOT_UNDERSTOOD_REASONS = {
+    "symlink": "is a symbolic link, which this audit does not follow",
+    "symlink-unusable": "is a symbolic link that does not lead to a regular file",
+    "directory": "is a directory, not a regular file",
+    "special": "is not a regular file",
+}
+_REASON_TOO_LARGE = "is larger than this audit reads"
+
+
+def _file_kind(path) -> str:
+    """What *path* is by ``lstat`` (never opened, never followed): "absent", "file",
+    "symlink", "directory" or "special" (pipe, socket, device).
+
+    "absent" is pathprobe's own "not there" set; any other ``OSError`` is raised, because
+    "could not look" is a different fact from "absent" (see :func:`_probe_noting`).
+    """
+    import stat as _stat  # noqa: PLC0415
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        if exc.errno in _FILE_KIND_ABSENT_ERRNOS:
+            return "absent"
+        raise
+    except ValueError:
+        return "absent"      # an embedded NUL byte in the path: not a path that is there
+    if _stat.S_ISLNK(mode):
+        return "symlink"
+    if _stat.S_ISREG(mode):
+        return "file"
+    if _stat.S_ISDIR(mode):
+        return "directory"
+    return "special"
+
+
+def _file_kind_resolved(path) -> str:
+    """:func:`_file_kind`, except that a symbolic link whose TARGET is a regular file is
+    "file", and any other link (dangling, a loop, to a pipe / device / directory) is
+    "symlink-unusable".
+
+    For the files a check has always read THROUGH a link (`is_file()` follows one, and so
+    does the platform when it loads the file): refusing such a link would turn a finding the
+    audit used to make into UNKNOWN. Only the kind is asked here (`stat`, which never blocks);
+    the read that follows still goes through the non-blocking regular-file reader.
+    """
+    import stat as _stat  # noqa: PLC0415
+    kind = _file_kind(path)
+    if kind != "symlink":
+        return kind
+    try:
+        mode = os.stat(path).st_mode
+    except PermissionError:
+        raise                       # could not look at the target: "unreadable", not "no file"
+    except (OSError, ValueError):
+        return "symlink-unusable"   # dangling, a loop, a target that is not there
+    return "file" if _stat.S_ISREG(mode) else "symlink-unusable"
+
+
+def _probe_kind(path, home, unreadable: list, *, resolve: bool = False) -> str:
+    """:func:`_file_kind` (or :func:`_file_kind_resolved` with *resolve*); "absent" plus a
+    home-relative note in *unreadable* on OSError."""
+    try:
+        return _file_kind_resolved(path) if resolve else _file_kind(path)
+    except OSError:
+        unreadable.append(_detail_path(path, home))
+        return "absent"
+
+
+def _read_failure_reason(exc: OSError) -> "str | None":
+    """The reason text when a read failed because of what the path IS (a pipe, a directory,
+    a file past the size bound); None for a plain permission / I/O error."""
+    from .. import safeio as _safeio  # noqa: PLC0415
+    if isinstance(exc, (_safeio.NotARegularFile, IsADirectoryError)):
+        return _NOT_UNDERSTOOD_REASONS["special"]
+    if isinstance(exc, _safeio.UserFileTooLarge):
+        return _REASON_TOO_LARGE
+    return None
+
+
+def _read_regular_text(path) -> str:
+    """The text of a regular file, bounded, decoded leniently; ``OSError`` for anything else.
+
+    ``safeio.read_user_text``: a pipe / device / oversized file raises instead of blocking
+    or filling memory. The decode is ``errors="replace"``, as the callers' ``read_text`` was.
+    """
+    from .. import safeio as _safeio  # noqa: PLC0415
+    return _safeio.read_user_text(path, errors="replace")
+
+
+def _read_regular_bytes(path) -> bytes:
+    """The bytes of a regular file, bounded; ``OSError`` for anything else (see above)."""
+    from .. import safeio as _safeio  # noqa: PLC0415
+    return _safeio.read_user_file(path)
+
+
+def _toml_text(raw: bytes) -> "str | None":
+    """*raw* as the text of a TOML file, or None when it is not text at all: a NUL byte
+    (UTF-16 or UTF-32 text always holds one, and so does a binary file).
+
+    Otherwise the bytes are decoded leniently, as this file always was: one stray byte in a
+    comment must not turn a readable config into an unread one. A leading UTF-8 byte-order
+    mark is dropped, so the line scan sees the first table header. Whether the text is VALID
+    TOML is deliberately not asked: the stdlib parser exists only from 3.11, and a verdict
+    must not depend on the interpreter.
+    """
+    if b"\x00" in raw:
+        return None
+    text = raw.decode("utf-8", errors="replace")
+    return text[1:] if text.startswith("\ufeff") else text
+
+
+def _not_understood_finding(cid: str, what: str, problems: list, unreadable=(), *,
+                            engine_degraded: bool = True) -> "Finding":
+    """UNKNOWN for a check whose input file is present but was not understood (C-731).
+
+    *problems* is ``[(home-relative path, reason)]``; *unreadable* the C-727 notes of paths
+    that could not be read at all. *what* names the role of what was not examined. With no
+    *problems* this is exactly :func:`_unreadable_dirs_finding`. ``engine_degraded`` follows
+    the neighbouring present-but-unread finding of the calling check.
+    """
+    if not problems:
+        return _unreadable_dirs_finding(cid, what, list(unreadable))
+    items = sorted({f"{p} {r}" for p, r in problems})
+    items += [f"{p} could not be read" for p in sorted(set(unreadable))]
+    shown = "; ".join(items[:6]) + (f" (+{len(items) - 6} more)" if len(items) > 6 else "")
+    return _finding(
+        cid,
+        UNKNOWN,
+        f"{shown} (paths are relative to the audited home), so {what} could not be fully "
+        "checked and no clean result is claimed for it.",
+        "Open the listed file(s) and check that each is an ordinary, valid file of the expected "
+        "format; repair or replace one that is not (this audit never opens a pipe, socket, "
+        "device or directory in place of a file), make an unreadable one readable by the user "
+        "running the audit, then re-run.",
+        engine_degraded=engine_degraded,
+    )
 
 
 def _finding(
@@ -2567,27 +3809,256 @@ def _mention_gate_scopes(node: dict) -> list:
 _MAX_WALK_DEPTH = 100
 
 
-def _secret_paths(obj, prefix="", depth=0) -> list[str]:
-    """Dotted paths of secret-bearing keys holding a non-trivial string (no values)."""
+# C-688: config slots OpenClaw itself marks sensitive (its `sensitive` schema registry,
+# `zod-schema.sensitive-*.mjs`, walked with the vendor's own `walkConfigSchema`) whose LEAF
+# NAME `SECRET_KEY_RE` does not know. 91 vendor-sensitive paths on 2026.10.2; 68 had such a
+# leaf. SECRET_KEY_RE is shared with the logger, the MCP/exec env scans and the report, so it
+# is NOT widened; instead:
+#   * an unambiguous leaf NAME (`passphrase`, `identityData`) is matched exactly, anywhere;
+#   * an ambiguous leaf (`key`, `value`, `*`) is matched by the vendor's PATH, so an unrelated
+#     `some.other.key` does not start to flag;
+#   * the rest are explicit, reasoned exclusions (`_VENDOR_NOT_SECRET_PATHS`).
+# `tests/test_c688_vendor_sensitive_drift.py` derives the vendor list from the installed dist
+# (local-only) and requires every path to be covered here or excluded below.
+_CONFIG_SECRET_LEAF_RE = re.compile(r"passphrase|identityData", re.I)
+
+# Slots that hold exactly one credential: any non-reference string is a plaintext value.
+_VENDOR_SECRET_VALUE_PATHS = tuple(
+    re.compile(p)
+    for p in (
+        r"(?:^|\.)request(?:\.proxy)?\.tls\.key$",  # TLS client private key (inline PEM)
+        r"(?:^|\.)request\.auth\.value$",  # custom auth-header value
+        r"^gateway\.remote\.edgeAuth\.[^.\[]+$",  # "secret-backed" edge-proxy headers
+    )
+)
+# Free-form env / header maps: the vendor redacts every value, but most values are not
+# credentials (`NODE_ENV`, a model name, a git SHA, `GOOGLE_APPLICATION_CREDENTIALS=creds.json`,
+# `User-Agent`, a tenant id). A map entry is reported ONLY for (a) a concrete value shape the
+# global detectors know (`_concrete_secret_literal`), (b) a URL with an inline password, or
+# (c) in a HEADER map, a vendor credential header name (`_header_name_is_credential`) holding
+# a literal. The ENV key name is NOT a signal here: name-based and entropy-based rules both
+# flagged ordinary paths, model names, digests and policy settings in review. A random
+# literal under a neutral or credential-sounding env key that matches no shape is a declared
+# ceiling (docs/THREAT_COVERAGE.md, Non-static coverage), not an oversight. The older
+# SECRET_KEY_RE key-name rule in `_secret_paths` is unchanged.
+_VENDOR_SECRET_ENV_MAP_PATHS = tuple(
+    re.compile(p)
+    for p in (
+        r"(?:^|\.)mcp\.servers\.[^.\[]+\.env\.[^.\[]+$",
+        r"^models\.providers\.[^.\[]+\.localService\.env\.[^.\[]+$",
+        r"^security\.installPolicy\.exec\.env\.[^.\[]+$",
+    )
+)
+_VENDOR_SECRET_HEADER_MAP_PATHS = tuple(
+    re.compile(p)
+    for p in (
+        r"(?:^|\.)mcp\.servers\.[^.\[]+\.headers\.[^.\[]+$",
+        r"^models\.providers\.[^.\[]+\.headers\.[^.\[]+$",
+        r"(?:^|\.)request\.headers\.[^.\[]+$",
+        r"^tools\.web\.fetch\.headers\.[^.\[]+$",
+    )
+)
+_VENDOR_SECRET_MAP_PATHS = _VENDOR_SECRET_ENV_MAP_PATHS + _VENDOR_SECRET_HEADER_MAP_PATHS
+# Credential header names, mirrored from the vendor's own model-provider header policy
+# (`model-provider-header-policy-*.mjs`: ALWAYS_SENSITIVE_MODEL_PROVIDER_HEADER_NAMES, exact
+# names only - its fragment list also matches `X-Token-Expiry`, which is not a credential).
+# `cookie` is not in the vendor list; it carries session credentials and is added here.
+_CREDENTIAL_HEADER_NAMES = frozenset({
+    "authorization", "proxy-authorization", "x-api-key", "api-key", "apikey", "x-auth-token",
+    "auth-token", "x-access-token", "access-token", "x-secret-key", "secret-key", "cookie",
+})
+# A vendor-sensitive path that holds a URL which MAY carry credentials: only a password in
+# the userinfo of the AUTHORITY is a plaintext secret.
+_VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
+# Vendor-sensitive paths that are deliberately NOT secrets (path regex -> reason). The drift
+# test requires each vendor path to be covered above or to match one of these.
+_VENDOR_NOT_SECRET_PATHS = (
+    (re.compile(r"(?:^|\.)request(?:\.proxy)?\.tls\.(?:cert|ca)$"),
+     "a TLS client certificate / CA bundle is public material"),
+    (re.compile(r"(?:^|\.)sandbox\.ssh\.(?:certificateData|knownHostsData)$"),
+     "an SSH certificate and a known_hosts list are public material"),
+    (re.compile(r"(?:^|\.)hooks\.mappings\[\]\.sessionKey$"),
+     "an operator-chosen session-routing identifier, not an authenticator"),
+)
+_ENV_REF_TOKEN_RE = re.compile(r"\$\{[A-Z_][A-Z0-9_]*\}")
+# `${NAME:-fallback}`: the fallback is a literal OpenClaw uses when NAME is unset, so it is
+# config text (`${NAME:-}` carries none). Vendor rule: a fallback with `$` or `{` is no token.
+_ENV_DEFAULT_TOKEN_RE = re.compile(r"\$\{[A-Z_][A-Z0-9_]*:-([^${}]*)\}")
+_AUTH_SCHEME_RE = re.compile(r"^(?:Bearer|Basic|Token)(?:\s+|$)", re.I)
+
+
+def _url_inline_password(value) -> "str | None":
+    """The inline password of ``scheme://user:password@host`` or None. A real parse: the
+    userinfo lives only in the AUTHORITY (the part before the first ``/ ? #``), so an ``@``
+    in a path, query or PAC file name (``http://proxy:3128/?next=a@b``) is not a password.
+    An unparseable value, an empty password and a password that is only an env reference
+    (``${PROXY_PASSWORD}``) are not flagged."""
+    if not isinstance(value, str) or "://" not in value:
+        return None
+    try:
+        parts = urlsplit(value.strip())
+        password = parts.password
+    except ValueError:
+        return None
+    if not parts.scheme or value.strip().lower().find(parts.scheme.lower() + "://") != 0:
+        return None
+    if not password:
+        return None
+    left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
+    return password if left else None
+
+
+def _concrete_secret_literal(value: str) -> bool:
+    """*value* carries a concrete credential literal the global detectors already know
+    (``sk-``, AWS key id, ``ghp_``/``xox``/..., JWT, PEM private key, ``clh_``): the group-less
+    patterns of SECRET_PATTERNS and the C015 extras. The keyword patterns are text-shaped
+    (``password=...``) and are not applied to a bare value."""
+    return any(
+        p.search(value) for p in (*SECRET_PATTERNS, *_C015_EXTRA_SECRET_PATTERNS) if p.groups == 0
+    )
+
+
+def _header_name_is_credential(key: str) -> bool:
+    """Is *key* one of the vendor's credential header names (case-insensitive, ``_`` = ``-``)?"""
+    return key.lower().replace("_", "-") in _CREDENTIAL_HEADER_NAMES
+
+
+# An entry that points AT a secret rather than holding one: a key named like a file / path /
+# directory / name / policy / expiry setting, or a value that is a path, a bare URL, or a bare
+# file name with a common extension (`GOOGLE_APPLICATION_CREDENTIALS=credentials.json`).
+_INDIRECT_KEY_RE = re.compile(r"[_-](?:FILE|PATH|DIR|NAME|POLICY|EXPIRY|EXPIRES|TTL)$", re.I)
+_INDIRECT_VALUE_RE = re.compile(
+    r"^(?:/|~/|\.{1,2}/|[a-zA-Z]:[\\/]|[a-zA-Z][a-zA-Z0-9+.-]*://)"  # absolute / home / URL
+    r"|^[\w.@-]+(?:/[\w.@-]+)+/?$"  # relative path: secrets/db_password
+    r"|^[\w.@-]*\.(?:json|txt|pem|key|crt|yaml|yml|env|npmrc|cfg|conf)$",  # bare file name
+    re.I,
+)
+
+
+def _map_entry_is_indirection(key: str, value: str) -> bool:
+    return bool(_INDIRECT_KEY_RE.search(key) or _INDIRECT_VALUE_RE.match(value))
+
+
+def _vendor_slot_hit(path: str, value, min_len: int) -> bool:
+    """True when *value* is a plaintext (non-reference) string at a vendor-sensitive slot
+    that `SECRET_KEY_RE` cannot see by name. A whole-value reference, and a reference
+    embedded in a header (`Bearer ${TOKEN}`), is the safe form and never counts."""
+    if not isinstance(value, str) or _is_secret_reference(value):
+        return False
+    norm = re.sub(r"\[\d+\]", "[]", path)
+    rest = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", value)).strip()
+    rest = _AUTH_SCHEME_RE.sub("", rest)
+    env_map = any(rx.search(norm) for rx in _VENDOR_SECRET_ENV_MAP_PATHS)
+    header_map = any(rx.search(norm) for rx in _VENDOR_SECRET_HEADER_MAP_PATHS)
+    if env_map or header_map or _VENDOR_SECRET_URL_PATH_RE.search(norm):
+        # a URL password is a credential at any length: `socks5://u:p@h` is 14 characters
+        if _url_inline_password(rest) is not None:
+            return True
+    if len(rest) < min_len:
+        return False
+    if any(rx.search(norm) for rx in _VENDOR_SECRET_VALUE_PATHS):
+        return True
+    if env_map or header_map:
+        if _concrete_secret_literal(rest):
+            return True
+        leaf = norm.rsplit(".", 1)[-1]
+        return (
+            header_map
+            and _header_name_is_credential(leaf)
+            and not _map_entry_is_indirection(leaf, rest)
+        )
+    return False
+
+
+def _vendor_slot_covers(path: str) -> "str | None":
+    """How a concrete vendor-sensitive path (`*` already replaced by a name, `[]` by `[0]`)
+    is handled: ``"name"``, ``"path"``, ``"excluded"`` or ``None`` (a gap)."""
+    norm = re.sub(r"\[\d+\]", "[]", path)
+    if any(rx.search(norm) for rx, _ in _VENDOR_NOT_SECRET_PATHS):
+        return "excluded"
+    leaf = norm.rsplit(".", 1)[-1]
+    if SECRET_KEY_RE.search(leaf) or _CONFIG_SECRET_LEAF_RE.fullmatch(leaf):
+        return "name"
+    for group in (_VENDOR_SECRET_VALUE_PATHS, _VENDOR_SECRET_MAP_PATHS, (_VENDOR_SECRET_URL_PATH_RE,)):
+        if any(rx.search(norm) for rx in group):
+            return "path"
+    return None
+
+
+def _secret_paths(obj, prefix="", depth=0, min_len=16, slots_only=False) -> list[str]:
+    """Dotted paths of secret-bearing keys holding a non-trivial string (no values).
+
+    ``min_len`` is 16 for B1's count (a shorter value is likely a placeholder);
+    ``--incident`` calls it with 1 to inventory short values too.
+
+    C-688: also counts the exact leaves ``passphrase`` / ``identityData`` and a plaintext
+    value at a vendor-sensitive slot (``_vendor_slot_hit``). ``slots_only`` reports ONLY that
+    new reach (C015 reads it for the config file; the older key-name rule stays text-based).
+    """
     found = []
     if depth >= _MAX_WALK_DEPTH:
         return found
     if isinstance(obj, dict):
         for k, v in obj.items():
             path = f"{prefix}.{k}" if prefix else k
-            if (
-                isinstance(v, str)
-                and len(v) >= 16
-                and SECRET_KEY_RE.search(k)
-                and not _is_secret_reference(v)
+            if isinstance(v, str) and not _is_secret_reference(v) and (
+                (
+                    len(v) >= min_len
+                    and ((not slots_only and SECRET_KEY_RE.search(k)) or _CONFIG_SECRET_LEAF_RE.fullmatch(k))
+                )
+                or _vendor_slot_hit(path, v, min_len)
             ):
                 found.append(path)
             else:
-                found.extend(_secret_paths(v, path, depth + 1))
+                found.extend(_secret_paths(v, path, depth + 1, min_len, slots_only))
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
-            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1))
+            found.extend(_secret_paths(v, f"{prefix}[{i}]", depth + 1, min_len, slots_only))
     return found
+
+
+def _vendor_secret_slot_paths(cfg) -> list[str]:
+    """Paths holding a plaintext value that only the C-688 rules (not SECRET_KEY_RE) see."""
+    return _secret_paths(cfg, slots_only=True)
+
+
+# C-691: OpenClaw's GitHub connect flow stores a MANAGED PROFILE ID `ghp_` + 32 lowercase hex
+# (`randomBytes(16)`, vendor `github-identity-profile-id-*.mjs`:
+# `MANAGED_GITHUB_PROFILE_ID_PATTERN = /^ghp_[a-f0-9]{32}$/`) under `tools.github.profileId`
+# (system scope) or `agents.entries.<id>.tools.github.profileId`. It names a directory, not a
+# credential, but it has the classic-token prefix. A real classic token is `ghp_` + 36 base62,
+# so the shapes cannot collide.
+_MANAGED_GITHUB_PROFILE_ID_RE = re.compile(r"ghp_[0-9a-f]{32}")
+
+
+def _managed_github_profile_ids(cfg) -> "list[str]":
+    """Every managed GitHub profile id at its vendor path (value shape checked too)."""
+    scopes = []
+    if isinstance(cfg, dict):
+        scopes.append(cfg.get("tools"))
+        agents = cfg.get("agents")
+        entries = agents.get("entries") if isinstance(agents, dict) else None
+        for entry in entries.values() if isinstance(entries, dict) else ():
+            scopes.append(entry.get("tools") if isinstance(entry, dict) else None)
+    found = []
+    for tools in scopes:
+        gh = tools.get("github") if isinstance(tools, dict) else None
+        pid = gh.get("profileId") if isinstance(gh, dict) else None
+        if isinstance(pid, str) and _MANAGED_GITHUB_PROFILE_ID_RE.fullmatch(pid):
+            found.append(pid)
+    return found
+
+
+def _c015_text_without_managed_github_ids(text: str, cfg) -> str:
+    """*text* with the managed GitHub profile ids removed, so C015 does not read the id as a
+    token. An id is removed only when EVERY occurrence of that exact string in the file is
+    accounted for by a profileId at its vendor path: the same string anywhere else (or a
+    real token that merely starts with it) leaves the text untouched and C015 still WARNs."""
+    ids = _managed_github_profile_ids(cfg)
+    for pid in set(ids):
+        if text.count(pid) == ids.count(pid):
+            text = text.replace(pid, "")
+    return text
 
 
 def _agent_tools_widenings(cfg: dict) -> "tuple[list, list]":
@@ -3627,7 +5098,7 @@ def _has_approval_gate(cfg: dict, tools=None) -> bool:
 # stay `ask`) - this is `_layer_exec_policy` below's whole reason for being a small,
 # self-contained port rather than a "merge the two dicts" shortcut.
 #
-# `resolveExecPolicyForMode` (`exec-approvals-core-BZ3ECkXD.mjs`) is unchanged from the
+# `resolveExecPolicyForMode` (`exec-approvals-core-s7tTQC_a.mjs`, 2026.10.1) is unchanged from the
 # closed 5-row table already cited on `_has_approval_gate` above.
 _EXEC_MODE_SECURITY_ASK = {
     "deny": ("deny", "off"),
@@ -4319,7 +5790,7 @@ def _credential_store_state(home) -> dict:
     if home is None:
         return out
     store = Path(home) / "credentials"
-    if not store.is_dir():
+    if not pathprobe.is_dir(store):
         return out
     out["present"] = True
     capped: list = []
@@ -4516,9 +5987,12 @@ def _trifecta_leg_sources(ctx: Context) -> dict:
     # `tests/test_b730_sensitive_data_model_agreement.py::
     # test_the_gateway_password_asymmetry_is_the_one_known_divergence`). Dave's decision
     # (2026-09-20): widen A1 to match the other two consumers, not narrow them. B1
-    # (`check_secrets`) still separately FAILs/CRITICALs on the same key - that is a
-    # different question (a plaintext secret sitting in the config file) from this leg's
-    # question (data the agent can reach), and both answers can be true at once.
+    # (`check_secrets`) separately FAILs/CRITICALs on the same key when it holds a
+    # PLAINTEXT value - that is a different question (a plaintext secret sitting in the
+    # config file) from this leg's question (data the agent can reach). Since C-646 the two
+    # can disagree on purpose: a SecretRef (`${GW_PW}`, the object form) is not a plaintext
+    # secret to B1, yet the gateway credential is still reachable, so this leg keeps
+    # counting it.
     if dig(cfg, "gateway.auth.password"):
         sensitive.append("gateway.auth.password is set")
     # B-061: ungated exec/shell can read any private file. Approval-gated exec (see
@@ -5124,6 +6598,11 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
             # very confusion this helper exists to undo).
             return f"gateway.customBindHost={host}"
     elif profile != "auto":
+        if _is_bind_template(raw):
+            # C-653: the template text, verbatim - not its lowercased first-colon fragment.
+            # No ctx here, so it stays "remote" as before; the converted callers resolve
+            # the template (`_effective_gateway_bind`) before they ask.
+            return f"gateway.bind={raw.strip()}"
         bind_host = parse_bind_host(raw)
         if bind_host not in LOOPBACK:
             return f"gateway.bind={bind_host}"
@@ -5140,18 +6619,45 @@ def _gateway_remote_exposure_reason(cfg: dict) -> str | None:
 # B-397: relocated from _config.py (B323-only originally) -- B326 needs the identical
 # env-var-reference detection, so per §3.1's "reused by 2+ topics -> _shared.py" rule
 # this leaves its original topic module rather than reaching across it.
-_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+# `\Z`, not `$`: JavaScript's `$` matches only at the very end of the string, Python's also
+# before a trailing newline, so `${FOO\n}` would otherwise read as a reference here and not
+# in OpenClaw (C-691).
+_B323_ENV_VAR_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*\Z")
+_B323_DEFAULT_VALUE_OPERATOR = ":-"
 
 
-def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None":
-    """Faithful port of OpenClaw's ``parseEnvTokenAt``
-    (``env-substitution-CATXLg7n.js:32-58``).
+def _b323_token_body_is_valid(body: str, default_operator: bool = False) -> bool:
+    """OpenClaw's token-body test (``iterateEnvTemplateTokens``, ``env-substitution-*.mjs``).
+
+    With ``default_operator`` (the audited build understands ``:-``, OpenClaw 2026.9.7 and
+    later - ``_env_default_operator(ctx) == "yes"``): split at the FIRST ``:-``, validate only
+    the NAME against ``ENV_VAR_NAME_PATTERN`` and refuse a default holding ``$`` or ``{``
+    (C-691). Without it (an older or undetermined build) the whole body must be the NAME, so
+    ``${HOME:-x}`` is NOT a reference there and stays a literal value - the reading B323 had
+    before C-691, and the safe one when the build is unknown."""
+    if not default_operator:
+        return bool(_B323_ENV_VAR_NAME_RE.match(body))
+    op = body.find(_B323_DEFAULT_VALUE_OPERATOR)
+    name = body if op == -1 else body[:op]
+    default = None if op == -1 else body[op + len(_B323_DEFAULT_VALUE_OPERATOR):]
+    if not _B323_ENV_VAR_NAME_RE.match(name):
+        return False
+    return default is None or ("$" not in default and "{" not in default)
+
+
+def _b323_parse_env_token_at(
+    value: str, index: int, default_operator: bool = False
+) -> "tuple[str, int] | None":
+    """Port of OpenClaw's env-template token parser (``iterateEnvTemplateTokens``,
+    ``env-substitution-*.mjs``; ``parseEnvTokenAt`` in builds before 2026.9.7).
 
     Returns ``("escaped", end)`` for a ``$${NAME}`` token, ``("substitution", end)``
     for a ``${NAME}`` token, or ``None`` if *index* isn't the start of either --
     including the case where ``NAME`` doesn't match OpenClaw's own
     ``ENV_VAR_NAME_PATTERN`` (``/^[A-Z_][A-Z0-9_]*$/``, all-caps only) or the ``}``
-    is missing. *end* is the index of the closing ``}``.
+    is missing. *end* is the index of the closing ``}`` (the FIRST ``}`` after the opening, as
+    in the vendor). ``default_operator`` selects the build's grammar, see
+    :func:`_b323_token_body_is_valid`.
     """
     if index >= len(value) or value[index] != "$":
         return None
@@ -5160,21 +6666,17 @@ def _b323_parse_env_token_at(value: str, index: int) -> "tuple[str, int] | None"
     if nxt == "$" and after_next == "{":
         start = index + 3
         end = value.find("}", start)
-        if end != -1:
-            name = value[start:end]
-            if _B323_ENV_VAR_NAME_RE.match(name):
-                return ("escaped", end)
+        if end != -1 and _b323_token_body_is_valid(value[start:end], default_operator):
+            return ("escaped", end)
     if nxt == "{":
         start = index + 2
         end = value.find("}", start)
-        if end != -1:
-            name = value[start:end]
-            if _B323_ENV_VAR_NAME_RE.match(name):
-                return ("substitution", end)
+        if end != -1 and _b323_token_body_is_valid(value[start:end], default_operator):
+            return ("substitution", end)
     return None
 
 
-def _b323_contains_env_var_reference(value: str) -> bool:
+def _b323_contains_env_var_reference(value: str, default_operator: bool = False) -> bool:
     """Faithful port of OpenClaw's ``containsEnvVarReference()``
     (``env-substitution-CATXLg7n.js:102-112``).
 
@@ -5189,6 +6691,10 @@ def _b323_contains_env_var_reference(value: str) -> bool:
     whenever the token merely *looks* like a substitution (e.g.
     ``${systemRoot}:/opt/evil/bin`` -- mixed-case name, not a real reference, but
     the naive check skipped it as if it were one).
+
+    ``default_operator`` is the audited build's grammar (see :func:`_b323_token_body_is_valid`):
+    pass ``_env_default_operator(ctx) == "yes"``. The False default is the pre-2026.9.7
+    reading, which is also the answer for an undetermined build.
     """
     if "$" not in value:
         return False
@@ -5198,7 +6704,7 @@ def _b323_contains_env_var_reference(value: str) -> bool:
         if value[i] != "$":
             i += 1
             continue
-        token = _b323_parse_env_token_at(value, i)
+        token = _b323_parse_env_token_at(value, i, default_operator)
         if token is not None:
             kind, end = token
             if kind == "escaped":
@@ -5279,10 +6785,74 @@ class ProseBinding(_NamedTuple):
     unresolved: bool  # B-879 round 4: a clouded EXEC verb reaches the block
 
 
+class _ScanMatch:
+    """The part of ``re.Match`` the content checks read, for a match a one-pass scanner
+    found: ``start()`` / ``end()`` / ``span()`` of the whole match and ``group(key)``."""
+
+    __slots__ = ("_text", "_start", "_end", "_groups")
+
+    def __init__(self, text: str, start: int, end: int, groups: "dict | None" = None):
+        self._text, self._start, self._end, self._groups = text, start, end, groups or {}
+
+    def start(self) -> int:
+        return self._start
+
+    def end(self) -> int:
+        return self._end
+
+    def span(self) -> "tuple[int, int]":
+        return (self._start, self._end)
+
+    def group(self, key=0):
+        return self._text[self._start:self._end] if key == 0 else self._groups[key]
+
+
+# The token shape, kept as the executable definition of what `_pb_tok_matches` returns.
+# C-730: it is no longer run over text - its `{{...}}` arm scanned from every "{{" to the next
+# "}" (quadratic on a run of "{" and on "{{ {{ {{ ...").
 _PB_TOK_RE = re.compile(
     r"\$\{?\w+\}?|\{\{[^}]*\}\}|<[A-Za-z_][\w-]*>|`[^`\n]*`|https?://\S+|"
     r"[A-Za-z][A-Za-z'" "\u2019" r"]*(?:\.[a-z]{2,}(?:/\S*)?)?|" "\u2014" r"|" "\u2013" r"|--|[,;:()]|\S"
 )
+_PB_TOK_BRACE_ARM = r"\{\{[^}]*\}\}|"
+assert _PB_TOK_RE.pattern.count(_PB_TOK_BRACE_ARM) == 1
+# Every arm but `{{...}}`: identical tokens on text with no "{{", and on text with one for
+# every position the brace arm does not win.
+_PB_TOK_REST_RE = re.compile(_PB_TOK_RE.pattern.replace(_PB_TOK_BRACE_ARM, ""))
+
+
+def _pb_tok_matches(s: str) -> list:
+    """What ``list(_PB_TOK_RE.finditer(s))`` returns - objects with ``start()``, ``end()``
+    and ``group(0)`` - in one pass (C-730).
+
+    The `{{...}}` arm matches exactly when the FIRST "}" after the "{{" is followed by a
+    second one. That "}" is found once and remembered while it is still ahead of the scan,
+    instead of being searched for again from every "{{". Every "{{" inside one run of braces
+    shares it, so only the run's first can be where the arm wins; a later one is never tried.
+    """
+    if "{{" not in s:
+        return list(_PB_TOK_REST_RE.finditer(s))
+    out: list = []
+    pos, n, close = 0, len(s), -2
+    while pos < n:
+        if s.startswith("{{", pos) and (pos == 0 or s[pos - 1] != "{"):
+            if close < pos + 2:
+                close = s.find("}", pos + 2)
+                if close < 0:
+                    close = n
+            if close < n and s.startswith("}", close + 1):
+                out.append(_ScanMatch(s, pos, close + 2))
+                pos = close + 2
+                continue
+        m = _PB_TOK_REST_RE.match(s, pos)
+        if m is None:               # whitespace: no arm starts on it
+            pos += 1
+            continue
+        out.append(m)
+        pos = m.end()
+    return out
+
+
 _PB_EMPH_RE = re.compile(r"\*\*|__|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
 
 _PB_DELIM = {",", ";", ":", "(", ")", "\u2014", "\u2013", "--"}
@@ -5463,7 +7033,7 @@ def _pb_tokens(s: str) -> list[str]:
       the word, so it is split into its own token here.
     """
     s = _pb_protect_abbrev(s)
-    matches = list(_PB_TOK_RE.finditer(s))
+    matches = _pb_tok_matches(s)
     out: list[str] = []
     for k, m in enumerate(matches):
         raw = m.group(0)
@@ -6232,7 +7802,10 @@ def _soft_break(prev: str, rest: str) -> bool:
     p = prev.rstrip()
     if not p.endswith(".") or p.endswith(".."):
         return False
-    wm = re.search(r"([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
+    # C-730: only the first character of the final run of letters and dots may start (every
+    # letter used to, each scanning the run); the run's leading dots are skipped outside the
+    # group, so group 1 - the only thing read - is what it was.
+    wm = re.search(r"(?<![A-Za-z.])\.*([A-Za-z](?:[A-Za-z.]*[A-Za-z])?)\.$", p)
     if not wm:
         return False
     w = wm.group(1)

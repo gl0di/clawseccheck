@@ -25,9 +25,10 @@ payloads) nor ``context.compiled``'s ``systemPrompt``/``prompt``/``messages`` si
 """
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
+from . import pathprobe
+from .configloader import loads_bounded, loads_shallow
 
 # Version gate: only parse the format we have grounded. Any other value -> we don't guess.
 _TRACE_SCHEMA = "openclaw-trajectory"
@@ -36,6 +37,12 @@ _SCHEMA_VERSION = 1
 # Bounds so a large/padded fleet of session logs can't blow up the scan (DoS guard).
 _MAX_FILES = 60
 _MAX_BYTES_PER_FILE = 8_000_000
+
+# C-664: model-shaped lines (tool-call arguments; context.compiled) are parsed with
+# `loads_shallow`, never `json.loads` and never a depth limit (a padded key would hide the
+# rest): the record is delivered unchanged, ELIDED marks what lies past the bound, and a line
+# with an elided part is counted in the reader's partial-read accounting. Only trajaudit's
+# tool-call reader reads text: the elided subtrees', and only if `arguments` holds the marker.
 
 # ---------------------------------------------------------------------------
 # B-732: OpenClaw locates a session's trajectory sidecar through a POINTER file
@@ -136,7 +143,7 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     # below does not save this, since e.g. a FIFO's st_size is 0. `is_file()` is a stat,
     # not an open, so it cannot itself hang; it must run before ANY read of this path.
     try:
-        if not pointer_path.is_file():
+        if not pathprobe.is_file(pointer_path):
             return "invalid", None
         pointer_size = pointer_path.stat().st_size
     except OSError:
@@ -150,7 +157,7 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     if len(raw) > _POINTER_MAX_BYTES:
         return "invalid", None
     try:
-        rec = json.loads(raw.decode("utf-8", "replace"))
+        rec = loads_bounded(raw.decode("utf-8", "replace"))
     except ValueError:
         return "invalid", None
     if not isinstance(rec, dict):
@@ -207,7 +214,7 @@ def _resolve_pointer_target(pointer_path: Path, home_resolved: Path) -> "tuple[s
     if not in_home:
         return "out_of_home", resolved
     try:
-        exists = resolved.is_file()
+        exists = pathprobe.is_file(resolved)
     except OSError:
         exists = False
     return ("resolved", resolved) if exists else ("missing", resolved)
@@ -240,7 +247,7 @@ def explicit_path_problem(explicit_path: str | None) -> str | None:
     """
     if not explicit_path:
         return None
-    p = Path(explicit_path).expanduser()
+    p = pathprobe.expand_user(explicit_path)
     # B-683: `Path.exists()` swallows ENOENT/ENOTDIR/EBADF/ELOOP and NOT EACCES, so a
     # path under a directory this process cannot stat made it RAISE - and the one
     # function whose entire job is to name a path problem answered one of them with
@@ -257,9 +264,10 @@ def explicit_path_problem(explicit_path: str | None) -> str | None:
         return f"{explicit_path}: {exc.strerror or exc}"
     # Reached only after a successful stat, so the parent is readable and this cannot
     # raise for the same reason.
-    if p.is_dir():
+    if pathprobe.is_dir(p):
         return f"{explicit_path}: is a directory, not a trajectory file"
-    return None
+    # C-720: a FIFO/socket/device is never opened, and is not "no trajectory here" either.
+    return None if pathprobe.is_file(p) else f"{explicit_path}: not a regular file"
 
 
 def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
@@ -282,9 +290,9 @@ def resolve_explicit_file(explicit_path) -> "tuple[list, bool]":
     One implementation rather than four, because the four had already drifted in what
     they recorded and a fifth copy is the obvious next step otherwise.
     """
-    p = Path(explicit_path).expanduser()
+    p = pathprobe.expand_user(explicit_path)
     try:
-        return ([p], False) if p.is_file() else ([], False)
+        return ([p], False) if pathprobe.is_file(p) else ([], False)
     except OSError:
         return [], True
 
@@ -335,18 +343,14 @@ def find_trajectory_files(
             stats["pointer_out_of_home"] = 0
             stats["pointer_invalid"] = 0
             stats["pointer_scan_capped"] = False
+            stats["unlistable_dirs"] = 0
         return []
-    try:
-        files = list(home.glob("agents/*/sessions/*.trajectory.jsonl"))
-    except OSError:
-        if stats is not None:
-            stats["files_total"] = 0
-            stats["files_capped"] = False
-            stats["pointer_targets_missing"] = 0
-            stats["pointer_out_of_home"] = 0
-            stats["pointer_invalid"] = 0
-            stats["pointer_scan_capped"] = False
-        return []
+    # C-682: `pathprobe.walk_segments`, not `Path.glob` -- found whenever the path is
+    # searchable (a home at mode 111, `agents/<id>` at 311), on every Python; a directory
+    # that must be listed and cannot be is counted in `unlistable_dirs`, never "no sidecars".
+    unlistable: list = []
+    files = list(pathprobe.walk_segments(
+        home, ("agents", "*", "sessions", "*.trajectory.jsonl"), errors=unlistable))
 
     try:
         home_resolved = home.resolve()
@@ -363,10 +367,9 @@ def find_trajectory_files(
     pointer_invalid = 0
     pointer_scan_capped = False
     scanned = 0
-    try:
-        pointer_it = home.glob(f"agents/*/sessions/*{_POINTER_SUFFIX}")
-    except OSError:
-        pointer_it = iter(())
+    pointer_unlistable: list = []
+    pointer_it = pathprobe.walk_segments(
+        home, ("agents", "*", "sessions", f"*{_POINTER_SUFFIX}"), errors=pointer_unlistable)
     try:
         # C-135: iterated LAZILY with an early break, mirroring trajectorystore.py's
         # own _pointer_files -- `list(home.glob(...))` first would fully enumerate and
@@ -419,6 +422,7 @@ def find_trajectory_files(
         # mean the same thing operationally (pointer counts are a lower bound, not
         # exhaustive) -- the distinct CAUSE is not worth a second stats key.
         pointer_scan_capped = True
+    pointer_scan_capped = pointer_scan_capped or bool(pointer_unlistable)  # C-682
 
     # Per-path mtime lookup that never raises: list.sort() evaluates the key for
     # every element before comparing any of them, so if the plain
@@ -447,6 +451,9 @@ def find_trajectory_files(
         stats["pointer_out_of_home"] = pointer_out_of_home
         stats["pointer_invalid"] = pointer_invalid
         stats["pointer_scan_capped"] = pointer_scan_capped
+        # The sidecar pass's count only: the pointer pass lists the same directories (its own
+        # gaps surface as `pointer_scan_capped`).
+        stats["unlistable_dirs"] = len(unlistable)
     return files[:max_files]
 
 
@@ -521,7 +528,7 @@ def read_proven_tools_by_origin(
                     if '"tool.call"' not in line:
                         continue
                     try:
-                        rec = json.loads(line)
+                        rec = loads_shallow(line).value  # C-664: see the note above
                     except ValueError:
                         continue
                     if not isinstance(rec, dict):
@@ -765,10 +772,17 @@ def _iter_source_tool_candidates(path, max_bytes_per_file: int, meta: dict):
                 if len(line) > _MAX_COMPILED_LINE_LEN:
                     meta["truncated"] = True
                     continue
+                # C-664: model-supplied content - read with the shallow reader, not a depth
+                # limit. Every field read below sits at a fixed shallow path, so the record
+                # is delivered unchanged; a line with an elided subtree is DISCLOSED the way
+                # an oversized one is (it is not skipped, but it was not read in full).
                 try:
-                    rec = json.loads(line)
+                    shallow = loads_shallow(line)
                 except ValueError:
                     continue
+                rec = shallow.value
+                if shallow.elided:
+                    meta["truncated"] = True
                 if not isinstance(rec, dict):
                     continue
                 if rec.get("traceSchema") != _TRACE_SCHEMA:
@@ -1090,6 +1104,7 @@ def read_events(
         # exhaustive, and behavioral.py's analysis_incompleteness() needs to name
         # each honestly.
         "unparseable_lines": False,
+        "deep_lines": False,  # C-664: a line nested deeper than the shallow reader follows
         "pointer_targets_missing": 0, "pointer_out_of_home": 0, "pointer_invalid": 0,
         "pointer_scan_capped": False,
     }
@@ -1127,8 +1142,12 @@ def read_events(
                     # event types we don't read, e.g. model.completed).
                     if not any(f'"{t}"' in line for t in _EVENT_TYPES):
                         continue
+                    # C-664: model-supplied content - read with the shallow reader, not a depth
+                    # limit; the fields read below are all shallow, so the record is delivered
+                    # unchanged and a line with an elided subtree is counted as one that was
+                    # not read in full (the flag below), never as a clean read.
                     try:
-                        rec = json.loads(line)
+                        shallow = loads_shallow(line)
                     except ValueError:
                         # B-767: this line passed the event-type pre-filter above --
                         # it looked like a target event and failed to parse, which a
@@ -1138,6 +1157,10 @@ def read_events(
                         # "nothing here" from "something here that could not be read".
                         meta["unparseable_lines"] = True
                         continue
+                    rec = shallow.value
+                    if shallow.elided:
+                        meta["unparseable_lines"] = True
+                        meta["deep_lines"] = True  # the true reason, for a renderer to word
                     if not isinstance(rec, dict):
                         continue
                     if rec.get("traceSchema") != _TRACE_SCHEMA:

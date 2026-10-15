@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
+from . import pathprobe
 from . import (
     audit, build_context, fingerprint, load_events, load_ignore, load_state, make_canary,
     record_events,
@@ -44,6 +45,7 @@ from .brand import WORDMARK
 # public name - stays exactly as it was, wrapping it.
 from .checks import detect_vet_type_with_reason, resolve_skill_target
 from .collector import LIMIT_DOMAIN_SKILL, Context, collect, limit_hits_for, sandbox_sync_marker_present
+from .configloader import loads_bounded
 from .checks import CHECKS_BY_ID, _credential_store_state
 from .invocation import cmd, command_prefix, display_path_for_delivery
 from .locking import journal_lock
@@ -52,7 +54,8 @@ from .locking import journal_lock
 from .monitor import (
     BASELINE_ABSENT, BASELINE_CORRUPT, BASELINE_CORRUPT_ALERT, BASELINE_OK,
     BASELINE_DIGEST_CHARS, baseline_reference, baseline_witness_event,
-    _coverage_signature, _diff_coverage, _home_identity,
+    _coverage_ahead, _coverage_record, _coverage_signature, _diff_coverage,
+    _home_identity,
     diff_with_notes, home_mismatch, read_baseline, snapshot_reference,
     witnessed_reference_for_state,
 )
@@ -66,12 +69,14 @@ from .iocdb import freshness_notice as _iocdb_freshness_notice
 from . import risk as _risk
 from .guide import render_next_actions, suggest_actions
 from .integrity import (
+    NOTE_BUNDLE_EXTRA,
     NOTE_PATH_ESCAPE,
     NOTE_SYMLINK,
     NOTE_UNCHECKED_PYC,
     NOTE_UNREADABLE,
     NOTE_VANISHED,
     build_fingerprint,
+    bundle_root_extras,
     package_digest,
 )
 from .report import _missing_layers_sentence
@@ -148,6 +153,7 @@ from .runstore import render_diff_json as _render_diff_json
 from .runstore import save_run as _save_run_snapshot
 from .menu import compute_ages, render_menu, render_onboarding
 from .palette import render_palette
+from .safeio import read_user_text
 from .percentile import render_percentile
 from .logsafe import get_logger
 from .safeio import secure_write_bytes, secure_write_text
@@ -324,8 +330,24 @@ def _with_next_actions(card: str, findings, score, ascii_only: bool,
     return card.rstrip("\n") + "\n\n" + render_next_actions(actions, ascii_only)
 
 
+# C-721: set for the run when the user asked for --ascii and the output is a human report,
+# so an em dash that arrives inside a finding's detail or a pipeline note (text the report
+# renderers do not own) is folded here, the one place every printed line passes through.
+# Never set for --json or the machine-format modes: folding a typographic quote to '"'
+# inside a JSON string would break the document.
+_EMIT_ASCII = False
+_ASCII_EMIT_MODES = frozenset({"dashboard", "dashboard_findings", "monitor"})
+
+
+def _set_emit_ascii(on: bool) -> None:
+    global _EMIT_ASCII
+    _EMIT_ASCII = bool(on)
+
+
 def _emit(text: str) -> None:
     """Print, falling back to ASCII-safe bytes if the console can't encode it."""
+    if _EMIT_ASCII:
+        text = asciify(text)
     if _EMIT_CAPTURE is not None:
         # B-723: intercepted, not copied - the line is replayed later, in its own slot.
         _EMIT_CAPTURE.append(text)
@@ -336,6 +358,20 @@ def _emit(text: str) -> None:
         print(text)
     except UnicodeEncodeError:
         print(asciify(text))
+
+
+def _emit_trailer(args, text: str, *, machine_output: bool = False) -> None:
+    """C-721: a human line that follows the primary output ("(run saved as ...)").
+
+    Under ``--json`` stdout must stay exactly one JSON document, so the line goes to
+    stderr; otherwise it is an ordinary ``_emit`` line on stdout, as documented.
+    ``machine_output`` is for a mode whose stdout is a document whatever the flags say
+    (``--sbom`` prints JSON in all three formats): its trailer always goes to stderr.
+    """
+    if machine_output or getattr(args, "json", False):
+        print(text, file=sys.stderr)
+    else:
+        _emit(text)
 
 
 @contextlib.contextmanager
@@ -396,7 +432,7 @@ def _store_dir(args) -> Path:
     one helper is what makes the promise structural instead of a list someone has to
     remember to extend.
     """
-    return Path(args.history).expanduser().parent
+    return pathprobe.expand_user(args.history).parent
 
 
 def _coverage_path(args) -> str:
@@ -1849,14 +1885,19 @@ def _run_vet_mcp(target, args, ascii_only: bool) -> int:
     if args.sarif:
         try:
             secure_write_text(
-                Path(args.sarif).expanduser(),
+                pathprobe.expand_user(args.sarif),
                 render_sarif(findings, tool_version=__version__, profile=profile),
             )
             _emit(f"(SARIF written to {args.sarif})")
         except OSError as exc:
             _emit(f"(could not write SARIF: {exc})")
     _record_run("vet_mcp", args)
-    _vet_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
+    # C-715: the exit code follows the verdict word here as in every other vet mode, for
+    # a named target and for the no-target "every configured server" form alike. The
+    # no-target form used to keep "1 on a FAIL/WARN server, otherwise 0", which left a
+    # host whose openclaw.json could not be read at CAUTION with exit 0. A readable
+    # config with no MCP servers is N/A (nothing to vet) and still exits 0.
+    _vet_rc = _vet_exit_code(profile)
     if args.json:
         _emit(render_vet_json(profile, mode="vet-mcp", version=__version__))
     else:
@@ -2184,6 +2225,47 @@ def _unusable_path_text(raw_path, reason: str) -> str:
     return _redact_home_paths(f"{_sanitize(str(raw_path))}: {reason}")
 
 
+# C-729: the options whose value is a filesystem path the tool expands with `~`. A value
+# naming a `~user` that does not exist is refused up front (`_refuse_unexpandable_paths`),
+# because `pathprobe.expand_user` would otherwise read it as a relative path and an output
+# flag would create a directory literally named `~user`. Keyed by argparse `dest`.
+# `tests/test_c729_unknown_tilde_user.py` walks the real parser and fails for any option
+# that takes a value and is in neither this table nor that test's "not a path" table.
+_PATH_OPTION_DESTS = (
+    "home", "save", "state", "events", "history", "data_dir", "vet", "vet_skill", "vet_plugin",
+    "vet_mcp", "advise", "analyze_trajectory", "behavioral", "vet_judged", "judged_bundle",
+    "attest", "badge", "html", "sarif", "pdf", "apply_ignore_proposals", "judged",
+    "propose_ignore", "log",
+)
+
+
+def _refuse_unexpandable_paths(args) -> None:
+    """Raise ``UnusableInputPath`` for the first path option whose ``~`` cannot be expanded.
+
+    C-729. Runs right after argument parsing, before anything is read or written, so a
+    mistyped account name ends the run with one named line instead of "unexpected internal
+    error" (or, for an output flag, a quietly created ``~name`` directory).
+    """
+    for dest in _PATH_OPTION_DESTS:
+        value = getattr(args, dest, None)
+        if not isinstance(value, str) or not value.startswith("~"):
+            continue
+        try:
+            Path(value).expanduser()
+        except RuntimeError:
+            if value == "~" or value.startswith("~/") or value.startswith("~\\"):
+                reason = ("the '~' in it cannot be expanded: this machine has no home "
+                          "directory for the current user")
+            else:
+                reason = "the '~user' in it names no account on this machine"
+            raise UnusableInputPath(value, reason) from None
+    # Every path option is usable; the tool's own defaults under `~` (the store, the
+    # history, the ledger) still need a home directory. Asked here, before anything is
+    # produced, so a run cannot print a report and then fail at the first default it needs -
+    # and can never fall back to a directory literally named `~` under the working directory.
+    pathprobe.require_home()
+
+
 def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     """``(payload, problem)`` for a judge-verdicts path. *problem* is None when it was read.
 
@@ -2210,7 +2292,7 @@ def _read_verdicts_payload(raw_path: str) -> "tuple[str, str | None]":
     if raw_path == "-":
         return sys.stdin.read(), None
     try:
-        return Path(raw_path).expanduser().read_text(encoding="utf-8"), None
+        return read_user_text(Path(raw_path).expanduser()), None
     except OSError as exc:
         return "", _path_problem_text(raw_path, exc, what="verdicts file")
     except UnicodeDecodeError:
@@ -2262,6 +2344,26 @@ def _verdicts_with_note(raw_path: str, flag: str) -> str:
     return payload
 
 
+def _vet_exit_code(profile) -> int:
+    """C-715: the ONE exit-code rule for --vet/--vet-skill/--vet-plugin/--vet-mcp/--advise.
+
+    The exit code follows the VERDICT WORD the dossier prints, never the finding list:
+    ``INSTALL`` -> 0, ``CAUTION`` and ``DO-NOT-INSTALL`` -> 1. Each mode used to keep its
+    own copy of "FAIL/WARN -> 1", which left a CAUTION that came from an UNKNOWN (an empty
+    directory, a self-referencing symlink, an unparseable spec) at 0 - the code a clean
+    vet returns - while the header said CAUTION, and let ``--advise`` and ``--vet-skill``
+    disagree about the same path. ``N/A`` (nothing to assess: a bare --vet-mcp over a
+    readable config with no MCP servers) is not a CAUTION and stays 0. A path that is not
+    there never gets here: that is the usage-error code 2, returned before anything is
+    assessed.
+
+    ``--vet-source`` deliberately does NOT use this: it judges an identity only, and
+    "no known-bad record" is a CAUTION whose next step is to fetch the source and vet it,
+    so it keeps exit 0 (see its branch in _main).
+    """
+    return 0 if profile.verdict in ("INSTALL", "N/A") else 1
+
+
 def _unassessable_target(typed) -> "str | None":
     """Why a user-named path cannot be assessed AT ALL, or None if it can be reached.
 
@@ -2284,7 +2386,7 @@ def _unassessable_target(typed) -> "str | None":
     top-level handler and printed "unexpected internal error (PermissionError) ... open an
     issue" - the tool asking to be bug-reported for the user's own directory mode.
     """
-    target_path = Path(str(typed)).expanduser()
+    target_path = pathprobe.expand_user(str(typed))
     try:
         os.stat(target_path)  # follows symlinks: "is there something here to read?"
     except (FileNotFoundError, NotADirectoryError):
@@ -2353,7 +2455,8 @@ _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 
 def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit, *,
-                                  coverage_page: dict | None = None) -> None:
+                                  coverage_page: dict | None = None,
+                                  plugin_sweep=None) -> None:
     """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
 
     These three used to WIN the mode race against `--dashboard`, run their own bare
@@ -2375,12 +2478,17 @@ def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit,
 
     A failed write is reported and does not stop the card: the dashboard is the
     deliverable and the file is its delivery (B-459's rule, applied to the riders).
+
+    *plugin_sweep* is the `--full` dashboard's live plugin sweep (None on the non-full
+    call, where the sweep never ran and "not scanned" is true). Only `--html` reads it,
+    for its Plugins inventory row; `--badge` and `--sarif` have no plugin-row surface, so
+    do not "fix" them by threading it through.
     """
     for value, label, render in (
         (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
         (getattr(args, "html", None), "HTML report",
          lambda: render_html(findings, score, native=ctx.native, ctx=ctx,
-                             coverage_page=coverage_page)),
+                             coverage_page=coverage_page, plugin_sweep=plugin_sweep)),
         (getattr(args, "sarif", None), "SARIF",
          lambda: render_sarif(findings, score, __version__, ctx=ctx)),
     ):
@@ -2529,7 +2637,15 @@ def _flag_coherence_notes(args) -> list[str]:
         if bool(getattr(args, "yes", False)):
             notes.append("note: --yes has no effect without --purge or "
                          "--apply-ignore-proposals")
-        return notes  # the default path honors every tracked global modifier
+        # C-719: --format / --save-sbom-run are honored only by --sbom (_MODE_HONORS["sbom"]),
+        # which is a primary mode - so reaching HERE means neither could have run. This
+        # branch used to return before naming them, so `--save-sbom-run` alone ran an
+        # ordinary audit and stored nothing without a word.
+        if getattr(args, "format", "native") != "native":
+            notes.append("note: --format has no effect without --sbom")
+        if bool(getattr(args, "save_sbom_run", False)):
+            notes.append("note: --save-sbom-run has no effect without --sbom")
+        return notes  # the default path honors the tracked global modifiers not noted above
     win_attr, win_flag = active[0]
     ignored = [
         f for a, f in active[1:]
@@ -2658,10 +2774,10 @@ def _onboarding_reason(home: Path) -> str | None:
     present but unreadable" case, which the dashboard/error path surfaces distinctly -
     onboarding must not hide a real, permission-blocked setup behind a welcome screen.
     """
-    if not home.exists():
+    if not pathprobe.exists(home):
         return "missing"
     try:
-        if home.is_dir() and not any(home.iterdir()):
+        if pathprobe.is_dir(home) and not any(home.iterdir()):
             return "empty"
     except OSError:
         return None
@@ -2697,6 +2813,17 @@ _PURGE_FILENAMES = (
     "sbom_runs.jsonl",
     # C-520: --incident-open's opt-in incident-lifecycle store. Same reasoning.
     "incidents.jsonl",
+    # C-517: --watch's liveness heartbeat (pid + the absolute home path + timestamps).
+    # Written to <store>/watch_heartbeat.json by _watch_heartbeat_path; read by --watch-status.
+    "watch_heartbeat.json",
+    # C-725: the advisory lock a running --watch holds (<store>/watch.lock, empty file).
+    "watch.lock",
+    # The bare --pdf default (_default_pdf_target's fallback, <store>/report.pdf). The four
+    # "openclaw-security-report.*" names above are F-162's guess at default names; this is
+    # the name the tool actually writes for PDF. NOT clawseccheck-report.pdf: that is the
+    # managed-attachment name and it lives in <openclaw home>/media/outbound, outside the
+    # store, which --purge must never reach into.
+    "report.pdf",
 )
 
 
@@ -2710,10 +2837,15 @@ def _run_watch_cli(args) -> int:
     loop does (SIGTERM/SIGINT), which is the one deliberate way this command differs
     from every other mode in this file.
     """
-    home = Path(args.home).expanduser()
-    if not home.is_dir():
+    home = pathprobe.expand_user(args.home)
+    if not pathprobe.is_dir(home):
         print(f"{cmd('--watch')}: '{home}' is not a directory \u2014 nothing to watch.",
               file=sys.stderr)
+        return 1
+    # C-725: one watcher per store - refuse before announcing a watch that will not happen.
+    may_start, refusal = _watch.can_start(_watch_heartbeat_path(args))
+    if not may_start:
+        print(refusal, file=sys.stderr)
         return 1
     _emit(f"Watching {home} for changes (Ctrl-C to stop) \u2014 a change triggers "
           f"`--monitor --verbose` after a {args.watch_debounce:g}s debounce window.\n"
@@ -2733,8 +2865,12 @@ def _run_watch_cli(args) -> int:
 def _run_watch_status(args) -> int:
     """--watch-status: read the heartbeat --watch writes and say whether it is
     still alive - read-only, writes nothing (same contract as --brief)."""
-    hb = _watch.read_heartbeat(_watch_heartbeat_path(args))
-    word, sentence = _watch.describe_liveness(hb)
+    hb_path = _watch_heartbeat_path(args)
+    hb, problem = _watch.read_heartbeat_ex(hb_path)
+    lock_path = _watch.lock_path_for(hb_path)
+    lock, lock_why = _watch.probe_watch_lock_ex(lock_path)
+    holder = _watch.lock_holder_pid(lock_path) if lock == "held" else None
+    word, sentence = _watch.describe_liveness(hb, problem, lock, lock_why, holder)
     _emit(f"{word}: {sentence}")
     return 0 if word == "ALIVE" else 1
 
@@ -2764,9 +2900,9 @@ def _run_purge(args) -> int:
     """Delete ClawSecCheck's local store (opt-in, confirmation-gated).
 
     Resolves the store directory from --history's parent (all _PURGE_FILENAMES
-    entries - the four store files plus the four default report-renderer
-    filenames, see that constant's comment for why - live alongside each other
-    under ~/.clawseccheck/ by default). Operates ONLY on that fixed whitelist
+    entries - the store files plus the default-named report outputs, see that
+    constant's comment for why - live alongside each other under ~/.clawseccheck/
+    by default). Operates ONLY on that fixed whitelist
     plus their ".lock" sidecars - never globs or rmtree's the directory, so an
     unrelated file the user happens to keep there is never at risk. Read-only
     until the user (or --yes) confirms.
@@ -2774,7 +2910,7 @@ def _run_purge(args) -> int:
     store_dir = _store_dir(args)
     candidates = [store_dir / name for name in _PURGE_FILENAMES]
     candidates += [store_dir / (name + ".lock") for name in _PURGE_FILENAMES]
-    existing = [p for p in candidates if p.exists()]
+    existing = [p for p in candidates if pathprobe.exists(p)]
 
     if not existing:
         _emit("Nothing to purge \u2014 no ClawSecCheck local store files found.")
@@ -2832,7 +2968,11 @@ def _run_apply_ignore_proposals(args) -> int:
     still flagged by --monitor) is untouched by this being the write's origin.
     """
     try:
-        raw = Path(args.apply_ignore_proposals).expanduser().read_text(encoding="utf-8")
+        raw = read_user_text(pathprobe.expand_user(args.apply_ignore_proposals))
+    except UnicodeDecodeError:
+        _emit(f"clawseccheck: could not read the proposals file "
+              f"{_sanitize(str(args.apply_ignore_proposals))}: not valid UTF-8 text.")
+        return 1
     except OSError as exc:
         # B-562: this always reported and exited 1, so it was never the silent failure
         # its two siblings were - but it printed only the exception CLASS
@@ -2879,7 +3019,7 @@ def _run_apply_ignore_proposals(args) -> int:
         _emit("Nothing to apply \u2014 no proposed entries in that file.")
         return 0
 
-    ignore_path = Path(args.home).expanduser() / ".clawseccheckignore"
+    ignore_path = pathprobe.expand_user(args.home) / ".clawseccheckignore"
     # B-478: `append_entries` skips entries the file already holds, so a second apply of
     # the same proposals printed the full list under "will be appended to ..." and then
     # "Applied 0" - which reads as a failed write, not as the idempotency it actually is.
@@ -2945,6 +3085,10 @@ def _chain_verdict(label: str, path: str, ok: "bool | None", msg: str,
     not proceed as if this was verified. Giving "could not check" its own exit code would
     just move the collapse into a place no shell idiom looks.
     """
+    if msg.startswith("broken at entry "):
+        # C-726: the verifiers count entries from 0 (tests pin their messages), so say so
+        # here rather than let "entry 0" read as a miscount of the first line.
+        msg = f"{msg} (entries are counted from 0: entry 0 is the first line)"
     if ok is True:
         return f"{label} chain OK ({path}): {msg}", 0
     if ok is False:
@@ -3151,7 +3295,59 @@ def _run_single_check(finding_id: str, args):
     return chk(ctx), None
 
 
+_EXIT_SIGPIPE = 141  # 128 + SIGPIPE: the shell convention for "my reader went away"
+
+
+def _stdout_to_devnull() -> None:
+    """C-721: point fd 1 at the null device after the reader of our stdout has gone.
+
+    Whatever is still buffered in ``sys.stdout`` then flushes into the void, so the
+    interpreter's own flush at exit has nothing left to fail on (it would otherwise print
+    "Exception ignored ... BrokenPipeError" and turn the exit code into 120). Best effort:
+    a stdout with no file descriptor (an embedding host, a test capture) has nothing to
+    redirect.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+        sys.stdout.flush()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def main(argv=None) -> int:
+    """C-721: the outermost wrapper - settles stdout before the interpreter does.
+
+    A reader that closes the pipe early (``... | head -1``) is normal use, not a defect.
+    The flush is done HERE, inside a handler, because the interpreter's own flush at exit
+    cannot be caught: output smaller than the buffer only fails there. When the pipe
+    broke after the run had finished computing, the run's own exit code stands; when it
+    broke mid-run, ``_guarded_main`` has already answered 141.
+    """
+    try:
+        code = _guarded_main(argv)
+    except SystemExit:
+        _settle_stdout()
+        raise
+    finally:
+        _set_emit_ascii(False)
+    _settle_stdout()
+    return code
+
+
+def _settle_stdout() -> None:
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _stdout_to_devnull()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _guarded_main(argv=None) -> int:
     """Thin top-level guard (B-101): never dump a raw traceback at users.
 
     Any unexpected error inside the audit/render pipeline becomes a clean one-line
@@ -3177,8 +3373,9 @@ def main(argv=None) -> int:
 
     C-314: the Python-version check runs before anything else in this
     function - including the try/except below - because an unpacked (non-pip)
-    install on Python <3.9 parses cleanly (no clean ImportError) but can fail later
-    with a confusing runtime error; see docs/TROUBLESHOOTING.md.
+    install on Python <3.10 parses cleanly (no clean ImportError) but can fail later
+    with a confusing runtime error; see docs/TROUBLESHOOTING.md. The source stays
+    3.9-parsable on purpose: a 3.9 user must reach this message, not a SyntaxError.
 
     I-038: all three ``except`` arms below already return exactly the exit code
     ``--exit-code-scheme graduated`` reserves for "could not produce a trustworthy
@@ -3193,9 +3390,9 @@ def main(argv=None) -> int:
     1 is already the right code for "the tool itself did not finish" under both
     schemes.
     """
-    if sys.version_info < (3, 9):
+    if sys.version_info < (3, 10):
         print(
-            "clawseccheck: needs Python 3.9+ (found "
+            "clawseccheck: needs Python 3.10+ (found "
             f"{sys.version_info[0]}.{sys.version_info[1]}); see "
             "docs/TROUBLESHOOTING.md for how to point the skill at a newer interpreter.",
             file=sys.stderr,
@@ -3247,6 +3444,22 @@ def main(argv=None) -> int:
         print(f"clawseccheck: {exc.text}. Nothing was produced; fix the path and re-run.",
               file=sys.stderr)
         return 1
+    except pathprobe.NoHomeDirectory as exc:
+        # C-729: a default location under `~` could not be resolved. Not a defect of this
+        # tool and not a path the user typed, so neither the bug-report banner nor the
+        # "fix the path" line fits. Nothing was read or written under a literal `~`.
+        raw = list(sys.argv[1:] if argv is None else argv)
+        if "--debug" in raw:
+            raise
+        print(f"clawseccheck: {exc}, so this tool's own files under ~/.clawseccheck cannot be "
+              "located. Nothing was produced; set HOME to your home directory and re-run.",
+              file=sys.stderr)
+        return 1
+    except BrokenPipeError:
+        # C-721: the reader of stdout went away mid-run. Not an internal error and not
+        # worth a word: no message, and the shell convention for the exit code.
+        _stdout_to_devnull()
+        return _EXIT_SIGPIPE
     except Exception as exc:  # noqa: BLE001 - a security tool must fail readably, not crash
         raw = list(sys.argv[1:] if argv is None else argv)
         if "--debug" in raw:
@@ -3258,6 +3471,25 @@ def main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+
+
+def _vet_attestation(attestation: dict, src: str) -> dict:
+    """C-714: remove the unusable parts of an attestation and say so on stderr.
+
+    Each part is vetted on its own (``attest.vet_attestation``): an agent roster or a
+    ``tools`` / ``proven_tools`` / ``host_monitors`` list with anything unusable in it is
+    removed whole and then reads as if that key had not been written, and the rest of the
+    attestation is used as written. The warning is one line with counts and fixed reasons -
+    never an entry's content, because the attestation may be attacker-influenced. Returns
+    the attestation to use.
+    """
+    from . import attest as _attest  # noqa: PLC0415
+    vetted, notes = _attest.vet_attestation(attestation)
+    if notes:
+        print(f"\u26a0 ignored in the attestation from {src}: {'; '.join(notes)}. "
+              "Each is ignored whole, as if its key were absent; the rest of the "
+              "attestation was read as written.", file=sys.stderr)
+    return vetted
 
 
 _JUDGED_BUNDLE_CACHE: dict = {}
@@ -3471,7 +3703,7 @@ def _findings_exit_gate(args, findings, ctx, *, extra_fail: bool = False, score=
 _PDF_AUTO = "\0pdf-auto\0"
 
 
-def _default_pdf_target(home: str) -> "tuple[str, bool]":
+def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[str, bool]":
     """Where a bare ``--pdf`` writes, and whether that is the managed root.
 
     B-606: OpenClaw parses a ``MEDIA:<path>`` directive off the assistant's own reply and
@@ -3490,13 +3722,23 @@ def _default_pdf_target(home: str) -> "tuple[str, bool]":
 
     Never CREATES the directory - an explicit, opt-in ``--pdf`` write is what CLAUDE.md
     allows; auto-resolution must not manufacture the very precondition it is testing for.
+
+    The fallback is ``<store>/report.pdf``. ``store_dir`` is the run's store directory
+    (``_store_dir(args)``) when ``--data-dir``/``--history`` moved it off the default, so
+    a scratch run's bare ``--pdf`` lands in the scratch store instead of the real
+    ``~/.clawseccheck`` - the same "the store moves together" promise ``--data-dir``
+    makes for history/state/events/coverage - and ``--purge`` (which looks in that same
+    directory) can reach it. ``None`` means the default store and keeps the home-relative
+    ``~/.clawseccheck/report.pdf`` spelling, which is what the attach note prints.
     """
-    managed = Path(home).expanduser() / "media" / "outbound"
+    managed = pathprobe.expand_user(home) / "media" / "outbound"
     try:
-        if managed.is_dir() and os.access(managed, os.W_OK):
+        if pathprobe.is_dir(managed) and os.access(managed, os.W_OK):
             return str(managed / "clawseccheck-report.pdf"), True
     except OSError:
         pass
+    if store_dir is not None:
+        return str(store_dir / "report.pdf"), False
     return "~/.clawseccheck/report.pdf", False
 
 
@@ -3518,6 +3760,23 @@ class _SuggestingParser(argparse.ArgumentParser):
             if hints:
                 message += "\n" + "\n".join(hints)
         super().error(message)
+
+
+def _seed_argument(value: str) -> str:
+    """C-724: ``--seed`` takes the same seed the ``liveTest`` bucket will accept.
+
+    The harness would happily render scenarios from an empty seed, but the bucket reads an
+    empty or over-long one as unusable and the verdict then runs "unseeded" - so a CI
+    script that passed ``--seed ""`` got a run it could never reproduce, with nothing said.
+    A seed of only whitespace is refused with them: the bucket would take it, but it is a
+    quoting mistake far more often than a choice. Any non-blank seed up to the bucket's
+    bound keeps working exactly as before."""
+    if not value.strip():
+        raise argparse.ArgumentTypeError("must not be empty or blank")
+    if len(value) > _pipeline._MAX_LIVE_TEST_SEED_LEN:
+        raise argparse.ArgumentTypeError(
+            f"must be at most {_pipeline._MAX_LIVE_TEST_SEED_LEN} characters")
+    return value
 
 
 def _main(argv=None) -> int:
@@ -3560,8 +3819,11 @@ def _main(argv=None) -> int:
                         "tree, so this is the escape hatch on a very large one")
     p.add_argument("--no-dist", action="store_true",
                    help="skip reading the installed OpenClaw package's own version "
-                        "(C4 corroborates it against meta.lastTouchedVersion to "
-                        "surface a version rollback). Read-only PATH lookup, no subprocess")
+                        "(B33 judges that installed build, not the config stamp "
+                        "meta.lastTouchedVersion, on this machine's own OpenClaw home, and C4 "
+                        "corroborates it against the stamp to surface a version rollback; "
+                        "with this flag the stamp decides B33). "
+                        "Read-only PATH lookup, no subprocess")
     p.add_argument("--save", metavar="PATH", help="also write the report to a file")
     p.add_argument("--save-run", action="store_true", dest="save_run",
                    help="also persist this run's full finding list, addressable by its "
@@ -3597,9 +3859,11 @@ def _main(argv=None) -> int:
                         f"before the re-scan runs, so one burst of writes triggers one "
                         f"re-scan, not several (default: {_watch.DEFAULT_DEBOUNCE_S:g})")
     p.add_argument("--watch-status", action="store_true",
-                   help="is a --watch process still alive? Reads its heartbeat file "
-                        "under --data-dir and reports ALIVE / STALE / STOPPED / NOT "
-                        "RUNNING \u2014 read-only, writes nothing, does not start a watch")
+                   help="is a --watch process running? Probes the store's lock under "
+                        "--data-dir and reads its heartbeat; reports ALIVE, LOCK HELD, "
+                        "STALE, STOPPED, STALE RECORD, UNREADABLE, UNKNOWN or NOT RUNNING "
+                        "(exit 0 only for ALIVE) \u2014 read-only, writes nothing, does "
+                        "not start a watch")
     p.add_argument("--vet", metavar="TARGET",
                    help="vet a skill / plugin / MCP target BEFORE installing it \u2014 the type is "
                         "autodetected by content (explicit flags below force an engine)")
@@ -3634,8 +3898,9 @@ def _main(argv=None) -> int:
                    help="INCIDENT-LIFECYCLE: open a PERSISTED incident record (status=open) linked to "
                         "this run's actionable findings, a best-effort PID when one of them "
                         "names one, and the current --events journal position \u2014 stored under "
-                        "--data-dir, never in the audited home. Refuses if nothing actionable "
-                        "was found this run")
+                        "--data-dir, never in the audited home. Refuses (non-zero exit, nothing "
+                        "written) if --home is missing or an empty directory and no FAIL was "
+                        "found, or if nothing actionable (a FAIL or WARN) was found this run")
     p.add_argument("--incident-mark", nargs=2, metavar=("ID", "STATUS"), dest="incident_mark",
                    help="INCIDENT-LIFECYCLE: transition a --incident-open record's status. STATUS is one "
                         "of open/investigating/mitigated/closed \u2014 forward moves one step at "
@@ -3678,7 +3943,7 @@ def _main(argv=None) -> int:
                    help="active prompt-injection canary self-test")
     p.add_argument("--redteam", action="store_true",
                    help="print a live red-team payload suite for adversarial self-testing")
-    p.add_argument("--seed", default=None, metavar="VALUE",
+    p.add_argument("--seed", default=None, metavar="VALUE", type=_seed_argument,
                    # B-475: this reached make_suite only, so `--seed X --self-test` gave
                    # reproducible red-team tokens and freshly random canary/dry-run/
                    # multi-turn ones in the same output - three of the four harnesses
@@ -3687,7 +3952,8 @@ def _main(argv=None) -> int:
                         "--redteam, --dryrun, --multiturn and the --self-test/--full "
                         "sections that render them (reproducible CI runs, and the seed a "
                         "--judged-bundle liveTest verdict must carry to be eligible for "
-                        "history/trend); default is a fresh random seed each run")
+                        "history/trend); 1 to 128 characters, not blank; default is a fresh "
+                        "random seed each run")
     p.add_argument("--dryrun", action="store_true",
                    help="print a behavioral dry-run harness (prompt-injection self-test across all sources)")
     p.add_argument("--multiturn", action="store_true",
@@ -3759,7 +4025,8 @@ def _main(argv=None) -> int:
                         "file itself into chat (a mobile client opens it inline; do not "
                         "paste the path or re-render its contents). Given with no PATH, "
                         "auto-resolves to OpenClaw's managed attachment directory when "
-                        "one exists and is writable, else ~/.clawseccheck/report.pdf")
+                        "one exists and is writable, else report.pdf in the local store "
+                        "(~/.clawseccheck/, or --data-dir)")
     # C-426: `--fail-under N` was REMOVED here, not deprecated-in-place. It thresholded
     # the audit SCORE, and under the five-layer rule a run only carries one when all
     # five layers ran - so for the ordinary invocation there was nothing left for it to
@@ -3778,11 +4045,13 @@ def _main(argv=None) -> int:
                         "chosen severity floor instead of any FAIL")
     p.add_argument("--exit-code", action="store_true",
                    help="exit 1 if any unsuppressed FAIL finding exists. DIFFERENT "
-                        "contract with --monitor: exit 3 if any alert at HIGH severity "
-                        "or above was persisted this run (--fail-on moves that floor), "
-                        "exit 1 only if the monitor's local store could not be written, "
-                        "exit 0 otherwise -- 0 by default, opt-in, off unless this flag "
-                        "or --fail-on is also given. Exit 2 is argparse's own reserved "
+                        "contract with --monitor: exit 1 whenever the monitor's local "
+                        "store could not be written (with or without this flag - a bare "
+                        "--monitor exits 0 only when its writes landed), exit 3 if any "
+                        "alert at HIGH severity or above was persisted this run "
+                        "(--fail-on moves that floor), exit 0 otherwise -- the exit-3 "
+                        "arm is opt-in, off unless this flag or --fail-on is also "
+                        "given. Exit 2 is argparse's own reserved "
                         "code for a usage error on either path, never emitted by this "
                         "flag itself.")
     # I-038: purely additive and opt-in. `binary` (the default) is BYTE-FOR-BYTE what
@@ -3848,8 +4117,9 @@ def _main(argv=None) -> int:
     p.add_argument("--data-dir", metavar="DIR", default=None,
                    help="put this run's whole local store under DIR \u2014 the monitor state, "
                         "the event journal, the score history AND the coverage/freshness "
-                        "ledger. They move together, so a scratch run cannot half-redirect "
-                        "and write into your real store. An explicitly given "
+                        "ledger, plus a bare --pdf's fallback report.pdf. They move together, "
+                        "so a scratch run cannot half-redirect and write into your real "
+                        "store. An explicitly given "
                         "--state/--events/--history still wins (the ledger follows "
                         "--history, which is also where --purge looks for it).")
     p.add_argument("--no-history", action="store_true",
@@ -3883,8 +4153,9 @@ def _main(argv=None) -> int:
                         "of the audit; read-only, same targeting as --explain")
     p.add_argument("--purge", action="store_true",
                    help="delete ClawSecCheck's local store (history/events/state/coverage "
-                        "files, plus the default-named badge/html/sarif/pdf report files if "
-                        "present, + their lock sidecars) and exit \u2014 confirmation-gated unless "
+                        "files and the --watch heartbeat, plus the default-named "
+                        "badge/html/sarif/pdf report files if present, + their lock "
+                        "sidecars) and exit \u2014 confirmation-gated unless "
                         "--yes is also given; nothing else is touched")
     p.add_argument("--apply-ignore-proposals", metavar="PATH", dest="apply_ignore_proposals",
                    help="apply a --propose-ignore output: append its proposed entries to "
@@ -3988,6 +4259,7 @@ def _main(argv=None) -> int:
             "withhold entirely). See CHANGELOG.md."
         )
     args = p.parse_args(argv)
+    _refuse_unexpandable_paths(args)
     # C-419: --monitor writes THREE files and --history defaulted independently of the
     # other two, so redirecting only --state/--events silently kept writing into the real
     # history. That is not hypothetical: a test campaign did exactly this and put ~51
@@ -4017,7 +4289,7 @@ def _main(argv=None) -> int:
         if not str(args.data_dir).strip():
             p.error("--data-dir needs a directory; an empty value would silently target "
                     "the current working directory, which --purge would then empty")
-        _store = Path(args.data_dir).expanduser()
+        _store = pathprobe.expand_user(args.data_dir)
         for _attr, _name in (("state", "state.json"), ("events", "events.jsonl"),
                              ("history", "history.jsonl")):
             if getattr(args, _attr) is None:
@@ -4035,7 +4307,11 @@ def _main(argv=None) -> int:
     _pdf_used_managed_root = False
     _pdf_was_auto = args.pdf == _PDF_AUTO
     if _pdf_was_auto:
-        args.pdf, _pdf_used_managed_root = _default_pdf_target(args.home)
+        # The store follows --data-dir/--history (B-599), so the PDF fallback does too;
+        # the default store keeps its home-relative spelling (None).
+        args.pdf, _pdf_used_managed_root = _default_pdf_target(
+            args.home,
+            None if args.history == DEFAULT_HISTORY else _store_dir(args))
 
     # Surface (on stderr) any second mode flag or global modifier the resolved mode
     # won't honor, so nothing is dropped silently (B-066 / B-067). Warn-and-continue:
@@ -4066,6 +4342,11 @@ def _main(argv=None) -> int:
     # disagreed - `--badge ""` printed a full default report at rc=0 while the coherence
     # note announced it was running --badge.
     _empty_flag = _empty_mode_target(args)
+    if _empty_flag == "--verify-baseline":
+        # C-726: its argument is the reference value a --monitor run printed, not a vet target.
+        print("--verify-baseline needs a baseline reference \u2014 got an empty value. "
+              "Pass the reference value a previous --monitor run printed.", file=sys.stderr)
+        return 2
     if _empty_flag:
         print(f"{_empty_flag} needs a target \u2014 got an empty value. "
               "Pass a path, slug, or URL.", file=sys.stderr)
@@ -4081,10 +4362,20 @@ def _main(argv=None) -> int:
               "Pass a path, slug, or URL.", file=sys.stderr)
         return 2
 
+    # C-721: --save is a modifier, not a primary mode, so the check above never sees it:
+    # `--save ""` was falsy at the `if args.save:` write site and silently produced
+    # nothing at rc 0, where --html/--sarif/--badge/--pdf given "" are a usage error.
+    if args.save is not None and not args.save.strip():
+        print("--save needs a path \u2014 got an empty value. "
+              "Pass the file to write the report to.", file=sys.stderr)
+        return 2
+
     # C-426 part B: _PRIMARY_MODES decides which mode runs. Every branch below asks this
     # one value rather than re-testing its own flag, so the table's order IS the dispatch
     # order instead of a hand-maintained mirror of it (see _resolve_mode).
     _mode = _resolve_mode(args)
+    _set_emit_ascii(args.ascii and not args.json
+                    and (not _mode or _mode in _ASCII_EMIT_MODES))
 
     # standalone modes that don't audit ~/.openclaw
     if _mode == "purge":
@@ -4174,6 +4465,34 @@ def _main(argv=None) -> int:
             lines.append("machine, 7,850 .pyc files on the interpreter's own paths were all")
             lines.append("timestamp-based and none was hash-based at all. Worth investigating if")
             lines.append("you did not put it there yourself.")
+        # C-637: importable files beside audit.py sit outside the digested package but are
+        # loaded ahead of the standard library. Presence-only disclosure, never folded into
+        # `combined` or rc (the signed digest is over clawseccheck/ alone), like the two
+        # notes above. audit.py itself refuses to run while any exist.
+        _bundle_rows = bundle_root_extras()
+        _bundle_extras = [(n, why) for k, n, why in _bundle_rows if k == NOTE_BUNDLE_EXTRA]
+        _bundle_unlisted = [(n, why) for k, n, why in _bundle_rows if k == NOTE_UNREADABLE]
+        if _bundle_extras:
+            lines.append("")
+            lines.append(f"Coverage note: {len(_bundle_extras)} importable entr"
+                         f"{'y' if len(_bundle_extras) == 1 else 'ies'} "
+                         f"{'sits' if len(_bundle_extras) == 1 else 'sit'} beside audit.py, "
+                         f"OUTSIDE the digested package:")
+            for _name, _why in _bundle_extras[:10]:
+                lines.append(f"  {ascii(_name)}  \u2014  {_why}")
+            if len(_bundle_extras) > 10:
+                lines.append(f"  (and {len(_bundle_extras) - 10} more)")
+            lines.append("Python puts this directory at the front of its import path, so a module")
+            lines.append("here (json.py, re.py, sitecustomize.py, ...) is loaded ahead of the")
+            lines.append("standard library and its bytes are not in the digest above. A clean")
+            lines.append("install has none of these, and audit.py refuses to run while any exist.")
+            lines.append("Worth investigating if you did not put them there yourself.")
+        for _name, _why in _bundle_unlisted:
+            lines.append("")
+            lines.append(f"Coverage note: the directory beside the package {ascii(_name)} "
+                         f"{_why}.")
+            lines.append("Files there are loaded ahead of the standard library and are not in the")
+            lines.append("digest above.")
         if _unreadable:
             lines.append("")
             lines.append(f"INTEGRITY CANNOT BE ESTABLISHED: {len(_unreadable)} path"
@@ -4559,13 +4878,13 @@ def _main(argv=None) -> int:
         # have the agent run this at session start with no consent prompt; the consent rule
         # covers --monitor, which writes.
         from .report import render_brief  # noqa: PLC0415
-        _state_path = Path(args.state).expanduser()
+        _state_path = pathprobe.expand_user(args.state)
         _state, _mtime = None, None
         try:
-            if _state_path.is_file():
+            if pathprobe.is_file(_state_path):
                 _mtime = datetime.fromtimestamp(
                     _state_path.stat().st_mtime).isoformat(timespec="seconds")
-                _state = json.loads(_state_path.read_text(encoding="utf-8"))
+                _state = loads_bounded(read_user_text(_state_path))
         except (OSError, ValueError):
             _state = None
         try:
@@ -4594,7 +4913,8 @@ def _main(argv=None) -> int:
         # effect of being asked how to install one has taken a decision nobody offered it.
         from .guide import render_cron_recipe  # noqa: PLC0415
         _emit(render_cron_recipe(ascii_only=ascii_only,
-                                 data_dir=args.data_dir or "~/.clawseccheck"))
+                                 data_dir=args.data_dir or "~/.clawseccheck",
+                                 home=args.home))
         return 0
 
     if _mode == "functions":
@@ -4669,7 +4989,6 @@ def _main(argv=None) -> int:
         # actually scanned rather than what was typed (it read "skill 'SKILL.md'" before).
         if vet_kind == "skill":
             vet_path = str(resolve_skill_target(vet_path))
-        vet_target = Path(vet_path).expanduser()
         f = vet_skill(vet_path) if vet_kind == "skill" else vet_plugin(vet_path)
         # C-254: use with --vet/--vet-skill/--vet-plugin only (checked above) - a
         # distinct stdout artifact, same pattern as --emit-manifest below.
@@ -4684,22 +5003,13 @@ def _main(argv=None) -> int:
             # it re-derives overall_status/score/grade from this pool the normal way.
             f = escalate_vet_output(f, verdicts_raw, target=vet_path)
         profile = build_profile(f, vet_path, vet_kind)
-        # rc: overall FAIL/WARN -> 1 (dangerous/suspicious target);
-        # UNKNOWN + target unusable -> 1;
-        # UNKNOWN + target exists (valid target, inconclusive assessment) -> 0;
-        # PASS -> 0.
+        # rc follows the verdict word (C-715, _vet_exit_code): INSTALL -> 0, CAUTION and
+        # DO-NOT-INSTALL -> 1. An UNKNOWN assessment of a target that exists is a CAUTION
+        # and exits 1 like every other CAUTION; it used to exit 0 here.
         #
         # B-680: "absent" no longer reaches this line - a path that simply is not there
-        # returned 2 above, before anything was assessed. What still lands here is the
-        # narrower case the guard deliberately declines to claim is absent: a path we
-        # could not stat at all (an unreadable parent). `.exists()` is False for that
-        # too, so the arm below is unchanged and still keeps it off 0.
-        if profile.overall_status in ("FAIL", "WARN"):
-            _vet_rc = 1
-        elif profile.overall_status == "UNKNOWN" and not vet_target.exists():
-            _vet_rc = 1
-        else:
-            _vet_rc = 0
+        # returned 2 above, before anything was assessed.
+        _vet_rc = _vet_exit_code(profile)
         # --emit-manifest: a stdout side output, single-skill vet only (B98/F-083).
         # Never runs the normal dossier/JSON render below - this is a distinct artifact.
         if args.emit_manifest and vet_kind == "skill":
@@ -4714,7 +5024,7 @@ def _main(argv=None) -> int:
         if args.sarif:
             try:
                 secure_write_text(
-                    Path(args.sarif).expanduser(),
+                    pathprobe.expand_user(args.sarif),
                     render_sarif([f, *getattr(f, "ring_findings", [])],
                                  tool_version=__version__, ctx=getattr(f, "ctx", None),
                                  profile=profile),
@@ -4729,6 +5039,22 @@ def _main(argv=None) -> int:
                                   version=__version__))
             return _vet_rc
         _emit(render_vet_dossier(profile, ascii_only=ascii_only))
+        if vet_kind == "skill" and getattr(getattr(f, "ctx", None),
+                                           "self_excluded_skills", None):
+            # C-705: the all-UNKNOWN dossier above is deliberate (a folder that merely
+            # matches this layout proves nothing), but it left the reader with no next
+            # step. `--verify-self` is NOT that step: it digests the scanner that is
+            # RUNNING, not this folder, and running a lookalike folder's own audit.py
+            # would execute its code and let it print any digest. So point at the
+            # published checksums and say to use tools from outside the folder.
+            _emit("")
+            _emit("This folder has ClawSecCheck's layout, so it is not scanned as a "
+                  "third-party skill. That layout is not proof that it is ClawSecCheck: "
+                  "a folder can imitate it. `--verify-self` checks the scanner you are "
+                  "running, not this folder. To check this copy, compare its files with "
+                  "the SHA256SUMS.txt published with the release (see \"Verify your copy "
+                  "is genuine\" in the README), using tools outside this folder; never "
+                  "run this folder's own audit.py to vouch for itself.")
         return _vet_rc
 
     if _vet_route and _vet_route[0] == "mcp":
@@ -4737,7 +5063,7 @@ def _main(argv=None) -> int:
         return _run_vet_mcp(_vet_route[1], args, ascii_only)
 
     if _mode == "vet_all":
-        home_dir = Path(args.home).expanduser()
+        home_dir = pathprobe.expand_user(args.home)
         return vet_all(home_dir, ascii_only=ascii_only, json_output=bool(args.json))
 
     if _mode == "vet_mcp":
@@ -4762,6 +5088,12 @@ def _main(argv=None) -> int:
             _emit(render_vet_json(profile, mode="vet-source", version=__version__))
             return _src_rc
         _emit(render_vet_dossier(profile, ascii_only=ascii_only))
+        if profile.overall_status == "UNKNOWN":
+            # C-715: this CAUTION exits 0 on purpose (most sources are simply unknown, and
+            # the next step is to fetch one and vet it), so say so where it is printed
+            # instead of leaving a CAUTION header beside a success code unexplained.
+            _emit("")
+            _emit("identity only: nothing was inspected; fetch it and run --vet")
         return _src_rc
 
     if _mode == "advise":
@@ -4789,7 +5121,7 @@ def _main(argv=None) -> int:
         advise_kind = detected if detected in ("plugin",) else "skill"
         f = vet_skill(advise_target) if advise_kind == "skill" else vet_plugin(advise_target)
         profile = build_profile(f, advise_target, advise_kind)
-        _advise_rc = 1 if profile.overall_status in ("FAIL", "WARN") else 0
+        _advise_rc = _vet_exit_code(profile)  # C-715: same rule as --vet
         _record_run("vet" if advise_kind == "skill" else "vet_plugin", args)
         if args.json:
             _emit(render_advise_json(profile, version=__version__))
@@ -4841,7 +5173,7 @@ def _main(argv=None) -> int:
         # holding only already-expired entries must still be reported on (which ones,
         # and that they no longer apply), not folded into "No entries found" just
         # because the ACTIVE set (`ignore` below) happens to be empty.
-        _ignore_entries = load_ignore_entries(Path(args.home).expanduser())
+        _ignore_entries = load_ignore_entries(pathprobe.expand_user(args.home))
         ignore = {e.entry for e in _ignore_entries if not e.expired}
         if not _ignore_entries:
             _emit("No .clawseccheckignore entries found.")
@@ -4992,10 +5324,16 @@ def _main(argv=None) -> int:
     if args.attest:
         from . import attest as _attest  # noqa: PLC0415
         if args.attest == "-":
-            attestation = _attest.parse_attestation(sys.stdin.read())
+            # C-626: hand parse_attestation the RAW bytes so it (not the locale codec)
+            # decodes - a non-UTF-8 / binary stdin becomes the "could not read" warning
+            # below instead of a UnicodeDecodeError crash, while valid UTF-8-with-BOM /
+            # UTF-16 / UTF-32 is accepted. A stand-in stdin with no binary layer
+            # (io.StringIO) is already text; parse_attestation takes both.
+            attestation = _attest.parse_attestation(
+                getattr(sys.stdin, "buffer", sys.stdin).read())
             src = "stdin"
         else:
-            attestation = _attest.load_attestation(Path(args.attest).expanduser())
+            attestation = _attest.load_attestation(pathprobe.expand_user(args.attest))
             src = args.attest
         if not attestation:
             # Diagnostic, not report content: keep machine-readable stdout (--json/--sarif)
@@ -5003,6 +5341,8 @@ def _main(argv=None) -> int:
             print(f"\u26a0 could not read a valid attestation from {src} "
                   f"(ignored; B43/B44 stay UNKNOWN). See '{command_prefix()} --ask'.",
                   file=sys.stderr)
+        else:
+            attestation = _vet_attestation(attestation, src)
     elif args.full and args.judged_bundle is not None:
         # B-476: --judged-bundle's own --help promises four buckets, and
         # `split_judged_bundle` has always parsed all four - but nothing in the codebase
@@ -5026,6 +5366,9 @@ def _main(argv=None) -> int:
                 print("\u26a0 the --judged-bundle 'attestation' object is not a valid "
                       "attestation (ignored; B43/B44 stay UNKNOWN). "
                       f"See '{command_prefix()} --ask'.", file=sys.stderr)
+            else:
+                attestation = _vet_attestation(
+                    attestation, "the --judged-bundle 'attestation' object")
     if args.attest and _bundle_att is not None:
         print("note: --attest was given, so the --judged-bundle 'attestation' object "
               "was not used.", file=sys.stderr)
@@ -5051,7 +5394,7 @@ def _main(argv=None) -> int:
         and not args.exit_code and not args.attest
     )
     if _bare_run:
-        first_run = _onboarding_reason(Path(args.home).expanduser())
+        first_run = _onboarding_reason(pathprobe.expand_user(args.home))
         if first_run:
             from .checks import CHECKS  # noqa: PLC0415
             # B-776: "nothing at --home" already holds by construction here (that's what
@@ -5075,8 +5418,18 @@ def _main(argv=None) -> int:
                                      exhaustive=args.exhaustive,
                                      progress_cb=_default_audit_progress_cb(args))
     except (PermissionError, OSError) as exc:
-        _emit(f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}")
-        _emit("Fix the permissions (or run as the owning user) and re-run the audit.")
+        _problem = f"Cannot read the OpenClaw home at {_sanitize(args.home)}: {_sanitize(str(exc))}"
+        _advice = "Fix the permissions (or run as the owning user) and re-run the audit."
+        if args.json:
+            # C-721: a consumer of --json parses stdout; a bare sentence there is not a
+            # document. The sentence stays human-readable on stderr; exit code unchanged.
+            _emit(json.dumps({"error": _problem, "tool": "clawseccheck",
+                              "version": __version__}, ensure_ascii=True, indent=2))
+            print(_problem, file=sys.stderr)
+            print(_advice, file=sys.stderr)
+            return 1
+        _emit(_problem)
+        _emit(_advice)
         return 1
     # B-464: record which subsystems the OPERATOR opted out of, so the score rationale can
     # disclose that its denominator was narrowed. Set here, from the parsed flags, because
@@ -5125,7 +5478,7 @@ def _main(argv=None) -> int:
     # B-154: RISK-* chains must honor .clawseccheckignore too - pass the same
     # ignore set findings were suppressed with, then drop suppressed chains
     # before they reach any render/JSON path.
-    _risk_ignore = load_ignore(Path(args.home).expanduser())
+    _risk_ignore = load_ignore(pathprobe.expand_user(args.home))
     paths = [p for p in _risk.risk_paths(ctx, findings, ignore=_risk_ignore)
              if not p.suppressed]
 
@@ -5156,9 +5509,9 @@ def _main(argv=None) -> int:
         ``/tmp`` (``--pdf /tmp/report.pdf``) would be a destructive surprise well outside
         what this tool is allowed to do to the user's machine.
         """
-        p = Path(raw).expanduser()
+        p = pathprobe.expand_user(raw)
         parent = p.parent
-        if not parent.exists():
+        if not pathprobe.exists(parent):
             parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         return p
 
@@ -5484,10 +5837,15 @@ def _main(argv=None) -> int:
                 return 1
             _emit(f"(could not write PDF report: {exc} \u2014 showing the full report inline)")
         if not args.dashboard:
+            # C-726: docs/USAGE.md promises a `MEDIA:~/...` line for a bare --pdf; the
+            # message used to carry the absolute path and no MEDIA line at all.
+            _pdf_shown = display_path_for_delivery(
+                args.pdf, sandboxed=getattr(ctx, "sandboxed", False))
             _emit(
-                f"(PDF report written to {args.pdf} \u2014 attach this file itself into the "
+                f"(PDF report written to {_pdf_shown} \u2014 attach this file itself into the "
                 "chat, do not re-render its contents or paste the path; a mobile client "
-                "opens a PDF inline where an HTML attachment would just be a download)"
+                "opens a PDF inline where an HTML attachment would just be a download)\n"
+                f"MEDIA:{_pdf_shown}"
             )
             _record_history_point(score, args, _live_signal, findings)          # B-601
             return _findings_exit_gate(args, findings, ctx, score=score)
@@ -5683,7 +6041,7 @@ def _main(argv=None) -> int:
         # second time, once the sweeps this branch runs have actually finished, so the
         # same reasoning puts the write after that too. Writing here would put a grade
         # in the badge that the run had not yet earned.
-        sweep_home = Path(args.home).expanduser()
+        sweep_home = pathprobe.expand_user(args.home)
         plugin_sweep = None
         # B-405: also swept for adjudication's own-target corpus (below) - NOT for a
         # separate SKILL SWEEP section (the Skills section above already came from
@@ -5808,7 +6166,8 @@ def _main(argv=None) -> int:
                                if args.fast else None))
         # B-586 + B-723: written only now, against the score the completed phases earned.
         _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
-                                      coverage_page=_dashboard_coverage_page)
+                                      coverage_page=_dashboard_coverage_page,
+                                      plugin_sweep=plugin_sweep)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
@@ -5890,11 +6249,12 @@ def _main(argv=None) -> int:
             _saved_sbom_id = _save_sbom_run_snapshot(build_sbom(ctx), _sbom_runs_path(args),
                                                       version=__version__)
             if _saved_sbom_id is None:
-                _emit("\n(could not save SBOM run \u2014 see --data-dir's directory for "
-                      "write access)")
+                _emit_trailer(args, "\n(could not save SBOM run \u2014 see --data-dir's "
+                                    "directory for write access)", machine_output=True)
             else:
-                _emit(f"\n(SBOM run saved as {_saved_sbom_id} \u2014 diff it later with "
-                      f"--sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)")
+                _emit_trailer(args, f"\n(SBOM run saved as {_saved_sbom_id} \u2014 diff it "
+                                    f"later with --sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)",
+                              machine_output=True)
         return 0
 
     if _mode == "incident":
@@ -5909,11 +6269,20 @@ def _main(argv=None) -> int:
         # this run's own findings - it's what the new record gets linked to - so it
         # dispatches here, alongside --incident, rather than in the pure-local-store
         # section before audit() ran.
+        # C-716: the first-run predicate, not "no openclaw.json": a home that holds
+        # anything (a skill, a workspace) is not "nothing to audit", and a FAIL found
+        # there still opens an incident - see open_incident_from_audit.
         _inc_record, _inc_err = open_incident_from_audit(
-            ctx, findings, path=_incidents_path(args), events=args.events)
+            ctx, findings, path=_incidents_path(args), events=args.events,
+            nothing_to_audit=_onboarding_reason(pathprobe.expand_user(args.home)) is not None)
         if _inc_err == "no_actionable_findings":
             print("--incident-open: no actionable (WARN/FAIL-weight) findings this run \u2014 "
                   "nothing to open an incident about.", file=sys.stderr)
+            return 1
+        if _inc_err == "nothing_to_audit":
+            print("--incident-open: --home is missing or an empty directory, so there is "
+                  "no setup to open an incident about; nothing was recorded.",
+                  file=sys.stderr)
             return 1
         if _inc_err == "write_failed":
             print(f"--incident-open: could not write to {_incidents_path(args)} \u2014 see "
@@ -6031,15 +6400,11 @@ def _main(argv=None) -> int:
                 "and silently rebase the real baseline to this run's values. Point "
                 "--data-dir at a location dedicated to this home, or re-run with the "
                 "--home this baseline was recorded for.", file=sys.stderr)
-            # The audit already ran and genuinely measured THIS home's score -- recorded
-            # for the same reason the failure paths below are (cli.py's own note there:
-            # "this run's score was really measured, and the trend should not gain a
-            # hole"). history.jsonl is additive and each row already names its own
-            # `home` (B-691), so a foreign row here is inert, never a corrupted baseline
-            # the way state.json would be.
-            if not _skip_live_test_persist and not _probe:
-                history_record(score, args.history, home=args.home,
-                               findings=findings, version=__version__)
+            # C-726: nothing is written on this path, the score history included -- the
+            # documented contract is "nothing is compared and nothing is written". This
+            # branch used to append the refused run's own score (the audit had really
+            # measured it), which put a row for a home the user did not mean to track into
+            # a store that belongs to another one.
             return 1
         # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
         # the reduced verdict. Two deliberate choices:
@@ -6160,7 +6525,11 @@ def _main(argv=None) -> int:
         # deliberately NOT passed to record_events below - a note is not an event, and a
         # tamper-evident timeline of what changed must not fill with entries about what
         # did not.
-        alerts, monitor_notes = diff_with_notes(prev, snap)
+        # C-718: `_cov_members_now` is filled with the NAMES (as digests) each per-name
+        # comparison was skipped for, so the coverage arm below can tell one member from
+        # another instead of comparing a count with its digits removed.
+        _cov_members_now: dict = {}
+        alerts, monitor_notes = diff_with_notes(prev, snap, members_out=_cov_members_now)
         # F-175 tier 3: an update is the moment a vetted setup silently becomes an unvetted
         # one. When the install records show a skill moved, re-run the vetting for THAT
         # skill and report the verdict - not merely "the version is different". This is the
@@ -6178,10 +6547,10 @@ def _main(argv=None) -> int:
         # content, and a crash in it must not take down the watch that found the change.
         _revet_names = _changed_skills(prev, snap)
         if _revet_names:
-            _revet_roots = _workspace_roots(Path(args.home).expanduser(), ctx.config)
+            _revet_roots = _workspace_roots(pathprobe.expand_user(args.home), ctx.config)
             for _name in _revet_names[:_REVET_CAP]:
                 _target = next((r / "skills" / _name for r in _revet_roots
-                                if (r / "skills" / _name).is_dir()), None)
+                                if pathprobe.is_dir(r / "skills" / _name)), None)
                 if _target is None:
                     # The record moved but the directory is not where the records say. Not
                     # an accusation: a workspace we cannot reach, or a removal mid-update.
@@ -6283,12 +6652,20 @@ def _main(argv=None) -> int:
         # regression now simply IS an alert, so `--fail-on medium` picks it up like any
         # other drift.
         _coverage_now = _coverage_signature(monitor_notes)
+        # C-718: what an unchanged next run will be unable to compare against this
+        # snapshot, and for which names. Computed once: the arm discloses a blind spot
+        # that opens with this run, and the record below stores the names so the next run
+        # can tell them from a name that really lost its comparison.
+        _cov_ahead_notes, _cov_ahead_members = _coverage_ahead(snap)
         _diff_coverage(prev, snap, monitor_notes, alerts,
-                       lambda _cat, _msg: monitor_notes.append((_cat, _msg)))
+                       lambda _cat, _msg: monitor_notes.append((_cat, _msg)),
+                       members_now=_cov_members_now, ahead_notes=_cov_ahead_notes,
+                       members_ahead=_cov_ahead_members)
         if base_status == BASELINE_OK:
             # Conditional on a USABLE baseline: a run that compared nothing must not store
             # an empty list, which would mean "the watch skipped nothing last time".
-            snap["not_compared"] = _coverage_now
+            # C-718: plus the names each per-name comparison cannot be made for.
+            snap["not_compared"] = _coverage_record(_coverage_now, _cov_ahead_members)
         # -- B-278 + B-271: write order is a deliberate choice, documented here ----------
         # Journal FIRST, then advance the baseline, and skip the advance if the journal
         # write failed. The alternative (advance first) is what lost drift permanently: a
@@ -6447,6 +6824,14 @@ def _main(argv=None) -> int:
                 "grade": score.grade if getattr(score, "graded", True) else None,
                 "graded": bool(getattr(score, "graded", True)),
                 "baseline_reference": _reference or None,
+                # C-726: the probe sentence the text report prints after its body.
+                "probe": _probe,
+                "probe_notice": (
+                    "This was a probe: nothing was recorded, so your baseline still points "
+                    "at the last ordinary check."
+                    + (" The alerts in this document are still outstanding and the next ordinary run "
+                       "will report them again." if alerts else "")
+                ) if _probe else None,
             }
             _emit(json.dumps(_monitor_payload, ensure_ascii=True, indent=2))
         else:
@@ -6457,7 +6842,15 @@ def _main(argv=None) -> int:
                                  live_test_skipped=_skip_live_test_persist,
                                  notes=monitor_notes,
                                  verbose=bool(getattr(args, "verbose", False)),
-                                 baseline_ref=_reference))
+                                 baseline_ref=_reference, probe=_probe))
+            # C-721: the loser of the race for the baseline (see the journal_lock block above)
+            # wrote nothing, and the renderer prints nothing at all for an unchanged
+            # comparison it did not persist - four header lines and silence. Say why.
+            if _baseline_moved and not _probe and not _skip_live_test_persist:
+                _emit("\nAnother --monitor run updated the baseline while this one was "
+                      "running, so this run recorded nothing" +
+                      ("." if alerts else " and shows no comparison.") +
+                      " Re-run --monitor to compare against the new baseline.")
         # --monitor records a score-history point as part of tracking drift, even under
         # --no-history; the conflict is surfaced as a stderr note (B-066), not silently
         # honored, to keep monitor's drift baseline intact. Recorded even on the failure
@@ -6477,7 +6870,9 @@ def _main(argv=None) -> int:
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
         # With nothing to report it must not promise a repeat alert that will never come.
-        if _probe:
+        # C-726: under --json the sentence is the document's `probe_notice` field instead -
+        # stdout must stay exactly one JSON document.
+        if _probe and not args.json:
             print("\nThis was a probe: nothing was recorded, so your baseline still points "
                   "at the last ordinary check.")
             if alerts:
@@ -6591,7 +6986,7 @@ def _main(argv=None) -> int:
         full_sweep_json = None
         full_pipeline = None
         if args.full:
-            sweep_home = Path(args.home).expanduser()
+            sweep_home = pathprobe.expand_user(args.home)
             sweep = None
             if not args.fast:
                 # B-404: reuse the SAME ctx the audit above already collected
@@ -6745,7 +7140,7 @@ def _main(argv=None) -> int:
         _hoisted_sweep = None
         _hoisted_sweep_lines: list[str] = []
         if args.full and not args.json and not args.card:
-            sweep_home = Path(args.home).expanduser()
+            sweep_home = pathprobe.expand_user(args.home)
             sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
             if not args.fast:
                 _record_run("self_test", args)
@@ -6821,7 +7216,7 @@ def _main(argv=None) -> int:
             # clamp is cooperative arithmetic on a monotonic float, never a nested
             # check_deadline block; the deadline is consulted BETWEEN targets, inside the
             # sweep, so a target already underway always finishes.
-            sweep_home = Path(args.home).expanduser()
+            sweep_home = pathprobe.expand_user(args.home)
             sweep_budget_s = _pipeline.sub_budget(full_deadline, DEFAULT_VET_ALL_BUDGET_S)
             sweep = None
             if args.quiet:
@@ -6988,9 +7383,9 @@ def _main(argv=None) -> int:
             # today's behaviour there.
             _saved = "\n".join([body, *_full_lines]) if _full_lines else body
             secure_write_text(_report_dest(args.save), strip_ansi(_saved))
-            _emit(f"\n(report saved to {args.save})")
+            _emit_trailer(args, f"\n(report saved to {args.save})")
         except OSError as exc:
-            _emit(f"\n(could not save report: {exc})")
+            _emit_trailer(args, f"\n(could not save report: {exc})")
             _save_failed = True
 
     # C-524: same tail slot as --save above, deliberately -- --save-run is reachable
@@ -7001,11 +7396,11 @@ def _main(argv=None) -> int:
         _saved_run_id = _save_run_snapshot(findings, _runs_path(args), home=args.home,
                                             version=__version__)
         if _saved_run_id is None:
-            _emit("\n(could not save run \u2014 see --data-dir/--history's directory "
-                  "for write access)")
+            _emit_trailer(args, "\n(could not save run \u2014 see --data-dir/--history's "
+                                "directory for write access)")
         else:
-            _emit(f"\n(run saved as {_saved_run_id} \u2014 diff it later with "
-                  f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
+            _emit_trailer(args, f"\n(run saved as {_saved_run_id} \u2014 diff it later with "
+                                f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
 
     # B-598: the guard this used to spell out inline now lives in
     # `_record_history_point`, which the --dashboard branch calls too. Its docstring

@@ -1,5 +1,5 @@
 {
- "build": "2026.9.6",
+ "build": "2026.10.3",
  "rows": [
   {
    "label": "empty",
@@ -25467,7 +25467,7 @@
       {
        "name": "Gary",
        "sandbox": {
-        "mode": "non-main"
+        "mode": "all"
        }
       }
      ]
@@ -25499,7 +25499,7 @@
       {
        "name": "Gary",
        "sandbox": {
-        "mode": "non-main",
+        "mode": "all",
         "scope": "shared",
         "docker": {
          "network": "host"

@@ -421,11 +421,14 @@ def _save_two_sbom_runs(store: str) -> "tuple[str, str]":
 
 def test_cli_save_sbom_run_creates_store_and_prints_id(tmp_path, capsys):
     rc = main(["--sbom", "--save-sbom-run", "--home", SAFE, "--data-dir", str(tmp_path)])
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
     assert rc == 0
     assert (tmp_path / "sbom_runs.jsonl").is_file()
-    assert "SBOM run saved as" in out
-    assert "--sbom-diff" in out
+    # --sbom prints a JSON document, so the human line goes to stderr and never trails it
+    # (it used to follow the document on stdout, which made the output unparseable).
+    assert "SBOM run saved as" in captured.err
+    assert "--sbom-diff" in captured.err
+    json.loads(captured.out)
 
 
 def test_cli_default_sbom_run_never_creates_the_store(tmp_path, capsys):

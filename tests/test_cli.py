@@ -189,3 +189,188 @@ def test_cli_attest_bad_file_warns_but_runs(tmp_path, capsys):
     # The warning is a diagnostic: it lives on stderr so machine-readable stdout
     # (--json/--sarif) stays clean (B-070).
     assert "could not read a valid attestation" in capsys.readouterr().err
+
+
+# C-626: a non-UTF-8 / UTF-16 attestation (file or stdin) used to escape load_attestation's
+# "Never raises" and end the run rc 1 with empty stdout ("unexpected internal error").
+def _cli_attest_payload_text() -> str:
+    import json
+    from clawseccheck import attest
+    return json.dumps({"schema": attest.SCHEMA_ID,
+                       "tools": ["search_threads", "create_draft"]})
+
+
+def _cli_attest_args(home, attest_arg):
+    return ["--home", str(home), "--no-native", "--no-host", "--no-history",
+            "--attest", attest_arg, "--json"]
+
+
+def test_cli_attest_non_utf8_file_warns_but_runs(tmp_path, capsys):
+    import json
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    bad = tmp_path / "latin1.json"
+    bad.write_bytes(b'{"tools": ["caf\xe9"]}')
+    rc = main(_cli_attest_args(tmp_path, str(bad)))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "could not read a valid attestation" in cap.err
+    json.loads(cap.out)  # stdout stays clean machine-readable JSON (B-070)
+
+
+def test_cli_attest_binary_file_warns_but_runs(tmp_path, capsys):
+    import json
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    bad = tmp_path / "bin.json"
+    bad.write_bytes(bytes(range(256)))
+    rc = main(_cli_attest_args(tmp_path, str(bad)))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "could not read a valid attestation" in cap.err
+    json.loads(cap.out)
+
+
+def test_cli_attest_utf16_file_is_accepted(tmp_path, capsys):
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    att = tmp_path / "att16.json"
+    att.write_bytes(_cli_attest_payload_text().encode("utf-16"))
+    rc = main(_cli_attest_args(tmp_path, str(att)))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert '"B43"' in cap.out
+    assert "could not read a valid attestation" not in cap.err
+
+
+def test_cli_attest_deeply_nested_file_warns_but_runs(tmp_path, capsys):
+    import json
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    bad = tmp_path / "deep.json"
+    bad.write_bytes(b"[" * 100000 + b"]" * 100000)
+    rc = main(_cli_attest_args(tmp_path, str(bad)))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "could not read a valid attestation" in cap.err
+    json.loads(cap.out)
+
+
+def test_cli_attest_stdin_non_utf8_warns_but_runs(tmp_path, capsys, monkeypatch):
+    import io
+    import json
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    # A stand-in WITH a binary layer, like real stdin: an io.StringIO cannot reproduce
+    # the bug (its .read() never decodes).
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(
+        io.BytesIO(b'{"tools": ["caf\xe9"]}'), encoding="utf-8"))
+    rc = main(_cli_attest_args(tmp_path, "-"))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "could not read a valid attestation from stdin" in cap.err
+    json.loads(cap.out)
+
+
+def test_cli_attest_stdin_utf16_is_accepted(tmp_path, capsys, monkeypatch):
+    import io
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(
+        io.BytesIO(_cli_attest_payload_text().encode("utf-16")), encoding="utf-8"))
+    rc = main(_cli_attest_args(tmp_path, "-"))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert '"B43"' in cap.out
+    assert "could not read a valid attestation" not in cap.err
+
+
+def test_cli_attest_stdin_deeply_nested_warns_but_runs(tmp_path, capsys, monkeypatch):
+    import io
+    import json
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(
+        io.BytesIO(b"[" * 100000 + b"]" * 100000), encoding="utf-8"))
+    rc = main(_cli_attest_args(tmp_path, "-"))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert "could not read a valid attestation from stdin" in cap.err
+    json.loads(cap.out)
+
+
+def test_cli_attest_stdin_text_stand_in_without_buffer_still_works(
+        tmp_path, capsys, monkeypatch):
+    # Pins the getattr(sys.stdin, "buffer", sys.stdin) fallback: a text-only stdin
+    # (io.StringIO has no .buffer) must keep working, so a future "simplify to
+    # sys.stdin.buffer.read()" cannot pass silently.
+    import io
+    (tmp_path / "openclaw.json").write_text("{}", encoding="utf-8")
+    stand_in = io.StringIO(_cli_attest_payload_text())
+    assert not hasattr(stand_in, "buffer")
+    monkeypatch.setattr("sys.stdin", stand_in)
+    rc = main(_cli_attest_args(tmp_path, "-"))
+    assert rc == 0
+    cap = capsys.readouterr()
+    assert '"B43"' in cap.out
+    assert "could not read a valid attestation" not in cap.err
+
+
+# C-626 (C-135 finding): an attestation moves SCORED, non-ATTESTED checks (A1, B3, B76)
+# and the grade inputs, not just B43/B44/B45. So widening --attest to BOM / UTF-16 /
+# UTF-32 means those files now behave EXACTLY like a plain UTF-8 file - including
+# moving scored checks and the score - and the commit message must not claim otherwise.
+_MOVED_BY_ATTEST = ("A1", "B3", "B76")
+
+
+def _mail_mcp_home(tmp_path):
+    import json
+    home = tmp_path / "home"
+    home.mkdir()
+    cfg = home / "openclaw.json"
+    cfg.write_text(json.dumps({"mcp": {"servers": {"mail": {
+        "command": "npx", "args": ["-y", "some-mail-mcp"]}}}}), encoding="utf-8")
+    cfg.chmod(0o600)
+    return home
+
+
+def _run_json(home, capsys, attest_path=None):
+    import json
+    argv = ["--home", str(home), "--no-native", "--no-host", "--no-history", "--json"]
+    if attest_path is not None:
+        argv += ["--attest", str(attest_path)]
+    assert main(argv) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def _verdict_view(report):
+    # (status, scored) per finding plus the grade inputs: the whole verdict surface.
+    return ({f["id"]: (f["status"], f["scored"]) for f in report["findings"]},
+            report["earned"], report["total"])
+
+
+def test_cli_attest_wide_encodings_move_scored_checks_like_utf8(tmp_path, capsys):
+    import json
+    from clawseccheck import attest
+    home = _mail_mcp_home(tmp_path)
+    text = json.dumps({"schema": attest.SCHEMA_ID, "agents": [{
+        "name": "main",
+        "tools": ["mcp__mail__send_message", "mcp__mail__search"]}]})
+    payloads = {
+        "utf8": text.encode("utf-8"),
+        "utf8_bom": b"\xef\xbb\xbf" + text.encode("utf-8"),
+        "utf16": text.encode("utf-16"),
+        "utf32": text.encode("utf-32"),
+    }
+    files = {}
+    for name, blob in payloads.items():
+        files[name] = tmp_path / (name + ".json")
+        files[name].write_bytes(blob)
+
+    base = _verdict_view(_run_json(home, capsys))
+    plain = _verdict_view(_run_json(home, capsys, files["utf8"]))
+
+    # Positive control: a plain UTF-8 attestation DOES move scored checks and the score,
+    # so the comparison below is not vacuous (an attestation that moved nothing would
+    # make "same as UTF-8" trivially true).
+    for cid in _MOVED_BY_ATTEST:
+        assert base[0][cid] != plain[0][cid], cid
+        assert plain[0][cid][1] is True, cid  # scored, not merely ATTESTED
+    assert base[0]["A1"][0] == "WARN" and plain[0]["A1"][0] == "PASS"
+    assert (base[1], base[2]) != (plain[1], plain[2])
+
+    for name in ("utf8_bom", "utf16", "utf32"):
+        assert _verdict_view(_run_json(home, capsys, files[name])) == plain, name

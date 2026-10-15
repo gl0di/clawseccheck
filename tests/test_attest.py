@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from clawseccheck import attest, audit
 from clawseccheck.catalog import ATTESTED, HIGH, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
@@ -17,6 +19,7 @@ from clawseccheck.checks import (
     check_capability_blast_radius,
 )
 from clawseccheck.collector import Context
+from clawseccheck.configloader import MAX_JSON_NESTING
 
 
 def _ctx(config=None, attestation=None, host=None):
@@ -197,6 +200,154 @@ def test_load_valid_roundtrip(tmp_path):
     assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
 
 
+# C-626: a non-UTF-8 / UTF-16 attestation file is a malformed attestation ("no
+# attestation"), never a crash. The file is read as BYTES and parse_attestation decodes it.
+def _valid_attestation_text() -> str:
+    return json.dumps({"schema": attest.SCHEMA_ID, "tools": ["search", "send_email"]})
+
+
+def test_load_non_utf8_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b'{"schema": "' + attest.SCHEMA_ID.encode() + b'", "tools": ["caf\xe9"]}')
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_binary_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(bytes(range(256)))
+    assert attest.load_attestation(p) == {}
+
+
+# (guard, not a revert detector: this already passed before C-626)
+def test_load_empty_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b"")
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf16_valid_attestation_parses(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(_valid_attestation_text().encode("utf-16"))
+    assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
+
+
+def test_load_utf16_bad_json_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes("{not json".encode("utf-16"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf16_wrong_schema_returns_empty(tmp_path):
+    # The schema gate must still run after the new decode path.
+    p = tmp_path / "a.json"
+    p.write_bytes(json.dumps({"schema": "something-else/9", "tools": ["x"]}).encode("utf-16"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf16_non_object_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes("[1, 2, 3]".encode("utf-16"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_utf8_bom_file_parses(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b"\xef\xbb\xbf" + _valid_attestation_text().encode("utf-8"))
+    assert attest.load_attestation(p)["tools"] == ["search", "send_email"]
+
+
+# (guard, not a revert detector: this already passed before C-626)
+def test_load_utf8_bom_wrong_schema_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps({"schema": "other/2"}).encode("utf-8"))
+    assert attest.load_attestation(p) == {}
+
+
+def test_load_nul_in_path_returns_empty():
+    # Not reachable from argv (argv cannot hold NUL) but the loader is a public API
+    # documented "Never raises"; Path.read_bytes raises ValueError, not OSError.
+    assert attest.load_attestation("a\0b") == {}
+
+
+def test_parse_attestation_bytes_undecodable_returns_empty():
+    # Positive control: parse_attestation was already safe on undecodable bytes; the
+    # C-626 crash was purely in the read layer.
+    assert attest.parse_attestation(b"\xff\xfe\xfa") == {}
+
+
+# Owner decision (Dave, 2026-09-30): pathologically nested JSON is just another invalid
+# attestation. C-648: the line is OURS - `configloader.MAX_JSON_NESTING` levels, enforced
+# before the parser runs - not wherever the running interpreter's `json.loads` gives up
+# (991 levels on 3.9, 9,997 on 3.12, and on 3.14 a function of the process stack size:
+# 57,974 with the default 8 MB, more than 400,000 with a CI runner's larger one). 100000
+# levels is far above the limit on every interpreter and stack size, and is refused for
+# that reason, never because a parser happened to give up.
+_DEEP = 100000
+
+
+def test_parse_attestation_deeply_nested_bytes_returns_empty():
+    assert attest.parse_attestation(b"[" * _DEEP + b"]" * _DEEP) == {}
+
+
+def test_parse_attestation_deeply_nested_str_returns_empty():
+    assert attest.parse_attestation("[" * _DEEP + "]" * _DEEP) == {}
+
+
+def test_parse_attestation_deeply_nested_object_returns_empty():
+    text = '{"schema": "' + attest.SCHEMA_ID + '", "tools": ' + "[" * _DEEP + "]" * _DEEP + "}"
+    assert attest.parse_attestation(text) == {}
+    assert attest.parse_attestation(text.encode("utf-8")) == {}
+
+
+def test_load_deeply_nested_file_returns_empty(tmp_path):
+    p = tmp_path / "a.json"
+    p.write_bytes(b'{"schema": "' + attest.SCHEMA_ID.encode() + b'", "tools": '
+                  + b"[" * _DEEP + b"]" * _DEEP + b"}")
+    assert attest.load_attestation(p) == {}
+
+
+def _tools_nested(levels: int) -> str:
+    """An attestation whose whole document is exactly *levels* deep: the root object plus a
+    `tools` value nested `levels - 1` times."""
+    return '{"schema": "' + attest.SCHEMA_ID + '", "tools": ' + "[" * (levels - 1) + "]" * (levels - 1) + "}"
+
+
+def test_the_nesting_limit_is_ours_just_below_it_parses():
+    # Exactly MAX_JSON_NESTING levels (the root counts as one) is read, on every interpreter.
+    text = _tools_nested(MAX_JSON_NESTING)
+    parsed = attest.parse_attestation(text)
+    assert parsed["schema"] == attest.SCHEMA_ID
+    assert attest.parse_attestation(text.encode("utf-8")) == parsed
+
+
+def test_the_nesting_limit_is_ours_just_above_it_is_refused():
+    text = _tools_nested(MAX_JSON_NESTING + 1)
+    assert attest.parse_attestation(text) == {}
+    assert attest.parse_attestation(text.encode("utf-8")) == {}
+
+
+def test_the_nesting_limit_holds_through_the_file_loader(tmp_path):
+    below = tmp_path / "below.json"
+    below.write_text(_tools_nested(MAX_JSON_NESTING), encoding="utf-8")
+    above = tmp_path / "above.json"
+    above.write_text(_tools_nested(MAX_JSON_NESTING + 1), encoding="utf-8")
+    assert attest.load_attestation(below)["schema"] == attest.SCHEMA_ID
+    assert attest.load_attestation(above) == {}
+
+
+@pytest.mark.parametrize("levels", [1_500, 20_000, 400_000])
+def test_depths_an_interpreter_might_have_parsed_are_refused_by_our_limit(levels):
+    # 20,000 and 400,000 are depths CPython 3.14 follows with a large stack: refusing them
+    # is the limit's doing, so the answer is the same there as on 3.9 and 3.12.
+    assert attest.parse_attestation(_tools_nested(levels)) == {}
+
+
+def test_parse_attestation_moderately_nested_still_parses():
+    # Positive control: only the pathological depth is refused, not nesting as such.
+    nested = {"schema": attest.SCHEMA_ID, "tools": [[["search"]]]}
+    assert attest.parse_attestation(json.dumps(nested)) == nested
+
+
 def test_parse_attestation_from_dict():
     d = {"schema": attest.SCHEMA_ID, "tools": ["x"]}
     assert attest.parse_attestation(d) == d
@@ -323,7 +474,10 @@ def test_b43_warn_when_a_gate_is_auto_with_unknown_bypass_actor():
     }
     f = check_capability_blast_radius(_ctx(attestation=att))
     assert f.status == WARN
-    assert not any("approval bypass actor(s):" in e for e in f.evidence)
+    # C-723: a declared actor counts whatever it is called - it was dropped here before -
+    # but a name outside the known vocabulary is counted, never printed.
+    assert "approval bypass actor(s): 1 declared actor(s)" in f.evidence
+    assert "1 declared actor(s)" in f.detail and "unknown" not in f.detail
 
 
 def test_b43_warns_when_a_gate_is_auto_with_cron_or_heartbeat_bypass():

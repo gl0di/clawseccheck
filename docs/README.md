@@ -21,6 +21,8 @@ Reading order depends on who you are:
    layer: what it adds, what it can't prove
 4. [../SECURITY_MODEL.md](../SECURITY_MODEL.md) - ClawSecCheck's own capability
    surface, least-privilege posture, and self-defense
+5. [IOC_DATA.md](IOC_DATA.md) - the bundled dataset of known-compromised identities and
+   infrastructure: where each entry comes from and how often it is refreshed
 
 ## I want the reasoning behind a design decision
 

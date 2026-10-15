@@ -144,7 +144,10 @@ def test_an_unscanned_store_records_nothing_at_all():
 def test_the_key_is_declared_but_not_written_by_a_bare_snapshot():
     ctx_snap = snapshot(*_audit(FIXTURES / "home_safe"))
     assert "credential_store" in WATCHED_DIMENSIONS
-    assert "credential_store" not in ctx_snap, "must be conditional on the caller scanning"
+    # C-675: the record now also carries the database stores, which the snapshot reads from
+    # the home itself; the DIRECTORY part must still be conditional on the caller scanning.
+    assert "files" not in ctx_snap.get("credential_store", {}), \
+        "must be conditional on the caller scanning"
 
 
 def _audit(home):

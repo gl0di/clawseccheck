@@ -45,7 +45,7 @@ import re
 import shutil
 
 import pytest
-from _distgrounding import dist_text, require_dist
+from _distgrounding import SEALED_BUNDLES, dist_text, require_dist
 
 import _toolgrantoracle as oracle
 from clawseccheck import toolgrant
@@ -510,6 +510,39 @@ def test_locate_refuses_two_declaring_bundles_instead_of_taking_the_first(tmp_pa
     _fake_dist(tmp_path, monkeypatch, {"a.mjs": decl, "b.mjs": decl})
     with pytest.raises(AssertionError, match="2 bundle"):
         oracle.locate("policies")
+
+
+def test_locate_skips_a_vendor_sealed_bundle_by_name_and_only_by_name(tmp_path, monkeypatch):
+    """OpenClaw 2026.9.7 ships a 66 MB updater-recovery bundle that re-declares every symbol
+    this oracle locates. It is skipped by NAME; a same-shaped bundle under any other name is
+    still a second declarer and still refused -- the exclusion must not become a hole."""
+    assert "package-update-activation-recovery.mjs" in SEALED_BUNDLES
+    sealed = sorted(SEALED_BUNDLES)
+    decl = "function resolveConfiguredToolPolicies(params) {}\n"
+    dist = _fake_dist(tmp_path, monkeypatch, {"policies.mjs": decl, sealed[0]: decl})
+    assert oracle.locate("policies").name == "policies.mjs"
+    (dist / "other-recovery.mjs").write_text(decl, encoding="utf-8")
+    oracle._scan.cache_clear()
+    with pytest.raises(AssertionError, match="2 bundle"):
+        oracle.locate("policies")
+
+
+def test_every_sealed_bundle_is_import_free_in_the_installed_dist():
+    """The sealed bundles are skipped because they carry no import graph for ``_rewrite`` to
+    point at the installed dist. Check that against the real bytes, so a future helper that
+    DOES import from the dist (and could be a genuine declaration site) is not swept under
+    the same skip, and a second sealed helper shows up as a locate failure rather than as
+    silence."""
+    dist = require_dist()
+    relative_import = re.compile(rb'(?:\bfrom\s+|^import\s+)"\./', re.M)
+    for name in sorted(SEALED_BUNDLES):
+        path = dist / name
+        if not path.is_file():  # an older build predates the helper; nothing to grade
+            continue
+        assert not relative_import.search(path.read_bytes()), (
+            f"{name} now imports from the dist; it can be a real declaration site, so it "
+            "must not stay in SEALED_BUNDLES -- re-ground the skip"
+        )
 
 
 def test_locate_refuses_a_symbol_that_moved(tmp_path, monkeypatch):

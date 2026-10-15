@@ -1,9 +1,10 @@
 # ClawSecCheck - Troubleshooting
 
 This page is for when **ClawSecCheck itself** is the problem - the command isn't found,
-it crashes, OpenClaw never picks it up, or a scan hangs. If instead you're looking at a
-grade, a finding, or output you don't understand, that's a question about *your audited
-setup*, not the engine - see [FAQ.md](FAQ.md) instead.
+it crashes, OpenClaw never picks it up, a scan hangs, or a scan says a file could not be
+read in full. If instead you're looking at a grade, a finding, or output you don't
+understand, that's a question about *your audited setup*, not the engine - see
+[FAQ.md](FAQ.md) instead.
 
 ---
 
@@ -48,15 +49,29 @@ almost always means an incomplete or partial copy, not a missing dependency:
 - Re-install from scratch rather than patching a partial copy - see
   [USAGE.md's install section](USAGE.md#install--run) for every supported install path.
 
+## `audit.py` refuses to run: importable file beside `audit.py`
+
+`clawseccheck: refusing to run - importable file(s) beside audit.py in <dir>` (exit code 2)
+means the directory holding `audit.py` also holds a Python module or extension of its own -
+a `json.py`, a `*.pyc`, a `sitecustomize.py`, a directory with an `__init__.py`, and so on.
+Python would import it ahead of the standard library on every run, and `--verify-self` does
+not hash it, so the shim stops before importing anything. Nothing was run and nothing was
+changed. Remove the entries it names (ClawSecCheck never deletes them for you) or reinstall
+the skill from a clean copy, then run again. If you did not put them there, treat the install
+as compromised and see the [verification steps](USAGE.md#important---trust-no-one-including-this-skill).
+If the message says it *could not list* the directory, fix that directory's permissions first:
+a stray file cannot be ruled out until it can be read. `python -m clawseccheck --verify-self`
+shows the same entries as a `Coverage note` without refusing.
+
 ## Wrong Python version
 
-ClawSecCheck needs **Python 3.9 or newer**. `pip`/`pipx` enforce this automatically for
+ClawSecCheck needs **Python 3.10 or newer**. `pip`/`pipx` enforce this automatically for
 that install path - but the skill's actual install path (an unpacked copy under
 OpenClaw's own skills directory) never goes through pip, so nothing stops it from being
 run under an older interpreter that just happens to be the system default `python3`.
 
 Recent releases fail fast with a plain one-line message (`clawseccheck: needs Python
-3.9+ (found X.Y)`) instead of a confusing error somewhere deep in a module. If you don't
+3.10+ (found X.Y)`) instead of a confusing error somewhere deep in a module. If you don't
 see that message and something still looks wrong on an older Python, that's itself a
 sign the interpreter is too old - check with:
 
@@ -64,8 +79,8 @@ sign the interpreter is too old - check with:
 python3 --version
 ```
 
-If it's below 3.9, point OpenClaw (or your own invocation) at a newer interpreter -
-`python3.9`, `python3.11`, etc. - whatever your system provides alongside the default.
+If it's below 3.10, point OpenClaw (or your own invocation) at a newer interpreter -
+`python3.12`, `python3.14`, etc. - whatever your system provides alongside the default.
 
 ## OpenClaw doesn't list the skill, or never runs it
 
@@ -112,6 +127,23 @@ mechanism** - the fix is to re-run narrower:
 If a *plain* audit (no flags) still hits its budget, that's unusual enough to be worth
 reporting - see "Filing a good bug report" below, and include `--debug` output.
 
+## UNKNOWN or CAUTION says a file could not be read in full
+
+An audit answers `UNKNOWN`, or a `--vet` answers `CAUTION` (never a clean `INSTALL`), and
+the advice text says a manifest or other file was not read in full. Two causes:
+
+- The file is not a regular file - for example a named pipe, a dangling link or a device
+  where `openclaw.plugin.json` should be. The file is refused or read through a size cap, so
+  nothing hangs; what is bundled beside it is still scanned.
+- The JSON is nested deeper than the reader follows. The part that was read is judged as
+  usual, and a problem found there still counts, but a clean result is not given for the
+  part that was not read.
+
+What to do: open the file named in the advice text and look at it. ClawSecCheck only reads
+it and changes nothing. If it is a pipe, a device or padded with nesting you did not write,
+treat the plugin or skill as suspect and remove or replace the file; once it is an ordinary
+file with sensible nesting, re-run to get a verdict.
+
 ## Where the diagnostics live
 
 - `--debug` - re-raises the real exception with its full traceback instead of the clean
@@ -126,7 +158,8 @@ reporting - see "Filing a good bug report" below, and include `--debug` output.
   computed from a compromised copy can't be trusted on its own - see ["trust no
   one"](USAGE.md#important---trust-no-one-including-this-skill) in the user guide for how
   to verify it against a signed release checksum instead of just trusting the tool's own
-  output.
+  output. It also names any importable file sitting beside `audit.py` (see
+  [`audit.py` refuses to run](#auditpy-refuses-to-run-importable-file-beside-auditpy)).
 
 ## Filing a good bug report
 

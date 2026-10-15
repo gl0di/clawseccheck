@@ -95,7 +95,41 @@ from ..textnorm import normalize_for_scan
 # The schema every packet item's "verdict_schema" field carries - a fixed
 # contract the host agent's answer must conform to, and exactly the shape
 # _parse_verdicts accepts.
-_VERDICT_SCHEMA = {"verdict": list(_VERDICT_VALUES), "reason": "free text"}
+#
+# C-712: a judge handed an item with no evidence to decide from had only categorical
+# answers, so any verdict would have measured the missing information rather than the
+# suspicion. ABSTAIN is the fourth, non-categorical answer: "I could not decide from the
+# packet". It is deliberately NOT a member of "verdict" above: that list is the
+# severity-ascending vocabulary the parser ranks, the questions quote, and the structural
+# tests derive from, and an abstention has no severity. The consumers treat it exactly
+# like a missing entry for the item (_verdicts._parse_verdicts_with_abstentions).
+#
+# It is OFFERED narrowly, because an invitation not to answer is a way to steer a judge
+# off a finding. The offer is keyed on what the item IS, not on its disposition word: the
+# audit packet also surfaces real signals about installed third-party code as "UNKNOWN"
+# on purpose (the recovered-taint, B62, env-auth and keyword-trigger items, and any
+# UNKNOWN that names a skill or carries evidence), and those must be judged, never
+# waved through. `_abstain_offered` below admits only an item built from one of the
+# audit's own findings that the engine left UNKNOWN, that recorded no evidence at all,
+# names no subject (its target is its own id) and carries no destination host - an item
+# that is structurally empty. Everything else, and every --vet packet item, carries
+# _VERDICT_SCHEMA exactly as before ABSTAIN existed.
+_ABSTAIN_VERDICT = "ABSTAIN"
+_VERDICT_SCHEMA = {
+    "verdict": list(_VERDICT_VALUES),
+    "reason": "free text",
+}
+_VERDICT_SCHEMA_EMPTY_UNKNOWN = {
+    **_VERDICT_SCHEMA,
+    "abstain": (
+        "this item names no skill, plugin or server and the engine recorded no evidence "
+        "for it: it could not determine it from what it read. If nothing in the packet "
+        f"lets you decide it, answer {_ABSTAIN_VERDICT} instead of guessing; it is treated "
+        "exactly like no verdict submitted for the item. If anything in the packet does "
+        "bear on it, answer one of the three, and when unsure between two answer the worse"
+    ),
+}
+
 
 # WARN-grade check ids with a documented false-negative-prone history: each is a
 # dual-use signal deliberately down-ranked from FAIL to WARN so a legitimate skill
@@ -868,6 +902,23 @@ def _item_from_finding(f) -> dict:
 # rather than ship an unanswerable question (2 real items beats 43 empty ones).
 # Scoped to findings that HAD evidence: a bare UNKNOWN with NO evidence at all keeps
 # its long-standing generic-question posture unchanged.
+def _abstain_offered(f, item: "dict | None" = None) -> bool:
+    """True for the one kind of item that is told it may be answered ABSTAIN (see the note
+    above ``_ABSTAIN_VERDICT``): built from an audit finding the engine left UNKNOWN, that
+    recorded no evidence at all, names no subject and carries no destination host. Every
+    condition is read off the finding or off fields this module authored - never off
+    packet prose, and never off the disposition word alone. ``item`` is the packet item
+    already built from ``f``; it is rebuilt when not given."""
+    if item is None:
+        item = _item_from_finding(f)
+    return (
+        f.status == UNKNOWN
+        and not (f.evidence or [])
+        and item["target"] == f.id
+        and "destination_host" not in item["safe_facts"]
+    )
+
+
 def _is_judgeable(item: dict, f) -> bool:
     if not (f.evidence or []):
         return True
@@ -1423,6 +1474,8 @@ def build_judge_packet(ctx, findings) -> list[dict]:
         if config_blind and _config_blind_only_cause(f):
             config_blind_candidates.append((f.id, item))
             continue
+        if _abstain_offered(f, item):
+            item["verdict_schema"] = _VERDICT_SCHEMA_EMPTY_UNKNOWN
         items.append(item)
 
     items.extend(_b62_items(ctx))
@@ -1500,7 +1553,7 @@ def build_bundle_template() -> dict:
             "judged": {
                 "finding_id": "copy the packet item's finding_id",
                 "target": "copy the packet item's target",
-                "verdict": " | ".join(_VERDICT_VALUES),
+                "verdict": " | ".join((*_VERDICT_VALUES, _ABSTAIN_VERDICT)),
                 "reason": "free text",
             },
             "liveTest": {
@@ -1513,12 +1566,12 @@ def build_bundle_template() -> dict:
                 # agent's own local trajectory log when one is readable - omit this
                 # entirely and the audited home's own sidecars are scanned
                 # automatically; there is nothing to fill in for the common case.
-                # Set ONLY when the run used a non-default session or an explicit
-                # trajectory file the agent wants pointed at directly (a path outside
-                # --home is ignored, not followed).
+                # Set ONLY when a sidecar lives somewhere the default layout does not
+                # reach. C-724: a hint only ever ADDS a file to the home's own scan; it
+                # cannot exclude one (a path outside --home is ignored, not followed).
                 "trajectory": {
-                    "sessionId": "optional \u2014 narrows the scan to one session",
-                    "path": "optional \u2014 an explicit .trajectory.jsonl, must be inside --home",
+                    "sessionId": "optional \u2014 ignored; it neither adds nor removes a session",
+                    "path": "optional \u2014 an extra .trajectory.jsonl inside --home, read in addition to the home's own",
                 },
                 "verdicts": [{
                     "tool": "canary",

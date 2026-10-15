@@ -26,7 +26,9 @@ runtime ENFORCEMENT / normalization sites (not just the schema shape):
 
 * `registry-B8eQDFB4.js:1390` — `...hooks?.allowPromptInjection !== false` — the grant is
   held UNLESS explicitly withdrawn with `false`; absent is the same granted state as `true`.
-* `config-normalization-shared-w2iz0aeC.js:314-323` — an unset `plugins.slots.memory`
+* `config-normalization-shared-w2iz0aeC.js:314-323` (2026.9.x; on openclaw@2026.10.2,
+  read 2026-10-12, `resolveSlotSelection` slots-DarSawuQ.mjs:44-49 applies the same
+  default) — an unset `plugins.slots.memory`
   normalizes to `defaultSlotIdForKey("memory")` = the bundled `"memory-core"` plugin, not to
   "no owner". Only the literal `"none"` disables the slot.
 
@@ -350,14 +352,18 @@ def test_b342_malformed_shapes_do_not_raise():
 # ---------------------------------------------------- B-421: implicit-default owner gating
 # The unset `plugins.slots.memory` default only takes effect when OpenClaw's own activation
 # precedence actually lets it -- config-normalization-shared-w2iz0aeC.js:70-100
-# (`resolvePluginActivationDecisionShared`) and gateway-startup-plugin-ids-COmsQTCi.js
-# :603-614 (`resolveMemorySlotStartupPluginId`, which resolves who actually backs the
+# (`resolvePluginActivationDecisionShared`, 2026.9.x; renamed
+# `resolvePluginActivationStateShared`, config-activation-shared-DnNUje5Q.mjs:117-182 on
+# openclaw@2026.10.2, read 2026-10-12) and gateway-startup-plugin-ids-COmsQTCi.js
+# :603-614 (`resolveMemorySlotStartupPluginId`, now gateway-startup-plugin-config-
+# 4WJh5_BE.mjs:630-640; it resolves who actually backs the
 # memory slot when the field is left unset). Before B-421 the implicit default was
 # disclosed unconditionally, which WARNed on this project's own fixtures/home_safe.
 
 
 def test_b342_implicit_default_not_disclosed_when_plugins_disabled():
-    """Gate 1 -- config-normalization-shared-w2iz0aeC.js:70, `!config.enabled`."""
+    """Gate 1 -- `!config.enabled` (config-normalization-shared-w2iz0aeC.js:70 on 2026.9.x;
+    config-activation-shared-DnNUje5Q.mjs:137 on openclaw@2026.10.2)."""
     cfg = {"plugins": {"enabled": False}}
     f = check_plugin_slots_and_deny(_ctx(cfg))
     assert f.status == PASS, f.evidence
@@ -418,7 +424,8 @@ def test_b342_home_safe_fixture_no_longer_warns():
 
 
 def test_b342_allow_deny_alias_collision_is_reported():
-    """OpenClaw's own `normalizePluginId` (config-state-CtMlHVRM.js:6-9) folds a built-in
+    """OpenClaw's own `normalizePluginId` (config-state-CtMlHVRM.js:6-9 on 2026.9.x;
+    config-state-wnnTmmuG.mjs:19-23 on openclaw@2026.10.2) folds a built-in
     alias to its canonical id before activation, so an id pair that LOOKS disjoint can
     still collide. `google-gemini-cli` -> `google` is a real, grounded alias (contrast
     with the case-difference test below, which is NOT folded by the real normalizer)."""
@@ -458,7 +465,10 @@ def test_b342_allow_deny_canonical_id_case_difference_is_a_collision():
 
 
 def test_b342_allow_deny_case_difference_alone_is_not_a_collision():
-    """Grounding correction: the real `normalizePluginId` (config-state-CtMlHVRM.js
+    """Grounding correction (2026.9.x; on openclaw@2026.10.2 the vendor lowercases a miss
+    -- executed 2026-10-12, normalizePluginId("Memory-Core") === "memory-core" -- so this
+    pin documents the mirror's current behaviour, not the newest vendor's): the real
+    `normalizePluginId` (config-state-CtMlHVRM.js
     :17-23) does NOT lowercase arbitrary ids OUTSIDE the built-in alias table -- it only
     trims them and falls back to the case-preserved original on an alias-lookup miss. So
     a bare case difference on an id that is NOT in that table (like `memory-core`, which

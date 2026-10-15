@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 from typing import NamedTuple
 from .. import attest as _attest
+from .. import pathprobe
 from .. import toolpolicy as _toolpolicy
 from .. import toolgrant as _toolgrant
 from .. import trajectory as _trajectory
@@ -32,6 +33,7 @@ from . import _shared
 from ._shared import (
     _fs_reads_are_confined,
     _b323_contains_env_var_reference,
+    _env_default_operator,
     _B55_FS_WRITE_TOOLS,
     _canon_tool,
     _code_mode_default,
@@ -70,6 +72,17 @@ _GATE_CLASS_FOR_BLAST = {
     "DESTRUCTIVE": ("write",),
     "MAILBOX_CONFIG": ("write",),
 }
+
+
+def _attested_name(value, limit: int = 64) -> str:
+    """C-723: an attestation string made safe to print in a finding.
+
+    The agent wrote it, so it may be attacker-influenced: control and ANSI characters are
+    removed by the report boundary's own sanitiser, whitespace is folded to single spaces
+    and the result is cut to *limit* characters.
+    """
+    from ..report import _sanitize  # noqa: PLC0415 - report imports the checks package
+    return " ".join(_sanitize(str(value)).split())[:limit]
 
 
 _B31_BYPASS_CANDIDATES = ("apply_patch", "exec", "process")
@@ -344,9 +357,13 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
     evidence = [f"{cls}: {', '.join(sorted(set(names)))}" for cls, names in high.items()]
     label = ", ".join(c.lower().replace("_", "-") for c in high)
     bypass_actors = _approval_bypass_actors(ctx, set(_attest.approval_gates_auto(att)), set(high))
+    declared_known, declared_other = _attest.declared_bypass_actors(att)
+    declared_known = sorted(declared_known)
     if bypass_actors or _attest.is_ungated(att):
         if bypass_actors:
             evidence.append(f"approval bypass actor(s): {', '.join(sorted(set(bypass_actors)))}")
+        if declared_other:  # C-723: counted, never named (see below)
+            evidence.append(f"{declared_other} other declared bypass actor(s)")
         # B-315: was FAIL, downgraded to WARN. B43 is ATTESTED/scored=False - the verdict
         # rests on the audited agent's OWN self-report, so a grade cap it could talk itself
         # into/out of is unsound (Dave's ruling: unscored checks cap at WARN).
@@ -359,6 +376,36 @@ def check_capability_blast_radius(ctx: Context) -> Finding:
             "Drop the dangerous verbs the agent does not need (least privilege at "
             "the capability level), or require human approval before send/exec/write "
             "and for any mailbox-config change.",
+            evidence=evidence,
+        )
+    # C-723: an actor the agent itself declares in approval_bypass_actors starts tool
+    # calls with no human in the loop, so "every gate is required" does not describe
+    # those calls. _approval_bypass_actors above only consults the list when some held
+    # class is 'auto'; with every gate 'required' (or unreported) the declaration was
+    # dropped and the wording was identical to an attestation with no actors at all.
+    # A declared actor counts whatever it is called: a name is printed only when it is in
+    # the closed vocabulary (cron, heartbeat, scheduled, sleeper); every other one is
+    # counted and never quoted, because the name is the agent's own text. Still WARN at
+    # most (B-315): the verdict rests on the agent's own self-report.
+    if declared_known or declared_other:
+        if declared_known and declared_other:
+            who = f"{', '.join(declared_known)} and {declared_other} other declared actor(s)"
+        elif declared_known:
+            who = ", ".join(declared_known)
+        else:
+            who = f"{declared_other} declared actor(s)"
+        evidence.append(f"approval bypass actor(s): {who}")
+        return _finding(
+            "B43",
+            WARN,
+            f"The agent holds high-blast-radius verbs ({label}) AND declares "
+            f"actor(s) that fire tool calls without human confirmation "
+            f"({who}) \u2014 per its own self-report the approval gates it "
+            "lists do not cover calls those actors start, so holding these verbs "
+            "widens the blast radius even where every gate reads 'required'.",
+            "Remove any dangerous verb the agent does not strictly need, and put "
+            "the listed actors behind the same human approval as an interactive call "
+            "(or keep them away from these verbs).",
             evidence=evidence,
         )
     # B-805: this used to say "An approval gate is reported" whenever ANY class
@@ -421,7 +468,11 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
               high-blast verb fired without an approval gate.
     WARN    - a proven high-blast verb fired AND the attested posture is ungated
               (untrusted_to_action == 'ungated', or a runtime approval-bypass actor
-              is reported) - evidence of an actual dangerous invocation, unguarded.
+              is reported, or - C-723 - the attested approval gate for that verb's
+              own action class is 'auto') - evidence of an actual dangerous
+              invocation, unguarded. Also WARN (C-723): an attested proven verb that
+              the same attestation's 'tools' inventory does not list - the self-report
+              contradicts itself.
     UNKNOWN - no attestation, or no 'proven_tools' evidence cited (silent by default;
               this check needs runtime/log evidence, which most setups won't have).
     """
@@ -480,13 +531,50 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
     bypass_actors = sorted(set(_attest.approval_bypass_actors(att)))
     ungated = _attest.is_ungated(att) or bool(bypass_actors)
 
+    # C-723: the attestation's own gate for the proven verb's action class. B-805's rule -
+    # a held class is judged by ITS gate and no other class's - so a send that fired is not
+    # excused (or condemned) by what the exec gate says. 'auto' is the agent saying it acts
+    # without asking for that class, and the verb did fire: the PASS sentence below ("no
+    # proven high-blast verb fired without an approval gate") would be false for it.
+    auto_classes = set(_attest.approval_gates_auto(att))
+    auto_gated = sorted({
+        gc
+        for v in proven_high
+        for gc in _GATE_CLASS_FOR_BLAST.get(_attest.classify_verb(v), ())
+        if gc in auto_classes
+    })
+    # C-723: a proven verb whose class NO tool in the same attestation's `tools` list falls
+    # in. Compared by the class the engine assigns (attest.classify_verb), not by spelling:
+    # `shell` vs `bash`, `read` vs `read_file` and `send-email` vs `send_email` are the same
+    # kind of verb, and a verb the engine cannot classify has no class to compare. Only the
+    # attestation's own two columns are compared (and only when `tools` is a usable list):
+    # log-observed verbs routinely include built-ins that no inventory names, and a verb the
+    # config grants is B44's question, so neither is called a contradiction here.
+    outside_by_class: dict[str, list[str]] = {}
+    if not observed and effective:
+        declared_classes = {_attest.classify_verb(t) for t in effective}
+        for v in sorted(proven):
+            cls = _attest.classify_verb(v)
+            if cls == "UNKNOWN" or cls in declared_classes or _canon_tool(v) in declared:
+                continue
+            outside_by_class.setdefault(cls, []).append(v)
+    outside = [(v, cls) for cls, vs in sorted(outside_by_class.items()) for v in vs]
+    contradiction = (
+        ["proven without a declared tool of its class: "
+         + ", ".join(f"{_attested_name(v)} ({cls})" for v, cls in outside[:8])
+         + (f" (+{len(outside) - 8} more)" if len(outside) > 8 else "")]
+        if outside else []
+    )
+    declared_known, declared_other = _attest.declared_bypass_actors(att)
+
     if proven_high and ungated:
-        evidence = [f"proven high-blast verb: {v}" for v in proven_high]
+        evidence = [f"proven high-blast verb: {_attested_name(v)}" for v in proven_high]
         if bypass_actors:
             evidence.append(f"approval bypass actor(s): {', '.join(bypass_actors)}")
         elif _attest.is_ungated(att):
             evidence.append("untrusted_to_action: ungated")
         evidence.append(f"proven source: {proven_source}")
+        evidence.extend(contradiction)
         return _finding(
             "B84",
             WARN,
@@ -500,6 +588,39 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             confidence=conf,
         )
 
+    if proven_high and auto_gated:
+        evidence = [f"proven high-blast verb: {_attested_name(v)}" for v in proven_high]
+        evidence.extend(f"approval gate for {gc}: auto" for gc in auto_gated)
+        evidence.append(f"proven source: {proven_source}")
+        evidence.extend(contradiction)
+        return _finding(
+            "B84",
+            WARN,
+            "The agent has PROVEN (log/trace evidence, not just self-reported "
+            "capability) that it actually invoked a high-blast-radius verb, and its own "
+            "attested approval gate for that verb's action class is 'auto' (it acts "
+            "without asking) \u2014 an evidenced dangerous invocation with no approval gate.",
+            "Require human approval (not 'auto') for the action class that verb belongs "
+            "to, or remove the verb from the agent's reach.",
+            evidence=evidence,
+            confidence=conf,
+        )
+
+    if outside:
+        return _finding(
+            "B84",
+            WARN,
+            "The attestation contradicts itself: 'proven_tools' includes a verb of class "
+            f"{', '.join(sorted(outside_by_class))} while its own 'tools' list declares "
+            "nothing of that class \u2014 the effective grant and the proven use cannot "
+            "both be right.",
+            "Re-attest: list the verb in 'tools' if the agent really holds it (and "
+            "review why the inventory missed it), or drop it from 'proven_tools' if no "
+            "log or trace shows it.",
+            evidence=[f"proven source: {proven_source}"] + contradiction,
+            confidence=conf,
+        )
+
     evidence = [f"proven source: {proven_source}"]
     dead_grants = sorted((declared or effective) - proven)
     if dead_grants:
@@ -507,11 +628,41 @@ def check_declared_effective_proven(ctx: Context) -> Finding:
             f"declared/effective but never proven (informational, not a finding): "
             f"{', '.join(dead_grants)}"
         )
+    # C-723: the "no proven high-blast verb fired without an approval gate" clause is a
+    # claim about gates, so it is made only when the attestation establishes it: every proven
+    # high-blast verb's OWN gate class is reported 'required' and no bypass actor is
+    # declared. Otherwise the status is unchanged and the sentence says which part is not
+    # established, in fixed wording (class names come from closed vocabularies, never from
+    # attestation text).
+    not_established: list[str] = []
+    if proven_high:
+        gates_map = att.get("approval_gates")
+        gates_map = gates_map if isinstance(gates_map, dict) else {}
+        proven_classes = {_attest.classify_verb(v) for v in proven_high}
+        unreported = sorted({
+            gc for cls in proven_classes for gc in _GATE_CLASS_FOR_BLAST.get(cls, ())
+            if str(gates_map.get(gc, "")).strip().lower() != "required"
+        })
+        no_setting = sorted(c for c in proven_classes if c not in _GATE_CLASS_FOR_BLAST)
+        if unreported:
+            not_established.append(
+                "no approval gate was reported as 'required' for "
+                + ", ".join(unreported) + " calls")
+        if no_setting:
+            not_established.append(
+                "the attestation has no gate setting for "
+                + ", ".join(c.lower().replace("_", "-") for c in no_setting) + " verbs")
+        if declared_known or declared_other:
+            not_established.append("a bypass actor is declared (see B43)")
     return _finding(
         "B84",
         PASS,
         "Proven tool use stays within the declared/effective grant, and no proven "
-        "high-blast verb fired without an approval gate.",
+        "high-blast verb fired without an approval gate."
+        if not not_established else
+        "Proven tool use stays within the declared/effective grant. Not established: "
+        "that the proven high-blast verb(s) ran behind an approval gate ("
+        + "; ".join(not_established) + ").",
         "Keep the trajectory sidecar (or attested 'proven_tools') current so this check "
         "keeps reflecting actual invocation, not just intent.",
         evidence=evidence,
@@ -2171,8 +2322,15 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
                 f"channel carrying untrusted content ({', '.join(ext_ch)}) that is not "
                 f"proven open, and the only scoping is a non-write-specific approval "
                 f"gate (tools.exec.mode) \u2014 it doesn't scope write-capable tools.",
-                "Lock the channel(s) to 'owner' (or 'disabled'); tools.exec.mode='ask' "
-                "alone does not clear this \u2014 it doesn't scope write-capable tools.",
+                # C-702: 'owner' is not a dmPolicy/groupPolicy value (OpenClaw 2026.10.2
+                # rejects it at `config validate`); every value named here is one the
+                # installed schema accepts, pinned by tests/test_c702_b55_advice_values.py.
+                "Narrow the channel(s) to your own account: where the channel has a dmPolicy, "
+                "set it to 'allowlist' with only your own channel-native id(s) in allowFrom; "
+                "where it has a groupPolicy, set it to 'allowlist' (and list your ids in "
+                "groupAllowFrom on channels that have that field) or to 'disabled'; or set "
+                "the policy to 'disabled' to remove the reach. tools.exec.mode='ask' alone "
+                "does not clear this \u2014 it doesn't scope write-capable tools.",
                 evidence=evidence,
             )
     else:
@@ -2433,7 +2591,7 @@ def _b326_exec_policy_blocking_reason(cfg: dict) -> str | None:
     return None
 
 
-def _b326_exec_policy_unresolved_reason(cfg: dict) -> str | None:
+def _b326_exec_policy_unresolved_reason(cfg: dict, default_operator: bool = False) -> str | None:
     """B-397 (C-135 round on this same fix): the field (if any) among
     tools.exec.mode/security/ask that contains an unresolved ${VAR} substitution --
     the identical hazard Defect 1 fixed for agents.defaults.elevatedDefault itself,
@@ -2450,7 +2608,7 @@ def _b326_exec_policy_unresolved_reason(cfg: dict) -> str | None:
         ("tools.exec.security", dig(cfg, "tools.exec.security")),
         ("tools.exec.ask", dig(cfg, "tools.exec.ask")),
     ):
-        if isinstance(value, str) and _b323_contains_env_var_reference(value):
+        if isinstance(value, str) and _b323_contains_env_var_reference(value, default_operator):
             return f"{field}={value!r}"
     return None
 
@@ -2542,7 +2700,9 @@ def check_elevated_default_full(ctx: Context) -> Finding:
     # Golden Rule #4 forbids. This must run BEFORE the `level != "full"` PASS below,
     # since an interpolated value is never the literal string "full" even when it
     # resolves to it at runtime.
-    if isinstance(level, str) and _b323_contains_env_var_reference(level):
+    if isinstance(level, str) and _b323_contains_env_var_reference(
+        level, _env_default_operator(ctx) == "yes"
+    ):
         return _finding(
             "B326",
             UNKNOWN,
@@ -2596,7 +2756,9 @@ def check_elevated_default_full(ctx: Context) -> Finding:
     # Whether an unresolved field would have resolved to a blocking value is
     # undeterminable from static config, so this must route to UNKNOWN rather than
     # confidently FAIL.
-    exec_policy_unresolved = _b326_exec_policy_unresolved_reason(cfg)
+    exec_policy_unresolved = _b326_exec_policy_unresolved_reason(
+        cfg, _env_default_operator(ctx) == "yes"
+    )
     if exec_policy_unresolved is not None:
         return _finding(
             "B326",
@@ -2858,7 +3020,8 @@ def check_path_safety(ctx: Context) -> Finding:
 
     def _flag(d: Path, label: str, suffix: str = "", *, after: str = "") -> None:
         try:
-            rd = d.resolve()
+            # C-682: `os.path.realpath` never raises on a symlink loop, where `Path.resolve` raises RuntimeError on 3.12 and returns on 3.14.
+            rd = Path(os.path.realpath(d))
         except OSError:
             rd = d
         if rd in checked:
@@ -2910,7 +3073,7 @@ def check_path_safety(ctx: Context) -> Finding:
         openclaw_index: int | None = None
         for i, d in enumerate(path_dirs):
             try:
-                if d.resolve() == bin_dir:
+                if Path(os.path.realpath(d)) == bin_dir:
                     openclaw_index = i
                     break
             except OSError:
@@ -2927,7 +3090,7 @@ def check_path_safety(ctx: Context) -> Finding:
     # Discovery-assisted: the agent may point at an install dir that `which` can't
     # resolve (non-PATH install). The engine still stat()s it itself.
     if attested_install:
-        inst = Path(attested_install).expanduser()
+        inst = pathprobe.expand_user(attested_install)
         _flag(inst, "openclaw install dir", after=" [attested]")
         _walk_ancestors(inst.parent, "openclaw install ancestor dir [attested]")
 
@@ -3561,7 +3724,12 @@ def check_code_mode_tool_surface(ctx: Context) -> Finding:
             "it back on independently of the global setting). This audit cannot see a "
             "per-run CLI --code-mode override, a runtime /model switch, a run routed "
             "through the Codex harness (a separate engine this check does not read), or "
-            "an external provider plugin's own compat.codeMode manifest flag.",
+            "an external provider plugin's own compat.codeMode manifest flag."
+            + (" The models named in the finding are the ones whose CONFIG resolves to "
+               "auto, not a verified list of models that engage Code Mode: that depends "
+               "on each model's provider catalog marking compat.codeMode=\"preferred\", "
+               "which this audit does not read, so a named model may run with its "
+               "normal tool surface." if has_auto and model_auto else ""),
             evidence=evidence[:8] or None,
         )
 
