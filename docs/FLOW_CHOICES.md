@@ -301,7 +301,11 @@ set up any schedule yourself without explicit confirmation.
 **This is layer 5 of a full check** - the other layer the tool cannot reach on its own. Together
 with the self-report above it is what stands between an ungraded result and a verdict, so offer it
 first whenever a run came back with no grade. It exercises the running agent, so ask before you
-run it; a refusal is a legitimate answer and simply leaves the run ungraded.
+run it; a refusal is a legitimate answer and simply leaves the run ungraded. **Exception:** if the
+user's request already named the whole tool ("use all functions", "all 5 layers", "the full
+audit", "everything") that is the consent - [`SKILL.md`](../SKILL.md) Step 2, "Broad-request
+consent" - so run the harnesses below without asking. The consent covers these self-test
+harnesses only, never `--monitor`, `--watch`, scheduling, `--apply-ignore-proposals` or `--purge`.
 
 Run the canary first:
 

@@ -3,6 +3,26 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.4.1] - 2026-10-16
+
+**This release re-grounds the audit on OpenClaw 2026.10.4**, the stability patch that followed
+2026.10.3, and corrects one sentence of B356's advice that 2026.10.4 made too broad. No finding
+changes status on any config.
+
+### Changed
+- **Grounded on OpenClaw 2026.10.4.** The installed tree equals the release package, the config
+  schema is identical to 2026.10.3 (5,430 paths), the state database layout, the vendor table
+  set, the verified paths and the DM-policy manifest differ by version stamp only, and both
+  ported vendor functions (the Codex-harness answer and the retired-format finder) give the same
+  answers on every row of their test batteries. The grounded ceiling and both windows move to
+  2026.10.4, so the newer-than-grounded notice no longer appears on a 2026.10.4 install and
+  B382 applies OpenClaw's own retired-format finder on 2026.10.1 to 2026.10.4. The default
+  worker image B391 names is unchanged on this build.
+- **B356 advice about OAuth credential sidecars.** From 2026.10.4 Doctor refuses over an OAuth
+  credential sidecar only when a legacy auth file still references it; through 2026.10.3 it
+  refused over every one. The advice now names the referenced ones, which is true on every
+  build that refuses at all. Only the `fix` text changes; no `detail` and no status moves.
+
 ## [4.4.0] - 2026-10-12
 
 **This release re-grounds the audit on OpenClaw 2026.10.3, after catching up with 2026.9.7,

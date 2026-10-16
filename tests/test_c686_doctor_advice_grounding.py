@@ -183,12 +183,16 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "c686-state-"));
 const out = [];
 try {
   let n = 0;
-  for (const files of scenarios) {
+  for (const scenario of scenarios) {
+    // A scenario is a list of files written as `{}`, or {files, json} where `json` maps a
+    // path to the object written there (a legacy auth file that REFERENCES a sidecar).
+    const files = Array.isArray(scenario) ? scenario : scenario.files;
+    const json = Array.isArray(scenario) ? {} : (scenario.json || {});
     const state = path.join(root, "s" + (n++));
     fs.mkdirSync(state, { recursive: true });
     for (const rel of files) {
       fs.mkdirSync(path.dirname(path.join(state, rel)), { recursive: true });
-      fs.writeFileSync(path.join(state, rel), "{}");
+      fs.writeFileSync(path.join(state, rel), rel in json ? JSON.stringify(json[rel]) : "{}");
     }
     const env = { OPENCLAW_STATE_DIR: state, HOME: root };
     const rec = {};
@@ -283,13 +287,23 @@ def vendor_state_answers() -> "dict[str, dict]":
                                symbol="assertNoRetiredStateFiles")
     delivery = dist_declaring("function listRetiredDeliveryQueueFiles(",
                               symbol="listRetiredDeliveryQueueFiles")
-    oauth = dist_declaring("function listLegacyOAuthSidecarPaths(",
-                           symbol="listLegacyOAuthSidecarPaths")
+    # 2026.10.4 replaced `listLegacyOAuthSidecarPaths` (every <32hex>.json blocked) with
+    # `listReferencedLegacyOAuthSidecarPaths` (only a sidecar that a legacy auth-profiles.json
+    # still references blocks; an unreferenced one is kept and does not). The 2026.10.3 form
+    # was read out of its release tarball on 2026-10-16; this oracle runs the installed one.
+    oauth = dist_declaring("function listReferencedLegacyOAuthSidecarPaths(",
+                           symbol="listReferencedLegacyOAuthSidecarPaths")
+    sidecar = f"credentials/auth-profiles/{'a' * 32}.json"
+    legacy_auth = "agents/main/agent/auth-profiles.json"
+    references = {legacy_auth: {"profiles": {"p": {"oauthRef": {
+        "source": "openclaw-credentials", "provider": "openai-codex", "id": "a" * 32}}}}}
     scenarios = {
         "cron/jobs.json": ["cron/jobs.json"],
         "cron/jobs-state.json": ["cron/jobs-state.json"],
         "cron/runs/*.jsonl": ["cron/runs/a.jsonl"],
-        "credentials/auth-profiles/<32hex>.json": [f"credentials/auth-profiles/{'a' * 32}.json"],
+        "credentials/auth-profiles/<32hex>.json": {"files": [sidecar, legacy_auth],
+                                                   "json": references},
+        "unreferenced <32hex> sidecar": [sidecar],
         "delivery-queue/*.json": ["delivery-queue/q.json"],
         "B356 allowFrom + device-auth": ["credentials/telegram-allowFrom.json",
                                          "identity/device-auth.json"],
@@ -303,7 +317,7 @@ def vendor_state_answers() -> "dict[str, dict]":
             cron.as_uri(), _alias(cron, "listRetiredCronStateFiles"),
             assert_no.as_uri(), _alias(assert_no, "assertNoRetiredStateFiles"),
             delivery.as_uri(), _alias(delivery, "listRetiredDeliveryQueueFiles"),
-            oauth.as_uri(), _alias(oauth, "listLegacyOAuthSidecarPaths"),
+            oauth.as_uri(), _alias(oauth, "listReferencedLegacyOAuthSidecarPaths"),
             str(work / "scenarios.json")])
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -400,6 +414,13 @@ def test_retired_state_file_makes_the_vendor_throw_naming_the_bridge(
     assert thrown is not None, f"{scenario}: no longer a retired state file"
     assert thrown["name"] == "RetiredStateFormatError"
     assert f"Upgrade through OpenClaw {_RETIRED_STATE_BRIDGE_VERSION}," in thrown["message"]
+
+
+def test_an_unreferenced_oauth_sidecar_does_not_block_doctor(vendor_state_answers):
+    # 2026.10.4: Doctor keeps a sidecar no legacy auth-profiles.json references and does not
+    # refuse over it (2026.10.1-10.3 refused over every <32hex>.json). The B356 sentence names
+    # only the REFERENCED sidecars, which is true on every build that refuses at all.
+    assert vendor_state_answers["unreferenced <32hex> sidecar"]["oauth"] is None
 
 
 def test_b356_files_are_on_no_retired_list(vendor_state_answers):

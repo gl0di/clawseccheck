@@ -47,7 +47,7 @@ from clawseccheck.risk import risk_paths
 
 OLD_STARTUP = "2026.9.8"   # Doctor still migrates; the 2026.9.7-9.9 text applies
 NEW = "2026.10.2"          # Doctor refuses the retired formats
-NEWER = "2026.10.4"        # outside the finder's validated window, still >= 2026.10.1
+NEWER = "2026.10.5"        # outside the finder's validated window, still >= 2026.10.1
 
 _LEGACY = {"browser": {"ssrfPolicy": {"allowPrivateNetwork": True}}}
 _UNTRUSTED = {"channels": {"telegram": {"contextVisibility": "all", "dmPolicy": "allowlist",
@@ -68,7 +68,7 @@ def _ctx(cfg, installed, home=Path("/nonexistent")):
 # ------------------------------------------------------------------ the predicate
 
 @pytest.mark.parametrize("installed, expected", [
-    ("2026.10.1", True), ("2026.10.2", True), ("2026.10.3", True), ("2027.1.1", True),
+    ("2026.10.1", True), ("2026.10.2", True), ("2026.10.3", True), ("2026.10.4", True), ("2027.1.1", True),
     ("2026.9.9", False), ("2026.9.7", False), ("2026.7.1-2", False),
     (None, False), ("", False), ("2026.10.1-beta.1", False),
 ])
