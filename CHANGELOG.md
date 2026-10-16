@@ -6,8 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 ## [4.4.1] - 2026-10-16
 
 **This release re-grounds the audit on OpenClaw 2026.10.4**, the stability patch that followed
-2026.10.3, and corrects one sentence of B356's advice that 2026.10.4 made too broad. No finding
-changes status on any config.
+2026.10.3, corrects one sentence of B356's advice that 2026.10.4 made too broad, and changes one
+instruction the skill gives the agent (a broad request now counts as consent to the live
+self-tests). No finding changes status on any config.
 
 ### Changed
 - **Grounded on OpenClaw 2026.10.4.** The installed tree equals the release package, the config
@@ -22,6 +23,14 @@ changes status on any config.
   credential sidecar only when a legacy auth file still references it; through 2026.10.3 it
   refused over every one. The advice now names the referenced ones, which is true on every
   build that refuses at all. Only the `fix` text changes; no `detail` and no status moves.
+- **A broad request is consent to the live self-tests.** When the user asks for the whole tool
+  ("use all functions", "all 5 layers", "the full audit"), the skill now tells the agent to run
+  the self-report, the judge panel and the self-test harnesses (canary, red-team, dry-run,
+  multi-turn) without stopping to ask. This never covers `--monitor`, `--watch`, scheduling,
+  `--apply-ignore-proposals` or `--purge`, which keep their own explicit confirmation, and a
+  narrow request ("check my security", "go") still asks before any active test. The change is in
+  `SKILL.md` (Step 2 and Step 4) and `docs/FLOW_CHOICES.md`; no code changed. It was part of this
+  release but was left out of the first version of this entry.
 
 ## [4.4.0] - 2026-10-12
 
