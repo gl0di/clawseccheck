@@ -200,7 +200,7 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-10-14 against the vendor repository's own advisory endpoint (722 published
+# Last swept: 2026-10-16 against the vendor repository's own advisory endpoint (722 published
 # advisories). The global GitHub advisory database lags it and missed a whole batch, so it is
 # not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
 # npm package (70 rows, titles as published); below that it is a curated subset, so the id
@@ -8367,7 +8367,10 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
                 # C-686: EXECUTED on 2026.10.2 -- Doctor's preflight (`prepareDoctorConfigRecovery`)
                 # throws before it migrates anything when the config holds a key from the
                 # vendor's retired list or the state tree holds a retired file (OAuth
-                # sidecars, cron state, JSON delivery queues). The allowFrom and device-auth
+                # sidecars, cron state, JSON delivery queues; from 2026.10.4 only a sidecar a
+                # legacy auth-profiles.json still references -- an unreferenced one is kept
+                # and blocks nothing, executed in tests/test_c686_doctor_advice_grounding.py).
+                # The allowFrom and device-auth
                 # files themselves are on none of those lists. The legacy plugin install
                 # index is NOT a Doctor stop: Doctor only warns and leaves it unchanged
                 # (refusal code `unsupported-plugin-install-index`, message names 2026.9.5),
@@ -8375,7 +8378,8 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
                 # install index", ...)`, names 2026.9.7).
                 f" On OpenClaw 2026.10.1 and later Doctor stops first, before it migrates "
                 "these files, if it finds a retired pre-July-2026 config key or state file "
-                "(older OAuth credential sidecars, cron state or JSON delivery queues); it "
+                "(older OAuth credential sidecars that a legacy auth file still references, cron "
+                "state or JSON delivery queues); it "
                 f"then names the release to install first (OpenClaw "
                 f"{_RETIRED_STATE_BRIDGE_VERSION} for a state file), so follow that message "
                 "before retrying. A legacy plugin install index is different: Doctor only "

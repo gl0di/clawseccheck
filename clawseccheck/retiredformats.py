@@ -58,7 +58,7 @@ JS FIDELITY, each measured against the vendor and pinned by the battery:
   ``byChannel.*`` entry against ``queue`` / ``steer-backlog`` / ``steer+backlog``.
 
 THE BUILD WINDOW is ``ORACLE_MIN..ORACLE_MAX``. 2026.9.9's finder is a different, smaller
-function (about 17 families); 2026.10.1, 2026.10.2 and 2026.10.3 are the only builds the
+function (about 17 families); 2026.10.1 to 2026.10.4 are the only builds the
 battery was executed on. Outside the window ``in_window`` is False and the caller must NOT claim the
 finder was applied: a newer build is exactly "an input this port does not model", so it
 degrades to the hand table's answer until ``tests/_retiredformatsoracle.py --write`` is run
@@ -75,7 +75,7 @@ from dataclasses import dataclass
 #: The window of builds this port was differentially validated on (first three components
 #: compared, so a correction release of a validated build stays inside it).
 ORACLE_MIN = (2026, 10, 1)
-ORACLE_MAX = (2026, 10, 3)
+ORACLE_MAX = (2026, 10, 4)
 
 #: The vendor's two ``bridgeVersion`` values, verbatim.
 BRIDGE_DEFAULT = "2026.9.5"

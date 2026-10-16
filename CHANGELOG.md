@@ -5,8 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 ## [4.4.0] - 2026-10-12
 
-**This release re-grounds the audit on OpenClaw 2026.10.3, after catching up with 2026.9.7,
-9.8, 9.9, 10.1 and 10.2, reads the SQLite stores where current OpenClaw keeps what older checks looked
+**This release re-grounds the audit on OpenClaw 2026.10.4, after catching up with 2026.9.7,
+9.8, 9.9, 10.1, 10.2 and 10.3, reads the SQLite stores where current OpenClaw keeps what older checks looked
 for in files, and makes it much harder for an odd or hostile file to end a run or hide a
 finding.** Gateway token references and templated binds are judged by what they are (a reference
 nothing visible resolves is UNKNOWN, never PASS). B138 (pending device pairings), B78
@@ -57,11 +57,11 @@ from PASS to UNKNOWN.
 
 - **Python 3.10 is the floor and 3.14 is tested.** CI drops the Ubuntu 3.9 leg; 3.12 and
   3.14 on Linux and 3.12 on macOS are tested. 3.13 has not been measured and is not claimed.
-- **Grounded on OpenClaw 2026.10.3.** The grounded ceiling moved through 2026.9.7, 9.8, 9.9,
-  10.1 and 10.2 to 10.3, with the snapshots and dist citations re-baselined on each. The Codex
-  harness determination behind B333 and B353 is trusted on all six, so they no longer drop to
-  WARN, and B382 applies OpenClaw's own retired-format finder on 10.1 to 10.3. On a build above
-  2026.10.3 the newer-than-grounded notice appears again.
+- **Grounded on OpenClaw 2026.10.4.** The grounded ceiling moved through 2026.9.7, 9.8, 9.9,
+  10.1, 10.2 and 10.3 to 10.4, with the snapshots and dist citations re-baselined on each. The
+  Codex harness determination behind B333 and B353 is trusted on all seven, so they no longer
+  drop to WARN, and B382 applies OpenClaw's own retired-format finder on 10.1 to 10.4. On a
+  build above 2026.10.4 the newer-than-grounded notice appears again.
 - **Test hygiene.** The subprocess tests set their resource limits on a best-effort basis (macOS
   refuses them), and the bytecode tests build their child environment explicitly, so they pass
   with `PYTHONDONTWRITEBYTECODE` exported.
