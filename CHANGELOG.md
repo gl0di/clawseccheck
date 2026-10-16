@@ -3,10 +3,30 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.4.1] - 2026-10-16
+
+**This release re-grounds the audit on OpenClaw 2026.10.4**, the stability patch that followed
+2026.10.3, and corrects one sentence of B356's advice that 2026.10.4 made too broad. No finding
+changes status on any config.
+
+### Changed
+- **Grounded on OpenClaw 2026.10.4.** The installed tree equals the release package, the config
+  schema is identical to 2026.10.3 (5,430 paths), the state database layout, the vendor table
+  set, the verified paths and the DM-policy manifest differ by version stamp only, and both
+  ported vendor functions (the Codex-harness answer and the retired-format finder) give the same
+  answers on every row of their test batteries. The grounded ceiling and both windows move to
+  2026.10.4, so the newer-than-grounded notice no longer appears on a 2026.10.4 install and
+  B382 applies OpenClaw's own retired-format finder on 2026.10.1 to 2026.10.4. The default
+  worker image B391 names is unchanged on this build.
+- **B356 advice about OAuth credential sidecars.** From 2026.10.4 Doctor refuses over an OAuth
+  credential sidecar only when a legacy auth file still references it; through 2026.10.3 it
+  refused over every one. The advice now names the referenced ones, which is true on every
+  build that refuses at all. Only the `fix` text changes; no `detail` and no status moves.
+
 ## [4.4.0] - 2026-10-12
 
-**This release re-grounds the audit on OpenClaw 2026.10.4, after catching up with 2026.9.7,
-9.8, 9.9, 10.1, 10.2 and 10.3, reads the SQLite stores where current OpenClaw keeps what older checks looked
+**This release re-grounds the audit on OpenClaw 2026.10.3, after catching up with 2026.9.7,
+9.8, 9.9, 10.1 and 10.2, reads the SQLite stores where current OpenClaw keeps what older checks looked
 for in files, and makes it much harder for an odd or hostile file to end a run or hide a
 finding.** Gateway token references and templated binds are judged by what they are (a reference
 nothing visible resolves is UNKNOWN, never PASS). B138 (pending device pairings), B78
@@ -57,11 +77,11 @@ from PASS to UNKNOWN.
 
 - **Python 3.10 is the floor and 3.14 is tested.** CI drops the Ubuntu 3.9 leg; 3.12 and
   3.14 on Linux and 3.12 on macOS are tested. 3.13 has not been measured and is not claimed.
-- **Grounded on OpenClaw 2026.10.4.** The grounded ceiling moved through 2026.9.7, 9.8, 9.9,
-  10.1, 10.2 and 10.3 to 10.4, with the snapshots and dist citations re-baselined on each. The
-  Codex harness determination behind B333 and B353 is trusted on all seven, so they no longer
-  drop to WARN, and B382 applies OpenClaw's own retired-format finder on 10.1 to 10.4. On a
-  build above 2026.10.4 the newer-than-grounded notice appears again.
+- **Grounded on OpenClaw 2026.10.3.** The grounded ceiling moved through 2026.9.7, 9.8, 9.9,
+  10.1 and 10.2 to 10.3, with the snapshots and dist citations re-baselined on each. The Codex
+  harness determination behind B333 and B353 is trusted on all six, so they no longer drop to
+  WARN, and B382 applies OpenClaw's own retired-format finder on 10.1 to 10.3. On a build above
+  2026.10.3 the newer-than-grounded notice appears again.
 - **Test hygiene.** The subprocess tests set their resource limits on a best-effort basis (macOS
   refuses them), and the bytecode tests build their child environment explicitly, so they pass
   with `PYTHONDONTWRITEBYTECODE` exported.
