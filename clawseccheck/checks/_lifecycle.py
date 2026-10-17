@@ -8722,7 +8722,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         return unreadable
 
     missing: list[str] = []
-    accepted_file = False
+    unread_files: list[str] = []
     for label, dirs in (
         ("skills.load.extraDirs", config_extra_skill_dirs(ctx.home, ctx.config)),
         ("plugins.load.paths", config_plugin_load_paths(ctx.home, ctx.config)),
@@ -8732,11 +8732,18 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                 present = pathprobe.is_dir(d)
                 # C-742: OpenClaw documents plugins.load.paths as "files or directories", and
                 # from 2026.10.4 an enabled standalone plugin FILE listed there starts with
-                # the Gateway. A present regular file is a present source, not a missing one.
-                # skills.load.extraDirs names skill ROOTS, so only a directory counts there.
-                if not present and label == "plugins.load.paths":
-                    present = pathprobe.is_file(d)
-                    accepted_file = accepted_file or present
+                # the Gateway. A present file is not a MISSING source, so it must not get the
+                # "not present on disk" sentence; but nothing here reads its code, so it is
+                # not "audited" either and keeps a WARN of its own (a PASS would have removed
+                # the only signal that an unscanned source loads). skills.load.extraDirs names
+                # skill ROOTS, so only a directory counts there.
+                if not present and label == "plugins.load.paths" and pathprobe.is_file(d):
+                    # Present, but not a directory this audit walks: nothing in it is read.
+                    unread_files.append(
+                        f"{label}: '{_detail_path(d, ctx.home)}' is a plugin file - present on "
+                        "disk, but this audit does not read plugin code"
+                    )
+                    continue
             except OSError:
                 present = False
             if not present:
@@ -8787,6 +8794,26 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
                     f"({_detail_path(p.parent, ctx.home)})"
                 )
 
+    if not missing and unread_files:
+        detail = (
+            "A plugin file listed in plugins.load.paths is present on disk, but this audit does "
+            "not read plugin code, so what it runs when the Gateway starts is unaudited: "
+            + "; ".join(unread_files[:6])
+            + (f" (+{len(unread_files) - 6} more)" if len(unread_files) > 6 else "")
+        )
+        if unreadable_lock_paths:
+            detail += (
+                " Additionally, could not check: " + "; ".join(unreadable_lock_paths[:4]) + "."
+            )
+        return _finding(
+            "B158",
+            WARN,
+            detail,
+            "Read the file yourself before you enable it: ClawSecCheck does not read the code "
+            "of a standalone plugin file." + (" " + _C680_PARTIAL_FIX if partial_lock_paths else ""),
+            evidence=unread_files,
+        )
+
     if not missing:
         if partial_lock_paths and not unreadable_lock_paths:
             return _finding(
@@ -8816,10 +8843,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         return _finding(
             "B158",
             PASS,
-            "Every declared skill/plugin load source resolves to a present directory on disk."
-            if not accepted_file
-            else "Every declared skill/plugin load source resolves to a present directory or "
-            "file on disk.",
+            "Every declared skill/plugin load source resolves to a present directory on disk.",
             "Keep declared load sources (skills.load.extraDirs, plugins.load.paths, ClawHub "
             "lock entries) in sync with what is actually installed.",
         )
@@ -8839,7 +8863,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         detail,
         "Remove the stale declaration, or install the skill/plugin so ClawSecCheck can scan it "
         "before it auto-loads." + (" " + _C680_PARTIAL_FIX if partial_lock_paths else ""),
-        evidence=missing,
+        evidence=missing + unread_files,
     )
 
 

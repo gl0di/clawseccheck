@@ -9,10 +9,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 - **B158 no longer calls a present plugin file "not present on disk".** `plugins.load.paths`
   accepts files as well as directories, and from OpenClaw 2026.10.4 an enabled standalone plugin
   file listed there starts with the Gateway. B158 tested every entry as a directory only, so a
-  file that existed was reported as declared but missing. A regular file now counts as present
-  there; a missing path of either kind is reported with the same text as before, and
-  `skills.load.extraDirs`, which names skill roots, still needs a directory. Only the verdict
-  on a present file changes (WARN to PASS); no `detail` text changed.
+  file that existed was reported as declared but missing. It is now reported for what it is: a
+  plugin file that is present on disk but whose code this audit does not read. The status stays
+  WARN (a PASS would have hidden an unscanned source that loads), a missing path of either kind
+  keeps its text, and `skills.load.extraDirs`, which names skill roots, still needs a directory.
+  The existing `detail` is unchanged whenever a path is missing; the new sentence appears only
+  when every listed source is present and at least one is a file.
 
 ## [4.4.1] - 2026-10-16
 
