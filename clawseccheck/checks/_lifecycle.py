@@ -8722,6 +8722,7 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         return unreadable
 
     missing: list[str] = []
+    accepted_file = False
     for label, dirs in (
         ("skills.load.extraDirs", config_extra_skill_dirs(ctx.home, ctx.config)),
         ("plugins.load.paths", config_plugin_load_paths(ctx.home, ctx.config)),
@@ -8729,6 +8730,13 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         for d in dirs:
             try:
                 present = pathprobe.is_dir(d)
+                # C-742: OpenClaw documents plugins.load.paths as "files or directories", and
+                # from 2026.10.4 an enabled standalone plugin FILE listed there starts with
+                # the Gateway. A present regular file is a present source, not a missing one.
+                # skills.load.extraDirs names skill ROOTS, so only a directory counts there.
+                if not present and label == "plugins.load.paths":
+                    present = pathprobe.is_file(d)
+                    accepted_file = accepted_file or present
             except OSError:
                 present = False
             if not present:
@@ -8808,7 +8816,10 @@ def check_declared_skill_reconciliation(ctx: Context) -> Finding:
         return _finding(
             "B158",
             PASS,
-            "Every declared skill/plugin load source resolves to a present directory on disk.",
+            "Every declared skill/plugin load source resolves to a present directory on disk."
+            if not accepted_file
+            else "Every declared skill/plugin load source resolves to a present directory or "
+            "file on disk.",
             "Keep declared load sources (skills.load.extraDirs, plugins.load.paths, ClawHub "
             "lock entries) in sync with what is actually installed.",
         )

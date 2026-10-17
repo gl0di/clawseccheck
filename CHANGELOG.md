@@ -3,6 +3,17 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **B158 no longer calls a present plugin file "not present on disk".** `plugins.load.paths`
+  accepts files as well as directories, and from OpenClaw 2026.10.4 an enabled standalone plugin
+  file listed there starts with the Gateway. B158 tested every entry as a directory only, so a
+  file that existed was reported as declared but missing. A regular file now counts as present
+  there; a missing path of either kind is reported with the same text as before, and
+  `skills.load.extraDirs`, which names skill roots, still needs a directory. Only the verdict
+  on a present file changes (WARN to PASS); no `detail` text changed.
+
 ## [4.4.1] - 2026-10-16
 
 **This release re-grounds the audit on OpenClaw 2026.10.4**, the stability patch that followed
