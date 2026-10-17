@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 ## [Unreleased]
 
 ### Fixed
+- **A skipped step of the standard flow is now visible in the output.** A real agent once
+  delivered the card of a gradeless run without ever filling in the self-report or running the
+  judge panel; the only place that said so was prose in `SKILL.md`, read many steps earlier.
+  When the self-report layer is missing because it was never handed in, the report, the
+  dashboard card (compact and full), the HTML page and the PDF now add one line under the
+  "No grade yet" sentence: "Item 1 is not finished: --ask, fill in, --attest, then the judge
+  panel." It is absent on a graded run and when the self-report is missing for another reason.
+  Rendering only: no status, score, grade, exit code or JSON key changes. It cannot tell that
+  the judge panel was skipped after a valid `--attest`. On the compact card the extra line costs
+  the explanatory `why:` lines of the lowest-severity findings, which that card already sheds
+  first to stay inside its character budget.
 - **B158 no longer calls a present plugin file "not present on disk".** `plugins.load.paths`
   accepts files as well as directories, and from OpenClaw 2026.10.4 an enabled standalone plugin
   file listed there starts with the Gateway. B158 tested every entry as a directory only, so a

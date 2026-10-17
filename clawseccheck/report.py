@@ -46,6 +46,7 @@ from .layers import (
     LAYER_LOGS_TRAJECTORIES,
     LAYER_ORDER,
     describe_layer,
+    item1_next_step_sentence,
     layers_definition_sentence,
 )
 from . import openclawdist as _openclawdist
@@ -3751,6 +3752,9 @@ def render_report(findings: list[Finding], score: ScoreResult,
         lines.append(_urgent_headline(findings, risk=risk))
         lines.append(_missing_layers_sentence(score))
         lines.append(layers_definition_sentence())
+        _next = item1_next_step_sentence(getattr(score, "missing_layers", ()))
+        if _next:
+            lines.append(_next)
     # C-423: the mandatory "not fully covered" line - appears on GRADED runs too,
     # whenever a layer that DID run still didn't exhaust its subject.
     _covered_line = _not_fully_covered_line(score)
@@ -5036,6 +5040,11 @@ def render_dashboard(findings: list[Finding], score: ScoreResult, *,
             # C-704: the sentence above counts layers it never names; the compact card
             # skips this line because it is tuned to fit ~4096 chars on a real home.
             grade_lines.append(layers_definition_sentence())
+        # C-737: the definition stays directly under the headline (C-704's contract); the
+        # next-step line follows it, or follows the headline itself on the compact card.
+        _next = item1_next_step_sentence(getattr(score, "missing_layers", ()))
+        if _next:
+            grade_lines.append(_next)
         if _headline != _NOTHING_URGENT_SENTENCE:
             # CLAWSECCHECK headline-id-leak: this headline states the risk, never the
             # check id (design-system.md Layer 0), and this card's own Skills/MCP
@@ -5469,6 +5478,9 @@ def render_monitor(alerts, score: ScoreResult, ascii_only: bool = False,
         lines.append(f"Current: {score.score}/100  Grade: {score.grade}")
     else:
         lines.append(_missing_layers_sentence(score))
+        _next = item1_next_step_sentence(getattr(score, "missing_layers", ()))
+        if _next:
+            lines.append(_next)
     _covered_line = _not_fully_covered_line(score)
     if _covered_line:
         lines.append(_covered_line)
@@ -7255,7 +7267,10 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
             '<div class="scorewrap">'
             f'<p class="meta">{esc(_urgent_headline(findings))}</p>'
             f'<p class="meta">{esc(_missing_layers_sentence(score))}</p>'
-            f'<p class="meta">{esc(layers_definition_sentence())}</p></div>'
+            + f'<p class="meta">{esc(layers_definition_sentence())}</p>'
+            + (f'<p class="meta">{esc(_next)}</p>' if (_next := item1_next_step_sentence(
+                getattr(score, "missing_layers", ()))) else "")
+            + "</div>"
         )
 
     # C-717: the build that wrote this page, once, in the footer (the PDF prints it as

@@ -79,7 +79,17 @@ no installed-skill sweep, no self-report, no live test) prints:
 
 <pre><code>Nothing failed outright &#x2014; most serious open item: HIGH &#x2014; &lt;finding title&gt;  [Bxx]
 No grade yet &#x2014; 3 of 5 layers did not run: installed skills and plugins (not reached),
-agent self-report (not submitted), live behaviour test (not submitted).</code></pre>
+agent self-report (not submitted), live behaviour test (not submitted).
+Item 1 is not finished: --ask, fill in, --attest, then the judge panel.</code></pre>
+
+When the agent self-report is one of the missing layers because it was never handed in, the
+report, the dashboard card (compact and full), the HTML page and the PDF add the last line
+above. It tells the reader, at the moment the result is in front of them, which steps the
+standard flow still owes: `--ask`, fill the template in, pass it with `--attest`, then the
+judge panel. It is absent on a graded run and when the self-report is missing for another
+reason (declined, unavailable, failed). It is a rendering aid only: no status, score, grade,
+exit code or JSON key depends on it, and it cannot tell that a judge panel was skipped after a
+valid `--attest`.
 
 `--full` closes layers 2 and 3 (the installed-skill/plugin sweep and the log/trajectory
 scan) but still needs a self-report and a submitted live-test verdict - typically fed
@@ -1965,6 +1975,7 @@ python3 audit.py --log audit.log            # also write log to a local file
 
     <pre><code>&#x1F99E; ClawSecCheck · OpenClaw Security Audit · Most urgent: CRITICAL &#x2014; Lethal Trifecta (untrusted input × sensitive data × outbound)
     No grade yet &#x2014; 2 of 5 layers did not run: agent self-report (not submitted), live behaviour test (not submitted).  ·  27 issues
+    Item 1 is not finished: --ask, fill in, --attest, then the judge panel.
     For that finding's check id (needed for `--explain &lt;id&gt;`), see the full report &#x2014; plain `clawseccheck` or `--save &lt;path&gt;` / `--html &lt;path&gt;`.
     Not fully covered: no trajectory sidecar was read
     &#x26A0;&#xFE0F; open CRITICAL finding &#x2014; it would have capped the grade, but this run has no grade to cap.&#10;
