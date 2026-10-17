@@ -17,6 +17,7 @@ from .. import trajectory as _trajectory
 from ..catalog import (
     BY_ID,
     FAIL,
+    LOW,
     PASS,
     UNKNOWN,
     WARN,
@@ -40,6 +41,8 @@ from ._shared import (
     _config_unreadable,
     _custom,
     _dir_replaceable_by_others,
+    _MENTION_GATE_CONTAINERS,
+    _channels,
     _external_input_channels,
     _finding,
     _has_approval_gate,
@@ -47,7 +50,9 @@ from ._shared import (
     _key_advice,
     _node_allow_skills,
     _node_commands,
+    _norm_group_policy,
     _open_channels,
+    _open_wildcard_group_channels,
     _profile_is_powerful,
     _surface_absent,
     _unpolicied_open_wildcard_group_channels,
@@ -1873,6 +1878,220 @@ def _escaping_scope_label(cfg: dict, name: str) -> str:
     return "global scope"
 
 
+# ---------- C-740: B55 on a channel whose ingress is ONE declared sender id ----------
+# Lives here, not in _shared.py: only B55 uses it (CLAUDE.md 3.1 - a helper used by exactly one
+# topic sits next to its check). `from __future__ import annotations` is in force.
+
+_ONE_ID_GROUP_PREFIXES = frozenset(
+    {"accessgroup", "role", "roles", "group", "groups", "team", "channel", "guild",
+     "chat_id", "chat_guid", "chat_identifier"}
+)
+
+# Providers whose `groupAllowFrom` is VERIFIED to be a list of SENDER ids. On the other
+# providers an entry can name a whole group chat (Feishu's docs use `oc_...` chat ids;
+# iMessage's shared matcher accepts `chat_id:` / `chat_guid:` entries that admit everyone in
+# that chat), and their runtimes are not installed here to prove otherwise, so a
+# `groupPolicy: allowlist` on them is never counted as "one sender". Telegram: a `groups`
+# entry without its own allowFrom falls back to the channel's `groupAllowFrom`, and both are
+# matched against the message SENDER (OpenClaw 2026.10.4, dist/bot-message-CpKgMHf_.mjs:1125,
+# 1137; dist/helpers-8klSsO8Z.mjs:662,681). Extend only with the same kind of evidence.
+_ONE_ID_GROUP_LIST_IS_SENDER_LIST = frozenset({"telegram"})
+_ONE_ID_CATCH_ALL_WORDS = frozenset({"all", "everyone", "anyone", "any", "public"})
+
+
+def _allow_list_ids(value):
+    """Distinct, normalised sender ids of one ``allowFrom``-style list, or ``None``.
+
+    ``None`` means "not a usable list" (absent, not a list, or an entry that is not a
+    string or an integer), never "no ids". An empty list is ``frozenset()``. Normalisation
+    is deliberately minimal (strip + casefold, an integer becomes its decimal text): two
+    spellings of one account are then counted as TWO ids, which is the safe direction here -
+    more ids can only keep a channel out of the "one id" class.
+    """
+    if not isinstance(value, list):
+        return None
+    out = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            return None
+        text = str(item).strip().casefold()
+        if not text:
+            continue
+        # One list entry must stand for ONE sender. An `accessGroup:<name>` entry expands to
+        # that group's members (OpenClaw allow-from / access-groups modules), a role or group
+        # entry names many, and any pattern or catch-all word admits an unknown set: none of
+        # them is "one id", so the list is unusable for this purpose.
+        if "*" in text or text in _ONE_ID_CATCH_ALL_WORDS:
+            return None
+        if ":" in text and text.split(":", 1)[0] in _ONE_ID_GROUP_PREFIXES:
+            return None
+        out.add(text)
+    return frozenset(out)
+
+
+_ONE_ID_WIDENING_KEY_HINTS = (
+    "allow", "policy", "user", "role", "member", "sender", "dm", "group", "invite", "guest",
+    "public", "everyone",
+)
+
+
+def _conversation_scope_widens(node):
+    """True when a per-conversation container under *node* carries a sender-policy key.
+
+    Walks the container vocabulary of ``_MENTION_GATE_CONTAINERS`` / sub-containers and
+    reports any entry holding a key that can change WHO is admitted (an ``allow*`` list, a
+    ``*policy``, ``users``, ``roles``, ``members``, ``senders``). Such a scope could admit
+    senders the channel-level allowlist does not, so the channel cannot be called bounded.
+    Entries that only tune delivery (``requireMention`` and the like) do not count. A
+    container that is not the expected dict-of-dicts shape is treated as widening: it is a
+    shape this helper cannot read, and "cannot read" must not become "bounded".
+    """
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if not isinstance(cur, dict):
+            return True
+        for container in _MENTION_GATE_CONTAINERS + ("topics",):
+            entries = cur.get(container)
+            if entries is None:
+                continue
+            if not isinstance(entries, dict):
+                return True
+            for entry in entries.values():
+                if not isinstance(entry, dict):
+                    return True
+                for key in entry:
+                    if key in _MENTION_GATE_CONTAINERS or key == "topics":
+                        continue
+                    low = str(key).casefold()
+                    if any(hint in low for hint in _ONE_ID_WIDENING_KEY_HINTS):
+                        return True
+                stack.append(entry)
+    return False
+
+
+_ONE_ID_HANDLED_KEYS = frozenset(
+    {"enabled", "dmPolicy", "groupPolicy", "allowFrom", "groupAllowFrom", "accounts", "topics"}
+)
+
+
+def _dict_has_sender_keys(value) -> bool:
+    """True when *value* (a dict, searched recursively) holds a truthy sender-policy key."""
+    if not isinstance(value, dict):
+        return False
+    for key, inner in value.items():
+        low = str(key).casefold()
+        if any(hint in low for hint in _ONE_ID_WIDENING_KEY_HINTS) and inner not in (
+            False, None, "", 0, [], {}
+        ):
+            return True
+        if isinstance(inner, dict) and _dict_has_sender_keys(inner):
+            return True
+    return False
+
+
+def _foreign_sender_policy(node) -> bool:
+    """True when *node* carries a sender-admitting setting this helper does not model.
+
+    ``allowBots: true``, a nested ``dm`` / ``group`` block with its own ``policy`` or
+    ``allowFrom``, a ``users`` / ``roles`` list, ``commands`` with an allow list, and so on.
+    The handled keys and the per-conversation containers are skipped (they have their own
+    rules); anything else with an ``allow*`` / ``*policy`` / ``users`` / ``roles`` /
+    ``members`` / ``senders`` name and a truthy value is treated as "cannot prove one id".
+    Conservative on purpose: a harmless key that happens to match only costs the downgrade,
+    never a wrong one.
+    """
+    if not isinstance(node, dict):
+        return True
+    for key, value in node.items():
+        if key in _ONE_ID_HANDLED_KEYS or key in _MENTION_GATE_CONTAINERS:
+            continue
+        low = str(key).casefold()
+        if any(hint in low for hint in _ONE_ID_WIDENING_KEY_HINTS) and value not in (
+            False, None, "", 0, [], {}
+        ):
+            return True
+        if isinstance(value, dict) and _dict_has_sender_keys(value):
+            return True
+    return False
+
+
+def _one_id_bounded_channels(cfg: dict) -> set:
+    """Names of declared channels whose whole ingress is ONE sender id (C-740).
+
+    A channel qualifies only when it is enabled, is not an open wildcard-group channel, and
+    EVERY sender-admitting setting of the channel root and of each account is an
+    ``allowlist`` whose list holds a usable set of ids, and the UNION of all those ids
+    (``allowFrom`` for ``dmPolicy``, ``groupAllowFrom`` for ``groupPolicy``) is exactly one
+    distinct id. Anything else is not bounded, always the conservative direction: ``open`` or
+    ``pairing`` (anyone, or whoever pairs), a missing or unusable list (also the shape of a
+    provider with a ``groupPolicy`` and no ``groupAllowFrom`` field), the wildcard ``"*"``,
+    an empty list (not one id), two or more ids (also two spellings of one account), a
+    schema-drifted ``accounts`` value, and any per-conversation scope that carries its own
+    sender policy (``_conversation_scope_widens``).
+
+    The id is never returned or printed. The id being the OWNER's is NOT established here -
+    config cannot say whose id it is - so callers must word the result as "bounded to one
+    declared sender", never "bounded to you".
+    """
+    open_wildcard = _open_wildcard_group_channels(cfg)
+    bounded = set()
+    for name, c in _channels(cfg).items():
+        if not isinstance(c, dict) or c.get("enabled") is False or name in open_wildcard:
+            continue
+        accounts = c.get("accounts")
+        if accounts is not None and not isinstance(accounts, dict):
+            continue
+        nodes = [c] + (list(accounts.values()) if isinstance(accounts, dict) else [])
+        if any(not isinstance(n, dict) for n in nodes):
+            continue
+        ids = set()
+        usable = True
+        saw_policy = False
+        for node in nodes:
+            if node.get("enabled") is False:
+                continue
+            if _conversation_scope_widens(node) or _foreign_sender_policy(node):
+                usable = False
+                break
+            # Every sender list this node carries counts toward the ONE id, whether or not
+            # the node states a policy of its own: an account that inherits the channel's
+            # allowlist policy but brings its own allowFrom admits those senders too.
+            for key in ("allowFrom", "groupAllowFrom"):
+                if key not in node:
+                    continue
+                listed = _allow_list_ids(node[key])
+                if listed is None:
+                    usable = False
+                    break
+                ids |= listed
+            if not usable:
+                break
+            dm = node.get("dmPolicy")
+            gp = _norm_group_policy(name, node.get("groupPolicy"))
+            # BOTH policies must be stated on every enabled node: an absent dmPolicy resolves
+            # to "pairing" in OpenClaw (every approved pairer is admitted), and an absent
+            # groupPolicy resolves per provider, to "open" for some. Only an explicit
+            # "disabled" closes a side without a list; "allowlist" needs a usable, non-empty
+            # list on THIS node (missing, malformed and empty all fail); open, pairing, absent
+            # and anything unknown admit more than one id.
+            for policy, key in ((dm, "allowFrom"), (gp, "groupAllowFrom")):
+                if policy == "disabled":
+                    continue
+                if key == "groupAllowFrom" and name not in _ONE_ID_GROUP_LIST_IS_SENDER_LIST:
+                    usable = False
+                    break
+                if policy != "allowlist" or not _allow_list_ids(node.get(key)):
+                    usable = False
+                    break
+                saw_policy = True
+            if not usable:
+                break
+        if usable and saw_policy and len(ids) == 1 and "*" not in ids:
+            bounded.add(name)
+    return bounded
+
+
 def check_fs_write_exposure(ctx: Context) -> Finding:
     """B55 (C-013) - filesystem-write tool granted without scoping.
 
@@ -2315,6 +2534,39 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
             ]
             if scope_grants is not None:
                 evidence += _b737_provenance_sentences(scope_grants)
+            # C-740 (Dave, 2026-10-17): when EVERY such channel is already an allowlist that
+            # admits exactly ONE sender id, the reach is bounded to that one declared sender
+            # and the "narrow the channel" advice below cannot be followed (it is already
+            # true). The finding stays WARN - never PASS: config cannot say whose id it is,
+            # so a wrong id or a shared account would make the reach wider - but drops to
+            # LOW and says what is actually left. Mixed cases keep the HIGH wording.
+            _enabled = {
+                n for n, c in _channels(cfg).items()
+                if isinstance(c, dict) and c.get("enabled") is not False
+            }
+            if _enabled and _enabled <= _one_id_bounded_channels(cfg):
+                evidence.append(
+                    "each channel above admits exactly one sender id (its allowlist holds a "
+                    "single id; the id itself is not printed and config cannot say whose it is)"
+                )
+                return _finding(
+                    "B55",
+                    WARN,
+                    f"Filesystem-write tool granted ({label}) is reachable by the ONE sender "
+                    f"id that the allowlist of the declared channel(s) ({', '.join(ext_ch)}) "
+                    f"admits, and the only scoping is a non-write-specific approval gate "
+                    f"(tools.exec.mode) \u2014 it doesn't scope write-capable tools.",
+                    "The channel side is already as narrow as it can be. Check that the single "
+                    "listed id is yours and that the account or bot token is not shared: if "
+                    "either is wrong the reach is wider than this says. To remove what is "
+                    "left, scope the write tool itself - keep write/edit/apply_patch out of "
+                    "tools.allow, or contain writes with a sandbox (see RISK-12). Other "
+                    "people's messages can still reach the model as quoted or history "
+                    "context (B26 reports that), so this is lower, not gone. "
+                    "tools.exec.mode='ask' alone does not scope write-capable tools.",
+                    evidence=evidence,
+                    severity=LOW,
+                )
             return _finding(
                 "B55",
                 WARN,

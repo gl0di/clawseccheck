@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [Se
 
 ## [Unreleased]
 
+### Changed
+- **B55 is LOW when the only reach is one declared sender.** When EVERY enabled channel is an
+  allowlist that admits exactly one distinct sender id, B55 stays a WARN but drops from HIGH to
+  LOW and says what is true: the tool is reachable by that one sender, the channel side is
+  already as narrow as it can be, the id may not be yours or the account may be shared, and
+  other people's quoted or history context can still reach the model (B26 reports that). The
+  old advice ("narrow the channel to your own account") could not be followed on such a config.
+  It is never a PASS, because config cannot say whose id it is. The rule is deliberately narrow
+  and was tightened by two independent adversarial reviews: both `dmPolicy` and `groupPolicy`
+  must be written on the channel and on every account (an absent `dmPolicy` is `pairing` in
+  OpenClaw, an absent `groupPolicy` is a provider default), the lists must hold one distinct id
+  in total (so not two ids, not two spellings, not an `accessGroup:` / role / `chat_id:` entry,
+  not a wildcard or a catch-all word, not an empty or missing list), a group allowlist counts
+  only on Telegram (the one provider whose `groupAllowFrom` is verified to hold sender ids; on
+  the others it can name a whole chat), no per-conversation scope or other sender setting may
+  carry its own policy, and every other enabled channel must qualify too. Anything else keeps
+  the old HIGH wording, as do proven-open reach and the no-approval-gate case. The `detail`
+  and `fix` of B55 change for the one-id shape only, so an ignore entry written against the old
+  text for that exact shape no longer matches; on a graded run the lower severity also lowers
+  the deduction.
+- **RISK-12's chain no longer says "no approval gate".** The label read "broad fs-write tool
+  (unscoped, no approval gate)" even on a config where `tools.exec.mode` is set, which B55's own
+  evidence says (an exec gate exists but is not write-specific). It now reads "broad fs-write
+  tool (no write-specific scoping)". Text only: RISK-12 arms and clears exactly as before.
+
 ### Fixed
 - **A skipped step of the standard flow is now visible in the output.** A real agent once
   delivered the card of a gradeless run without ever filling in the self-report or running the

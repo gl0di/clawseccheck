@@ -1470,7 +1470,7 @@ def _rule_fs_write_tamper(ctx: Context, findings: list[Finding],
         id="RISK-12",
         severity=HIGH,
         title="Untrusted input + broad filesystem-write = tamper / persistence",
-        chain=[ingress_label, "broad fs-write tool (unscoped, no approval gate)",
+        chain=[ingress_label, "broad fs-write tool (no write-specific scoping)",
                "files overwritten \u2192 tamper / persistence implant"],
         why=(
             "The agent is granted a filesystem-write tool (fs_write / apply_patch) that "

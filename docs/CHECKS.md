@@ -3117,7 +3117,7 @@ These paths are computed from multiple checks. They fire only when every leg is 
 
 - Severity: HIGH
 - Pattern: HIGH: broad filesystem-write capability (B55) + untrusted ingress = tamper/persistence.
-- Chain: ingress_label -> broad fs-write tool (unscoped, no approval gate) -> files overwritten -> tamper / persistence implant
+- Chain: ingress_label -> broad fs-write tool (no write-specific scoping) -> files overwritten -> tamper / persistence implant
 - Why:
   The agent is granted a filesystem-write tool (fs_write / apply_patch) that B55 found
   broadly reachable or ungated, AND untrusted content can reach the agent (an open channel

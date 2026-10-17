@@ -320,6 +320,7 @@ from ._agents import (
 from ._capability import (
     _b352_effective_prepends,
     _b352_risky,
+    _one_id_bounded_channels,
     check_exec_path_prepend,
     _b351_normalize_agent_id,
     _b351_resolvable_agents,
