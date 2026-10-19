@@ -3,6 +3,61 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.4.2] - 2026-10-19
+
+**Three accuracy fixes after 4.4.1; no new check and no finding changes status except one
+severity.** B55 drops from HIGH to LOW when the only reach is one declared sender, B158 stops
+calling a present plugin file "not present on disk", and a gradeless run whose self-report was
+never handed in now says which steps of the standard flow are still owed. RISK-12's chain label
+no longer claims there is no approval gate on a config where one is set.
+
+### Changed
+- **B55 is LOW when the only reach is one declared sender.** When EVERY enabled channel is an
+  allowlist that admits exactly one distinct sender id, B55 stays a WARN but drops from HIGH to
+  LOW and says what is true: the tool is reachable by that one sender, the channel side is
+  already as narrow as it can be, the id may not be yours or the account may be shared, and
+  other people's quoted or history context can still reach the model (B26 reports that). The
+  old advice ("narrow the channel to your own account") could not be followed on such a config.
+  It is never a PASS, because config cannot say whose id it is. The rule is deliberately narrow
+  and was tightened by two independent adversarial reviews: both `dmPolicy` and `groupPolicy`
+  must be written on the channel and on every account (an absent `dmPolicy` is `pairing` in
+  OpenClaw, an absent `groupPolicy` is a provider default), the lists must hold one distinct id
+  in total (so not two ids, not two spellings, not an `accessGroup:` / role / `chat_id:` entry,
+  not a wildcard or a catch-all word, not an empty or missing list), a group allowlist counts
+  only on Telegram (the one provider whose `groupAllowFrom` is verified to hold sender ids; on
+  the others it can name a whole chat), no per-conversation scope or other sender setting may
+  carry its own policy, and every other enabled channel must qualify too. Anything else keeps
+  the old HIGH wording, as do proven-open reach and the no-approval-gate case. The `detail`
+  and `fix` of B55 change for the one-id shape only, so an ignore entry written against the old
+  text for that exact shape no longer matches; on a graded run the lower severity also lowers
+  the deduction.
+- **RISK-12's chain no longer says "no approval gate".** The label read "broad fs-write tool
+  (unscoped, no approval gate)" even on a config where `tools.exec.mode` is set, which B55's own
+  evidence says (an exec gate exists but is not write-specific). It now reads "broad fs-write
+  tool (no write-specific scoping)". Text only: RISK-12 arms and clears exactly as before.
+
+### Fixed
+- **A skipped step of the standard flow is now visible in the output.** A real agent once
+  delivered the card of a gradeless run without ever filling in the self-report or running the
+  judge panel; the only place that said so was prose in `SKILL.md`, read many steps earlier.
+  When the self-report layer is missing because it was never handed in, the report, the
+  dashboard card (compact and full), the HTML page and the PDF now add one line under the
+  "No grade yet" sentence: "Item 1 is not finished: --ask, fill in, --attest, then the judge
+  panel." It is absent on a graded run and when the self-report is missing for another reason.
+  Rendering only: no status, score, grade, exit code or JSON key changes. It cannot tell that
+  the judge panel was skipped after a valid `--attest`. On the compact card the extra line costs
+  the explanatory `why:` lines of the lowest-severity findings, which that card already sheds
+  first to stay inside its character budget.
+- **B158 no longer calls a present plugin file "not present on disk".** `plugins.load.paths`
+  accepts files as well as directories, and from OpenClaw 2026.10.4 an enabled standalone plugin
+  file listed there starts with the Gateway. B158 tested every entry as a directory only, so a
+  file that existed was reported as declared but missing. It is now reported for what it is: a
+  plugin file that is present on disk but whose code this audit does not read. The status stays
+  WARN (a PASS would have hidden an unscanned source that loads), a missing path of either kind
+  keeps its text, and `skills.load.extraDirs`, which names skill roots, still needs a directory.
+  The existing `detail` is unchanged whenever a path is missing; the new sentence appears only
+  when every listed source is present and at least one is a file.
+
 ## [4.4.1] - 2026-10-16
 
 **This release re-grounds the audit on OpenClaw 2026.10.4**, the stability patch that followed

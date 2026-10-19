@@ -116,6 +116,15 @@ def test_regular_file_and_missing_roots_still_warn(tmp_path, request, source, in
         cfg = mkcfg([_make(kind, home)])
         assert discover(home, cfg) == [home / "extra"]
         f = check_declared_skill_reconciliation(_ctx(home, cfg))
+        if kind == "regular_file" and source == "plugin_paths":
+            # C-742: plugins.load.paths accepts files, so a present regular file is not a MISSING
+            # source - but this audit reads no plugin code, so it stays a WARN with its own true
+            # sentence (a PASS would hide an unscanned source). skills.load.extraDirs names
+            # skill ROOTS and keeps the "not present" wording on a file.
+            assert f.status == WARN, (f.status, f.detail)
+            assert "does not read plugin code" in f.detail
+            assert "declared but not present on disk" not in f.detail
+            continue
         assert f.status == WARN and "declared but not present on disk" in f.detail, kind
 
 

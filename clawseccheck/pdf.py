@@ -60,7 +60,12 @@ from .catalog import (
     WARN,
     Finding,
 )
-from .layers import LAYER_ORDER, describe_layer, layers_definition_sentence
+from .layers import (
+    LAYER_ORDER,
+    describe_layer,
+    item1_next_step_sentence,
+    layers_definition_sentence,
+)
 from .report import (
     _behavioral_block_lines, _cap_also_clause, _cap_cascade, _cap_primary_reason_text,
     _coverage_lines, _degraded_incomplete_clause, _logs_unexamined, _EXPORT_FINDINGS_ONLY_NOTE,
@@ -757,6 +762,9 @@ def render_pdf(findings: list[Finding], score: ScoreResult, native=None,
         if missing_text:
             flow.wrapped(missing_text, size=9.5, color="#666666")
         flow.wrapped(layers_definition_sentence(), size=9.5, color="#666666")
+        _next = item1_next_step_sentence(score.missing_layers)
+        if _next:
+            flow.wrapped(_next, size=9.5, color="#666666")
         flow.spacer(4.0)
 
     # C-423: the honesty invariant applies even on a graded run - a layer that ran

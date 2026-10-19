@@ -172,6 +172,28 @@ def layers_definition_sentence() -> str:
     return f"A grade needs all {len(LAYER_ORDER)} layers of evidence: {names}."
 
 
+def item1_next_step_sentence(missing_layers) -> str:
+    """The one sentence that makes a skipped step of the standard audit flow VISIBLE in tool
+    output (C-737): ``Item 1 is not finished: --ask, fill in, --attest, then the judge panel.``
+
+    A real agent once delivered the card of a gradeless run without ever filling in the
+    self-report or running the judge panel; the only place that said so was prose in
+    SKILL.md, which it had read many steps earlier. The tool knows exactly when the
+    self-report layer was not handed in, so it says what to do next at the moment the
+    reader is looking at the result. Empty string whenever the self-report layer is not in
+    the ``not_submitted`` state (it ran, was declined, or failed for another reason), so a
+    graded run and a run that failed differently never get advice that does not fit.
+
+    ``missing_layers`` is ``ScoreResult.missing_layers``: ``(layer, status)`` pairs. ASCII
+    only (the ``--ascii`` fold would otherwise have to touch it). It does not detect a
+    judge panel that was skipped after a valid ``--attest``: nothing in a run records that.
+    """
+    for layer, status in missing_layers or ():
+        if layer == LAYER_SELF_REPORT and status == STATUS_NOT_SUBMITTED:
+            return "Item 1 is not finished: --ask, fill in, --attest, then the judge panel."
+    return ""
+
+
 @dataclass(frozen=True)
 class LayerState:
     status: str
