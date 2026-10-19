@@ -178,6 +178,8 @@ def _channel_schema() -> dict:
             return set()
         if "enum" in node:
             return set(node["enum"])
+        if "const" in node:
+            return {node["const"]}
         values = set()
         for key in ("anyOf", "oneOf"):
             for member in node.get(key, []):
@@ -196,6 +198,14 @@ def _channel_schema() -> dict:
     return out
 
 
+# C-744: the X channel (new in 2026.10.5) has no direct messages at all: its `dmPolicy` is the
+# single constant "disabled" (measured on the installed root JSON schema, `channels.x.dmPolicy`
+# and `channels.x.accounts.<key>.dmPolicy` are `{type: string, const: "disabled"}`). The advised
+# value "disabled" is accepted; "allowlist" is not a thing to advise there, and a DM-less
+# channel has no direct-message ingress for the advice to narrow.
+_DM_DISABLED_ONLY = {"x"}
+
+
 @live
 def test_every_provider_that_has_the_policy_accepts_the_advised_values():
     """The whole channel x policy matrix of the installed build: wherever a provider has a
@@ -205,6 +215,9 @@ def test_every_provider_that_has_the_policy_accepts_the_advised_values():
     with_group = [p for p, v in matrix.items() if "groupPolicy" in v["fields"]]
     assert len(with_dm) >= 10 and len(with_group) >= 10, (with_dm, with_group)  # not vacuous
     for provider in with_dm:
+        if provider in _DM_DISABLED_ONLY:
+            assert matrix[provider]["dm"] == {"disabled"}, (provider, matrix[provider]["dm"])
+            continue
         assert {"allowlist", "disabled"} <= matrix[provider]["dm"], (provider, matrix[provider]["dm"])
     for provider in with_group:
         assert {"allowlist", "disabled"} <= matrix[provider]["group"], (provider, matrix[provider]["group"])

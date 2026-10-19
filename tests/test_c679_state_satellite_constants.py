@@ -276,13 +276,32 @@ def test_the_shipped_baseline_lists_the_satellite_only_tables():
 _LIVE_STATE_DB = REAL_HOME / ".openclaw" / "state" / "openclaw.sqlite"
 
 
+# Tables a database created by an OLDER build still holds although the installed build no
+# longer declares them: the vendor stopped using them and nothing drops them. They are not a
+# classification gap, so the backstop below must not read them as one. Each entry names the
+# measurement that retired it; an entry that the installed dist declares again fails
+# `test_a_lingering_table_is_really_not_declared`.
+_LINGERING_RETIRED_TABLES = {
+    "fleet_cells": "2026.10.5: no longer declared; its only readers (registry.worker) are gone "
+                   "from dist (still present in 2026.10.4); the live database keeps the table",
+}
+
+
 def _live_state_tables() -> set:
     conn = sqlite3.connect(f"file:{_LIVE_STATE_DB}?mode=ro", uri=True)
     try:
         return {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")}
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+            if r[0] not in _LINGERING_RETIRED_TABLES}
     finally:
         conn.close()
+
+
+def test_a_lingering_table_is_really_not_declared():
+    """Control for the allowance above: a table listed as retired must be absent from the
+    generated vendor set, or the allowance is hiding a live table."""
+    _, names = _read_vendor_table_baseline()
+    assert not (set(_LINGERING_RETIRED_TABLES) & set(names))
 
 
 def _require_live_state_db() -> Path:

@@ -446,6 +446,7 @@ from ._config import (
 from ._shared import (INJECTION_PATTERNS, LOG_SCAN_INJECTION_PATTERNS, _FM_BLOCK_BARE_RE, _FM_BLOCK_HEADERED_RE, _HOOK_EXEC_RE, _skill_frontmatter_block,)
 from ._shared import (_B323_ENV_VAR_NAME_RE, _b323_parse_env_token_at, _b323_contains_env_var_reference, _b323_token_body_is_valid,)  # B-397: relocated from _config (reused by B326 too)
 from ._shared import (_SYMLINK_KNOB_RETIRED_MIN, _workshop_symlink_knob,)  # B-783
+from ._shared import (_WORKSHOP_PROPOSALS_RETIRED_MIN, _workshop_proposals_state,)  # C-744
 from ._shared import (_CROSS_CONTEXT_DEFAULT_ALLOW_MIN, _CROSS_CONTEXT_DENY_MEASURED_MIN, _cross_context_default,)  # B-833
 from ._shared import (_CODE_MODE_AUTO_DEFAULT_MIN, _CODE_MODE_OFF_MEASURED_MIN, _code_mode_default,)  # B351 re-grounded
 from ._shared import (_TERMINAL_DEFAULT_ON_MIN, _TERMINAL_OFF_MEASURED_MIN, _TERMINAL_OFF_MEASURED_MAX, _TERMINAL_OFF_MEASURED_SPANS, _terminal_default,)  # C-640

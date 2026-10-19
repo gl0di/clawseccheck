@@ -96,6 +96,7 @@ from ._shared import (
     _skill_corpus_complete,
     _skill_frontmatter_block,
     _surface_absent,
+    _workshop_proposals_state,  # C-744
     _workshop_symlink_knob,
 )
 from ..invocation import command_prefix
@@ -200,7 +201,7 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-10-16 against the vendor repository's own advisory endpoint (722 published
+# Last swept: 2026-10-19 against the vendor repository's own advisory endpoint (722 published
 # advisories). The global GitHub advisory database lags it and missed a whole batch, so it is
 # not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
 # npm package (70 rows, titles as published); below that it is a curated subset, so the id
@@ -4601,7 +4602,9 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             "review-gated.",
             "Point --home at the OpenClaw home you mean to audit, then re-run. If this IS "
             "the right home and OpenClaw has never written a config here, it is running on "
-            "those defaults.",
+            "those defaults. (On OpenClaw 2026.10.5 and later only the mode remains, \"auto\" "
+            "by default: Skill Workshop proposals and approvalPolicy were removed, so the "
+            "agent saves and updates skills with no approval step.)",
         )
     if (f := _config_unreadable("B175", ctx)) is not None:
         return f
@@ -4664,9 +4667,18 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     # otherwise, exactly as `readApprovalPolicy` does. So `mode: "zzz"` resolves to the
     # build default, not to "off" - reading an unrecognised string as "not enabled" was a
     # false negative in the first version of this fix, caught by the type-confusion pass.
+    # C-744: 2026.10.5 REMOVED Skill Workshop proposals. The runtime reads only
+    # `autonomous.mode`, and only `"off"` stays off: `"auto"`, the retired `"propose"` and any
+    # other value all resolve to `"auto"`. There is no approval step to fall back on, and
+    # `approvalPolicy` is not read at all (Doctor deletes it). `proposals_gone` is True only
+    # when the build (installed first, `meta.lastTouchedVersion` second) is KNOWN to be that
+    # generation; `"unknown"` keeps the pre-10.5 reading and wording below.
+    proposals_gone = (generation == "modern"
+                      and _workshop_proposals_state(ctx) == "retired")
     in_effect_mode = (workshop_mode
                       if generation == "modern"
-                      and workshop_mode in ("off", "propose", "auto")
+                      and workshop_mode in (("off", "auto") if proposals_gone
+                                            else ("off", "propose", "auto"))
                       else None)
     in_effect_enabled = legacy_enabled if generation == "legacy" else None
     stale_key = None
@@ -4676,6 +4688,9 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         stale_key = "skills.workshop.autonomous.mode"
 
     autonomy_default = False
+    # `mode: "propose"` (or a typo) on a proposals-gone build: written, not honoured.
+    mapped_mode = (workshop_mode if proposals_gone and isinstance(workshop_mode, str)
+                   and workshop_mode not in ("off", "auto") else None)
     if isinstance(in_effect_mode, str):
         enabled = in_effect_mode in ("propose", "auto")
         autonomy_key = "skills.workshop.autonomous.mode"
@@ -4701,7 +4716,11 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
     # `readApprovalPolicy(value, fallback)` keeps only "pending"/"auto" and falls back
     # otherwise, so an invalid value resolves to the build's default exactly like an absent
     # one - mirrored here rather than treated as its own state.
-    if approval in ("pending", "auto"):
+    if proposals_gone:
+        # No approval gate exists on this build: enabled learning IS unreviewed install.
+        is_auto = enabled
+        approval_default = False
+    elif approval in ("pending", "auto"):
         is_auto = approval == "auto"
         approval_default = False
     else:
@@ -4732,6 +4751,20 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                   f" NOTE: {stale_key} is present in the config but this OpenClaw build "
                   "does not read it, so its value is NOT in effect \u2014 the build default "
                   "applies instead.")
+    if proposals_gone:
+        # C-744: the keys 2026.10.5 stopped reading. Said wherever this check speaks, because
+        # a leftover `approvalPolicy: "pending"` is exactly the setting a user relied on.
+        if approval is not None:
+            stale_note += (
+                " NOTE: skills.workshop.approvalPolicy is still in the config, but OpenClaw "
+                "2026.10.5 removed Skill Workshop proposals and no longer reads it "
+                "\u2014 a leftover approvalPolicy of \"pending\" protects nothing; only "
+                'skills.workshop.autonomous.mode "off" turns background learning off.')
+        if mapped_mode is not None:
+            stale_note += (
+                f" NOTE: skills.workshop.autonomous.mode={mapped_mode!r} is not a value this "
+                "build accepts (\"off\" and \"auto\" only; 2026.10.5 removed \"propose\"), "
+                "and it runs as \"auto\".")
 
     # B-783: OpenClaw 2026.9.3 REMOVED skills.workshop.allowSymlinkTargetWrites from the
     # schema outright (not merely defaulted it off) - vendor hardening, not a widening.
@@ -4765,7 +4798,9 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "Set the values explicitly rather than inheriting them: on OpenClaw "
                 "2026.8.1 and later, skills.workshop.autonomous.mode=\"off\" and "
                 "skills.workshop.approvalPolicy=\"pending\"; before it, "
-                "skills.workshop.autonomous.enabled=false and the same approvalPolicy.",
+                "skills.workshop.autonomous.enabled=false and the same approvalPolicy. "
+                "On OpenClaw 2026.10.5 and later approvalPolicy is gone (proposals were "
+                'removed): only skills.workshop.autonomous.mode="off" turns learning off.',
             )
         if stale_key is not None and retired_note:
             pass_fix = (f"Remove {stale_key} and set the key this build actually reads; "
@@ -4782,6 +4817,15 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         if retired_note and _doctor_refuses_retired_formats(ctx):
             # C-686: fix only (the note is in `detail`, which a fingerprint hashes).
             pass_fix += f" {_doctor_whole_config_hedge(ctx)}"
+        if proposals_gone:
+            return _finding(
+                "B175",
+                PASS,
+                'Skill Workshop background learning is off (skills.workshop.autonomous.mode '
+                '= "off"), so the agent does not save or update skills on its own.'
+                + stale_note + retired_note,
+                pass_fix,
+            )
         return _finding(
             "B175",
             PASS,
@@ -4792,7 +4836,22 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
         )
 
     reasons = []
-    if enabled:
+    if enabled and proposals_gone:
+        # C-744: one reason, in the build's own terms (no proposals, no approval policy).
+        if mapped_mode is not None:
+            origin = (f"skills.workshop.autonomous.mode={mapped_mode!r}, which this build "
+                      "runs as \"auto\"")
+        elif autonomy_default:
+            origin = ('skills.workshop.autonomous.mode="auto" \u2014 the OpenClaw default, '
+                      "not something set here")
+        else:
+            origin = 'skills.workshop.autonomous.mode="auto"'
+        reasons.append(
+            origin + " (the agent saves and updates skills on its own after substantial work "
+            "or after using a learned skill; OpenClaw 2026.10.5 removed Skill Workshop "
+            "proposals, so there is no approval step \u2014 each change is announced and "
+            "can be undone afterwards)")
+    elif enabled:
         reasons.append(
             (f"skills.workshop.autonomous.mode={autonomy_value!r}"
              if autonomy_value is not None
@@ -4804,7 +4863,7 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             + (" AND applies them" if autonomy_value == "auto" else "")
             + ")"
         )
-    if is_auto:
+    if is_auto and not proposals_gone:
         reasons.append(
             'skills.workshop.approvalPolicy="auto"'
             + (" \u2014 the OpenClaw 2026.8.1 DEFAULT, not something set here"
@@ -4827,13 +4886,21 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
                 "conversation signals AND install it with no human review step: "
                 + "; ".join(reasons)
                 + "." + stale_note + retired_note,
-                'Set skills.workshop.approvalPolicy to "pending" so every generated '
-                "proposal needs an explicit `openclaw skills workshop apply` decision "
-                f"before it installs, and set {autonomy_key} to "
-                + ('"off"' if generation == "modern" else "false")
-                + " unless unattended skill authoring is genuinely intended."
-                + (" Both are OpenClaw 2026.8.1 defaults, so leaving them unset is not "
-                   "the safe choice on this build." if generation == "modern" else ""),
+                (f'Set {autonomy_key} to "off" unless unattended skill learning is '
+                 "genuinely intended. OpenClaw 2026.10.5 removed Skill Workshop proposals, "
+                 "so there is no approval setting to fall back on (approvalPolicy is no "
+                 'longer read): "off" is the only switch, and the mode is "auto" by '
+                 "default, so leaving it unset is not the safe choice on this build."
+                 if proposals_gone else
+                 'Set skills.workshop.approvalPolicy to "pending" so every generated '
+                 "proposal needs an explicit `openclaw skills workshop apply` decision "
+                 f"before it installs, and set {autonomy_key} to "
+                 + ('"off"' if generation == "modern" else "false")
+                 + " unless unattended skill authoring is genuinely intended."
+                 + (" Both are OpenClaw 2026.8.1 defaults, so leaving them unset is not "
+                    "the safe choice on this build." if generation == "modern" else "")
+                 + (" (On OpenClaw 2026.10.5 and later approvalPolicy no longer exists: "
+                    'set the mode to "off" instead.)')),
                 evidence=reasons,
             )
         # B-239: enabled+auto is set, but a separate tool-policy/sandbox control
@@ -4856,10 +4923,15 @@ def check_skill_workshop_autonomy(ctx: Context) -> Finding:
             + ". One tool-policy edit (removing the deny/allow restriction, dropping "
             "out of sandbox.mode=all, or widening tools.profile) re-arms the full "
             "unattended pipeline.",
-            'Set skills.workshop.approvalPolicy to "pending" (never "auto") and turn off '
-            f"{autonomy_key} unless unattended authoring is genuinely intended \u2014 don't "
-            "rely on tool-policy/sandboxing alone to contain it, since either can be "
-            "loosened independently later.",
+            (f'Turn off {autonomy_key} (set it to "off") unless unattended learning is '
+             "genuinely intended \u2014 don't rely on tool-policy/sandboxing alone to "
+             "contain it, since either can be loosened independently later. OpenClaw "
+             "2026.10.5 has no approval setting any more."
+             if proposals_gone else
+             'Set skills.workshop.approvalPolicy to "pending" (never "auto") and turn off '
+             f"{autonomy_key} unless unattended authoring is genuinely intended \u2014 don't "
+             "rely on tool-policy/sandboxing alone to contain it, since either can be "
+             "loosened independently later."),
             evidence=reasons,
         )
 
