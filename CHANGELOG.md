@@ -3,7 +3,13 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [4.4.2] - 2026-10-19
+
+**Three accuracy fixes after 4.4.1; no new check and no finding changes status except one
+severity.** B55 drops from HIGH to LOW when the only reach is one declared sender, B158 stops
+calling a present plugin file "not present on disk", and a gradeless run whose self-report was
+never handed in now says which steps of the standard flow are still owed. RISK-12's chain label
+no longer claims there is no approval gate on a config where one is set.
 
 ### Changed
 - **B55 is LOW when the only reach is one declared sender.** When EVERY enabled channel is an
