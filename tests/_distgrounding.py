@@ -279,6 +279,98 @@ _CATALOG_RECORD_RE = re.compile(
 _CATALOG_SECTION_RE = re.compile(r'\n\t*sectionId: "([a-z0-9_]+)"')
 
 
+# C-744: OpenClaw 2026.10.5 rewrote ``CORE_TOOL_DEFINITIONS`` from one object literal per tool
+# into ``...coreTools("<section>", { <defaults> }, [["<id>", "<description>", { <overrides> }?], ...])``
+# calls, with ``sectionId`` and the section's defaults merged in by a function. Every adjacency or
+# "record carries sectionId" regex went blind at once (0 tools). ``catalog_tool_records`` reads the
+# NEW form structurally -- bracket-aware, string-aware, not a regex over the layout -- and
+# returns ``{id: {"sectionId", "profiles"}}`` with the same merge ``coreTools`` does (an
+# override replaces the default). It returns ``{}`` for the old form, so callers fall back.
+
+def _js_skip_string(text: str, i: int) -> int:
+    """Index just past the string literal opening at *i* (``"``, ``'`` or a backtick)."""
+    q = text[i]
+    i += 1
+    while i < len(text) and text[i] != q:
+        i += 2 if text[i] == "\\" else 1
+    return i + 1
+
+
+def _js_split_top(text: str) -> "list[str]":
+    """Split *text* on commas that sit at bracket depth 0 (strings stepped over)."""
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        c = text[i]
+        if c in "\"'`":
+            i = _js_skip_string(text, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+        i += 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _js_matching(text: str, i: int) -> int:
+    """Index of the bracket closing the one that opens at *i*."""
+    depth = 0
+    while i < len(text):
+        c = text[i]
+        if c in "\"'`":
+            i = _js_skip_string(text, i)
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise AssertionError("unbalanced bracket in the tool catalog")
+
+
+_PROFILES_FIELD_RE = re.compile(r"profiles:\s*\[([^\]]*)\]")
+
+
+def catalog_tool_records(text: str) -> "dict[str, dict]":
+    """``{tool id: {"sectionId": str, "profiles": [str, ...]}}`` for the ``coreTools(...)`` form."""
+    head = re.search(r"CORE_TOOL_DEFINITIONS\s*=\s*\[", text)
+    if head is None:
+        return {}
+    end = _js_matching(text, head.end() - 1)
+    body = text[head.end():end]
+    out: "dict[str, dict]" = {}
+    for call in re.finditer(r"\.\.\.coreTools\(", body):
+        close = _js_matching(body, call.end() - 1)
+        args = _js_split_top(body[call.end():close])
+        assert len(args) == 3, f"coreTools call with {len(args)} args -- the builder changed"
+        section = args[0].strip("\"'`")
+        dm = _PROFILES_FIELD_RE.search(args[1])
+        default_profiles = re.findall(r'"([a-z]+)"', dm.group(1)) if dm else []
+        assert args[2].startswith("[") and args[2].endswith("]"), "coreTools tools arg moved"
+        for entry in _js_split_top(args[2][1:-1]):
+            assert entry.startswith("[") and entry.endswith("]"), entry[:60]
+            fields = _js_split_top(entry[1:-1])
+            if not re.fullmatch(r'"[a-z0-9_]+"', fields[0]):
+                # an id spelled as an IMPORTED identifier (`AUTOMATIONS_TOOL_NAME`): the old
+                # one-literal-per-tool parser never saw those either (66 tools on 2026.10.4),
+                # and resolving it would need the sibling bundle -- left out, as before
+                continue
+            tool_id = fields[0].strip('"')
+            profiles = default_profiles
+            if len(fields) > 2:
+                om = _PROFILES_FIELD_RE.search(fields[2])
+                if om:
+                    profiles = re.findall(r'"([a-z]+)"', om.group(1))
+            out[tool_id] = {"sectionId": section, "profiles": profiles}
+    return out
+
+
 def catalog_tool_sections(text: str) -> "dict[str, str]":
     """``{tool id: sectionId}`` for the TOOL records -- the ones carrying ``sectionId``.
 
@@ -286,6 +378,9 @@ def catalog_tool_sections(text: str) -> "dict[str, str]":
     records, none in neither bucket); ``nodes`` and ``sessions`` are each both a tool and a
     category, which is why the discriminator is the field and not the id.
     """
+    records = catalog_tool_records(text)
+    if records:     # the 2026.10.5 ``coreTools(...)`` form
+        return {tool_id: rec["sectionId"] for tool_id, rec in records.items()}
     return {
         m.group(1): s.group(1)
         for m in _CATALOG_RECORD_RE.finditer(text)
