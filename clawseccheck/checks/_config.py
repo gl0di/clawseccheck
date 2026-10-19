@@ -155,11 +155,11 @@ CLOUD_PROVIDERS = (
 # gateway.tools.deny  - explicit denial list.
 #
 # B-835: this set is now grounded on the installed openclaw@2026.9.5 dist's own
-# GATEWAY_CONTROL_PLANE_TOOLS (dangerous-tools-D5_2xo_6.mjs:35-39 - "Sensitive
+# GATEWAY_CONTROL_PLANE_TOOLS (dangerous-tools-fofvrQTg.mjs:35-39 - "Sensitive
 # control-plane tools. `automations` can persist scheduled runs; `gateway` exposes
 # config and self-update; `plugins` manages executable plugin lifecycles."), resolving
 # its AUTOMATIONS_TOOL_NAME import to the canonical id "automations"
-# (automations-tool-name-DBMZPbPL.mjs). Entries compared against this set MUST go
+# (automations-tool-name-DaxQ5QU2.mjs). Entries compared against this set MUST go
 # through _normalize_tool_name (below) first, the same normalizeToolPolicyName the
 # vendor itself applies (toolgrant._normalize_tool_name, reused rather than a third
 # copy - toolgrant.py's own docstring names checks/_shared.py's and toolpolicy.py's
@@ -194,9 +194,9 @@ CLOUD_PROVIDERS = (
 #
 # Deliberately EXCLUDED despite being real tool ids in the same two vendor deny lists
 # (DEFAULT_GATEWAY_HTTP_TOOL_DENY and GATEWAY_OWNER_ONLY_CORE_TOOLS,
-# dangerous-tools-D5_2xo_6.mjs:8-30,45-58): "nodes" ("Nodes + devices" - device
-# pairing/control, tool-catalog-BAOwO8Un.mjs:369) and "openclaw" ("Delegate OpenClaw
-# setup and repair", ibid:362). The vendor itself keeps both OUT of
+# dangerous-tools-fofvrQTg.mjs:8-30,45-58): "nodes" ("Nodes + devices" - device
+# pairing/control, tool-catalog-DfaCehx8.mjs:398 on 2026.10.5) and "openclaw" ("Delegate
+# OpenClaw setup and repair", ibid:392). The vendor itself keeps both OUT of
 # GATEWAY_CONTROL_PLANE_TOOLS while putting them in the broader, differently-justified
 # GATEWAY_OWNER_ONLY_CORE_TOOLS (owner-identity requirement, not "control-plane
 # mutation" - that list also adds sessions/screen/terminal/portal/conversations_*/
@@ -2313,7 +2313,7 @@ def _retired_finder_present(ctx) -> "_retiredformats.RetiredFormats | None":
     cfg = getattr(ctx, "config", None)
     if not _retiredformats.in_window(installed) or not isinstance(cfg, dict):
         return None
-    return _retiredformats.find_retired(cfg)
+    return _retiredformats.find_retired(cfg, installed)
 
 
 def check_retired_config_keys_invalid(ctx: Context) -> Finding:
@@ -5041,7 +5041,7 @@ def check_sandbox(ctx: Context) -> Finding:
 # installed) and out of the installed 2026.9.7 dist. Builds read, and what each declares:
 #     2026.8.1  2026.8.2  2026.9.1  2026.9.2   node:22-slim   ("Optional Node 22+ image ...")
 #     2026.9.3  2026.9.4  2026.9.5  2026.9.6   node:24.19.0-slim
-#     2026.9.7  2026.9.8  2026.9.9  2026.10.1  2026.10.2  2026.10.3  2026.10.4   node:24.21.0-slim
+#     2026.9.7  2026.9.8  2026.9.9  2026.10.1  2026.10.2  2026.10.3  2026.10.4  2026.10.5   node:24.21.0-slim
 #                          ("Optional Node 24.16+ or 26.1+ image ...")
 # (2026.9.8 was read out of the installed dist and 2026.9.9 out of its npm-cached release
 # tarball, on 2026-10-09; both declare the same constant and the same help text as 2026.9.7.
@@ -5070,7 +5070,12 @@ def check_sandbox(ctx: Context) -> Finding:
 #   2026-10-16: dist/startup-state-readiness-C59t6tgk.mjs:4753 declares the same constant with
 #   the same value, the fallback is still taken only when no image is configured (:4968),
 #   dist/schema-BBhEexxB.mjs:909 carries the same help text, and the `isolation` enum and the
-#   `containerImage` schema (dist/zod-schema.root-support-B_04-6fB.mjs:147-152) are unchanged.)
+#   `containerImage` schema (dist/zod-schema.root-support-B_04-6fB.mjs:147-152) are unchanged.
+# 2026.10.5 was read out of the installed dist, byte-identical to its release tarball, on
+#   2026-10-19: dist/startup-state-readiness-BB0GkXC2.mjs:4736 declares the same constant with
+#   the same value, the fallback is still taken only when no image is configured (:4951),
+#   dist/schema-B5pKhM6L.mjs:906 carries the same help text, and the `isolation` enum and the
+#   `containerImage` schema (dist/zod-schema.root-support-BF0vOtgh.mjs:150) are unchanged.)
 # The literal `node:24.19.0-slim` this check used to print unconditionally was therefore
 # already wrong on 2026.8.1-2026.9.2 and became wrong again on 2026.9.7; it will drift again
 # every few releases. So the image is looked up by the INSTALLED build, EXACT match only:
@@ -5096,6 +5101,7 @@ _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
     (2026, 10, 2): "node:24.21.0-slim",
     (2026, 10, 3): "node:24.21.0-slim",
     (2026, 10, 4): "node:24.21.0-slim",
+    (2026, 10, 5): "node:24.21.0-slim",
 }
 
 

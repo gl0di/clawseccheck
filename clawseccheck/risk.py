@@ -69,6 +69,7 @@ from .checks._shared import (  # C-681
     _effective_gateway_bind,
     _is_bind_template,
     _js_trim,
+    _workshop_proposals_state,  # C-744
     parse_bind_host,
 )
 from .collector import Context, agent_roster, dig
@@ -2959,6 +2960,7 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
     if not arms:
         return None
     detail = "; ".join(arms)
+    gone = _workshop_proposals_state(ctx) == "retired"  # C-744: proposals removed in 2026.10.5
     return RiskPath(
         id="RISK-26",
         severity=HIGH,
@@ -2969,20 +2971,31 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
             "persistent executable code on disk",
         ],
         why=(
-            "This install has the full unattended Skill Workshop pipeline configured "
-            "and reachable: the Skill Workshop autonomy setting authors new skill "
-            "proposals from conversation signals, and approvalPolicy='auto' installs "
-            "them with no human confirmation. At the same time, at least one ingress "
+            ("This install has Skill Workshop background learning on and reachable: the "
+             "agent saves and updates skills on its own, and OpenClaw 2026.10.5 has no "
+             "proposal or approval step any more (each change is announced and can be "
+             "undone afterwards). "
+             if gone else
+             "This install has the full unattended Skill Workshop pipeline configured "
+             "and reachable: the Skill Workshop autonomy setting authors new skill "
+             "proposals from conversation signals, and approvalPolicy='auto' installs "
+             "them with no human confirmation. ")
+            + "At the same time, at least one ingress "
             f"surface admits content from someone other than the owner: {detail}. A "
             "single inbound message can therefore cause the agent to author and "
             "install new executable code on disk with no review step in between."
         ),
         fix=(
-            "Set skills.workshop.approvalPolicy to 'pending' so every "
-            "generated proposal needs an explicit `openclaw skills workshop apply` "
-            "decision, and/or turn off skills.workshop.autonomous.mode "
-            "(skills.workshop.autonomous.enabled before OpenClaw 2026.8.1) unless "
-            "unattended authoring is genuinely intended. Independently, close the "
+            ("Set skills.workshop.autonomous.mode to 'off' unless unattended learning is "
+             "genuinely intended (OpenClaw 2026.10.5 removed approvalPolicy, so 'off' is "
+             "the only switch). "
+             if gone else
+             "Set skills.workshop.approvalPolicy to 'pending' so every "
+             "generated proposal needs an explicit `openclaw skills workshop apply` "
+             "decision, and/or turn off skills.workshop.autonomous.mode "
+             "(skills.workshop.autonomous.enabled before OpenClaw 2026.8.1) unless "
+             "unattended authoring is genuinely intended. ")
+            + "Independently, close the "
             "flagged ingress surface(s): set channels.<provider>.contextVisibility to "
             "'allowlist'/'allowlist_quote' (B26), scope commands.ownerAllowFrom/"
             "allowFrom to your own channel-native ID(s) (B171), or disable "

@@ -58,11 +58,18 @@ JS FIDELITY, each measured against the vendor and pinned by the battery:
   ``byChannel.*`` entry against ``queue`` / ``steer-backlog`` / ``steer+backlog``.
 
 THE BUILD WINDOW is ``ORACLE_MIN..ORACLE_MAX``. 2026.9.9's finder is a different, smaller
-function (about 17 families); 2026.10.1 to 2026.10.4 are the only builds the
-battery was executed on. Outside the window ``in_window`` is False and the caller must NOT claim the
-finder was applied: a newer build is exactly "an input this port does not model", so it
-degrades to the hand table's answer until ``tests/_retiredformatsoracle.py --write`` is run
-against it and ``ORACLE_MAX`` is raised.
+function (about 17 families); 2026.10.1 to 2026.10.5 are the builds this port is validated on.
+2026.10.5 added two families (a provider or model ``api`` of ``openai-codex-responses``, and a
+``driver: extension`` browser profile that still carries a ``cdpUrl``): ``find_retired`` takes
+the build and names them only on 2026.10.5 and later, because 2026.10.1-2026.10.4 do not refuse
+them. The pinned battery was regenerated on 2026.10.5 (it holds only that build's answers), so
+the 2026.10.1-2026.10.4 half of the window rests on the 2026.10.4 battery of 999 rows (git
+history) plus a one-off differential run on 2026-10-19: the 2026.10.4 release tarball's finder
+executed over all 1,045 current rows against ``find_retired(cfg, (2026, 10, 4))``, equal on every
+row. Outside the window ``in_window`` is False and the caller must NOT claim the finder was
+applied: a newer build is exactly "an input this port does not model", so it degrades to the
+hand table's answer until ``tests/_retiredformatsoracle.py --write`` is run against it and
+``ORACLE_MAX`` is raised.
 
 Leaf: stdlib only, imports nothing from this package. Not in ``__all__``, matching its
 siblings ``toolpolicy.py`` / ``toolgrant.py`` / ``harnessruntime.py``.
@@ -75,7 +82,7 @@ from dataclasses import dataclass
 #: The window of builds this port was differentially validated on (first three components
 #: compared, so a correction release of a validated build stays inside it).
 ORACLE_MIN = (2026, 10, 1)
-ORACLE_MAX = (2026, 10, 4)
+ORACLE_MAX = (2026, 10, 5)
 
 #: The vendor's two ``bridgeVersion`` values, verbatim.
 BRIDGE_DEFAULT = "2026.9.5"
@@ -103,6 +110,16 @@ def in_window(version) -> bool:
         return False
     head = tuple(version)[:3]
     return ORACLE_MIN <= head <= ORACLE_MAX
+
+
+# ECMAScript ``String.prototype.trim``: WhiteSpace + LineTerminator, which is NOT Python's
+# ``str.strip`` set (Python also strips \x1c-\x1f and \x85; JS also strips U+FEFF).
+_JS_WHITESPACE = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+                  "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def _js_trim(value: str) -> str:
+    return value.strip(_JS_WHITESPACE)
 
 
 def _is_record(value) -> bool:
@@ -162,10 +179,21 @@ def _visit_channel_entries(raw: dict, channel_id: str, visitor) -> None:
             visitor(account, f"channels.{channel_id}.accounts.{account_id}")
 
 
-def find_retired(cfg) -> "RetiredFormats | None":
-    """The retired formats OpenClaw's own finder names in *cfg*, or ``None`` (nothing)."""
+#: The first build whose finder names the ``openai-codex-responses`` api and the extension
+#: browser-profile ``cdpUrl`` (measured by diffing the 2026.10.4 and 2026.10.5 finders).
+_V10_5 = (2026, 10, 5)
+
+
+def find_retired(cfg, version=None) -> "RetiredFormats | None":
+    """The retired formats OpenClaw's own finder names in *cfg*, or ``None`` (nothing).
+
+    *version* is the numeric build the answer is for (``(year, month, patch, ...)``); the two
+    families 2026.10.5 added are named only when it is 2026.10.5 or later. ``None`` means
+    "the newest validated build" (what the battery runs).
+    """
     if not _is_record(cfg):
         return None
+    newer = version is None or tuple(version)[:3] >= _V10_5
     retired: "list[str]" = []
 
     def check_keys(scope, config_path: str, keys) -> None:
@@ -181,7 +209,25 @@ def find_retired(cfg) -> "RetiredFormats | None":
     check_keys(cfg, "", ["heartbeat"])
     check_keys(cfg.get("routing"), "routing", ["allowFrom", "groupChat"])
     check_keys(cfg.get("plugins"), "plugins", ["installs"])
+    providers = child(cfg.get("models"), "providers") if newer else None
+    if _is_record(providers):
+        for provider_id, provider in _entries(providers):
+            if not _is_record(provider):
+                continue
+            if provider.get("api") == "openai-codex-responses":
+                retired.append(f"models.providers.{provider_id}.api")
+            if isinstance(provider.get("models"), list):
+                for index, model in enumerate(provider["models"]):
+                    if _is_record(model) and model.get("api") == "openai-codex-responses":
+                        retired.append(f"models.providers.{provider_id}.models.{index}.api")
     check_keys(cfg.get("browser"), "browser", ["relayBindHost"])
+    browser_profiles = child(cfg.get("browser"), "profiles") if newer else None
+    if _is_record(browser_profiles):
+        for profile_id, profile in _entries(browser_profiles):
+            if (_is_record(profile) and isinstance(profile.get("driver"), str)
+                    and _js_trim(profile["driver"]) == "extension"
+                    and isinstance(profile.get("cdpUrl"), str) and _js_trim(profile["cdpUrl"])):
+                retired.append(f"browser.profiles.{profile_id}.cdpUrl")
     check_keys(child(cfg.get("browser"), "ssrfPolicy"), "browser.ssrfPolicy",
                ["allowPrivateNetwork"])
 

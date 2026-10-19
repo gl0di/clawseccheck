@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.10.4
+# openclaw-version: 2026.10.5
 # state-schema-version: 20
-# generated: 2026-10-16
-# tables: 136
+# generated: 2026-10-19
+# tables: 132
 #
-# source-bundle: openclaw-state-db-legacy-backfills-BxTnDU05.mjs
+# source-bundle: openclaw-state-db-U2AVOsoF.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -25,10 +25,10 @@
 # that a given database has it yet: many are created on first use.
 #
 # Satellite constants read (bundle it came from, tables it adds beyond the main constant):
-#   USER_PROFILES_SCHEMA_SQL  [user-profiles-internal-DlO1LBbo.mjs, 1 copy]
-#     adds: user_profile_emails, user_profiles
-#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [store-row-codec-Bhj-SxXe.mjs, 1 copy]
+#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [store-row-codec-DHnXZv7G.mjs, 1 copy]
 #     adds: worker_environment_session_attachments
+#   ensureUserProfileTables  [user-profiles-internal-DXv4ujIH.mjs, 1 copy]
+#     adds: user_profile_emails, user_profiles
 #
 # Why it exists
 # -------------
@@ -87,7 +87,6 @@ exec_approvals_config
 execution_decision_facts
 execution_identity_contexts
 execution_owner_lifecycle_bindings
-fleet_cells
 flow_runs
 gateway_boot_lifecycle
 gateway_origin_device_tokens
@@ -143,10 +142,7 @@ skill_library_uploads
 skill_upload_chunks
 skill_uploads
 skill_usage
-skill_workshop_collection_reviews
-skill_workshop_proposal_events
-skill_workshop_proposal_rollbacks
-skill_workshop_proposals
+skill_workshop_changes
 state_leases
 subagent_runs
 task_delivery_state

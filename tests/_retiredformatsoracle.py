@@ -54,7 +54,7 @@ sys.path.insert(0, str(HERE.parent))
 BATTERY_PATH = HERE / "data" / "retiredformats_battery.json"
 
 #: The build the battery was generated against (recorded in the battery header).
-ORACLE_BUILD = "2026.10.4"
+ORACLE_BUILD = "2026.10.5"
 
 _FINDER = "findRetiredConfigUpgradeRequirement"
 
@@ -256,6 +256,14 @@ def _finder_paths() -> "list[tuple[str, dict, str]]":
         add(["messages", "queue", "mode"], mode, label=f"messages.queue.mode={mode}")
         add(["messages", "queue", "byChannel", "slack"], mode,
             label=f"messages.queue.byChannel.slack={mode}")
+    # 2026.10.5 families: a provider/model `api` value and an extension-driver CDP URL
+    add(["models", "providers", "p", "api"], "openai-codex-responses")
+    rows.append(("models.providers.p.models.0.api",
+                 {"models": {"providers": {"p": {"models": [{"api": "openai-codex-responses"}]}}}},
+                 "models.providers.p.models.0.api"))
+    rows.append(("browser.profiles.work.cdpUrl",
+                 {"browser": {"profiles": {"work": {"driver": "extension", "cdpUrl": "x"}}}},
+                 "browser.profiles.work.cdpUrl"))
     for key in ("mode", "transport", "brain", "model", "voice"):
         add(["talk", key], "x")
 
@@ -431,6 +439,49 @@ def _near_cases() -> "list[tuple[str, dict]]":
         "streamMode": 1}, "matrix": {"allowPrivateNetwork": True}}})
     add("bridge-earlier-key-only-with-empty-discord", {"heartbeat": 1, "channels": {
         "discord": {"voice": {"tts": {}}, "guilds": {"g": {"channels": {"c": {}}}}}}})
+    # 2026.10.5 families: the exact-match and trim edges the port must share with the vendor
+    for name, value in (("other-api", "openai-responses"), ("api-case", "OPENAI-CODEX-RESPONSES"),
+                        ("api-padded", " openai-codex-responses"), ("api-number", 1),
+                        ("api-null", None), ("api-list", ["openai-codex-responses"])):
+        add(f"provider-{name}", {"models": {"providers": {"p": {"api": value}}}})
+        add(f"model-{name}", {"models": {"providers": {"p": {"models": [{"api": value}]}}}})
+    add("provider-models-not-a-list", {"models": {"providers": {"p": {"models": {
+        "0": {"api": "openai-codex-responses"}}}}}})
+    add("provider-not-a-record", {"models": {"providers": {"p": "openai-codex-responses",
+                                                           "q": ["x"], "r": None}}})
+    add("provider-model-mixed", {"models": {"providers": {"p": {
+        "api": "openai-codex-responses", "models": [1, None, {"api": "x"},
+                                                    {"api": "openai-codex-responses"}]}}}})
+    add("provider-order", {"models": {"providers": {"b": {"api": "openai-codex-responses"},
+                                                    "2": {"api": "openai-codex-responses"},
+                                                    "1": {"api": "openai-codex-responses"}}}})
+    add("models-providers-not-record", {"models": {"providers": ["openai-codex-responses"]}})
+    for name, drv, url in (
+            ("plain", "extension", "x"), ("driver-padded", " extension ", "x"),
+            ("driver-case", "Extension", "x"), ("driver-other", "managed", "x"),
+            ("driver-number", 1, "x"), ("driver-nbsp", "\u00a0extension", "x"),
+            ("driver-bom", "\ufeffextension", "x"), ("driver-x85", "\x85extension", "x"),
+            ("driver-x1f", "\x1fextension", "x"), ("driver-zwsp", "\u200bextension", "x"),
+            ("url-empty", "extension", ""), ("url-spaces", "extension", "   "),
+            ("url-nbsp-only", "extension", "\u00a0"), ("url-bom-only", "extension", "\ufeff"),
+            ("url-x85-only", "extension", "\x85"), ("url-x1f-only", "extension", "\x1f"),
+            ("url-zwsp-only", "extension", "\u200b"), ("url-line-sep", "extension", "\u2028"),
+            ("url-number", "extension", 1), ("url-null", "extension", None),
+            ("url-true", "extension", True)):
+        add(f"browser-profile-{name}", {"browser": {"profiles": {"w": {
+            "driver": drv, "cdpUrl": url}}}})
+    add("browser-profile-no-driver", {"browser": {"profiles": {"w": {"cdpUrl": "x"}}}})
+    add("browser-profile-no-url", {"browser": {"profiles": {"w": {"driver": "extension"}}}})
+    add("browser-profiles-not-record", {"browser": {"profiles": [{"driver": "extension",
+                                                                 "cdpUrl": "x"}]}})
+    add("browser-profile-order", {"browser": {"profiles": {
+        "b": {"driver": "extension", "cdpUrl": "x"}, "3": {"driver": "extension", "cdpUrl": "x"},
+        "1": {"driver": "extension", "cdpUrl": "x"}}}})
+    add("new-families-keep-the-finder-order", {
+        "browser": {"relayBindHost": 1, "profiles": {"w": {"driver": "extension", "cdpUrl": "x"}},
+                    "ssrfPolicy": {"allowPrivateNetwork": 1}},
+        "models": {"providers": {"p": {"api": "openai-codex-responses"}}},
+        "plugins": {"installs": 1}, "heartbeat": 1})
     # an unrelated top-level config the loader might hand over
     everything: dict = {}
     for _label, cfg, path in FINDER_PATHS:

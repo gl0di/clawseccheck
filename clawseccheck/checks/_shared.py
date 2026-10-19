@@ -1752,6 +1752,36 @@ def _workshop_symlink_knob(ctx) -> str:
     return "unknown"
 
 
+# C-744: the build that REMOVED Skill Workshop proposals. Measured in the 2026.10.5 dist
+# (`skills/workshop/config.ts` -> `resolveSkillWorkshopConfig`): the runtime reads only
+# `skills.workshop.autonomous.mode` (`"off"` stays off, EVERYTHING else -- `"auto"`, the retired
+# `"propose"`, a typo, nothing -- resolves to `"auto"`) and `maxSkillBytes`. `approvalPolicy` and
+# `maxPending` left the schema, Doctor deletes them ("Skill Workshop proposals were removed"),
+# and there is no `openclaw skills workshop apply` step any more: a change applies at once,
+# is announced and can be undone afterwards. So a leftover `approvalPolicy: "pending"` -- the
+# setting that kept 2026.8.1-2026.10.4 review-gated -- protects nothing there.
+_WORKSHOP_PROPOSALS_RETIRED_MIN = (2026, 10, 5)
+
+
+def _workshop_proposals_state(ctx) -> str:
+    """``"retired"`` / ``"honoured"`` / ``"unknown"``: does the reader's OpenClaw still have
+    Skill Workshop proposals (and so ``approvalPolicy``)?
+
+    Same three-way shape, sources and asymmetry as ``_workshop_symlink_knob`` and for the same
+    reason: only ``"retired"`` may change what a finding says; ``"honoured"`` and
+    ``"unknown"`` both keep today's wording. An unknown build is not a build that still has
+    proposals, so the caller must not claim either.
+    """
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    if installed is not None:
+        return "retired" if installed >= _WORKSHOP_PROPOSALS_RETIRED_MIN else "honoured"
+    stamped = _numeric_version(
+        _openclawdist.self_reported_version(getattr(ctx, "config", None)))
+    if stamped is not None and stamped >= _WORKSHOP_PROPOSALS_RETIRED_MIN:
+        return "retired"
+    return "unknown"
+
+
 # B-833: the build that FLIPPED tools.message.crossContext.allowAcrossProviders from
 # default-DENY to default-ALLOW. The config PATH did not move and the schema's own
 # default/enum did not move, so no path diff sees it -- only the resolver line does:

@@ -412,7 +412,18 @@ def self_reported_version(config: "dict | None") -> str:
 # name only, the 773-row harness battery and the 999-row retired-format battery re-ran with no
 # moved answer (both windows widened to 10.4), the B391 default worker image is unchanged, the
 # fleet gate shows no new FAIL and no advisory was published after 2026-10-05.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 4)
+# Raised to 2026.10.5 on 2026-10-19 -- NOT on stamp-only evidence this time (2026.10.5 is a feature
+# release: line-set delta ~76k/93k lines, schema 5,430 -> 5,517 paths). The installed tree equals the
+# release tarball; the changes that touch what this tool says were each read and handled: Skill
+# Workshop proposals removed (B175/RISK-26 now state the build's own model), two new retired-config
+# families (ported, battery 999 -> 1,045 rows, differential against both finders), the user-profiles
+# DDL moved to an ensurer (state guard taught the spelling), the dm-policy manifest gained the X
+# channel; the 773-row harness battery moved no answer, the resolved-default oracle located 63 of
+# 205 paths with 0 real flips (both controls run), the B391 default worker image is unchanged, the
+# state-DB drift gate is satisfied for all 16 readers, and the repository advisory endpoint lists the
+# same 722 advisories (none published after 2026-09-11). New X-channel guest mode and
+# agent-to-agent send are recorded, not covered (maintenance mode).
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 5)
 
 
 def grounding_gap(installed_version: "str | None"):
