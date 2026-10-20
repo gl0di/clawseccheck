@@ -64,6 +64,9 @@ _PINNED_FINGERPRINTS = {
     # whose dotted tail reads as a high-entropy key value. Generated test data, so there is no
     # source line to split; published on dev (2026.10.5 re-ground) before the scan caught it.
     "c1e13303152526463f27b09009ead09051c4f7b6:tests/data/retiredformats_battery.json:generic-api-key:11060",
+    # ... and the first version of the comment explaining that pin quoted the sentence, so the
+    # ignore file itself was flagged once, at the commit that added it.
+    "cabbf9db0d80eed392a000b94c05471b6237024d:.gitleaksignore:generic-api-key:34",
 }
 
 # gitleaks allowlist keys that broaden an exemption beyond one exact, anchored value:
