@@ -423,7 +423,16 @@ def self_reported_version(config: "dict | None") -> str:
 # state-DB drift gate is satisfied for all 16 readers, and the repository advisory endpoint lists the
 # same 722 advisories (none published after 2026-09-11). New X-channel guest mode and
 # agent-to-agent send are recorded, not covered (maintenance mode).
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 5)
+# Raised to 2026.10.6 on 2026-10-23: a focused reliability patch ("does not introduce new user-facing
+# features"). The installed tree equals the release tarball; the config schema is identical (5,517
+# paths, +0/-0); the 773-row harness battery moved no answer; the retired-config finder changed in one
+# place (an EMPTY plugins.installs record is no longer refused) and the port follows it by build, checked
+# over 1,063 rows against the 2026.10.4, 2026.10.5 and 2026.10.6 finders; the default worker image MOVED
+# to node:24.22.1-slim (B391 row added) and the resolved-default oracle independently flagged that one
+# path (66 of 205 located, both controls run); one vendor state table was added
+# (node_worker_launch_boots), the state-DB drift gate is satisfied for all 16 readers; the repository
+# advisory endpoint lists the same 722 advisories.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 6)
 
 
 def grounding_gap(installed_version: "str | None"):

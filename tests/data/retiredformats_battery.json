@@ -1,6 +1,6 @@
 {
- "build": "2026.10.5",
- "finder_sha256": "e2118494fb1675fc9a0e794b4d7d9370c83bdd7ce7dbf713f70ea1dc91fc5474",
+ "build": "2026.10.6",
+ "finder_sha256": "f887302b0cd56b70b5d1e2692aded86386dc9d7f65f907ef3f39cf0eee4b6b83",
  "vocabulary": [
   "",
   "2026.9.5",
@@ -5314,6 +5314,232 @@
    },
    "vendor": {
     "message": "Config contains retired pre-July-2026 settings: browser.profiles.1.cdpUrl, browser.profiles.3.cdpUrl, browser.profiles.b.cdpUrl. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-empty-record",
+   "cfg": {
+    "plugins": {
+     "installs": {}
+    }
+   },
+   "vendor": null
+  },
+  {
+   "label": "near:installs-one-entry",
+   "cfg": {
+    "plugins": {
+     "installs": {
+      "a": {}
+     }
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-entry-null",
+   "cfg": {
+    "plugins": {
+     "installs": {
+      "a": null
+     }
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-empty-list",
+   "cfg": {
+    "plugins": {
+     "installs": []
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-list-one",
+   "cfg": {
+    "plugins": {
+     "installs": [
+      1
+     ]
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-null",
+   "cfg": {
+    "plugins": {
+     "installs": null
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-string",
+   "cfg": {
+    "plugins": {
+     "installs": "x"
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-empty-string",
+   "cfg": {
+    "plugins": {
+     "installs": ""
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-zero",
+   "cfg": {
+    "plugins": {
+     "installs": 0
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-false",
+   "cfg": {
+    "plugins": {
+     "installs": false
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-true",
+   "cfg": {
+    "plugins": {
+     "installs": true
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-number",
+   "cfg": {
+    "plugins": {
+     "installs": 7
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-proto-key",
+   "cfg": {
+    "plugins": {
+     "installs": {
+      "__proto__": 1
+     }
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-nested-empty",
+   "cfg": {
+    "plugins": {
+     "installs": {
+      "a": {}
+     }
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: plugins.installs. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-absent-plugins-empty",
+   "cfg": {
+    "plugins": {}
+   },
+   "vendor": null
+  },
+  {
+   "label": "near:installs-plugins-not-a-record",
+   "cfg": {
+    "plugins": [
+     "installs"
+    ]
+   },
+   "vendor": null
+  },
+  {
+   "label": "near:installs-empty-with-other-retired",
+   "cfg": {
+    "plugins": {
+     "installs": {}
+    },
+    "heartbeat": 1
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: heartbeat. Doctor cannot remove these settings safely.",
+    "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
+   }
+  },
+  {
+   "label": "near:installs-empty-after-new-families",
+   "cfg": {
+    "models": {
+     "providers": {
+      "p": {
+       "api": "openai-codex-responses"
+      }
+     }
+    },
+    "plugins": {
+     "installs": {}
+    },
+    "browser": {
+     "relayBindHost": 1
+    }
+   },
+   "vendor": {
+    "message": "Config contains retired pre-July-2026 settings: models.providers.p.api, browser.relayBindHost. Doctor cannot remove these settings safely.",
     "nextAction": "Install OpenClaw 2026.9.5, run \"openclaw doctor --fix\", then upgrade to latest. See https://docs.openclaw.ai/install/updating#upgrading-very-old-versions."
    }
   },

@@ -58,7 +58,7 @@ JS FIDELITY, each measured against the vendor and pinned by the battery:
   ``byChannel.*`` entry against ``queue`` / ``steer-backlog`` / ``steer+backlog``.
 
 THE BUILD WINDOW is ``ORACLE_MIN..ORACLE_MAX``. 2026.9.9's finder is a different, smaller
-function (about 17 families); 2026.10.1 to 2026.10.5 are the builds this port is validated on.
+function (about 17 families); 2026.10.1 to 2026.10.6 are the builds this port is validated on.
 2026.10.5 added two families (a provider or model ``api`` of ``openai-codex-responses``, and a
 ``driver: extension`` browser profile that still carries a ``cdpUrl``): ``find_retired`` takes
 the build and names them only on 2026.10.5 and later, because 2026.10.1-2026.10.4 do not refuse
@@ -82,7 +82,7 @@ from dataclasses import dataclass
 #: The window of builds this port was differentially validated on (first three components
 #: compared, so a correction release of a validated build stays inside it).
 ORACLE_MIN = (2026, 10, 1)
-ORACLE_MAX = (2026, 10, 5)
+ORACLE_MAX = (2026, 10, 6)
 
 #: The vendor's two ``bridgeVersion`` values, verbatim.
 BRIDGE_DEFAULT = "2026.9.5"
@@ -182,6 +182,10 @@ def _visit_channel_entries(raw: dict, channel_id: str, visitor) -> None:
 #: The first build whose finder names the ``openai-codex-responses`` api and the extension
 #: browser-profile ``cdpUrl`` (measured by diffing the 2026.10.4 and 2026.10.5 finders).
 _V10_5 = (2026, 10, 5)
+#: The first build whose finder leaves an EMPTY ``plugins.installs`` record alone (Doctor then
+#: repairs "empty retired-plugin metadata" instead of refusing the update over it). Measured by
+#: diffing the 2026.10.5 and 2026.10.6 finders.
+_V10_6 = (2026, 10, 6)
 
 
 def find_retired(cfg, version=None) -> "RetiredFormats | None":
@@ -194,6 +198,7 @@ def find_retired(cfg, version=None) -> "RetiredFormats | None":
     if not _is_record(cfg):
         return None
     newer = version is None or tuple(version)[:3] >= _V10_5
+    empty_installs_ok = version is None or tuple(version)[:3] >= _V10_6
     retired: "list[str]" = []
 
     def check_keys(scope, config_path: str, keys) -> None:
@@ -208,7 +213,9 @@ def find_retired(cfg, version=None) -> "RetiredFormats | None":
 
     check_keys(cfg, "", ["heartbeat"])
     check_keys(cfg.get("routing"), "routing", ["allowFrom", "groupChat"])
-    check_keys(cfg.get("plugins"), "plugins", ["installs"])
+    installs = child(cfg.get("plugins"), "installs")
+    if not (empty_installs_ok and _is_record(installs) and not installs):
+        check_keys(cfg.get("plugins"), "plugins", ["installs"])
     providers = child(cfg.get("models"), "providers") if newer else None
     if _is_record(providers):
         for provider_id, provider in _entries(providers):
