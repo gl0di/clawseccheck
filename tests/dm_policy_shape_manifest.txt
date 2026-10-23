@@ -2,11 +2,11 @@
 # Do not hand-edit. Regenerate on an OpenClaw upgrade re-baseline (this is a step in
 # that protocol -- see docs/process/OPENCLAW_UPGRADE_PROTOCOL.md).
 #
-# version: 2026.10.4   channels: 27   with-a-dm-policy-surface: 18
-# generated: 2026-10-16
+# version: 2026.10.5   channels: 28   with-a-dm-policy-surface: 19
+# generated: 2026-10-19
 # depth-cap: 20
-# converged: yes  (cap+8 yields 5430 total paths vs 5430)
-# source-module: schema-BBhEexxB.mjs   export: t
+# converged: yes  (cap+8 yields 5517 total paths vs 5517)
+# source-module: schema-B5pKhM6L.mjs   export: t
 # nested_dm_policy=yes channels: matrix
 # excluded as non-channel siblings of channels.*: defaults, modelByChannel (see NON_CHANNEL_SIBLINGS in this script for why)
 #
@@ -53,5 +53,6 @@ telegram	yes	no	no
 tlon	no	no	no
 twitch	no	no	no
 whatsapp	yes	no	no
+x	yes	no	no
 zalo	yes	no	no
 zalouser	yes	no	no

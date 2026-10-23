@@ -69,6 +69,7 @@ from .checks._shared import (  # C-681
     _effective_gateway_bind,
     _is_bind_template,
     _js_trim,
+    _workshop_proposals_state,  # C-744
     parse_bind_host,
 )
 from .collector import Context, agent_roster, dig
@@ -2959,7 +2960,7 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
     if not arms:
         return None
     detail = "; ".join(arms)
-    return RiskPath(
+    path = RiskPath(
         id="RISK-26",
         severity=HIGH,
         title="Skill Workshop's unattended install pipeline is reachable from untrusted ingress",
@@ -2988,6 +2989,27 @@ def _rule_workshop_autonomy_untrusted_ingress(ctx: Context,
             "allowFrom to your own channel-native ID(s) (B171), or disable "
             "hooks.enabled if it is not required (B179)."
         ),
+    )
+    if _workshop_proposals_state(ctx) != "retired":
+        return path
+    # C-744: OpenClaw 2026.10.5 removed Skill Workshop proposals and approvalPolicy. The text
+    # above is the 2026.8.1-2026.10.4 story (and what docs/CHECKS.md is generated from); on a
+    # build known to be 2026.10.5+ the same chain is told in the build's own terms.
+    return replace(
+        path,
+        why=("This install has Skill Workshop background learning on and reachable: the "
+             "agent saves and updates skills on its own, and OpenClaw 2026.10.5 has no "
+             "proposal or approval step any more (each change is announced and can be "
+             "undone afterwards). At the same time, at least one ingress surface admits "
+             f"content from someone other than the owner: {detail}. A single inbound "
+             "message can therefore cause the agent to author and install new executable "
+             "code on disk with no review step in between."),
+        fix=("Set skills.workshop.autonomous.mode to 'off' unless unattended learning is "
+             "genuinely intended (OpenClaw 2026.10.5 removed approvalPolicy, so 'off' is "
+             "the only switch). Independently, close the flagged ingress surface(s): set "
+             "channels.<provider>.contextVisibility to 'allowlist'/'allowlist_quote' "
+             "(B26), scope commands.ownerAllowFrom/allowFrom to your own channel-native "
+             "ID(s) (B171), or disable hooks.enabled if it is not required (B179)."),
     )
 
 

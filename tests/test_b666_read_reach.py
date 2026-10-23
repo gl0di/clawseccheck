@@ -212,12 +212,17 @@ def test_dist_profile_enum_matches_the_known_set():
 
 def test_dist_still_grants_read_to_exactly_the_profiles_we_name():
     """`read` is a `coding` tool, and `full` is ``allow: ["*"]``. Any other profile
-    gaining it would silently widen this predicate."""
+    gaining it would silently widen this predicate.
+
+    C-744: read through ``catalog_tool_records`` (the structural reader of the 2026.10.5
+    ``coreTools(...)`` form, which falls back to nothing on the old one-literal-per-tool form),
+    not a regex over the layout that went blind when the vendor rewrote the catalog."""
+    from _distgrounding import catalog_tool_records
     text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
                      contains="CORE_TOOL_DEFINITIONS")
-    entry = re.search(r'id: "read",(.*?)profiles: \[([^\]]*)\]', text, re.S)
-    assert entry, "the read tool entry moved — re-ground _PROFILES_GRANTING_READ"
-    named = set(re.findall(r'"([a-z]+)"', entry.group(2)))
+    records = catalog_tool_records(text)
+    assert records.get("read"), "the read tool entry moved — re-ground _PROFILES_GRANTING_READ"
+    named = set(records["read"]["profiles"])
     wildcard = re.search(r'full: \{ allow: \["\*"\] \}', text)
     assert wildcard, 'the "full" profile is no longer allow-all — re-ground'
     assert named | {"full"} == set(toolpolicy._PROFILES_GRANTING_READ), named
@@ -230,13 +235,11 @@ def test_dist_group_fs_membership_matches_core_tool_definitions():
     that guard, so the next vendor addition is caught mechanically instead of by
     inspection. See ``_GROUP_FS_MEMBERS``'s own comment for why the drift was inert
     rather than a lying-PASS."""
+    from _distgrounding import catalog_tool_records
     text = dist_text("tool-catalog-*.js", symbol="CORE_TOOL_DEFINITIONS",
                      contains="CORE_TOOL_DEFINITIONS")
-    block = re.search(r"CORE_TOOL_DEFINITIONS = \[(.*?)\n\];", text, re.S)
-    assert block, "CORE_TOOL_DEFINITIONS not found — re-ground _GROUP_FS_MEMBERS"
-    members = set(re.findall(
-        r'id: "([a-z_]+)",\s*[^{}]*?sectionId: "fs"', block.group(1), re.S
-    ))
+    members = {tool_id for tool_id, rec in catalog_tool_records(text).items()
+               if rec["sectionId"] == "fs"}
     assert members, "no fs-sectioned tool found — re-ground _GROUP_FS_MEMBERS"
     assert members == set(toolpolicy._GROUP_FS_MEMBERS), members
 

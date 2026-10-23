@@ -123,11 +123,12 @@ def test_battery_catches_a_short_retired_value_list(monkeypatch):
 # --- the window ---
 
 def test_window_is_the_validated_builds_only():
-    assert DATA["build"] == "2026.10.4"
+    assert DATA["build"] == "2026.10.5"
     assert rf.in_window((2026, 10, 1)) and rf.in_window((2026, 10, 2))
     assert rf.in_window((2026, 10, 3)) and rf.in_window((2026, 10, 4))
+    assert rf.in_window((2026, 10, 5))
     assert rf.in_window((2026, 10, 2, 1))  # a correction release stays inside
-    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 5))
+    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 6))
     assert not rf.in_window((2027, 1, 1))
     assert not rf.in_window(None) and not rf.in_window(()) and not rf.in_window((2026, 10))
     assert not rf.in_window("2026.10.2")
@@ -136,3 +137,38 @@ def test_window_is_the_validated_builds_only():
 def test_a_non_record_config_is_nothing_retired():
     for junk in (None, [], "x", 0, True):
         assert rf.find_retired(junk) is None
+
+
+# --- C-744: the two families 2026.10.5 added are named only from 2026.10.5 on ----------------
+
+_NEW_FAMILY_CFGS = [
+    {"models": {"providers": {"p": {"api": "openai-codex-responses"}}}},
+    {"models": {"providers": {"p": {"models": [{"api": "openai-codex-responses"}]}}}},
+    {"browser": {"profiles": {"w": {"driver": "extension", "cdpUrl": "http://x"}}}},
+]
+
+
+@pytest.mark.parametrize("cfg", _NEW_FAMILY_CFGS)
+def test_the_new_families_are_named_on_2026_10_5_and_not_before(cfg):
+    for newer in (None, (2026, 10, 5), (2026, 10, 5, 1), (2026, 10, 6), (2027, 1, 1)):
+        assert rf.find_retired(cfg, newer) is not None, newer
+    for older in ((2026, 10, 4), (2026, 10, 1), (2026, 9, 9)):
+        assert rf.find_retired(cfg, older) is None, older
+
+
+def test_the_build_argument_only_removes_the_two_new_families():
+    """On a build before 2026.10.5 every battery row answers as the unversioned call minus the
+    paths of the two new families -- nothing else moves, and the bridge release stays."""
+    new = ("models.providers.", "browser.profiles.")
+    dropped = 0
+    for row in ROWS:
+        a = rf.find_retired(row["cfg"], (2026, 10, 4))
+        b = rf.find_retired(row["cfg"])
+        want = [] if b is None else [p for p in b.paths if not p.startswith(new)]
+        got = [] if a is None else list(a.paths)
+        assert got == want, row["label"]
+        if b is not None and len(want) != len(b.paths):
+            dropped += 1
+        if a is not None and b is not None:
+            assert a.bridge_version == b.bridge_version, row["label"]
+    assert dropped >= 40   # the control: the new-family rows really are exercised

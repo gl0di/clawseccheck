@@ -195,8 +195,14 @@ from .collector import agent_roster
 #: configs and envs, the same 22 thrown-error rows, and the vendor's answer identical on
 #: every row -- only its ``build`` stamp moved. The chain is now 9.5 = 9.6 = 9.7 = 9.8 =
 #: 9.9 = 10.1 = 10.2 = 10.3 = 10.4, measured row by row, and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.10.5 on 2026-10-19. The battery was regenerated against the
+#: installed 2026.10.5 and compared with the 2026.10.4 one: 773 rows each, the same labels,
+#: configs and envs, and the vendor's answer identical on every row -- only its ``build``
+#: stamp moved. The chain is now 9.5 = 9.6 = 9.7 = 9.8 = 9.9 = 10.1 = 10.2 = 10.3 = 10.4 =
+#: 10.5, measured row by row, and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 10, 4)
+ORACLE_MAX = (2026, 10, 5)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 

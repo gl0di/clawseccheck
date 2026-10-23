@@ -1309,6 +1309,22 @@ _DIST_MAX_DEPTH = 8
 # Verdicts below are from `OpenClawSchema.safeParse()` on the installed 2026.7.1-2 dist, not
 # from this file's reader — the reader was cross-checked against it, not trusted over it.
 _NOT_IN_CURRENT_SCHEMA = {
+    # C-744: OpenClaw 2026.10.5 removed Skill Workshop proposals. Measured on the installed
+    # 2026.10.5 root JSON schema (`schema-*.mjs` export `t`): `skills.workshop` is
+    # `{type: object, additionalProperties: false}` with exactly {autonomous: {mode:
+    # "off" | "auto"}, maxSkillBytes}; `approvalPolicy` and `maxPending` are not properties
+    # (Doctor's "skills.workshop.proposal-settings-retired" migration deletes them), and the
+    # runtime (`resolveSkillWorkshopConfig`) reads only `mode` and `maxSkillBytes`.
+    # checks/_lifecycle.py::check_skill_workshop_autonomy reads it BESIDE the build gate
+    # `_workshop_proposals_state(ctx)`: on a build known to be 2026.10.5+ the value is ignored
+    # (and a leftover is called out as protecting nothing); on 2026.8.1-2026.10.4 it is the
+    # live review gate, which is why the read stays.
+    "skills.workshop.approvalPolicy": (
+        "root JSON schema 2026.10.5: skills.workshop.additionalProperties=false with "
+        "properties {autonomous.mode, maxSkillBytes}; the real switch is "
+        "skills.workshop.autonomous.mode. checks/_lifecycle.py::check_skill_workshop_autonomy "
+        "reads the key only for builds before 2026.10.5 (see _workshop_proposals_state)."
+    ),
     # C-472 re-grounded every SCHEMA DISPROOF here against 2026.8.1. It did not re-ground
     # the CODE POINTERS beside them, and the original wording of this comment ("EVERY
     # justification") did not distinguish the two -- so a claim that was true of one half

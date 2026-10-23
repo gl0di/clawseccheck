@@ -28,3 +28,11 @@ d5daee01d3fe9d28bf57d713dc52695f0d7b1f7d:tests/test_logscan.py:generic-api-key:9
 # A settings string ("min-length-16-rotate-90d-no-reuse") under a credential-named key in a
 # test input; split into fragments at HEAD and pinned to its introducing commit.
 4fe23739704b3b2d91bed2ed90c5ce5e0f67c0ae:tests/test_c688_plaintext_at_vendor_sensitive_paths.py:generic-api-key:269
+
+# The pinned retired-format battery (tests/data/retiredformats_battery.json) records the vendor's
+# own refusal sentence verbatim, a list of config paths and no credential; the dotted tail of one
+# path reads as a high-entropy key value. It is generated test data, so there is no source line to
+# split: pinned to the commit that introduced the row. (Do not quote the sentence here -- the
+# first version of this comment did, and gitleaks flagged the comment itself, pinned below.)
+c1e13303152526463f27b09009ead09051c4f7b6:tests/data/retiredformats_battery.json:generic-api-key:11060
+cabbf9db0d80eed392a000b94c05471b6237024d:.gitleaksignore:generic-api-key:34

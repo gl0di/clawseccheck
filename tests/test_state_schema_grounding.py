@@ -2319,10 +2319,11 @@ _PRIMARY_STATE_SCHEMA_CONSTANT = "OPENCLAW_STATE_SCHEMA_SQL"
 # name -> evidence: the write path that applies the DDL to the STATE database (grounded
 # against the installed 2026.9.9 dist; function names, not rotating bundle hashes).
 _STATE_SATELLITE_CONSTANTS = {
-    "USER_PROFILES_SCHEMA_SQL": (
-        "user-profiles-internal-*.mjs: ensureUserProfilesSchema -> runUserProfileWriteTransaction "
-        "-> runOpenClawStateWriteTransaction, `db.exec(USER_PROFILES_SCHEMA_SQL)`; opens the "
-        "database with openOpenClawStateDatabase"
+    "ensureUserProfileTables": (
+        "user-profiles-internal-*.mjs (2026.10.5): `ensureUserProfileTables = "
+        "createSqliteSchemaEnsurer(() => ...)`, applied to the state database by the user-profile "
+        "write path (runUserProfileWriteTransaction -> runOpenClawStateWriteTransaction); before "
+        "2026.10.5 the same DDL was the constant USER_PROFILES_SCHEMA_SQL"
     ),
     "WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL": (
         "openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema -> "
@@ -2386,6 +2387,14 @@ _STATE_EXCLUDED_CONSTANTS = {
         "RETIRED_AGENT_STATE_LEASE_SCHEMA_SQL",
     ), "retired shape, kept by the vendor only to migrate old databases away"),
 }
+
+# 2026.10.5 moved the user-profiles DDL out of a `USER_PROFILES_SCHEMA_SQL = \`...\`` constant into
+# `ensureUserProfileTables = createSqliteSchemaEnsurer(() => \`...\`)`. The template is the same
+# kind of literal, so a satellite may be spelled either way; the ensurer spelling is NOT a
+# `*_SCHEMA_SQL` name, which is why `_SCHEMA_SQL_NAME_RE` below cannot see a NEW constant in
+# that style -- the net covers only the old spelling, and a new ensurer-style state table is
+# found by the schema-walk / table-baseline diff, not by this guard.
+_ENSURER_PREFIX = r"(?:createSqliteSchemaEnsurer\(\s*\(\)\s*=>\s*)?"
 
 _SCHEMA_SQL_NAME_RE = re.compile(r"\b[A-Z][A-Z0-9_]*_SCHEMA_SQL\b")
 _CREATE_TABLE_RE = re.compile(r"\bCREATE\s+TABLE\b", re.IGNORECASE)
@@ -2500,7 +2509,7 @@ def _survey_schema_sql_constants(dist_dir: Path, wanted) -> "tuple[set, dict]":
             for name in wanted:
                 if name not in text:
                     continue
-                for m in re.finditer(rf"\b{name}\s*=\s*([`\"'])", text):
+                for m in re.finditer(rf"\b{name}\s*=\s*{_ENSURER_PREFIX}([`\"'])", text):
                     sql, spliced = _extract_satellite_schema_sql(text, m.end(), m.group(1), name)
                     found[name].append((path, sql, spliced))
     return seen, found

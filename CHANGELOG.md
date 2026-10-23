@@ -3,15 +3,33 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
-## [4.4.2] - 2026-10-19
+## [4.4.3] - 2026-10-23
 
-**Three accuracy fixes after 4.4.1; no new check and no finding changes status except one
-severity.** B55 drops from HIGH to LOW when the only reach is one declared sender, B158 stops
-calling a present plugin file "not present on disk", and a gradeless run whose self-report was
-never handed in now says which steps of the standard flow are still owed. RISK-12's chain label
-no longer claims there is no approval gate on a config where one is set.
+**Re-grounded on OpenClaw 2026.10.5, plus everything 4.4.2 carried.** 4.4.2 was tagged and its
+upload was accepted by ClawHub, but the version never became visible there (a registry-side
+fault: the first upload attempt failed with "Skill upload ticket does not match this publish"
+and left a reservation, so the retry answered "already exists" while the version stays
+unlisted). Nothing from 4.4.2 reached users, so its entries are folded into this release and
+there is no separate 4.4.2 on ClawHub. 2026.10.5 is a feature release, not a stamp-only one:
+three statements the tool makes were made false by it and are fixed; no check is added and no
+finding changes status except the B55 severity from 4.4.2.
 
 ### Changed
+- **B175 and RISK-26 describe Skill Workshop the way OpenClaw 2026.10.5 has it.** That build
+  removed Skill Workshop proposals and `approvalPolicy`: the runtime reads only
+  `skills.workshop.autonomous.mode`, `"off"` stays off and every other value (the retired
+  `"propose"`, a typo, nothing) runs as `"auto"`, applying changes at once (announced, undoable).
+  On a build known to be 2026.10.5 or later the verdict is unchanged (FAIL when the tool is
+  reachable, the default included), but the text no longer names `approvalPolicy` or the
+  removed `apply` step: a leftover `approvalPolicy: "pending"` is called out as protecting
+  nothing, `mode: "propose"` is called out as running unattended, and the advice is
+  `autonomous.mode: "off"`. Older builds and an undeterminable build keep their wording. The
+  `detail` of B175 changes on 2026.10.5 only, so an ignore entry for B175 written there no
+  longer matches.
+- **The "verified against OpenClaw" stamp moves to 2026.10.5**, with the grounded ceiling, the
+  schema and state snapshots, the Codex-harness battery (773 rows, no answer moved), the DM-policy
+  manifest (adds the X channel, which has no direct messages) and the B391 default worker image
+  (`node:24.21.0-slim`, unchanged) re-baselined.
 - **B55 is LOW when the only reach is one declared sender.** When EVERY enabled channel is an
   allowlist that admits exactly one distinct sender id, B55 stays a WARN but drops from HIGH to
   LOW and says what is true: the tool is reachable by that one sender, the channel side is
@@ -37,6 +55,11 @@ no longer claims there is no approval gate on a config where one is set.
   tool (no write-specific scoping)". Text only: RISK-12 arms and clears exactly as before.
 
 ### Fixed
+- **B382 names the two retired-config families OpenClaw 2026.10.5 added.** Its own finder now also
+  refuses a provider or model `api` of `openai-codex-responses` and an `extension` browser profile
+  that still carries a `cdpUrl`; the port names them from 2026.10.5 on (and not on 2026.10.1-
+  2026.10.4, which do not refuse them). Checked row by row against both the 2026.10.4 and 2026.10.5
+  finders over 1,045 configs, including JavaScript `trim` edge cases.
 - **A skipped step of the standard flow is now visible in the output.** A real agent once
   delivered the card of a gradeless run without ever filling in the self-report or running the
   judge panel; the only place that said so was prose in `SKILL.md`, read many steps earlier.

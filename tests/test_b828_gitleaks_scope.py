@@ -59,6 +59,14 @@ _PINNED_FINGERPRINTS = {
     # A settings string under a credential-named key, published on dev before the 4.4.0 scan
     # caught it; split into fragments at HEAD.
     "4fe23739704b3b2d91bed2ed90c5ce5e0f67c0ae:tests/test_c688_plaintext_at_vendor_sensitive_paths.py:generic-api-key:269",
+    # The vendor's own retired-config refusal sentence, recorded verbatim in the generated
+    # retired-format battery: a list of config paths (`models.providers.p.api, surfaces.s2....`)
+    # whose dotted tail reads as a high-entropy key value. Generated test data, so there is no
+    # source line to split; published on dev (2026.10.5 re-ground) before the scan caught it.
+    "c1e13303152526463f27b09009ead09051c4f7b6:tests/data/retiredformats_battery.json:generic-api-key:11060",
+    # ... and the first version of the comment explaining that pin quoted the sentence, so the
+    # ignore file itself was flagged once, at the commit that added it.
+    "cabbf9db0d80eed392a000b94c05471b6237024d:.gitleaksignore:generic-api-key:34",
 }
 
 # gitleaks allowlist keys that broaden an exemption beyond one exact, anchored value:
