@@ -54,7 +54,7 @@ sys.path.insert(0, str(HERE.parent))
 BATTERY_PATH = HERE / "data" / "retiredformats_battery.json"
 
 #: The build the battery was generated against (recorded in the battery header).
-ORACLE_BUILD = "2026.10.5"
+ORACLE_BUILD = "2026.10.6"
 
 _FINDER = "findRetiredConfigUpgradeRequirement"
 
@@ -477,6 +477,19 @@ def _near_cases() -> "list[tuple[str, dict]]":
     add("browser-profile-order", {"browser": {"profiles": {
         "b": {"driver": "extension", "cdpUrl": "x"}, "3": {"driver": "extension", "cdpUrl": "x"},
         "1": {"driver": "extension", "cdpUrl": "x"}}}})
+    # 2026.10.6: an EMPTY `plugins.installs` record is left alone; anything else that is present is
+    # still named. Every shape of "present", and the neighbours that must not move.
+    for name, val in (("empty-record", {}), ("one-entry", {"a": {}}), ("entry-null", {"a": None}),
+                      ("empty-list", []), ("list-one", [1]), ("null", None), ("string", "x"),
+                      ("empty-string", ""), ("zero", 0), ("false", False), ("true", True),
+                      ("number", 7), ("proto-key", {"__proto__": 1}), ("nested-empty", {"a": {}})):
+        add(f"installs-{name}", {"plugins": {"installs": val}})
+    add("installs-absent-plugins-empty", {"plugins": {}})
+    add("installs-plugins-not-a-record", {"plugins": ["installs"]})
+    add("installs-empty-with-other-retired", {"plugins": {"installs": {}}, "heartbeat": 1})
+    add("installs-empty-after-new-families", {
+        "models": {"providers": {"p": {"api": "openai-codex-responses"}}},
+        "plugins": {"installs": {}}, "browser": {"relayBindHost": 1}})
     add("new-families-keep-the-finder-order", {
         "browser": {"relayBindHost": 1, "profiles": {"w": {"driver": "extension", "cdpUrl": "x"}},
                     "ssrfPolicy": {"allowPrivateNetwork": 1}},

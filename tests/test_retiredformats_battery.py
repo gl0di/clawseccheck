@@ -123,12 +123,12 @@ def test_battery_catches_a_short_retired_value_list(monkeypatch):
 # --- the window ---
 
 def test_window_is_the_validated_builds_only():
-    assert DATA["build"] == "2026.10.5"
+    assert DATA["build"] == "2026.10.6"
     assert rf.in_window((2026, 10, 1)) and rf.in_window((2026, 10, 2))
     assert rf.in_window((2026, 10, 3)) and rf.in_window((2026, 10, 4))
-    assert rf.in_window((2026, 10, 5))
+    assert rf.in_window((2026, 10, 5)) and rf.in_window((2026, 10, 6))
     assert rf.in_window((2026, 10, 2, 1))  # a correction release stays inside
-    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 6))
+    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 7))
     assert not rf.in_window((2027, 1, 1))
     assert not rf.in_window(None) and not rf.in_window(()) and not rf.in_window((2026, 10))
     assert not rf.in_window("2026.10.2")
@@ -156,19 +156,46 @@ def test_the_new_families_are_named_on_2026_10_5_and_not_before(cfg):
         assert rf.find_retired(cfg, older) is None, older
 
 
-def test_the_build_argument_only_removes_the_two_new_families():
-    """On a build before 2026.10.5 every battery row answers as the unversioned call minus the
-    paths of the two new families -- nothing else moves, and the bridge release stays."""
+def _paths(res):
+    return [] if res is None else list(res.paths)
+
+
+def test_the_build_argument_only_removes_the_two_new_families_before_2026_10_5():
+    """On a build before 2026.10.5 every battery row answers as the 2026.10.5 call minus the paths
+    of the two families that build added -- nothing else moves, and the bridge release stays."""
     new = ("models.providers.", "browser.profiles.")
     dropped = 0
     for row in ROWS:
         a = rf.find_retired(row["cfg"], (2026, 10, 4))
-        b = rf.find_retired(row["cfg"])
-        want = [] if b is None else [p for p in b.paths if not p.startswith(new)]
-        got = [] if a is None else list(a.paths)
-        assert got == want, row["label"]
-        if b is not None and len(want) != len(b.paths):
-            dropped += 1
+        b = rf.find_retired(row["cfg"], (2026, 10, 5))
+        want = [p for p in _paths(b) if not p.startswith(new)]
+        assert _paths(a) == want, row["label"]
+        dropped += len(_paths(b)) != len(want)
         if a is not None and b is not None:
             assert a.bridge_version == b.bridge_version, row["label"]
     assert dropped >= 40   # the control: the new-family rows really are exercised
+
+
+def test_2026_10_5_names_an_empty_plugins_installs_and_2026_10_6_does_not():
+    """2026.10.6 leaves an EMPTY `plugins.installs` record alone; every other present value is
+    still named, on every build."""
+    empty = {"plugins": {"installs": {}}}
+    assert _paths(rf.find_retired(empty, (2026, 10, 5))) == ["plugins.installs"]
+    assert _paths(rf.find_retired(empty, (2026, 10, 4))) == ["plugins.installs"]
+    for newer in (None, (2026, 10, 6), (2026, 10, 6, 1), (2026, 11, 1)):
+        assert rf.find_retired(empty, newer) is None, newer
+    for value in ({"a": 1}, [], [1], None, "x", "", 0, False, True, 7):
+        cfg = {"plugins": {"installs": value}}
+        for ver in ((2026, 10, 4), (2026, 10, 5), (2026, 10, 6), None):
+            assert _paths(rf.find_retired(cfg, ver)) == ["plugins.installs"], (value, ver)
+
+
+def test_every_battery_row_equals_the_2026_10_5_call_except_an_empty_installs():
+    for row in ROWS:
+        a = _paths(rf.find_retired(row["cfg"], (2026, 10, 5)))
+        b = _paths(rf.find_retired(row["cfg"]))
+        plugins = row["cfg"].get("plugins") if isinstance(row["cfg"], dict) else None
+        empty = isinstance(plugins, dict) and plugins.get("installs") == {} \
+            and isinstance(plugins.get("installs"), dict)
+        want = [p for p in a if not (empty and p == "plugins.installs")]
+        assert b == want, row["label"]

@@ -38,11 +38,11 @@ _NEW_IN_10_5 = ("models.providers.", "browser.profiles.")
 
 
 @pytest.mark.parametrize("installed", ["2026.10.1", "2026.10.2", "2026.10.2-1", "2026.10.3",
-                                       "2026.10.4", "2026.10.5"])
+                                       "2026.10.4", "2026.10.5", "2026.10.6"])
 def test_every_ledger_path_warns_inside_the_window(installed):
     """For every path the finder names, alone in its config, B382 is WARN and names it."""
     bad = []
-    older = installed != "2026.10.5"
+    older = installed not in ("2026.10.5", "2026.10.6")
     for label, cfg, path in FINDER_PATHS:
         if older and path.startswith(_NEW_IN_10_5):
             f = _run(cfg, installed)
@@ -150,7 +150,7 @@ def test_benign_near_misses_stay_pass_and_say_what_was_checked(cfg):
 _FINDER_ONLY = {"agents": {"entries": {"main": {"agentRuntime": {"id": "codex"}}}}}
 
 
-@pytest.mark.parametrize("build", ["2026.10.6", "2026.10.0", "2026.9.9", "2027.1.1"])
+@pytest.mark.parametrize("build", ["2026.10.7", "2026.10.0", "2026.9.9", "2027.1.1"])
 def test_outside_the_window_the_pass_carries_the_caveat_in_detail(build):
     """The vendor's list was not consulted: the PASS must not read like the in-window one,
     and the caveat is in `detail` because the list renderer never shows `fix`."""
@@ -159,12 +159,12 @@ def test_outside_the_window_the_pass_carries_the_caveat_in_detail(build):
     assert f.detail == (
         "The file audited holds none of the 20 retired config keys this check tracks. "
         "OpenClaw's own retired-format list was NOT checked: it is ported only for "
-        f"2026.10.1-2026.10.5 and this build is {build}.")
+        f"2026.10.1-2026.10.6 and this build is {build}.")
     assert "retired-format finder names nothing" not in f.detail
     assert "not applied" not in f.fix
 
 
-@pytest.mark.parametrize("build", ["2026.10.1", "2026.10.2", "2026.10.3", "2026.10.4", "2026.10.5"])
+@pytest.mark.parametrize("build", ["2026.10.1", "2026.10.2", "2026.10.3", "2026.10.4", "2026.10.5", "2026.10.6"])
 def test_inside_the_window_the_same_config_warns(build):
     assert _run(_FINDER_ONLY, build).status == WARN
 
@@ -189,7 +189,7 @@ def test_the_pinned_battery_never_makes_b382_pass_or_fail_wrongly():
     table-only WARN, and no row is ever FAIL."""
     flagged = quiet = 0
     for row in BATTERY["rows"]:
-        f = _run(row["cfg"], "2026.10.5")   # the battery is the 2026.10.5 finder's answers
+        f = _run(row["cfg"], "2026.10.6")   # the battery is the 2026.10.6 finder's answers
         assert f.status != FAIL, row["label"]
         if row["vendor"] is not None:
             flagged += 1
