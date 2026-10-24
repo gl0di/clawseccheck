@@ -174,16 +174,16 @@ def _coverage_notes(finding) -> list:
 
 
 class TestVetSourceSaysWhenThePoolIsEmpty:
-    @pytest.mark.parametrize("target,eco", [("npm:left-pad", "npm"), ("pypi:requests", "pypi")])
+    @pytest.mark.parametrize("target,eco", [("pypi:requests", "pypi")])
     def test_an_empty_ecosystem_pool_is_named(self, target, eco):
         f = vet_source(target)
         notes = _coverage_notes(f)
         assert notes == ["coverage: " + _EMPTY_POOL.format(eco=eco)], f.evidence
 
     def test_detail_of_the_existing_unknown_finding_is_unchanged(self):
-        f = vet_source("npm:left-pad")
+        f = vet_source("pypi:requests")
         assert f.detail == (
-            "no known-bad record for 'npm:left-pad' — identity checks cannot prove "
+            "no known-bad record for 'pypi:requests' — identity checks cannot prove "
             "unseen code safe"
         )
         assert f.status == "UNKNOWN"
@@ -217,9 +217,9 @@ class TestVetSourceSaysWhenThePoolIsEmpty:
         assert not _coverage_notes(f)
 
     def test_the_human_dossier_prints_it_as_a_non_verdict_note(self):
-        f = vet_source("npm:left-pad")
-        text = render_vet_dossier(build_profile(f, "npm:left-pad", "source"))
-        assert _EMPTY_POOL.format(eco="npm") in text
+        f = vet_source("pypi:requests")
+        text = render_vet_dossier(build_profile(f, "pypi:requests", "source"))
+        assert _EMPTY_POOL.format(eco="pypi") in text
         assert "does not affect the verdict" in text
 
 

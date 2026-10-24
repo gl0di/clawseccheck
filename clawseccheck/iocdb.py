@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from datetime import date
 
-REVISION = "2026-07-03"  # dataset point-in-time snapshot date -- bump on every content refresh
+REVISION = "2026-10-24"  # dataset point-in-time snapshot date -- bump on every content refresh
 
 # Past this many days since REVISION, freshness_notice() surfaces an explicit
 # staleness advisory instead of staying silent. See the module docstring for why
@@ -118,6 +118,59 @@ SOURCES: tuple = (
         "https://unit42.paloaltonetworks.com/openclaw-ai-supply-chain-risk/",
         "Palo Alto Unit 42",
         "macOS infostealer delivery",
+    ),
+    # npm: name-level records for packages whose GitHub Advisory Database malware
+    # advisory (type=malware) names the package itself as malicious. vet_source matches
+    # by bare name, never by version, so a legitimate package whose ONE release was
+    # compromised (e.g. tensorlake@0.5.144, GHSA-rqxj-g25x-4v9v) is deliberately NOT here:
+    # a name record would FAIL every clean release too (C-750).
+    _rec(
+        "items-validator", "npm", "2026-10-19",
+        "https://github.com/advisories/GHSA-rpgc-c7g7-g8fh",
+        "GitHub Advisory Database (GHSA-rpgc-c7g7-g8fh)",
+        "whole-package malware: GHSA malware advisory covers every version (>= 0)",
+    ),
+    _rec(
+        "item-validator", "npm", "2026-10-19",
+        "https://github.com/advisories/GHSA-ff48-h3v7-m43r",
+        "GitHub Advisory Database (GHSA-ff48-h3v7-m43r)",
+        "whole-package malware: GHSA malware advisory covers every version (>= 0)",
+    ),
+    _rec(
+        "data-pipeline-testmetest", "npm", "2026-10-22",
+        "https://github.com/advisories/GHSA-6cj6-rwg9-r9jc",
+        "GitHub Advisory Database (GHSA-6cj6-rwg9-r9jc)",
+        "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 2.0.1",
+    ),
+    _rec(
+        "event-emitter-testmetest", "npm", "2026-10-22",
+        "https://github.com/advisories/GHSA-23vf-x9vg-87p2",
+        "GitHub Advisory Database (GHSA-23vf-x9vg-87p2)",
+        "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 1.0.6, 1.0.7, 4.1.0, 5.0.0",
+    ),
+    _rec(
+        "test-brotli-testmetest", "npm", "2026-10-22",
+        "https://github.com/advisories/GHSA-r5cq-2h3p-f6qf",
+        "GitHub Advisory Database (GHSA-r5cq-2h3p-f6qf)",
+        "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 1.0.0",
+    ),
+    _rec(
+        "pixel-map-testmetest", "npm", "2026-10-22",
+        "https://github.com/advisories/GHSA-26g3-4jrv-x55w",
+        "GitHub Advisory Database (GHSA-26g3-4jrv-x55w)",
+        "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 0.0.1-0.0.3",
+    ),
+    _rec(
+        "net-codec-testmetest", "npm", "2026-10-22",
+        "https://github.com/advisories/GHSA-g4jf-x8gh-87jw",
+        "GitHub Advisory Database (GHSA-g4jf-x8gh-87jw)",
+        "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 1.0.1",
+    ),
+    _rec(
+        "log-rotate-testmetest", "npm", "2026-10-22",
+        "https://github.com/advisories/GHSA-c6r9-8976-74gm",
+        "GitHub Advisory Database (GHSA-c6r9-8976-74gm)",
+        "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 1.0.1",
     ),
 )
 
