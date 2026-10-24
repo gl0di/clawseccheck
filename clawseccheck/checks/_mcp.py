@@ -11220,7 +11220,7 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             f"{incomplete}",
             "Identify which server or plugin supplies the named tool, stop the agent and "
             "remove or pin it, then check for persistence it may have left behind "
-            "(host-persistence findings B150/B379, `clawseccheck --incident`), and only "
+            "(host-persistence findings B150/B379, the `--incident` report), and only "
             "THEN rotate any credential the affected sessions could reach - some payloads "
             "wipe the home directory the moment a stolen token is revoked. Re-run this "
             "audit after the next session to confirm the delivered description changed.",

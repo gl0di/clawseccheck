@@ -7418,7 +7418,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             "Uninstall the flagged skill(s) NOW and stop the agent. Removing a skill does "
             "not remove persistence its payload may have installed elsewhere (systemd user "
             "units, LaunchAgents, scheduled tasks, shell profiles): check the host-persistence "
-            "findings (B150, B379) and run `clawseccheck --incident`, remove anything you did "
+            "findings (B150, B379) and run the `--incident` report, remove anything you did "
             "not install, and only THEN rotate any secrets they could reach (channel tokens, "
             "1Password, cloud keys) - some payloads wipe the home directory the moment a "
             "stolen token is revoked. Only reinstall skills whose source you have read."
@@ -10624,7 +10624,7 @@ def vet_source(
             f"KNOWN-BAD source '{t}': " + reasons_bad[0],
             "Do NOT fetch or install this. If it is already installed, stop the agent and "
             "remove it, then check for persistence it may have left outside the skill "
-            "(host-persistence findings B150/B379, `clawseccheck --incident`), and only THEN "
+            "(host-persistence findings B150/B379, the `--incident` report), and only THEN "
             "rotate any secrets the agent could reach - some payloads wipe the home "
             "directory the moment a stolen token is revoked.",
             evidence,

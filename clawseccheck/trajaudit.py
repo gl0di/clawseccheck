@@ -1301,7 +1301,7 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
             )
         lines.append("  Review those tool calls in the trajectory manually. If an instruction "
                      "was acted on, stop the agent, check for persistence it may have "
-                     "installed (host-persistence findings, `clawseccheck --incident`), "
+                     "installed (host-persistence findings, the `--incident` report), "
                      "and only THEN rotate any credential the referenced path/host could "
                      "expose - some payloads wipe the home directory when a stolen token "
                      "is revoked.")

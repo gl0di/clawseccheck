@@ -64,11 +64,8 @@ specific path, secret or privacy concern - read
 [`docs/playbook/SCOPE.md`](docs/playbook/SCOPE.md) and answer from it, not from this
 summary.**
 
-If a finding looks like real malware in an installed skill, tell the user plainly, advise them
-to stop the agent and remove that skill, then check for persistence the payload may have
-installed elsewhere (host-persistence findings, `clawseccheck --incident`), and only then rotate
-any secrets it could reach (revoking a stolen token first can trigger a wipe), and **never run**
-the payload.
+If an installed skill looks like real malware, tell the user: stop the agent, remove the skill
+and its persistence (`--incident`) before rotating secrets, and **never run** the payload.
 
 ---
 
