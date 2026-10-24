@@ -143,17 +143,19 @@ section is deliberately short on promises and specific about triggers.
 bumped to the verification date in the same change that adds any record. This is already
 part of [RELEASING.md](RELEASING.md)'s documentation-alignment step.
 
-**Per release, also: read all four OpenClaw dist-tags, not just `latest`.**
-`https://registry.npmjs.org/-/package/openclaw/dist-tags` returns `alpha`, `latest`,
-`extended-stable` and `beta`. Every version-gated fact we ship is grounded against `latest`,
+**Per release, also: read all the OpenClaw dist-tags, not just `latest`.**
+`https://registry.npmjs.org/-/package/openclaw/dist-tags` returns up to four channels -
+`alpha`, `latest`, `extended-stable` and `beta` - and omits a channel that has no published
+build (on 2026-10-24 it returned no `alpha` at all). Every version-gated fact we ship is grounded against `latest`,
 so the other three are maintained channels with real users that nothing here re-checks
-unless this step is taken. Two dated readings, so the rate of change is visible rather than
+unless this step is taken. Dated readings, so the rate of change is visible rather than
 assumed:
 
 | Read on | `alpha` | `latest` | `extended-stable` | `beta` |
 | --- | --- | --- | --- | --- |
 | 2026-08-06 | 2026.5.19-alpha.1 | 2026.7.1-2 | 2026.6.34 | 2026.7.2-beta.7 |
 | 2026-08-27 | 2026.5.19-alpha.1 | 2026.7.1-2 | 2026.6.34 | 2026.8.1-beta.3 |
+| 2026-10-24 | not published | 2026.10.6 | 2026.9.33 | 2026.10.10-beta.3 |
 
 `beta` moved twice in three weeks while `latest` did not move at all. That asymmetry is the
 whole reason for the step: a fact confirmed on a beta build is not a fact about OpenClaw,
