@@ -1185,6 +1185,13 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
     # hostpersist.py's own module docstring: passing ctx.home there once silently
     # returned 23 entries instead of 36, every home-rooted family missing, no error.
     scan = _hostpersist.scan(home=home)
+    # C-749: macOS launchd directories exist but hostpersist never reads them. Disclosed in
+    # `fix`/`evidence` (never `detail` on an existing branch: baseline.fingerprint() hashes it).
+    launchd_note = (
+        " macOS launchd locations (" + ", ".join(scan.launchd_unread) + ") are present "
+        "but this tool does not read them - inspect them yourself (`ls -l` the "
+        "directories, `launchctl list`)."
+    ) if scan.launchd_unread else ""
 
     # C-135 (independent, two rounds): a lookup of every systemd-user entry BY
     # BASENAME, built once, so a `.timer` entry can find its paired `.service` unit
@@ -1240,8 +1247,8 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             "one from a static scan.",
             "Confirm each entry above is intentional. If it should not exist, remove it "
             "(`systemctl --user disable --now <name>.timer`, or edit the /etc/cron.* "
-            "file directly).",
-            evidence=hits,
+            "file directly)." + launchd_note,
+            evidence=hits + list(scan.launchd_unread),
             confidence="MEDIUM",
         )
 
@@ -1255,8 +1262,23 @@ def check_host_scheduled_persistence(ctx: Context) -> Finding:
             "subprocess this read-only tool will not run. This is not the same as "
             "confirming nothing is scheduled.",
             "Run `crontab -l` yourself to check your personal crontab \u2014 this tool "
-            "cannot read it.",
-            evidence=list(scan.unreadable),
+            "cannot read it." + launchd_note,
+            evidence=list(scan.unreadable) + list(scan.launchd_unread),
+        )
+
+    if scan.launchd_unread:
+        # C-749: macOS shape. The Linux surfaces came back clean or absent, but the
+        # platform's own persistence surface (launchd) was never read: neither PASS nor
+        # "does not apply" would be true.
+        return _finding(
+            "B379",
+            UNKNOWN,
+            "No OpenClaw-related systemd timer or system-cron entry was found, but this "
+            "host has macOS launchd locations that this tool does not read, so host-level "
+            "scheduled persistence on this machine is not confirmed absent.",
+            "Inspect " + ", ".join(scan.launchd_unread) + " yourself (`ls -l` the "
+            "directories, `launchctl list`) for plists you did not install.",
+            evidence=list(scan.launchd_unread),
         )
 
     if not scan.families_seen:
