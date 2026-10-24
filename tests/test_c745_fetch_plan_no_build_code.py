@@ -58,6 +58,12 @@ _REFUSED = [
     "npm:file:../x",
     "npm:https://example.invalid/x.tgz",
     "npm:alias@npm:left-pad",                         # alias
+    "pypi:evil-1.0.tar.gz",                           # pip reads it as a local sdist
+    "pypi:evil-1.0-py3-none-any.whl",
+    "pypi:evil.zip",
+    "pypi:evil.tar.bz2>=1",
+    "npm:evil.tgz",                                   # npm reads it as a local tarball
+    "npm:evil.tar.gz",
 ]
 
 

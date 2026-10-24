@@ -6235,10 +6235,18 @@ _NPM_NAME_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*\Z"
 _NPM_VERSION_RE = re.compile(r"[0-9A-Za-z^~*.<>=|_+-][0-9A-Za-z^~*.<>=|_+ -]*\Z")  # semver, range or tag
 
 
+# pip reads a requirement that looks like an archive/wheel filename as a LOCAL FILE (and
+# builds an sdist), and npm-package-arg reads `x.tgz` / `x.tar.gz` as a local tarball, so a
+# "name" ending in one of these is a path in disguise, not a registry name.
+_ARCHIVE_NAME_RE = re.compile(r"\.(?:whl|zip|tgz|tar(?:\.(?:gz|bz2|xz))?)\Z", re.I)
+
+
 def _registry_spec_ok(eco: str, name, version) -> bool:
     """True when *name*/*version* are a plain registry spec for *eco* (npm / pypi)."""
     name = str(name or "")
     version = None if version is None else str(version)
+    if eco in ("pypi", "npm") and _ARCHIVE_NAME_RE.search(re.split(r"[\s<>=~!,]", name, maxsplit=1)[0]):
+        return False
     if eco == "pypi":
         return bool(_PYPI_NAME_RE.match(name)) and (
             version is None or bool(_PYPI_VERSION_RE.match(version)))
