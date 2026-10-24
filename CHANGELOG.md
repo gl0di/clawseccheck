@@ -3,6 +3,51 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.4.4] - 2026-10-24
+
+**Two security fixes in the tool's own advice and printed commands, OpenClaw 2026.10.6, and a
+refreshed indicator dataset.** The vet-before-install plan could hand the agent a fetch command
+that runs a package's build code before anything had scanned it, and the advice given after a
+malware conviction said to rotate secrets first, which some October 2026 payloads punish by
+wiping the home directory. No check is added; B379 and B382 change status on the shapes below.
+
+### Security
+- **The vet-before-install plan no longer runs package code at fetch time.** For PyPI it now
+  prints `pip download --only-binary=:all: ...` (wheels only) and says to stop, not retry, when a
+  package has no wheel, because building a source distribution executes its code. npm lines carry
+  `--ignore-scripts`. A target that is not a plain registry name - a git repository, a URL, a
+  local path, a PEP 508 direct reference, an npm alias, or a name shaped like an archive or wheel
+  file (pip and npm read those as local files and build them) - now gets no package-manager
+  command at all and is pointed at the `git:` / URL forms, which fetch without running anything.
+  The plan also stops calling its temporary folder a quarantine: it is a plain folder, not a
+  sandbox.
+- **Compromise advice now says what to do before rotating secrets.** Where the tool convicts
+  malware (a skill exfiltrating to a paste host, a known-bad source, RISK-09, a hidden payload in
+  a tool description (B185), an acted-on instruction in a trajectory), the advice now reads: stop
+  the agent, remove the skill and any persistence it installed elsewhere (the host-persistence
+  findings, the `--incident` report), and only then rotate - some payloads wipe the home
+  directory the moment a stolen token is revoked (the tensorlake@0.5.144 worm, October 2026).
+  Advice text only; no status, severity or `detail` changes.
+
+### Changed
+- **Re-grounded on OpenClaw 2026.10.6.** A reliability patch with an identical config schema
+  (5,517 paths). The default Node worker container image moved to `node:24.22.1-slim` and B391
+  now names it for that build. The indicator dataset adds eight npm packages, each from its GitHub
+  Advisory Database malware advisory (`items-validator`, `item-validator` and six `*testmetest`
+  packages), and the exfiltration host of the tensorlake worm; `REVISION` is 2026-10-24.
+- **The coverage notes name the Node runtime as not checked.** OpenClaw 2026.10.6 requires Node
+  24.22.1+ / 26.12.1+ after the Node.js security releases of 2026-10-21; B33 reports the OpenClaw
+  version, not the Node runtime under it.
+
+### Fixed
+- **B379 no longer reports a Mac as clean.** On a home with a macOS `Library` directory the host
+  persistence surface never read launchd (`~/Library/LaunchAgents`, `/Library/LaunchAgents`,
+  `/Library/LaunchDaemons`), yet B379 answered "does not apply" or, with a shell rc file present,
+  PASS. It now answers UNKNOWN and names the directories it did not read.
+- **B382 follows OpenClaw 2026.10.6 on an empty `plugins.installs`.** That build no longer refuses
+  an empty `plugins.installs` record; B382 passes it on 2026.10.6 and later and still names every
+  other present value.
+
 ## [4.4.3] - 2026-10-23
 
 **Re-grounded on OpenClaw 2026.10.5, plus everything 4.4.2 carried.** 4.4.2 was tagged and its
