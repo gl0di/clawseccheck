@@ -37,14 +37,18 @@ jobs:
     #     while CI for the tagged SHA is still running; a full CI run measured 23m36s)
     #   * smoke gate (full pytest, ruff, compileall)                    ~32 min
     #   * Publish, up to                                                ~11 min
-    #   * "Confirm publication surfaced" poll, 40 x 60 s (C-368)         40 min
+    #   * "Confirm publication surfaced" poll, 60 x 60 s (C-368, C-751)   60 min
     #   * warn-only surfaced-check poll, 10 x 60 s                       10 min
-    #   = ~123 min, before npm ci, the preflight curl checks with their retries, the
+    #   = ~143 min, before npm ci, the preflight curl checks with their retries, the
     #   dry-run, signing and the GitHub Release. The previous 90 was already below the
     #   smoke + publish + confirm + surfaced-check sum alone (~93 min): a release whose
     #   confirm poll ran to its limit would have hit the job limit before "Decide
     #   release action" could reach a verdict.
-    timeout-minutes: 150
+    # C-751: the confirm poll grew from 40 to 60 min (v4.4.3 surfaced ~45 min after the
+    # CLI error), so the sum is 143 min and the limit moved 150 -> 170, keeping ~27 min
+    # for npm ci, preflight curls, the dry-run, signing, the final decide-time re-probe
+    # and the GitHub Release.
+    timeout-minutes: 170
     # contents:write is needed to create the GitHub Release (the repo default token is
     # read-only). id-token:write is needed for cosign's keyless/OIDC signing below (it
     # exchanges the job's short-lived GitHub Actions OIDC token for a Fulcio cert — no
@@ -1036,8 +1040,8 @@ jobs:
 
       - name: Confirm publication surfaced
         # C-368: only runs when the CLI reported failure, so a normal success pays no
-        # poll cost. Polls up to 40×60s (clears the ~29-minute worst observed indexing
-        # lag, v3.52.1) for the helper's two-signal check to flip true — what separates
+        # poll cost. Polls up to 60×60s (C-751: v4.4.3 surfaced ~45 minutes after the CLI
+        # error; the earlier worst observed indexing lag was ~29 minutes, v3.52.1) for the helper's two-signal check to flip true — what separates
         # a #3349 false failure (the bundle really did land) from a genuine one (413,
         # auth, a real duplicate). Deliberately never `exit 1` here: this step only
         # REPORTS: "Decide release action" below is the single place that turns a
@@ -1049,7 +1053,7 @@ jobs:
         run: |
           set -euo pipefail
           LIVE=false
-          for i in $(seq 1 40); do
+          for i in $(seq 1 60); do
             if bash .github/scripts/clawhub-version-live.sh clawseccheck "$VER"; then
               LIVE=true
               echo "Version ${VER} confirmed live on ClawHub after ~${i} min despite the" \
@@ -1057,7 +1061,7 @@ jobs:
                    "failure, not a real one."
               break
             fi
-            if [ "$i" -lt 40 ]; then
+            if [ "$i" -lt 60 ]; then
               sleep 60
             fi
           done
@@ -1108,9 +1112,13 @@ jobs:
         #   publish succeeded                                    -> PUBLISHED           (release, pass)
         #   publish failed, Confirm live, wasn't live beforehand  -> PUBLISHED_VIA_GHOST (release, pass)
         #   publish failed, Confirm live, WAS live beforehand     -> DUPLICATE           (release, pass)
-        #   publish failed, Confirm not live                      -> GENUINE_FAILURE     (no release, FAIL)
-        # Pure logic over the three earlier steps' outputs — no network calls here, so
-        # this step itself cannot flake. `!cancelled()` (not the default success()) so
+        #   publish failed, Confirm not live, re-probe live      -> PUBLISHED_LATE      (release, pass)
+        #   publish failed, Confirm not live, re-probe not live  -> GENUINE_FAILURE     (no release, FAIL)
+        # C-751: logic over the earlier steps' outputs plus ONE final re-probe of the
+        # registry (only when publish failed and Confirm saw nothing): v4.4.3 surfaced
+        # ~3 minutes after the Confirm window closed and the old pure-logic verdict
+        # called a live release GENUINE_FAILURE. The helper never exits the step (its
+        # status is consumed by `if`), so this step itself still cannot flake. `!cancelled()` (not the default success()) so
         # it still runs and logs an explicit verdict even after an earlier hard failure
         # (e.g. the smoke gate), landing on GENUINE_FAILURE in that case too.
         id: decide
@@ -1120,17 +1128,26 @@ jobs:
           PRE_LIVE: ${{ steps.pre.outputs.live }}
           CONFIRM_LIVE: ${{ steps.confirm.outputs.live }}
           IS_TAG: ${{ github.ref_type == 'tag' }}
+          VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
+          REPROBE_LIVE=false
+          if [ "$PUBLISH_OUTCOME" = "failure" ] && [ "${CONFIRM_LIVE:-false}" != "true" ]; then
+            if bash .github/scripts/clawhub-version-live.sh clawseccheck "$VER"; then
+              REPROBE_LIVE=true
+            fi
+          fi
           if [ "$PUBLISH_OUTCOME" = "success" ]; then
             VERDICT=PUBLISHED
             CREATE_RELEASE=true
             FAIL_JOB=false
-          elif [ "${CONFIRM_LIVE:-false}" = "true" ]; then
+          elif [ "${CONFIRM_LIVE:-false}" = "true" ] || [ "$REPROBE_LIVE" = "true" ]; then
             if [ "${PRE_LIVE:-false}" = "true" ]; then
               VERDICT=DUPLICATE
-            else
+            elif [ "${CONFIRM_LIVE:-false}" = "true" ]; then
               VERDICT=PUBLISHED_VIA_GHOST
+            else
+              VERDICT=PUBLISHED_LATE
             fi
             CREATE_RELEASE=true
             FAIL_JOB=false
@@ -1143,7 +1160,8 @@ jobs:
             CREATE_RELEASE=false
           fi
           echo "Verdict: ${VERDICT} (publish.outcome=${PUBLISH_OUTCOME}," \
-               "pre_live=${PRE_LIVE:-<unset>}, confirm_live=${CONFIRM_LIVE:-<unset>})"
+               "pre_live=${PRE_LIVE:-<unset>}, confirm_live=${CONFIRM_LIVE:-<unset>}," \
+               "reprobe_live=${REPROBE_LIVE})"
           {
             echo "verdict=${VERDICT}"
             echo "create_release=${CREATE_RELEASE}"

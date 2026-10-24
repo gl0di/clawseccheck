@@ -2298,6 +2298,7 @@ def test_c368_publish_resilience_step_wiring() -> None:
     assert "id: decide" in decide_body
     for token in (
         "steps.publish.outcome", "steps.pre.outputs.live", "steps.confirm.outputs.live",
+        "clawhub-version-live.sh",
     ):
         assert token in decide_body, f"Decide must read {token!r}."
 
@@ -2338,8 +2339,9 @@ def test_probe_and_confirm_steps_use_the_shared_helper_script() -> None:
     )
     text = WORKFLOW_PATH.read_text(encoding="utf-8")
     count = text.count(".github/scripts/clawhub-version-live.sh")
-    assert count == 2, (
-        f"Expected exactly 2 references to the helper script (Probe + Confirm), "
+    assert count == 3, (
+        f"Expected exactly 3 references to the helper script (Probe + Confirm + the "
+        f"C-751 decide-time re-probe), "
         f"found {count}."
     )
 
@@ -2510,30 +2512,48 @@ def test_clawhub_version_live_two_signal_discriminator(
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
 @pytest.mark.parametrize(
     "case_id,publish_outcome,pre_live,confirm_live,is_tag,"
-    "expected_verdict,expected_create,expected_fail",
+    "expected_verdict,expected_create,expected_fail,reprobe_live",
     [
-        ("normal-success", "success", "false", "", "true", "PUBLISHED", "true", "false"),
+        ("normal-success", "success", "false", "", "true", "PUBLISHED", "true", "false", "false"),
         (
             "false-failure-surfaces", "failure", "false", "true", "true",
-            "PUBLISHED_VIA_GHOST", "true", "false",
+            "PUBLISHED_VIA_GHOST", "true", "false", "false",
         ),
         (
             "genuine-duplicate-retag", "failure", "true", "true", "true",
-            "DUPLICATE", "true", "false",
+            "DUPLICATE", "true", "false", "false",
         ),
         (
             "genuine-failure-never-surfaces", "failure", "false", "false", "true",
-            "GENUINE_FAILURE", "false", "true",
+            "GENUINE_FAILURE", "false", "true", "false",
         ),
         (
             "success-but-not-a-tag-run", "success", "false", "", "false",
-            "PUBLISHED", "false", "false",
+            "PUBLISHED", "false", "false", "false",
+        ),
+        # C-751: v4.4.3 surfaced after the Confirm window closed; the decide-time
+        # re-probe must turn that into a release, not a GENUINE_FAILURE.
+        (
+            "surfaced-after-the-poll-window", "failure", "false", "false", "true",
+            "PUBLISHED_LATE", "true", "false", "true",
+        ),
+        (
+            "late-but-already-live-before-publish", "failure", "true", "false", "true",
+            "DUPLICATE", "true", "false", "true",
+        ),
+        (
+            "late-surfacing-on-a-non-tag-run", "failure", "false", "false", "false",
+            "PUBLISHED_LATE", "false", "false", "true",
+        ),
+        (
+            "earlier-step-failed-publish-never-ran-registry-live", "", "false", "",
+            "true", "GENUINE_FAILURE", "false", "true", "true",
         ),
     ],
 )
 def test_decide_release_action_truth_table(
     tmp_path, case_id, publish_outcome, pre_live, confirm_live, is_tag,
-    expected_verdict, expected_create, expected_fail,
+    expected_verdict, expected_create, expected_fail, reprobe_live,
 ) -> None:
     """Decide's pure-logic truth table, executed under `bash -eo pipefail` — the
     same shell mode GitHub Actions runs every `run:` block under — so an errexit
@@ -2550,10 +2570,21 @@ def test_decide_release_action_truth_table(
     script.write_text(_step_shell_block("Decide release action"), encoding="utf-8")
     output_file = tmp_path / "github_output"
     output_file.write_text("", encoding="utf-8")
+    # C-751: Decide re-probes the registry through the shared helper, resolved
+    # relative to the cwd. Run it from a scratch dir holding a stub helper so the
+    # re-probe answer is under test control and no network is touched.
+    stub_dir = tmp_path / ".github" / "scripts"
+    stub_dir.mkdir(parents=True)
+    (stub_dir / "clawhub-version-live.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        + ("exit 0\n" if reprobe_live == "true" else "exit 1\n"),
+        encoding="utf-8",
+    )
 
     env = dict(os.environ)
     env.update(
         {
+            "VER": "9.9.9",
             "PUBLISH_OUTCOME": publish_outcome,
             "PRE_LIVE": pre_live,
             "CONFIRM_LIVE": confirm_live,
@@ -2566,9 +2597,10 @@ def test_decide_release_action_truth_table(
         capture_output=True,
         text=True,
         env=env,
+        cwd=tmp_path,
     )
     assert proc.returncode == 0, (
-        f"[{case_id}] Decide must never fail itself (pure logic, no network).\n"
+        f"[{case_id}] Decide must never fail itself (stubbed re-probe, no network).\n"
         f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
     )
 
@@ -3107,3 +3139,21 @@ def test_publish_job_timeout_covers_the_serial_worst_case() -> None:
         "the small steps. Raise it with the poll, keep it under 360, and update the "
         "budget comment above `timeout-minutes` in the workflow."
     )
+
+
+def test_confirm_poll_outlasts_the_observed_late_surfacing() -> None:
+    """C-751: v4.4.3 surfaced ~45 minutes after the CLI error, so the failure-path
+    confirm poll must be at least 60 minutes, while the success-path surfaced-check
+    stays a short warn-only poll that never exits non-zero."""
+    steps = _steps()
+    names = [_step_name(s) for s in steps]
+
+    def body(prefix: str) -> str:
+        i = next(i for i, n in enumerate(names) if n.startswith(prefix))
+        return "\n".join(t for _, t in steps[i])
+
+    confirm = body("Confirm publication surfaced")
+    assert int(re.search(r"seq 1 (\d+)", confirm).group(1)) >= 60
+    warn = body("Check whether this version surfaced")
+    assert int(re.search(r"seq 1 (\d+)", warn).group(1)) == 10
+    assert "exit 1" not in " ".join(warn.split())
