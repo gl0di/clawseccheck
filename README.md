@@ -351,9 +351,10 @@ source in about a minute.
 alarming-looking string live here on purpose:
 
 1. **A known-bad IOC dataset.** `clawseccheck/iocdb.py` ships a small, dated,
-   provenance-tagged list - host indicators `91.92.242.30`, `laosji.net` and
-   `letssendit.fun`, plus known-bad ClawHub slugs - each carrying the primary
-   report it came from (Koi Security, Palo Alto Unit 42). It exists so the tool
+   provenance-tagged list - host indicators `91.92.242.30`, `laosji.net`,
+   `letssendit.fun` and `iseekaigogo.com`, plus known-bad ClawHub slugs and npm
+   packages - each carrying the primary report it came from (Koi Security, Palo
+   Alto Unit 42, StepSecurity, the GitHub Advisory Database). It exists so the tool
    can *warn you* about them. A scanner matching raw strings sees a repository
    that contains malicious infrastructure.
 2. **Detection signatures.** The checks look for pipe-to-shell installs,

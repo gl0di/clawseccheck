@@ -29,7 +29,7 @@ today (a test pins these counts to the shipped data, so a row cannot go stale):
 | npm | 8 | exact-match check by package name (version-blind) |
 | pypi | 0 | no identity signal |
 | git | 0 | no name check; its host is still checked against `HOSTS` |
-| hosts | 3 | exact-match check by host (this is what a URL source is judged on) |
+| hosts | 4 | exact-match check by host (this is what a URL source is judged on) |
 | publishers | 0 | no identity signal |
 
 For an ecosystem with no entries, `--vet-source` says so on its result

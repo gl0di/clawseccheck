@@ -207,6 +207,12 @@ HOSTS: tuple = (
         "Palo Alto Unit 42",
         "letssendit campaign infrastructure",
     ),
+    _rec(
+        "iseekaigogo.com", "domain", "2026-10-08",
+        "https://www.stepsecurity.io/blog/tensorlake-npm-compromised-hostage-token-worm",
+        "StepSecurity",
+        "exfiltration host of the tensorlake@0.5.144 Shai-Hulud variant",
+    ),
 )
 
 

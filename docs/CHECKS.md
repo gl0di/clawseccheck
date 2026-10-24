@@ -3075,9 +3075,13 @@ These paths are computed from multiple checks. They fire only when every leg is 
   secrets and conversation data and send them out - this is an active exfiltration path,
   not theoretical.
 - Fix:
-  Uninstall the flagged skill(s) NOW (see the B13 finding for the name), and ROTATE every
-  secret it could have reached - channel tokens, cloud keys, password managers. Only
-  reinstall skills whose source you have read.
+  Uninstall the flagged skill(s) NOW (see the B13 finding for the name) and stop the
+  agent. Removing the skill does not remove persistence its payload may have installed
+  elsewhere: check the host-persistence findings (B150, B379) and run `clawseccheck
+  --incident`, remove anything you did not install, and only THEN rotate every secret it
+  could have reached - channel tokens, cloud keys, password managers (some payloads wipe
+  the home directory the moment a stolen token is revoked). Only reinstall skills whose
+  source you have read.
 
 ### RISK-10 - Powerful agent on an unmonitored host - a breach would be invisible
 

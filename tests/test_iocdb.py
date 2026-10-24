@@ -213,7 +213,8 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "omnicogg", "money-radar", "letssendit",
         "ai-tradingview-assistant-for-macos", "tradingview-ai-indicator-assistant",
     })
-    assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun"})
+    assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun",
+                                      "iseekaigogo.com"})  # C-750: tensorlake exfil host
     # CLAWSECCHECK-F-157 (C-135 regression): pre-commit, the hardcoded "any" pool was
     # an explicit, always-empty frozenset() — NOT the same set as "url". HOSTS values
     # are a host IOC (matched via vet_source's url/registry-host path), not a bare
