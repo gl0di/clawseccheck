@@ -151,6 +151,40 @@ above refuses to run it again for this version. Burn the patch number (§4)
 and ship the content under a new version instead of trying to backfill the
 old one.
 
+### The CLI fails but the version surfaces later (v4.4.3), and the ghost (v4.4.2)
+
+Two publish runs ended with the CLI error `Uncaught Error: Skill upload ticket
+does not match this publish` after ~12 minutes on "Preparing clawseccheck".
+They went differently:
+
+- **v4.4.3 (late surfacing).** The CLI failed at 12:49 UTC; the version
+  appeared on ClawHub at 13:34 UTC, about 45 minutes later and 3 minutes after
+  the old 40-minute confirm poll gave up, so the run was marked
+  `GENUINE_FAILURE` and no GitHub Release was cut. The workflow now polls up to
+  60 minutes after a CLI failure and re-probes the registry once more inside
+  "Decide release action". A version that is live at that point gets the
+  `PUBLISHED_LATE` verdict (or `DUPLICATE` if it was already live before the
+  publish): the Release is created and the job passes. A version that is still
+  absent fails the job as before. If a run is nonetheless red and
+  `curl .../versions/vX.Y.Z` answers 200 later, use the manual recovery above.
+- **v4.4.2 (ghost reservation, never surfaced).** A re-run answered "Version
+  4.4.2 already exists" while `versions/4.4.2` stayed 404. Tag `v4.4.2` exists
+  with no GitHub Release and no registry version; its content was folded into
+  4.4.3 (tags are immutable, so the number is burned). The next release's
+  "PREVIOUS release actually surfaced" preflight treats exactly this shape
+  (404 on ClawHub, tag present, no GitHub Release) as expected and hard-fails
+  with "fold the entry into the version that actually ships this content"; it
+  does not point at a publishing incident. Keep the CHANGELOG honest by
+  folding the entry before tagging.
+
+Manual recovery verification: if `cosign` is installed, run the documented
+`cosign verify-blob --bundle` command against the downloaded
+`SHA256SUMS.txt` and `SHA256SUMS.txt.bundle`. If it is not, cross-check each
+line of `SHA256SUMS.txt` against the tagged tree
+(`git show vX.Y.Z:<path> | sha256sum`). The one expected mismatch is the
+trimmed `CHANGELOG.md` in the staged bundle, so its digest will not match the
+tagged file.
+
 ## Release-notes template
 
 Lead with user impact; the exhaustive technical changelog can follow below it.

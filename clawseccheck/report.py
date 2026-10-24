@@ -6215,7 +6215,57 @@ def _breaks_the_line_it_is_printed_on(text: str) -> bool:
     return bool(text) and text.splitlines() != [text]
 
 
-def _refuse_command_plan(target: str, *, option_shaped: bool = False) -> str:
+# C-745 (follow-up of the security review of f77f269d): `--only-binary=:all:` and
+# `--ignore-scripts` only protect a plain REGISTRY spec. `_parse_source_target` hands the
+# rest of an `npm:`/`pypi:` target through verbatim, so `pypi:git+https://...`,
+# `pypi:foo @ https://.../x.tar.gz`, `pypi:./local`, `npm:github:o/r`, `npm:git+...`,
+# `npm:file:..`, `npm:https://.../x.tgz` and the alias `npm:a@npm:b` all reached the
+# package-manager line. A VCS or local source has no wheel and is BUILT; an npm git
+# dependency runs `prepare`. So a fetch command is built only for a bare registry
+# name (+ an optional version); everything else is refused with a plain reason and
+# pointed at the `git:`/URL forms, which fetch without running anything.
+# A PEP 508 project name, optionally followed by PEP 440 version clauses (`>=2.0`,
+# `~=1.4, !=1.4.2`): `_parse_source_target` only splits on `==`, so a range stays in `name`.
+_PYPI_CLAUSE = r"\s*(?:===|==|~=|!=|>=|<=|>|<)\s*[0-9A-Za-z.*!+_-]+"
+_PYPI_NAME_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:" + _PYPI_CLAUSE
+    + r"(?:\s*,\s*" + _PYPI_CLAUSE.lstrip(r"\s*") + r")*)?\Z")
+_PYPI_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.!+_-]*\Z")              # one PEP 440 version
+_NPM_NAME_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*\Z", re.I)
+_NPM_VERSION_RE = re.compile(r"[0-9A-Za-z^~*.<>=|_+-][0-9A-Za-z^~*.<>=|_+ -]*\Z")  # semver, range or tag
+
+
+# pip reads a requirement that looks like an archive/wheel filename as a LOCAL FILE (and
+# builds an sdist), and npm-package-arg reads `x.tgz` / `x.tar.gz` as a local tarball, so a
+# "name" ending in one of these is a path in disguise, not a registry name.
+# pip's own list (`pip._internal.utils.filetypes`: ZIP .zip .whl, BZ2 .tar.bz2 .tbz, XZ .tar.xz
+# .txz .tlz .tar.lz .tar.lzma, TAR .tar.gz .tgz .tar), plus .tbz2 and .tar.zst for npm/tar.
+_ARCHIVE_NAME_RE = re.compile(
+    r"\.(?:whl|zip|tgz|tbz2?|txz|tlz|tar(?:\.(?:gz|bz2|xz|lz|lzma|zst))?)\s*\Z", re.I)
+
+
+def _registry_spec_ok(eco: str, name, version) -> bool:
+    """True when *name*/*version* are a plain registry spec for *eco* (npm / pypi)."""
+    name = str(name or "")
+    version = None if version is None else str(version)
+    # Checked on every piece AND on the exact string the package manager will receive: pip
+    # tests the whole requirement for an archive suffix, so `foo==1.0.tar.gz` is a path too.
+    if eco in ("pypi", "npm"):
+        joined = name + (("==" if eco == "pypi" else "@") + version if version else "")
+        pieces = [name, joined, *(re.split(r"[\s<>=~!,]+", name)), version or ""]
+        if any(_ARCHIVE_NAME_RE.search(p) for p in pieces if p):
+            return False
+    if eco == "pypi":
+        return bool(_PYPI_NAME_RE.match(name)) and (
+            version is None or bool(_PYPI_VERSION_RE.match(version)))
+    if eco == "npm":
+        return bool(_NPM_NAME_RE.match(name)) and (
+            version is None or bool(_NPM_VERSION_RE.match(version)))
+    return True
+
+
+def _refuse_command_plan(target: str, *, option_shaped: bool = False,
+                         not_registry: bool = False) -> str:
     """The --vet-plan output for a target it will not build commands for: no commands.
 
     Renders the same 4-step plain-language preamble (a reader still deserves to know what
@@ -6224,7 +6274,15 @@ def _refuse_command_plan(target: str, *, option_shaped: bool = False) -> str:
     line break into the output it is protecting. `option_shaped` (C-628) swaps the reason
     for an npm/pypi spec that a package manager would read as an option.
     """
-    if option_shaped:
+    if not_registry:
+        why = [
+            "It is not a plain registry package name (with an optional version): it names a",
+            "git repository, a URL, a local path or an alias. pip and npm BUILD such a source",
+            "(or run its `prepare` script) while fetching it, so its own code would run before",
+            "anything has scanned it. Fetch the source itself instead: `git:host/owner/repo` for",
+            "a repository, or the https URL of a published archive, and vet that copy.",
+        ]
+    elif option_shaped:
         why = [
             "Its package name or version starts with '-'. Written into an npm or pip",
             "command, that text is read as a command-line option, not as a package, and",
@@ -6441,18 +6499,30 @@ def render_vet_plan(target: str) -> str:
         return _refuse_command_plan(target, option_shaped=True)
     eco, name, version = info["ecosystem"], info["name"], info.get("version")
     ver_suffix = f"@{version}" if version else ""
+    if eco in ("npm", "pypi") and not _registry_spec_ok(eco, name, version):
+        return _refuse_command_plan(target, not_registry=True)
 
     if eco == "npm":
         # `name + ver_suffix` (e.g. "left-pad@1.0.0") is ONE npm package-spec argument -
         # quote it as a single unit so quoting can't split it into two shell words.
-        fetch = f"npm pack {_shq(name + ver_suffix)} --pack-destination \"$QUARANTINE\""
+        # C-745: `npm:` accepts ANY npm spec, including git/GitHub shapes
+        # (`npm:github:o/r`, `npm:o/r`, `npm:git+https://...`). `npm pack` on those runs the
+        # package's `prepare` script (and builds deps), i.e. untrusted code before the scan.
+        # `--ignore-scripts` is a real `npm pack` option (see `npm pack --help`) and is a
+        # no-op for a plain registry spec, so it is always emitted.
+        fetch = (f"npm pack {_shq(name + ver_suffix)} --ignore-scripts "
+                 "--pack-destination \"$QUARANTINE\"")
     elif eco == "pypi":
-        fetch = (f"pip download --no-deps -d \"$QUARANTINE\" "
+        # C-745: wheels only. For an sdist pip runs the build backend / setup.py to get
+        # metadata, which is untrusted code with the user's permissions BEFORE the scan.
+        fetch = (f"pip download --only-binary=:all: --no-deps -d \"$QUARANTINE\" "
                   f"{_shq(name + ('==' + version if version else ''))}")
     elif eco == "git":
         # info only keeps host + the repo-name tail, not the full owner/repo path - pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
         # reconstructing it from parsed fields (which would drop the owner segment).
+        # C-745: `git clone --depth 1` without --recurse-submodules runs no repo code
+        # (hooks are not cloned) and fetches no submodules, so it needs no extra flag.
         path = target[len("git:"):]
         ref = info.get("ref")
         if ref:
@@ -6472,12 +6542,18 @@ def render_vet_plan(target: str) -> str:
     fetch_note = "   # (git clone / pip download / curl per ecosystem)" if eco in (
         "npm", "pypi", "git", "url") else ""
 
+    pypi_note = (
+        ["  # No wheel for this package? Stop and tell the user - do NOT retry without",
+         "  # --only-binary: fetching a source distribution runs its build code."]
+        if eco == "pypi" else [])
+
     return "\n".join([
         f"Before you install \"{name}\", here's what I'll do \u2014 nothing lands on your setup",
         "until it passes:",
         "",
         "  1. Check the source's reputation first \u2014 no download at all.",
-        "  2. Fetch it into a throwaway folder your agent can't auto-load.",
+        "  2. Fetch it into a throwaway folder your agent won't auto-load (a plain folder, not a",
+        "     sandbox - so only fetch in ways that run none of the package's code).",
         "  3. Scan that copy and give you a plain verdict: install / be careful / don't install.",
         "  4. Delete the throwaway copy no matter what.",
         "",
@@ -6486,8 +6562,9 @@ def render_vet_plan(target: str) -> str:
         "Commands (for the agent \u2014 clawseccheck never touches the network itself):",
         "",
         f"  {command_prefix()} --vet-source {_shq(target)}   # 1: reputation, zero network",
-        "  QUARANTINE=$(mktemp -d)   # 2: throwaway, outside auto-load",
+        "  QUARANTINE=$(mktemp -d)   # 2: throwaway folder, outside auto-load (not a sandbox)",
         f"  {fetch}{fetch_note}",
+        *pypi_note,
         f"  {command_prefix()} --advise \"$QUARANTINE\"   # 3: verdict",
         "  rm -rf \"$QUARANTINE\"   # 4: cleanup (always)",
     ])

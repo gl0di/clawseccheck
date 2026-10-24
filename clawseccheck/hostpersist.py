@@ -55,6 +55,26 @@ What IS readable without privileges, and is therefore covered: `/etc/crontab`,
 `timers.target.wants/` symlinks that decide whether a timer is actually armed, and the
 shell startup files.
 
+## macOS launchd: NOT read (C-749)
+
+This module has no launchd coverage. The following macOS persistence locations are never
+enumerated, digested, or watched for drift:
+
+- ``~/Library/LaunchAgents``  (per-user agents; where the October 2026 Shai-Hulud /
+  tensorlake payload installs its token watcher as a plist)
+- ``/Library/LaunchAgents``   (all-users agents)
+- ``/Library/LaunchDaemons``  (system daemons)
+
+Enumeration was left out on purpose (a new surface is out of maintenance scope); what this
+module does instead is refuse to let the absence read as "nothing scheduled". :func:`scan`
+records in ``launchd_unread`` which of those three directories exist, so a consumer can say
+"present, not read" rather than "none found" or "does not apply". Platform is decided by
+the audited HOME, never by the machine running the code: a home containing a ``Library``
+directory is macOS-shaped. A Linux-shaped home yields an empty ``launchd_unread`` on every
+platform, so a Linux CI runner and a macOS CI runner agree. ``launchd_unread`` is
+deliberately NOT part of :func:`to_snapshot` (the drift baseline and its fingerprints are
+unchanged).
+
 ## What was removed after an adversarial pass, and why (C-135)
 
 A fourth family - Python auto-execution hooks, the `.pth` files and `sitecustomize.py` that
@@ -186,6 +206,11 @@ class HostEntry:
     digest: str
 
 
+#: C-749: launchd directories this module never reads. The home-rooted one is relative.
+LAUNCHD_HOME_DIRS = ("Library/LaunchAgents",)
+LAUNCHD_SYSTEM_DIRS = ("/Library/LaunchAgents", "/Library/LaunchDaemons")
+
+
 @dataclass(frozen=True)
 class HostPersistScan:
     entries: "tuple[HostEntry, ...]" = ()
@@ -196,6 +221,10 @@ class HostPersistScan:
     #: than present it as whole.
     capped: bool = False
     families_seen: "tuple[str, ...]" = field(default=())
+    #: C-749: macOS launchd directories that EXIST but are never read (no enumeration).
+    #: Empty unless the audited home is macOS-shaped (has a ``Library`` directory).
+    #: Home-rooted entries are rendered ``~/...``. Not part of :func:`to_snapshot`.
+    launchd_unread: "tuple[str, ...]" = field(default=())
 
 
 def _digest(path: Path) -> "str | None":
@@ -236,7 +265,8 @@ def _rel(path: Path, home: Path) -> str:
 
 def scan(home: "str | Path | None" = None,
          system_cron_paths: "tuple[str, ...] | None" = None,
-         user_cron_spools: "tuple[str, ...] | None" = None) -> HostPersistScan:
+         user_cron_spools: "tuple[str, ...] | None" = None,
+         launchd_system_dirs: "tuple[str, ...] | None" = None) -> HostPersistScan:
     """Enumerate the host persistence surface.
 
     *home* is taken from the caller, never from ``Path.home()``. That is not a style
@@ -342,11 +372,23 @@ def scan(home: "str | Path | None" = None,
     # deliberately no parameter left behind to re-enable them - see the C-135 note in the
     # module docstring. `test_a_pth_file_is_not_a_watched_family` pins the absence.
 
+    # ---- macOS launchd: probed for existence only, never read (C-749) --------------
+    launchd_unread: "list[str]" = []
+    if pathprobe.is_dir(home_path / "Library"):  # platform = the audited HOME's shape
+        sys_dirs = LAUNCHD_SYSTEM_DIRS if launchd_system_dirs is None else launchd_system_dirs
+        for rel in LAUNCHD_HOME_DIRS:
+            if pathprobe.is_dir(home_path / rel):
+                launchd_unread.append("~/" + rel)
+        for raw in sys_dirs:
+            if pathprobe.is_dir(Path(raw)):
+                launchd_unread.append(raw)
+
     return HostPersistScan(
         entries=tuple(entries),
         unreadable=tuple(sorted(set(unreadable))),
         capped=capped,
         families_seen=tuple(families_seen),
+        launchd_unread=tuple(launchd_unread),
     )
 
 

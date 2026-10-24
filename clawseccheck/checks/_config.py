@@ -5042,6 +5042,7 @@ def check_sandbox(ctx: Context) -> Finding:
 #     2026.8.1  2026.8.2  2026.9.1  2026.9.2   node:22-slim   ("Optional Node 22+ image ...")
 #     2026.9.3  2026.9.4  2026.9.5  2026.9.6   node:24.19.0-slim
 #     2026.9.7  2026.9.8  2026.9.9  2026.10.1  2026.10.2  2026.10.3  2026.10.4  2026.10.5   node:24.21.0-slim
+#     2026.10.6                                                  node:24.22.1-slim
 #                          ("Optional Node 24.16+ or 26.1+ image ...")
 # (2026.9.8 was read out of the installed dist and 2026.9.9 out of its npm-cached release
 # tarball, on 2026-10-09; both declare the same constant and the same help text as 2026.9.7.
@@ -5075,7 +5076,12 @@ def check_sandbox(ctx: Context) -> Finding:
 #   2026-10-19: dist/startup-state-readiness-BB0GkXC2.mjs:4736 declares the same constant with
 #   the same value, the fallback is still taken only when no image is configured (:4951),
 #   dist/schema-B5pKhM6L.mjs:906 carries the same help text, and the `isolation` enum and the
-#   `containerImage` schema (dist/zod-schema.root-support-BF0vOtgh.mjs:150) are unchanged.)
+#   `containerImage` schema (dist/zod-schema.root-support-BF0vOtgh.mjs:150) are unchanged.
+# 2026.10.6 CHANGED the default: it was read out of the installed dist, byte-identical to its
+#   release tarball, on 2026-10-23: dist/startup-state-readiness-B7uq1p70.mjs:4766 declares
+#   `const DEFAULT_NODE_WORKER_CONTAINER_IMAGE = "node:24.22.1-slim"` (the vendor's own changelog:
+#   Docker images ship Node 24.22.1, the patched runtime), the fallback is still taken only when no
+#   image is configured (:4981); the `isolation` enum and the `containerImage` schema are unchanged.)
 # The literal `node:24.19.0-slim` this check used to print unconditionally was therefore
 # already wrong on 2026.8.1-2026.9.2 and became wrong again on 2026.9.7; it will drift again
 # every few releases. So the image is looked up by the INSTALLED build, EXACT match only:
@@ -5102,6 +5108,7 @@ _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
     (2026, 10, 3): "node:24.21.0-slim",
     (2026, 10, 4): "node:24.21.0-slim",
     (2026, 10, 5): "node:24.21.0-slim",
+    (2026, 10, 6): "node:24.22.1-slim",
 }
 
 

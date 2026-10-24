@@ -7415,9 +7415,13 @@ def check_installed_skills(ctx: Context) -> Finding:
         # paste-host finding and orphan the `.clawseccheckignore` entries users have
         # already recorded against them. The advice field carries no such contract.
         fix = (
-            "Uninstall the flagged skill(s) NOW and rotate any secrets they could reach "
-            "(channel tokens, 1Password, cloud keys). Only reinstall skills whose source "
-            "you have read."
+            "Uninstall the flagged skill(s) NOW and stop the agent. Removing a skill does "
+            "not remove persistence its payload may have installed elsewhere (systemd user "
+            "units, LaunchAgents, scheduled tasks, shell profiles): check the host-persistence "
+            "findings (B150, B379) and run the `--incident` report, remove anything you did "
+            "not install, and only THEN rotate any secrets they could reach (channel tokens, "
+            "1Password, cloud keys) - some payloads wipe the home directory the moment a "
+            "stolen token is revoked. Only reinstall skills whose source you have read."
         )
         # B-895: the disclosure below used to fire off `crit_hosts_by_skill`
         # alone, so EVERY "paste / exfiltration host" CRIT carried the same "known limit"
@@ -10618,8 +10622,11 @@ def vet_source(
             CRITICAL,
             FAIL,
             f"KNOWN-BAD source '{t}': " + reasons_bad[0],
-            "Do NOT fetch or install this. If it is already installed, remove it "
-            "and rotate any secrets the agent could reach.",
+            "Do NOT fetch or install this. If it is already installed, stop the agent and "
+            "remove it, then check for persistence it may have left outside the skill "
+            "(host-persistence findings B150/B379, the `--incident` report), and only THEN "
+            "rotate any secrets the agent could reach - some payloads wipe the home "
+            "directory the moment a stolen token is revoked.",
             evidence,
         )
     if reasons_susp:

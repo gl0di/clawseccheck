@@ -74,9 +74,9 @@ def _installed_dist_version(binary_name="openclaw"):
     return _openclawdist._read_version(root) or None
 
 
-__version__ = "4.4.3"
+__version__ = "4.4.4"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-10-23"
+__released__ = "2026-10-24"
 
 
 def build_context(home: Path | str = "~/.openclaw",

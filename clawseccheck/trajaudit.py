@@ -1299,8 +1299,12 @@ def render_trajectory_analysis(ctx, *, explicit_path: str | None = None, ascii_o
                 f"      - skill '{h['skill']}' indicator '{h['indicator']}' seen in "
                 f"{h['count']}× '{h['verb']}' tool call(s)"
             )
-        lines.append("  Review those tool calls in the trajectory manually and rotate any "
-                     "credential the referenced path/host could expose.")
+        lines.append("  Review those tool calls in the trajectory manually. If an instruction "
+                     "was acted on, stop the agent, check for persistence it may have "
+                     "installed (host-persistence findings, the `--incident` report), "
+                     "and only THEN rotate any credential the referenced path/host could "
+                     "expose - some payloads wipe the home directory when a stolen token "
+                     "is revoked.")
     elif r["indicator_count"]:
         lines.append(f"  {ok} Installed skills name indicators, but NONE appeared in any "
                      "tool.call arguments \u2014 instructions present, not observed acted-on.")

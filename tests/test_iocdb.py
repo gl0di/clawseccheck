@@ -213,14 +213,27 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "omnicogg", "money-radar", "letssendit",
         "ai-tradingview-assistant-for-macos", "tradingview-ai-indicator-assistant",
     })
-    assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun"})
+    assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun",
+                                      "iseekaigogo.com"})  # C-750: tensorlake exfil host
     # CLAWSECCHECK-F-157 (C-135 regression): pre-commit, the hardcoded "any" pool was
     # an explicit, always-empty frozenset() — NOT the same set as "url". HOSTS values
     # are a host IOC (matched via vet_source's url/registry-host path), not a bare
     # name to be checked against every ecosystem, so "any" must stay empty exactly
     # like the former literal — never widen to equal "url" again.
     assert pools["any"] == frozenset()
-    assert pools["npm"] == pools["pypi"] == pools["git"] == frozenset()
+    assert pools["pypi"] == pools["git"] == frozenset()
+    # C-750: npm holds only packages whose GitHub Advisory Database malware advisory
+    # names the package itself (bare-name match is version-blind, so a single
+    # compromised release of a legitimate package, e.g. tensorlake, must NOT be here).
+    assert pools["npm"] == frozenset({
+        "items-validator", "item-validator", "data-pipeline-testmetest",
+        "event-emitter-testmetest", "test-brotli-testmetest", "pixel-map-testmetest",
+        "net-codec-testmetest", "log-rotate-testmetest",
+    })
+    assert "tensorlake" not in pools["npm"]
+    for rec in iocdb.SOURCES:
+        if rec["type"] == "npm":
+            assert rec["source_url"].startswith("https://github.com/advisories/GHSA-")
 
 
 def test_known_bad_sources_any_pool_excludes_every_hosts_value():
@@ -426,3 +439,12 @@ def test_module_imports_nothing_from_the_package():
                     "iocdb.py must not import clawseccheck.* — leaf modules depend "
                     "only on each other's absence and stdlib."
                 )
+
+
+def test_c750_npm_records_gate_vet_source_by_name_and_never_a_single_release():
+    from clawseccheck.checks import vet_source
+    assert vet_source("npm:items-validator").status == "FAIL"
+    assert vet_source("npm:log-rotate-testmetest@1.0.1").status == "FAIL"
+    # tensorlake@0.5.144 is compromised, other releases are not: name records are
+    # version-blind, so the package must stay out of the dataset.
+    assert vet_source("npm:tensorlake@0.5.143").status != "FAIL"

@@ -48,7 +48,9 @@ verdict in plain language:
 - NO KNOWN ISSUE -> "Nothing suspicious on any axis."
 - SUSPICIOUS -> "A couple of axes are worth a closer look (I'll name them). I'd be cautious."
 - DANGEROUS -> "This skill contains patterns used by malware (the danger axis fails). Do not
-  install it. If it's already installed, remove it and rotate any secrets it could have accessed."
+  install it. If it's already installed, stop the agent and remove it, check for persistence it
+  may have left elsewhere (`clawseccheck --incident`), and only then rotate any secrets it could
+  have accessed."
 
 ## Choice: check a plugin / "vet this plugin" / "is this plugin safe"
 
@@ -93,7 +95,13 @@ X" end to end: (1) `--vet-source <target>` - the identity gate above; stop here 
 (2) `--vet-plan <target>` leads with a plain-language "here's what I'll do" summary (4 numbered
 steps + a consent line), then prints the exact fetch+isolate+cleanup commands for *you* (the
 agent) to run - a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb
-for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
+for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. The fetch
+line runs none of the package's code: pypi is `--only-binary=:all:` (wheels only) and npm is
+`--ignore-scripts`. If pip reports no wheel, **stop and tell the user** - never retry without
+`--only-binary`, because building a source distribution executes its code before the scan. A
+npm/pypi target that is not a plain registry name (a git repo, URL, local path or alias) gets no
+fetch command at all: those are built while fetched, so fetch them as `git:`/URL targets instead. The temp
+folder is only a throwaway folder, not a sandbox. (3) Run those
 commands yourself - **unless the tool refused to build a plan**: for a target it cannot quote
 safely (shell metacharacters, control characters) or that a package manager would read as an
 option (an npm/pypi name or version starting with `-`) it prints `I will not build a fetch plan for
@@ -432,8 +440,9 @@ appeared in a tool call your agent made, i.e. something already happened, not ju
 something that could happen. Treat it as at least as urgent as a Dashboard &#x1F534; CRITICAL
 finding, and always:
 - relay the skill name, indicator, and tool-call count exactly as printed;
-- relay the tool's own remediation line verbatim - review those tool calls manually and
-  rotate any credential the referenced path/host could expose;
+- relay the tool's own remediation line verbatim - review those tool calls manually, check
+  for persistence if an instruction was acted on, and only then rotate any credential the
+  referenced path/host could expose;
 - point the user at the "vet this skill" flow above for the implicated skill, so they get
   the full risk dossier, not just this one correlation.
 
