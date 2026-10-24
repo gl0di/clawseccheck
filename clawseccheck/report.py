@@ -6445,14 +6445,24 @@ def render_vet_plan(target: str) -> str:
     if eco == "npm":
         # `name + ver_suffix` (e.g. "left-pad@1.0.0") is ONE npm package-spec argument -
         # quote it as a single unit so quoting can't split it into two shell words.
-        fetch = f"npm pack {_shq(name + ver_suffix)} --pack-destination \"$QUARANTINE\""
+        # C-745: `npm:` accepts ANY npm spec, including git/GitHub shapes
+        # (`npm:github:o/r`, `npm:o/r`, `npm:git+https://...`). `npm pack` on those runs the
+        # package's `prepare` script (and builds deps), i.e. untrusted code before the scan.
+        # `--ignore-scripts` is a real `npm pack` option (see `npm pack --help`) and is a
+        # no-op for a plain registry spec, so it is always emitted.
+        fetch = (f"npm pack {_shq(name + ver_suffix)} --ignore-scripts "
+                 "--pack-destination \"$QUARANTINE\"")
     elif eco == "pypi":
-        fetch = (f"pip download --no-deps -d \"$QUARANTINE\" "
+        # C-745: wheels only. For an sdist pip runs the build backend / setup.py to get
+        # metadata, which is untrusted code with the user's permissions BEFORE the scan.
+        fetch = (f"pip download --only-binary=:all: --no-deps -d \"$QUARANTINE\" "
                   f"{_shq(name + ('==' + version if version else ''))}")
     elif eco == "git":
         # info only keeps host + the repo-name tail, not the full owner/repo path - pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
         # reconstructing it from parsed fields (which would drop the owner segment).
+        # C-745: `git clone --depth 1` without --recurse-submodules runs no repo code
+        # (hooks are not cloned) and fetches no submodules, so it needs no extra flag.
         path = target[len("git:"):]
         ref = info.get("ref")
         if ref:
@@ -6472,12 +6482,18 @@ def render_vet_plan(target: str) -> str:
     fetch_note = "   # (git clone / pip download / curl per ecosystem)" if eco in (
         "npm", "pypi", "git", "url") else ""
 
+    pypi_note = (
+        ["  # No wheel for this package? Stop and tell the user - do NOT retry without",
+         "  # --only-binary: fetching a source distribution runs its build code."]
+        if eco == "pypi" else [])
+
     return "\n".join([
         f"Before you install \"{name}\", here's what I'll do \u2014 nothing lands on your setup",
         "until it passes:",
         "",
         "  1. Check the source's reputation first \u2014 no download at all.",
-        "  2. Fetch it into a throwaway folder your agent can't auto-load.",
+        "  2. Fetch it into a throwaway folder your agent won't auto-load (a plain folder, not a",
+        "     sandbox - so only fetch in ways that run none of the package's code).",
         "  3. Scan that copy and give you a plain verdict: install / be careful / don't install.",
         "  4. Delete the throwaway copy no matter what.",
         "",
@@ -6486,8 +6502,9 @@ def render_vet_plan(target: str) -> str:
         "Commands (for the agent \u2014 clawseccheck never touches the network itself):",
         "",
         f"  {command_prefix()} --vet-source {_shq(target)}   # 1: reputation, zero network",
-        "  QUARANTINE=$(mktemp -d)   # 2: throwaway, outside auto-load",
+        "  QUARANTINE=$(mktemp -d)   # 2: throwaway folder, outside auto-load (not a sandbox)",
         f"  {fetch}{fetch_note}",
+        *pypi_note,
         f"  {command_prefix()} --advise \"$QUARANTINE\"   # 3: verdict",
         "  rm -rf \"$QUARANTINE\"   # 4: cleanup (always)",
     ])

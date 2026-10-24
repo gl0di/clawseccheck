@@ -156,14 +156,14 @@ def test_clean_specs_still_render_a_plan(spec):
 def test_clean_command_lines_are_byte_identical():
     from clawseccheck.report import render_vet_plan
 
-    assert ('npm pack left-pad@1.0.0 --pack-destination "$QUARANTINE"'
+    assert ('npm pack left-pad@1.0.0 --ignore-scripts --pack-destination "$QUARANTINE"'
             in _command_lines(render_vet_plan("npm:left-pad@1.0.0")))
-    assert ('npm pack @openclaw/brave-plugin@2026.6.11 --pack-destination "$QUARANTINE"'
+    assert ('npm pack @openclaw/brave-plugin@2026.6.11 --ignore-scripts --pack-destination "$QUARANTINE"'
             in _command_lines(render_vet_plan("npm:@openclaw/brave-plugin@2026.6.11")))
-    assert ('pip download --no-deps -d "$QUARANTINE" requests==2.0'
+    assert ('pip download --only-binary=:all: --no-deps -d "$QUARANTINE" requests==2.0'
             in _command_lines(render_vet_plan("pypi:requests==2.0")))
     # the operator is part of the name here, so it is shell-quoted as one token (B-487)
-    assert ('pip download --no-deps -d "$QUARANTINE" \'requests>=2.0\''
+    assert ('pip download --only-binary=:all: --no-deps -d "$QUARANTINE" \'requests>=2.0\''
             in _command_lines(render_vet_plan("pypi:requests>=2.0")))
 
 
