@@ -65,7 +65,10 @@ specific path, secret or privacy concern - read
 summary.**
 
 If a finding looks like real malware in an installed skill, tell the user plainly, advise them
-to remove that skill and rotate any secrets it could reach, and **never run** the payload.
+to stop the agent and remove that skill, then check for persistence the payload may have
+installed elsewhere (host-persistence findings, `clawseccheck --incident`), and only then rotate
+any secrets it could reach (revoking a stolen token first can trigger a wipe), and **never run**
+the payload.
 
 ---
 

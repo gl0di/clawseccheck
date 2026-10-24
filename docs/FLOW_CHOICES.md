@@ -48,7 +48,9 @@ verdict in plain language:
 - NO KNOWN ISSUE -> "Nothing suspicious on any axis."
 - SUSPICIOUS -> "A couple of axes are worth a closer look (I'll name them). I'd be cautious."
 - DANGEROUS -> "This skill contains patterns used by malware (the danger axis fails). Do not
-  install it. If it's already installed, remove it and rotate any secrets it could have accessed."
+  install it. If it's already installed, stop the agent and remove it, check for persistence it
+  may have left elsewhere (`clawseccheck --incident`), and only then rotate any secrets it could
+  have accessed."
 
 ## Choice: check a plugin / "vet this plugin" / "is this plugin safe"
 
@@ -438,8 +440,9 @@ appeared in a tool call your agent made, i.e. something already happened, not ju
 something that could happen. Treat it as at least as urgent as a Dashboard &#x1F534; CRITICAL
 finding, and always:
 - relay the skill name, indicator, and tool-call count exactly as printed;
-- relay the tool's own remediation line verbatim - review those tool calls manually and
-  rotate any credential the referenced path/host could expose;
+- relay the tool's own remediation line verbatim - review those tool calls manually, check
+  for persistence if an instruction was acted on, and only then rotate any credential the
+  referenced path/host could expose;
 - point the user at the "vet this skill" flow above for the implicated skill, so they get
   the full risk dossier, not just this one correlation.
 
