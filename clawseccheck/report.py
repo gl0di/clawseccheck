@@ -6215,7 +6215,41 @@ def _breaks_the_line_it_is_printed_on(text: str) -> bool:
     return bool(text) and text.splitlines() != [text]
 
 
-def _refuse_command_plan(target: str, *, option_shaped: bool = False) -> str:
+# C-745 (follow-up of the security review of f77f269d): `--only-binary=:all:` and
+# `--ignore-scripts` only protect a plain REGISTRY spec. `_parse_source_target` hands the
+# rest of an `npm:`/`pypi:` target through verbatim, so `pypi:git+https://...`,
+# `pypi:foo @ https://.../x.tar.gz`, `pypi:./local`, `npm:github:o/r`, `npm:git+...`,
+# `npm:file:..`, `npm:https://.../x.tgz` and the alias `npm:a@npm:b` all reached the
+# package-manager line. A VCS or local source has no wheel and is BUILT; an npm git
+# dependency runs `prepare`. So a fetch command is built only for a bare registry
+# name (+ an optional version); everything else is refused with a plain reason and
+# pointed at the `git:`/URL forms, which fetch without running anything.
+# A PEP 508 project name, optionally followed by PEP 440 version clauses (`>=2.0`,
+# `~=1.4, !=1.4.2`): `_parse_source_target` only splits on `==`, so a range stays in `name`.
+_PYPI_CLAUSE = r"\s*(?:===|==|~=|!=|>=|<=|>|<)\s*[0-9A-Za-z.*!+_-]+"
+_PYPI_NAME_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:" + _PYPI_CLAUSE
+    + r"(?:\s*,\s*" + _PYPI_CLAUSE.lstrip(r"\s*") + r")*)?\Z")
+_PYPI_VERSION_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.!+_-]*\Z")              # one PEP 440 version
+_NPM_NAME_RE = re.compile(r"(?:@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*\Z", re.I)
+_NPM_VERSION_RE = re.compile(r"[0-9A-Za-z^~*.<>=|_+-][0-9A-Za-z^~*.<>=|_+ -]*\Z")  # semver, range or tag
+
+
+def _registry_spec_ok(eco: str, name, version) -> bool:
+    """True when *name*/*version* are a plain registry spec for *eco* (npm / pypi)."""
+    name = str(name or "")
+    version = None if version is None else str(version)
+    if eco == "pypi":
+        return bool(_PYPI_NAME_RE.match(name)) and (
+            version is None or bool(_PYPI_VERSION_RE.match(version)))
+    if eco == "npm":
+        return bool(_NPM_NAME_RE.match(name)) and (
+            version is None or bool(_NPM_VERSION_RE.match(version)))
+    return True
+
+
+def _refuse_command_plan(target: str, *, option_shaped: bool = False,
+                         not_registry: bool = False) -> str:
     """The --vet-plan output for a target it will not build commands for: no commands.
 
     Renders the same 4-step plain-language preamble (a reader still deserves to know what
@@ -6224,7 +6258,15 @@ def _refuse_command_plan(target: str, *, option_shaped: bool = False) -> str:
     line break into the output it is protecting. `option_shaped` (C-628) swaps the reason
     for an npm/pypi spec that a package manager would read as an option.
     """
-    if option_shaped:
+    if not_registry:
+        why = [
+            "It is not a plain registry package name (with an optional version): it names a",
+            "git repository, a URL, a local path or an alias. pip and npm BUILD such a source",
+            "(or run its `prepare` script) while fetching it, so its own code would run before",
+            "anything has scanned it. Fetch the source itself instead: `git:host/owner/repo` for",
+            "a repository, or the https URL of a published archive, and vet that copy.",
+        ]
+    elif option_shaped:
         why = [
             "Its package name or version starts with '-'. Written into an npm or pip",
             "command, that text is read as a command-line option, not as a package, and",
@@ -6441,6 +6483,8 @@ def render_vet_plan(target: str) -> str:
         return _refuse_command_plan(target, option_shaped=True)
     eco, name, version = info["ecosystem"], info["name"], info.get("version")
     ver_suffix = f"@{version}" if version else ""
+    if eco in ("npm", "pypi") and not _registry_spec_ok(eco, name, version):
+        return _refuse_command_plan(target, not_registry=True)
 
     if eco == "npm":
         # `name + ver_suffix` (e.g. "left-pad@1.0.0") is ONE npm package-spec argument -
