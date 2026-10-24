@@ -11218,8 +11218,11 @@ def check_compiled_tool_poisoning(ctx: Context) -> Finding:
             f"payload or exfil directive ({scope}). Because the model already received "
             f"this text, treat any session that used the tool as compromised. {posthoc}"
             f"{incomplete}",
-            "Identify which server or plugin supplies the named tool, remove or pin it, "
-            "and rotate any credential the affected sessions could reach. Re-run this "
+            "Identify which server or plugin supplies the named tool, stop the agent and "
+            "remove or pin it, then check for persistence it may have left behind "
+            "(host-persistence findings B150/B379, `clawseccheck --incident`), and only "
+            "THEN rotate any credential the affected sessions could reach - some payloads "
+            "wipe the home directory the moment a stolen token is revoked. Re-run this "
             "audit after the next session to confirm the delivered description changed.",
             evidence=ev,
             scored=True,

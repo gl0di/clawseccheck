@@ -442,7 +442,9 @@ So, before you download, install, or use **any** skill (this one included):
    and scripts for shell-exec, credential access, paste-host uploads, and obfuscated
    (base64) payloads *before* enabling it. ClawSecCheck does this with `--vet <skill>`.
 3. **Pin a known release**, prefer signed / VirusTotal-clean skills, and rotate any secret a
-   skill could have reached if you ever suspect it.
+   skill could have reached if you ever suspect it - but stop the agent and check for
+   persistence it installed (`clawseccheck --incident`) first, because some payloads wipe the
+   home directory the moment a stolen token is revoked.
 
 ClawSecCheck practises this: it is open source, zero-dependency, read-only, and its
 installed-skill check does exactly this vetting on the skills you've *already* installed.
