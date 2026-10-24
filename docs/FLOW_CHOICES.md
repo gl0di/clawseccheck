@@ -93,7 +93,13 @@ X" end to end: (1) `--vet-source <target>` - the identity gate above; stop here 
 (2) `--vet-plan <target>` leads with a plain-language "here's what I'll do" summary (4 numbered
 steps + a consent line), then prints the exact fetch+isolate+cleanup commands for *you* (the
 agent) to run - a temp quarantine dir outside every OpenClaw auto-load path, the right fetch verb
-for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. (3) Run those
+for the target's ecosystem (npm/pypi/git/url), never executed by the tool itself. The fetch
+line runs none of the package's code: pypi is `--only-binary=:all:` (wheels only) and npm is
+`--ignore-scripts`. If pip reports no wheel, **stop and tell the user** - never retry without
+`--only-binary`, because building a source distribution executes its code before the scan. A
+npm/pypi target that is not a plain registry name (a git repo, URL, local path or alias) gets no
+fetch command at all: those are built while fetched, so fetch them as `git:`/URL targets instead. The temp
+folder is only a throwaway folder, not a sandbox. (3) Run those
 commands yourself - **unless the tool refused to build a plan**: for a target it cannot quote
 safely (shell metacharacters, control characters) or that a package manager would read as an
 option (an npm/pypi name or version starting with `-`) it prints `I will not build a fetch plan for

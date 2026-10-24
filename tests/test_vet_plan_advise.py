@@ -36,7 +36,7 @@ def test_vet_plan_npm_ecosystem():
 
 def test_vet_plan_pypi_ecosystem():
     out = render_vet_plan("pypi:some-mcp-server==1.0")
-    assert "pip download --no-deps" in out
+    assert "pip download --only-binary=:all: --no-deps" in out
     assert "some-mcp-server==1.0" in out
 
 

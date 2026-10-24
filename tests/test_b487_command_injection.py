@@ -109,7 +109,14 @@ def _assert_no_escape(line: str, target: str) -> None:
 
 @pytest.mark.parametrize("target", _HOSTILE_TARGETS)
 def test_vet_plan_never_emits_an_escapable_command(target):
-    lines = _command_lines(render_vet_plan(target))
+    rendered = render_vet_plan(target)
+    lines = _command_lines(rendered)
+    if not lines and target.startswith(("npm:", "pypi:")):
+        # C-745: a spec that is not a plain registry name (and a shell metacharacter
+        # makes it one of those) is refused outright, which is stronger than quoting: no
+        # package-manager line exists for the payload to escape from.
+        assert rendered.startswith("I will not build a fetch plan for this target."), rendered
+        return
     assert lines, f"no command lines rendered for {target!r} — the test is not exercising the fix"
     for line in lines:
         _assert_no_escape(line, target)
