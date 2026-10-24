@@ -4,6 +4,17 @@ updates:
   # The Python package itself has zero runtime dependencies (pyproject.toml: dependencies=[]).
   # The requirements.txt files under fixtures/ are intentional test vectors for checks C044/F022
   # and must NOT be updated — they model real-world vulnerable configs on purpose.
+  #
+  # C-752: this scoping covers VERSION updates only. Dependabot SECURITY updates are
+  # alert-driven (job command "security"): they run per open alert, for whatever
+  # manifest the alert names, and do not consult the directory scoping below. So
+  # fixtures/**/requirements.txt (e.g. the certifi pin in bad_f022_typosquat, alert
+  # #42 -> PR #47) still gets security PRs even though no entry here lists it. No
+  # dependabot.yml key is relied on to stop that (an exclude-paths key was not
+  # confirmed to apply to security updates). What does: dismiss the alert in the
+  # Security tab with reason "Vulnerable code is not actually used" (or "Risk is
+  # tolerable to this project"), or add a Dependabot auto-dismiss rule scoped to the
+  # fixtures/ manifest paths in repo settings. Close the stray PR; never merge it.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
