@@ -6238,15 +6238,23 @@ _NPM_VERSION_RE = re.compile(r"[0-9A-Za-z^~*.<>=|_+-][0-9A-Za-z^~*.<>=|_+ -]*\Z"
 # pip reads a requirement that looks like an archive/wheel filename as a LOCAL FILE (and
 # builds an sdist), and npm-package-arg reads `x.tgz` / `x.tar.gz` as a local tarball, so a
 # "name" ending in one of these is a path in disguise, not a registry name.
-_ARCHIVE_NAME_RE = re.compile(r"\.(?:whl|zip|tgz|tar(?:\.(?:gz|bz2|xz))?)\Z", re.I)
+# pip's own list (`pip._internal.utils.filetypes`: ZIP .zip .whl, BZ2 .tar.bz2 .tbz, XZ .tar.xz
+# .txz .tlz .tar.lz .tar.lzma, TAR .tar.gz .tgz .tar), plus .tbz2 and .tar.zst for npm/tar.
+_ARCHIVE_NAME_RE = re.compile(
+    r"\.(?:whl|zip|tgz|tbz2?|txz|tlz|tar(?:\.(?:gz|bz2|xz|lz|lzma|zst))?)\s*\Z", re.I)
 
 
 def _registry_spec_ok(eco: str, name, version) -> bool:
     """True when *name*/*version* are a plain registry spec for *eco* (npm / pypi)."""
     name = str(name or "")
     version = None if version is None else str(version)
-    if eco in ("pypi", "npm") and _ARCHIVE_NAME_RE.search(re.split(r"[\s<>=~!,]", name, maxsplit=1)[0]):
-        return False
+    # Checked on every piece AND on the exact string the package manager will receive: pip
+    # tests the whole requirement for an archive suffix, so `foo==1.0.tar.gz` is a path too.
+    if eco in ("pypi", "npm"):
+        joined = name + (("==" if eco == "pypi" else "@") + version if version else "")
+        pieces = [name, joined, *(re.split(r"[\s<>=~!,]+", name)), version or ""]
+        if any(_ARCHIVE_NAME_RE.search(p) for p in pieces if p):
+            return False
     if eco == "pypi":
         return bool(_PYPI_NAME_RE.match(name)) and (
             version is None or bool(_PYPI_VERSION_RE.match(version)))

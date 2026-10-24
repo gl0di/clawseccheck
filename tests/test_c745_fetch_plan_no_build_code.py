@@ -64,6 +64,10 @@ _REFUSED = [
     "pypi:evil.tar.bz2>=1",
     "npm:evil.tgz",                                   # npm reads it as a local tarball
     "npm:evil.tar.gz",
+    "pypi:evil.tbz", "pypi:evil.txz", "pypi:evil.tlz", "pypi:evil.tar.lz", "pypi:evil.tar.lzma",
+    "pypi:foo==1.0.tar.gz",                           # the version half makes it a path
+    "pypi:foo>=1.0.whl",
+    "npm:left-pad@1.0.0.tgz",
 ]
 
 
