@@ -1,2 +1,2 @@
 reqests==2.31.0
-certifi==2024.2.2
+certifi==2026.10.19
