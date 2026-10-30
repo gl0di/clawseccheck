@@ -1945,6 +1945,19 @@ def check_polyglot(filename: str, format_name: str | None, data: bytes) -> str |
     return None
 
 
+def _inner_raw_name(raw_member_name: str | None, file_relpath: str, ext: str) -> str:
+    """Real (uncapped) name of the single stream inside a .gz/.bz2/.xz wrapper.
+
+    Derived from the wrapper's REAL name when it is an archive member (its display name is
+    truncated past the cap); a wrapper without the expected suffix has no knowable inner
+    name, which yields one that never ends in .pyc.
+    """
+    raw = raw_member_name if raw_member_name is not None else file_relpath
+    if raw.lower().endswith(ext):
+        return raw[: -len(ext)]
+    return raw + "::extracted"
+
+
 def decompress_and_classify(
     ctx: Context | None,
     skill_dir: Path,
@@ -2234,7 +2247,7 @@ def decompress_and_classify(
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".gz") else f"{file_relpath}::extracted"
             sub_results = decompress_and_classify(
                 ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
-                raw_member_name=sub_rel)
+                raw_member_name=_inner_raw_name(raw_member_name, file_relpath, ".gz"))
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2288,7 +2301,7 @@ def decompress_and_classify(
             sub_rel = file_relpath[:-4] if file_relpath.lower().endswith(".bz2") else f"{file_relpath}::extracted"
             sub_results = decompress_and_classify(
                 ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
-                raw_member_name=sub_rel)
+                raw_member_name=_inner_raw_name(raw_member_name, file_relpath, ".bz2"))
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2342,7 +2355,7 @@ def decompress_and_classify(
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".xz") else f"{file_relpath}::extracted"
             sub_results = decompress_and_classify(
                 ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
-                raw_member_name=sub_rel)
+                raw_member_name=_inner_raw_name(raw_member_name, file_relpath, ".xz"))
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"

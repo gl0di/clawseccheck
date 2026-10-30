@@ -301,6 +301,20 @@ def test_gzip_wrapped_pyc_is_checked(tmp_path):
     assert _run_check(g).status == FAIL
 
 
+@pytest.mark.parametrize("ext", ["gz", "bz2", "xz"])
+def test_long_named_compressed_pyc_inside_a_zip_is_checked(tmp_path, ext):
+    import bz2
+    import gzip
+    import lzma
+
+    comp = {"gz": gzip.compress, "bz2": bz2.compress, "xz": lzma.compress}[ext]
+    data = _pyc(_skill(tmp_path), UNCHECKED).read_bytes()
+    name = "p/" + "a" * (collector._UNTRUSTED_NAME_CAP + 50) + ".pyc." + ext
+    z = tmp_path / "skill.zip"
+    z.write_bytes(_zip_with(comp(data), name=name))
+    assert _run_check(z).status == FAIL
+
+
 def test_remediation_is_published_for_the_docs_generator():
     from clawseccheck.catalog import remediation_for
     assert remediation_for("B398")["commands"]
