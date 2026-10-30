@@ -658,7 +658,13 @@ _PINNED_REF_RE = re.compile(
 # Non-redundant with B25 (auto-update/pinning), B13 (skill malware content), B22 (writable
 # identity + dangerous tools). B42 surfaces install-time supply-chain risk: an install hook
 # that runs code on install/auto-update, and skill dirs writable by OTHER local users.
-_POSTINSTALL_RE = re.compile(r'"(pre|post)install"\s*:\s*"([^"]{1,200})"', re.I)
+# B-1005: `(pre|post)?` - the bare `install` script runs too. Grounded against
+# npm 11.11.0's @npmcli/arborist `lib/arborist/rebuild.js`, which runs the three phases in
+# order (`#runScripts('preinstall')`, then `'install'`, then `'postinstall'`), and
+# @npmcli/package-json `normalize.js` even synthesises `scripts.install = 'node-gyp rebuild'`
+# for a binding.gyp package. Before this, `"install": "node -e ..."` vetted clean while the
+# identical command under `postinstall` WARNed. deptree.py's INSTALL_PHASES already had all three.
+_POSTINSTALL_RE = re.compile(r'"(pre|post)?install"\s*:\s*"([^"]{1,200})"', re.I)
 
 
 _SOFT_BOOTSTRAP = ("MEMORY.md", "HEARTBEAT.md")
@@ -2824,7 +2830,7 @@ def check_install_policy(ctx: Context) -> Finding:
     # install/postinstall hooks that execute code on install or auto-update
     for name, blob in skills.items():
         for m in _POSTINSTALL_RE.finditer(blob):
-            kind, cmd = m.group(1).lower(), m.group(2)
+            kind, cmd = (m.group(1) or "").lower(), m.group(2)
             if _HOOK_EXEC_RE.search(cmd):
                 warns.append(
                     f"{name}: {kind}install hook runs code on install/update -> "

@@ -52,6 +52,21 @@ def test_preinstall_hook_with_exec_warns(tmp_path):
     assert _b42(tmp_path).status == WARN
 
 
+def test_bare_install_hook_with_exec_warns(tmp_path):
+    # B-1005: npm runs scripts.install between preinstall and postinstall
+    # (npm 11.11.0 @npmcli/arborist rebuild.js runs 'preinstall', 'install', 'postinstall').
+    # Before the fix this vetted clean while the same command under postinstall WARNed.
+    _skill(tmp_path, "i", {"package.json": '{"scripts": {"install": "node -e 1"}}'})
+    f = _b42(tmp_path)
+    assert f.status == WARN
+    assert any(": install hook runs code" in e for e in f.evidence), f.evidence
+
+
+def test_benign_bare_install_is_safe(tmp_path):
+    _skill(tmp_path, "g", {"package.json": '{"scripts": {"install": "node-gyp rebuild"}}'})
+    assert _b42(tmp_path).status == PASS
+
+
 # ---------------------------------------------------------------------------
 # writable skill dirs
 # ---------------------------------------------------------------------------
