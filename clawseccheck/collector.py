@@ -41,7 +41,7 @@ from .configloader import (
     loads_bounded as _loads_bounded,
     loads_shallow as _loads_shallow,
 )
-from .safeio import walk_dir_safely, is_safe_tar_member
+from .safeio import walk_dir_safely, is_safe_tar_member, pyc_header_flags, PYC_UNCHECKED_HASH_FLAGS, PYC_HEADER_LEN
 from .skilldiscovery import (
     config_extra_skill_dirs as _config_extra_skill_dirs,
     config_plugin_load_paths as _config_plugin_load_paths,
@@ -1227,6 +1227,11 @@ class Context:
     # the very skill whose payload directory the same report said it never read. Keyed by
     # skill name so a per-skill consumer can take exactly its own.
     skill_coverage_gaps: dict = field(default_factory=dict)
+    # B-1001 / B398: str(skill dir) -> sorted relpaths of PEP 552 UNCHECKED_HASH .pyc files, and
+    # str(skill dir) -> reasons the pyc scan could not be completed (symlink, unreadable, cap).
+    # The ordinary skill walk prunes __pycache__, so these are gathered by `_scan_skill_pycs`.
+    skill_unchecked_pycs: dict = field(default_factory=dict)
+    skill_pyc_gaps: dict = field(default_factory=dict)
     # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
     # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
     # found - this skill will not appear to the agent"), which is a false statement about a
@@ -2528,6 +2533,86 @@ def _media_is_well_terminated(fmt: str, data: bytes) -> bool:
     return end is not None and end == len(data)
 
 
+_PYC_SCAN_MAX_DIRS = 20000
+_PYC_SCAN_MAX_PYCS = 5000
+
+
+def _scan_skill_pycs(base_dir: Path, ctx) -> None:
+    """B-1001 / B398: find PEP 552 unchecked-hash ``.pyc`` files under a skill directory.
+
+    `walk_dir_safely(exclude_pycache=True)` never enters ``__pycache__``, so a skill could
+    ship clean sources plus a hash-unchecked ``.pyc`` that Python imports WITHOUT comparing
+    it to the source. This reads ONLY the 8-byte header of each ``.pyc`` (never the code
+    object, never unmarshalled/executed) and never follows a symlink: a symlinked
+    ``__pycache__`` or ``.pyc`` is recorded as a gap (unknown), not as clean. Listing is
+    bounded; hitting a cap or an OSError is a gap too. Bare legacy ``.pyc`` files outside a
+    ``__pycache__`` are importable too, so they are classified the same way.
+    """
+    key = str(base_dir)
+    found: list[str] = []
+    gaps: list[str] = []
+
+    def _rel(p: str) -> str:
+        try:
+            return os.path.relpath(p, base_dir)
+        except ValueError:
+            return p
+
+    def _onerr(exc: OSError) -> None:
+        gaps.append(f"{_rel(getattr(exc, 'filename', None) or str(base_dir))}: could not be listed")
+
+    dirs_seen = 0
+    pycs_seen = 0
+    capped = False
+    for root, dirnames, filenames in os.walk(base_dir, followlinks=False, onerror=_onerr):
+        dirs_seen += 1
+        if dirs_seen > _PYC_SCAN_MAX_DIRS:
+            capped = True
+            break
+        keep = []
+        for d in dirnames:
+            full = os.path.join(root, d)
+            if os.path.islink(full):
+                if d == "__pycache__":
+                    gaps.append(f"{_rel(full)}: symlinked __pycache__ not followed")
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for fn in filenames:
+            if not fn.endswith(".pyc"):
+                continue
+            full = os.path.join(root, fn)
+            pycs_seen += 1
+            if pycs_seen > _PYC_SCAN_MAX_PYCS:
+                capped = True
+                break
+            try:
+                st = os.lstat(full)
+            except OSError as exc:
+                gaps.append(f"{_rel(full)}: {exc.strerror or exc}")
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                gaps.append(f"{_rel(full)}: symlinked .pyc not followed")
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            flags = pyc_header_flags(Path(full))
+            if flags is None:
+                if st.st_size < PYC_HEADER_LEN:
+                    continue  # too short for Python to load at all: inert
+                gaps.append(f"{_rel(full)}: .pyc header could not be read")
+            elif flags == PYC_UNCHECKED_HASH_FLAGS:
+                found.append(_rel(full).replace(os.sep, "/"))
+        if capped:
+            break
+    if capped:
+        gaps.append("pyc scan stopped at its size cap; the rest of the skill was not looked at")
+    if found:
+        ctx.skill_unchecked_pycs[key] = sorted(found)
+    if gaps:
+        ctx.skill_pyc_gaps[key] = gaps
+
+
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
     """Collect (and archive-decompress/classify) the files that make up one skill.
 
@@ -2584,6 +2669,8 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             base_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL,
             skips=_skips, capped=_capped, unreadable_dirs=_unreadable_dirs,
         )
+        if ctx is not None:
+            _scan_skill_pycs(base_dir, ctx)
         if ctx is not None and _capped:
             # The walk stopped at _MAX_FILES_PER_SKILL and the rest of the skill was never
             # looked at. `walk_dir_safely` has always offered this sentinel -- its own

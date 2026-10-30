@@ -134,6 +134,7 @@ _AXIS_BY_ID: dict[str, str | None] = {
     "B13": "danger",  # malware verdict (AST01 and AST02) - danger dominates
     "B90": "danger",  # reassembled split base64 payload = active malicious code
     "B89": "persistence",  # dormant / unreachable-yet-code-bearing = staged
+    "B398": "persistence",  # hash-unchecked .pyc = staged compiled code the source scan never saw (B-1001)
     "B86": "persistence",  # writable import path = staging / tamper surface
     "B87": "persistence",  # symlink escape to a sensitive path = staged exfil primitive
     # F-177: the fourth, genuinely-new persistence feeder the B-613 comment on B335

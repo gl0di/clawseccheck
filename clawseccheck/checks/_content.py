@@ -11441,6 +11441,69 @@ def check_dormant_capability(ctx: Context) -> Finding:
     )
 
 
+def check_unchecked_hash_pyc(ctx: Context) -> Finding:
+    """B398 (B-1001) - a skill ships a PEP 552 UNCHECKED_HASH ``.pyc``.
+
+    Python imports such a file without comparing it to its sibling ``.py``, so the
+    readable source can be clean while the compiled code is not. The skill walk prunes
+    ``__pycache__``, so the data comes from `collector._scan_skill_pycs` (header bytes
+    only, never executed, no symlink followed). No ordinary build writes this flag: a
+    default compile and a normal import both write a timestamp-based pyc.
+
+    A ``.pyc`` with no sibling source is NOT flagged here: that was considered and left
+    out, because stale caches of removed modules are common on real installs.
+    """
+    skills = getattr(ctx, "installed_skills", None)
+    found = getattr(ctx, "skill_unchecked_pycs", {})
+    gaps = getattr(ctx, "skill_pyc_gaps", {})
+    fix_fail = (
+        "Delete the skill's __pycache__ directories and treat the skill as untrusted: Python "
+        "runs a hash-unchecked .pyc without checking it against the source, so the .py files "
+        "you reviewed may not be what executes. Re-fetch the skill from its origin and "
+        "compare. A legitimate build does not produce this kind of .pyc."
+    )
+    if found:
+        ev = [f"{Path(k).name}: {rel}" for k, rels in sorted(found.items()) for rel in rels]
+        extra = f" (+{len(ev) - 6} more)" if len(ev) > 6 else ""
+        return _custom(
+            "B398",
+            HIGH,
+            FAIL,
+            "Hash-unchecked compiled Python (.pyc) shipped in the skill: "
+            + "; ".join(ev[:6]) + extra,
+            fix_fail,
+            ev,
+        )
+    if gaps:
+        ev = [f"{Path(k).name}: {g}" for k, gl in sorted(gaps.items()) for g in gl]
+        return _custom(
+            "B398",
+            HIGH,
+            UNKNOWN,
+            "Could not fully inspect compiled Python (.pyc) in the skill: "
+            + "; ".join(ev[:6]) + (f" (+{len(ev) - 6} more)" if len(ev) > 6 else ""),
+            "Replace symlinked or unreadable __pycache__ entries with plain files (or delete "
+            "__pycache__) and re-run; compiled code that was not read is not cleared.",
+            ev,
+            engine_degraded=True,
+        )
+    if not skills:
+        return _custom(
+            "B398",
+            HIGH,
+            UNKNOWN,
+            "No installed skills to inspect for hash-unchecked compiled code.",
+            "Run on a skill dir (--vet) or a host with installed skills.",
+        )
+    return _custom(
+        "B398",
+        HIGH,
+        PASS,
+        f"No hash-unchecked compiled Python (.pyc) found in {len(skills)} skill(s).",
+        "Ship source only; do not ship __pycache__.",
+    )
+
+
 def check_dynamic_dispatch_obfuscation(ctx: Context) -> Finding:
     """B91 (F-102, L1-5) - sink built from a computed/dynamic name, not a literal token.
 

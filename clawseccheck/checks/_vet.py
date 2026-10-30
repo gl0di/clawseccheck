@@ -145,6 +145,7 @@ from ._content import (
     check_deaddrop_resolver,
     check_dependency_confusion,
     check_dormant_capability,
+    check_unchecked_hash_pyc,
     check_dotfile_exfil_directive,
     check_dynamic_dispatch_obfuscation,
     check_event_hook_interceptor,
@@ -10737,6 +10738,7 @@ SKILL_CONTENT_RING = (
     check_symlink_escape,  # B87 - symlink escape to a sensitive host path (TAM-07)
     check_frontmatter_hygiene,  # B88 - frontmatter authoring hygiene (tag values / squat)
     check_dormant_capability,  # B89 - unreachable-yet-code-bearing skill (dormant capability)
+    check_unchecked_hash_pyc,  # B398 - hash-unchecked .pyc shipped in a skill (B-1001)
     check_cross_file_payload,  # B90 - cross-file split base64 payload reassembly (I-019)
     check_cross_file_boundary_payload,  # B102 - base64 split exactly at a file boundary (F-086)
     check_cross_file_plaintext_payload,  # B154 - cross-file split PLAINTEXT payload reassembly

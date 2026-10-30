@@ -775,6 +775,7 @@ from ._content import (
     check_deaddrop_resolver,
     check_dependency_confusion,
     check_dormant_capability,
+    check_unchecked_hash_pyc,
     check_dotfile_exfil_directive,
     check_dynamic_dispatch_obfuscation,
     check_event_hook_interceptor,
