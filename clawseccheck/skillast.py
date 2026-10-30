@@ -18757,17 +18757,14 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
 #             bundle must not convict an unrelated `fetch(url, {body: data})`    #
 #             10,000 lines later. Every taint event of a name is kept (a name    #
 #             read twice keeps both), and a sink hits if ANY is in window.       #
-#   direct  - crit additionally needs the value not provably REDUCED: it is    #
-#             DERIVED (-> JS_SECRET_FILE_FLOW, warn) only when it passes an      #
-#             allowlisted reducer on a RESOLVED receiver (a crypto MAC/hash/sign #
-#             call or a create*().update().digest() chain, `.length`/`.size`/    #
-#             `.byteLength`, `.includes/.startsWith/.endsWith` on the secret,    #
-#             `/re/.test(secret)`, a comparison) or is the TLS `key`/`cert`/`ca`/`pfx`/`passphrase`     #
-#             option of a TLS client call it is a direct argument of. Every      #
-#             other transform -- a user function, slice, replace, join, match,  #
-#             a carrier -- stays direct (fail-closed), and so does every reducer #
-#             name the file defines for itself (`_JS_SHADOW_RE`): an AWS SigV4   #
-#             client and an exfiltrator differ only in that reducer step.        #
+#   direct  - crit additionally needs the value not REDUCED. It is DERIVED    #
+#             (-> JS_SECRET_FILE_FLOW, warn) only when a structural member is    #
+#             read straight off it (`.length`/`.size`/`.byteLength`, or         #
+#             `.includes(`/`.startsWith(`/`.endsWith(` called ON it) or it is    #
+#             the TLS `key`/`cert`/`ca`/`pfx`/`passphrase` option of a TLS       #
+#             client call its object literal is a direct argument of. Every      #
+#             other transform -- a user function, slice, replace, match, a       #
+#             crypto MAC/hash/signature -- stays direct (fail-closed).           #
 # Severity: a secret no client sends as-is (process environ, private key, raw    #
 # AWS credentials, wallet/keystore, keychain) reaching a sink directly is crit,  #
 # the grade analyze_python gives CRED_EXFIL_FLOW. A token/config file (.npmrc, a #
@@ -18792,6 +18789,12 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
 #     read's argument, but no JS value carries the secret);                      #
 #   - process.env read key by key (`process.env.AWS_SECRET_ACCESS_KEY`);         #
 #   - `.env`, `.git-credentials`, `.config/gh/hosts.yml`: not on _CRED_PATH_RE.  #
+# Accepted FALSE POSITIVE (pending a section 2.5 ruling), test-pinned and        #
+# disclosed in the B13 `fix`: a signing client that reads a credential file and  #
+# sends a derived signature (AWS SigV4: ~/.aws/credentials -> HMAC ->            #
+# https.request to sts) is shape-identical to exfiltration and stays crit. A    #
+# crypto-reducer exemption was built and retracted after five review rounds     #
+# (see `_JS_REDUCER_MEMBERS`).                                                   #
 # --------------------------------------------------------------------------- #
 _JS_FLOW_WINDOW = 4000  # chars between a taint and the sink it reaches, per hop
 _JS_FLOW_MAX_HOPS = 4
@@ -18866,63 +18869,28 @@ _JS_SINK_CALL_RE = re.compile(
 )
 _JS_PIPE_RE = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*|\))\s*\.\s*pipe\s*\(\s*([A-Za-z_$][\w$]*)")
 
-# Round 2 (crit needs the secret ITSELF at the sink). FAIL-closed by construction: a
-# value read from a hard secret is DIRECT (crit) unless it provably passes through a
-# known REDUCER on its way to the sink -- an explicit allowlist, never "anything that is
-# not a known carrier", because the latter let any user function, `.slice()`,
-# `.replace()`, `.join()` or a `body: {key: secret}` member escape crit (security review
-# of the first cut). Reducers: the crypto MAC/hash/sign family (createHmac/createHash/
-# createSign/createVerify/sign/verify/timingSafeEqual, and `.update(...)` on such a
-# chain ending in `.digest`/`.sign`), a boolean test (`.includes/.startsWith/.endsWith`
-# on the secret, a RegExp literal's `.test`), a size (`.length/.size/.byteLength`), or a
-# comparison operator. Measured shapes
-# that need it: an AWS SigV4 client HMACs ~/.aws/credentials and calls sts; a tool posts
-# `/proc/self/environ`'s length; one tests `environ.includes(...)`.
-# Callees that REDUCE an argument, each only on a resolved receiver (round-2 review: a
-# bare `sign`/`test`/`includes` may be a user function returning its input):
-#   crypto create*/sign/verify/timingSafeEqual - on a `crypto` binding, or destructured
-#     from it; `.update(...)` - chained directly onto such a create* call (or on a name
-#     assigned one) AND the chain ends in `.digest(...)`/`.sign(...)`;
-#   `.test(...)` - on a RegExp literal.
-# `match` is deliberately absent everywhere: it RETURNS the matched text
-# (`data.match(/[\s\S]*/)[0]` is the whole secret).
-_JS_CRYPTO_CREATE = frozenset({"createHmac", "createHash", "createSign", "createVerify"})
-_JS_CRYPTO_REDUCERS = _JS_CRYPTO_CREATE | {"sign", "verify", "timingSafeEqual"}
-# Members that reduce the secret they are read off (a size or a boolean test).
+# Round 2 (crit needs the secret ITSELF at the sink). FAIL-closed and deliberately
+# small: a value read from a hard secret is DIRECT (crit) unless it is reduced by one
+# of these STRUCTURAL members read straight off the tainted name itself -- a size
+# (`data.length` / `.size` / `.byteLength`) or a boolean test
+# (`data.includes(..)` / `.startsWith(..)` / `.endsWith(..)`). Nothing else counts: no
+# free-standing callee, no RegExp `.test`, no `match` (it returns the matched text),
+# and NO crypto. A crypto-reducer allowlist (createHmac/createHash/sign/update/digest,
+# resolved against the file's own `require('crypto')` binding) was built and retracted
+# after five review rounds: every receiver-resolution rule (global vs bound name,
+# decoys in strings, rebinding, shadowing, template-hole lexing) opened a new way to
+# launder the secret through a look-alike, and the machinery outgrew the rule. So an
+# AWS SigV4-style client (reads ~/.aws/credentials, HMACs a request, calls sts) stays
+# crit -- the same ambiguity analyze_python's CRED_EXFIL_FLOW has -- and the B13 FAIL
+# discloses it in `fix` (see `_JS_SIGNING_CLIENT_DISCLOSURE` in checks/_vet.py).
 _JS_REDUCER_MEMBERS = frozenset(
     {"length", "size", "byteLength", "includes", "startsWith", "endsWith"}
 )
-_JS_CRYPTO_NS_BIND_RE = re.compile(
-    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"](?:node:)?crypto['\"]\s*\)"
-    r"|\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['\"](?:node:)?crypto['\"]"
+# A redefined String/Buffer prototype method could return its receiver.
+_JS_PROTO_OVERRIDE_RE = re.compile(
+    r"\bprototype\s*\.\s*(includes|startsWith|endsWith)\s*=(?!=)"
+    r"|\bdefineProperty\s*\([^)]{0,200}['\"](includes|startsWith|endsWith)['\"]"
 )
-_JS_CRYPTO_DESTRUCTURE_RE = re.compile(
-    r"\{([^{}]{1,300})\}\s*=\s*require\(\s*['\"](?:node:)?crypto['\"]\s*\)"
-    r"|\bimport\s*\{([^{}]{1,300})\}\s*from\s+['\"](?:node:)?crypto['\"]"
-)
-# A file that declares or assigns its own function under a reducer's name (`function
-# sign(`, `const test =`, `sign = (x) => x`, a method `update(x) {`, an object member
-# `digest: (x) =>`, `String.prototype.includes = ...`) gets NO reducer credit for that
-# name at all -- fail-closed, since the local definition may return its input.
-# (`length`/`size`/`byteLength` are left out: they are data properties of the read
-# value, which no assignment elsewhere in the file can turn back into the secret, and
-# `arr.length = 0` is ubiquitous.)
-_JS_REDUCER_NAMES = (
-    _JS_CRYPTO_REDUCERS | _JS_REDUCER_MEMBERS | {"update", "digest", "test", "match"}
-) - {"length", "size", "byteLength"}
-_JS_SHADOW_RE = re.compile(
-    r"\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("
-    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?::\s*[\w$.<>\[\]|& ]{1,80}?\s*)?=(?![=>])"
-    r"|\.\s*([A-Za-z_$][\w$]*)\s*=(?![=>])"
-    r"|(?:^|[{};,])\s*(?:(?:async|static|get|set)\s+)*([A-Za-z_$][\w$]*)\s*\([^()\n]{0,200}\)\s*\{"
-    r"|(?:^|[{,])\s*([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^()\n]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
-    re.M,
-)
-_JS_CRYPTO_OBJ_RE = re.compile(
-    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:([A-Za-z_$][\w$]*)\s*\.\s*)?"
-    r"(createHmac|createHash|createSign)\s*\("
-)
-_JS_COMPARISON_OPS = ("===", "!==", "==", "!=", "<=", ">=", "<", ">")
 # A secret handed to a TLS-capable client AS its identity option is authentication, not
 # exfiltration -- but only when the `{...}` holding it is itself a direct argument of
 # that client call (https.request/get, tls.connect, http2.connect, new https.Agent,
@@ -19105,95 +19073,25 @@ def _js_frames(text: str) -> "list[list]":
     return frames
 
 
-def _js_postfix_reduces(text: str, p: int, frames: list, shadowed=()) -> bool:
-    """Does the member chain starting at `p` (`.a.b(...)[i]...`) pass through a known
-    reducer member, or end in a comparison operator?"""
-    opens = {f[1]: f for f in frames}
-    n = len(text)
-    while True:
-        while p < n and text[p] in " \t\r\n":
-            p += 1
-        if text[p : p + 2] == "?.":
-            p += 1
-        if p < n and text[p] == "[" and p in opens:
-            p = opens[p][2] + 1
-            continue
-        if p >= n or text[p] != ".":
-            break
-        m = re.match(r"\.\s*([A-Za-z_$][\w$]*)\s*", text[p : p + 80])
-        if not m:
-            break
-        if m.group(1) in _JS_REDUCER_MEMBERS and m.group(1) not in shadowed:
-            return True
-        q = p + m.end()
-        if q < n and text[q] == "(" and q in opens:
-            p = opens[q][2] + 1
-        else:
-            p = p + len(m.group(0).rstrip())
-    return text[p : p + 3].startswith(_JS_COMPARISON_OPS) and text[p : p + 2] != "=>"
-
-
-def _js_string_spans(text: str) -> "list[tuple[int, int]]":
-    """(start, end) of every '...', "..." and `...` literal, linear and quote-aware."""
-    spans = []
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "'\"`":
-            j = i + 1
-            while j < n and text[j] != ch:
-                if text[j] == "\\":
-                    j += 1
-                elif text[j] == "\n" and ch != "`":
-                    break
-                j += 1
-            spans.append((i, min(j + 1, n)))
-            i = j + 1
-            continue
-        i += 1
-    return spans
-
-
-def _js_in_spans(pos: int, spans) -> bool:
-    k = bisect.bisect_right(spans, (pos, float("inf"))) - 1
-    return k >= 0 and spans[k][0] <= pos < spans[k][1]
-
-
-def _js_blank_spans(text: str, spans) -> str:
-    parts, last = [], 0
-    for a0, a1 in spans:
-        parts.append(text[last:a0])
-        parts.append(" " * (a1 - a0))
-        last = a1
-    parts.append(text[last:])
-    return "".join(parts)
-
-
-def _js_rebind_re(name: str):
-    n = re.escape(name)
-    return re.compile(
-        rf"\b(?:const|let|var|function|class)\s+{n}(?![\w$])"
-        rf"|(?<![\w$.]){n}\s*=(?!=)"
-        rf"|[{{,]\s*{n}\s*[,}}:=]"
-        rf"|\(\s*{n}\s*[,)=]"
-        rf"|,\s*{n}\s*[,)=]"
-        rf"|\bimport\s+(?:\*\s+as\s+)?{n}(?![\w$])"
-        rf"|\bimport\s*\{{[^{{}}]*(?<![\w$]){n}(?![\w$])"
-    )
+def _js_member_reduces(text: str, e: int, overridden) -> bool:
+    """The member read straight off the value ending at `e` is a size or a boolean test
+    (`.length`/`.size`/`.byteLength`, `.includes(`/`.startsWith(`/`.endsWith(`)."""
+    m = re.match(r"\s*\??\.\s*([A-Za-z_$][\w$]*)", text[e : e + 80])
+    if not m or m.group(1) not in _JS_REDUCER_MEMBERS or m.group(1) in overridden:
+        return False
+    if m.group(1) in ("includes", "startsWith", "endsWith"):
+        return text[e + m.end() :].lstrip()[:1] == "("
+    return True
 
 
 class _JsFlowCtx:
-    """File-level bindings the reducer and TLS tests resolve receivers against."""
+    """File-level bindings the TLS-option exemption and the reducer test need."""
 
-    __slots__ = ("tls", "crypto_ns", "crypto_fns", "crypto_objs", "shadowed")
+    __slots__ = ("tls", "overridden")
 
-    def __init__(self, tls=_JS_TLS_MODULES, crypto_ns=(), crypto_fns=(),
-                 crypto_objs=(), shadowed=()):
+    def __init__(self, tls=("https", "tls", "http2"), overridden=()):
         self.tls = set(tls)
-        self.crypto_ns = set(crypto_ns)
-        self.crypto_fns = set(crypto_fns)
-        self.crypto_objs = set(crypto_objs)
-        self.shadowed = set(shadowed)
+        self.overridden = set(overridden)
 
     @classmethod
     def of(cls, masked: str) -> "_JsFlowCtx":
@@ -19202,63 +19100,10 @@ class _JsFlowCtx:
             for m in _JS_NET_NS_BIND_RE.finditer(masked)
             if (m.group(2) or m.group(4)) in _JS_TLS_MODULES and (m.group(1) or m.group(3))
         }
-        shadowed = {
-            name
-            for m in _JS_SHADOW_RE.finditer(masked)
-            for name in m.groups()
-            if name in _JS_REDUCER_NAMES
+        overridden = {
+            n for m in _JS_PROTO_OVERRIDE_RE.finditer(masked) for n in m.groups() if n
         }
-        if "crypto" not in masked:
-            return cls(tls, shadowed=shadowed)
-        # Never trusted by NAME (round-2 review): no credit for a bare/global `crypto`.
-        # A name counts only when it is bound by an explicit require/import of the node
-        # module ('crypto' | 'node:crypto') that is real code, not text inside a string,
-        # AND that same identifier is never declared, assigned, destructured or taken as
-        # a parameter anywhere OUTSIDE its own bind. Any other crypto-looking shape is
-        # not a reducer, so the value stays DIRECT.
-        strings = _js_string_spans(masked)
-        blanked = _js_blank_spans(masked, strings)
-        ns_binds = [
-            ((m.group(1) or m.group(2)), m.span())
-            for m in _JS_CRYPTO_NS_BIND_RE.finditer(masked)
-            if not _js_in_spans(m.start(), strings)
-        ]
-        fn_binds = []
-        for m in _JS_CRYPTO_DESTRUCTURE_RE.finditer(masked):
-            if _js_in_spans(m.start(), strings):
-                continue
-            for entry in (m.group(1) or m.group(2) or "").split(","):
-                parts = [x.strip() for x in re.split(r":|\s+as\s+", entry.strip())]
-                if parts and parts[0] in _JS_CRYPTO_REDUCERS and parts[-1]:
-                    fn_binds.append((parts[-1], m.span()))
-        bind_spans = [sp for _n, sp in ns_binds + fn_binds]
-        # a decl `const x = require(...)` starts before the regex's own span for the
-        # destructured form; widen every bind span back over its `const|let|var`.
-        bind_spans = [
-            (max(0, a0 - 12) if re.search(r"(?:const|let|var)\s*$", masked[max(0, a0 - 12):a0])
-             else a0, a1)
-            for a0, a1 in bind_spans
-        ]
-        bind_spans.sort()
-
-        def rebound(name: str) -> bool:
-            for m in _js_rebind_re(name).finditer(blanked):
-                if not _js_in_spans(m.start(), bind_spans):
-                    return True
-            return False
-
-        ns = {n for n, _sp in ns_binds if n and not rebound(n)}
-        fns = {n for n, _sp in fn_binds if not rebound(n)}
-        objs: set = set()
-        finals = [x for x in ("digest", "sign") if x not in shadowed]
-        for m in _JS_CRYPTO_OBJ_RE.finditer(masked) if finals else ():
-            name, recv, fn = m.group(1), m.group(2), m.group(3)
-            if fn in shadowed or not ((recv in ns) if recv else (fn in fns)):
-                continue
-            if re.search(r"(?<![\w$.])" + re.escape(name) + r"\s*\.\s*(?:"
-                         + "|".join(finals) + r")\s*\(", masked[m.end():]):
-                objs.add(name)
-        return cls(tls, ns, fns, objs, shadowed)
+        return cls(tls, overridden)
 
 
 _JS_DEFAULT_CTX = _JsFlowCtx()
@@ -19271,106 +19116,36 @@ def _js_is_tls_callee(callee: str, tls_receivers) -> bool:
     )
 
 
-def _js_is_crypto_call(callee: str, names, ctx: "_JsFlowCtx") -> bool:
-    """`callee` (a frame's dotted name) is one of `names` on a resolved crypto binding."""
-    parts = callee.split(".")
-    last = parts[-1]
-    if last not in names:
-        return False
-    if len(parts) == 1:
-        return last in ctx.crypto_fns
-    return parts[-2] in ctx.crypto_ns
-
-
-def _js_chain_ends_in_digest(text: str, p: int, frames: list, shadowed=()) -> bool:
-    """From `p`, the member chain is `.update(...)`* then `.digest(...)`/`.sign(...)`."""
-    opens = {f[1]: f for f in frames}
-    n = len(text)
-    while True:
-        m = re.match(r"\s*\.\s*([A-Za-z_$][\w$]*)\s*", text[p : p + 80])
-        if not m:
-            return False
-        q = p + m.end()
-        if q >= n or text[q] != "(" or q not in opens:
-            return False
-        if m.group(1) in ("digest", "sign"):
-            return m.group(1) not in shadowed
-        if m.group(1) != "update":
-            return False
-        p = opens[q][2] + 1
-
-
-def _js_callee_reduces(text: str, f: list, frames: list, ctx: "_JsFlowCtx") -> bool:
-    """Does the call frame `f` reduce its arguments? Only on a RESOLVED receiver - see
-    `_JS_CRYPTO_CREATE`'s comment; an unbound `sign(...)`/`obj.update(...)` does not."""
-    callee = f[3]
-    parts = callee.split(".")
-    last = parts[-1]
-    if last in ctx.shadowed:
-        return False
-    if _js_is_crypto_call(callee, _JS_CRYPTO_REDUCERS, ctx):
-        return True
-    if last == "sign" and len(parts) >= 2 and parts[-2] in ctx.crypto_objs:
-        return True
-    if last == "test" and f[5] > 0 and text[f[5] - 1] == "/" and (
-        len(parts) == 1 or re.fullmatch(r"[dgimsuyv]*", parts[-2] or "")
-    ):
-        return True  # /re/flags.test(secret)
-    if last == "update":
-        if len(parts) >= 2 and parts[-2] in ctx.crypto_objs:
-            return True
-        if len(parts) == 2 and parts[0] == "":
-            # chained: `<create*(...) or .update(...)>.update(` -- find what it hangs on
-            j = f[5] - 1
-            while j >= 0 and text[j] in " \t\r\n":
-                j -= 1
-            prev = next((g for g in frames if g[0] == "(" and g[2] == j), None)
-            while prev is not None and prev[3].split(".")[-1] == "update" and prev[3].startswith("."):
-                j = prev[5] - 1
-                while j >= 0 and text[j] in " \t\r\n":
-                    j -= 1
-                prev = next((g for g in frames if g[0] == "(" and g[2] == j), None)
-            if prev is not None and _js_is_crypto_call(prev[3], _JS_CRYPTO_CREATE, ctx):
-                return _js_chain_ends_in_digest(text, f[2] + 1, frames, ctx.shadowed)
-    return False
-
-
 def _js_occurrence_is_direct(
     text: str, s: int, e: int, frames: list, outer_callee: str = "",
     ctx: "_JsFlowCtx" = _JS_DEFAULT_CTX,
 ) -> bool:
-    """False only when the value at text[s:e] provably passes a known REDUCER before
-    the end of `text` (see the module comment: an allowlist, fail-closed), or is a TLS
-    identity option of the client call it is a direct argument of. `outer_callee` names
-    the call whose argument list `text` is, if any."""
-    if _js_postfix_reduces(text, e, frames, ctx.shadowed):
-        return False
-    if text[:s].rstrip().endswith(_JS_COMPARISON_OPS) and not text[:s].rstrip().endswith("=>"):
+    """False only when the value at text[s:e] is reduced by a structural member read
+    straight off it (see `_JS_REDUCER_MEMBERS`), or is the TLS identity option of the
+    TLS client call its object literal is a direct argument of. `outer_callee` names
+    the call whose argument list `text` is, if any. Everything else is direct."""
+    if _js_member_reduces(text, e, ctx.overridden):
         return False
     containing = sorted((f for f in frames if f[1] < s and e <= f[2]), key=lambda f: f[1])
     for idx, f in enumerate(containing):
-        kind, op, cl = f[0], f[1], f[2]
-        if kind == "(":
-            if _js_callee_reduces(text, f, frames, ctx):
+        if f[0] != "{":
+            continue
+        op = f[1]
+        member_start = max([c for c in f[4] if c < s], default=op) + 1
+        member = text[member_start:s]
+        is_option = bool(_JS_TLS_OPTION_RE.match(member)) or (
+            not member.strip()
+            and _JS_TLS_OPTION_RE.match(text[s:e] + ":")
+            and text[e:].lstrip()[:1] in (",", "}")
+        )
+        if not is_option:
+            continue
+        parent = containing[idx - 1] if idx > 0 else None
+        if parent is None:
+            if _js_is_tls_callee(outer_callee, ctx.tls):
                 return False
-            if cl < len(text) and _js_postfix_reduces(text, cl + 1, frames, ctx.shadowed):
-                return False
-        elif kind == "{":
-            member_start = max([c for c in f[4] if c < s], default=op) + 1
-            member = text[member_start:s]
-            is_option = bool(_JS_TLS_OPTION_RE.match(member)) or (
-                not member.strip()
-                and _JS_TLS_OPTION_RE.match(text[s:e] + ":")
-                and text[e:].lstrip()[:1] in (",", "}")
-            )
-            if not is_option:
-                continue
-            parent = containing[idx - 1] if idx > 0 else None
-            if parent is None:
-                if _js_is_tls_callee(outer_callee, ctx.tls):
-                    return False
-            elif parent[0] == "(" and _js_is_tls_callee(parent[3], ctx.tls):
-                return False
+        elif parent[0] == "(" and _js_is_tls_callee(parent[3], ctx.tls):
+            return False
     return True
 
 
@@ -19738,7 +19513,7 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
         if ("cred", True) in hits:
             rule = "JS_CRED_EXFIL_FLOW"
         else:
-            # a DERIVED value of a hard secret (hashed, signed, measured, a TLS key)
+            # a DERIVED value of a hard secret (its size, a boolean test, a TLS key)
             # is as ambiguous as a token file: WARN, never FAIL.
             kinds = {k for k, _d in hits}
             rule = "JS_SECRET_FILE_FLOW" if kinds & {"cred", "credsoft"} else "JS_ENV_EXFIL_FLOW"
@@ -19827,7 +19602,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
         `_js_exfil_flows` and its documented limits.
       JS_SECRET_FILE_FLOW (warn) - a token/config credential file (.npmrc, .netrc, a
         secrets mount, Cookies, ...) reaches a network call, or a hard secret reaches
-        one only in derived form (hashed, signed, measured, a TLS key option): also the
+        one only as its size, a boolean test of it, or a TLS key option: also the
         normal shape of a client authenticating as the user, so never FAIL.
       JS_ENV_EXFIL_FLOW (warn) - process.env serialised whole by one of three spellings
         (JSON.stringify(process.env), Object.entries/values(process.env),
@@ -19916,7 +19691,7 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
                 ln,
                 "a value from a credential file reaches a network call \u2014 a token/"
                 "config file (.npmrc, .netrc, a secrets mount, ...) or a key only in "
-                "derived form (hashed, signed, measured, a TLS key) \u2014 normal for a "
+                "derived form (its length, a boolean test, a TLS key) \u2014 normal for a "
                 "client authenticating as you, and also how a secret is stolen",
             )
         else:
