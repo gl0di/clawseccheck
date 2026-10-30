@@ -2012,11 +2012,20 @@ python3 audit.py --log audit.log            # also write log to a local file
   ships outside its declared skills gets the same AST/taint pass a bundled skill's does, so a
   remote code loader at the plugin root is convicted exactly as it is one directory lower;
   runtime JS/TS gets eight lexical rules only (obfuscated eval, remote fetch-then-eval, dynamic
-  `child_process` command, dynamic `require`, native `dlopen`, a private-key, raw-credential or
-  `/proc/<pid>/environ` read reaching a network call, a token/config credential file reaching
-  one, the whole `process.env` sent out) - not the signature scan a bundled skill's files get,
-  so a pipe-to-shell string, a config read, or a credential read or outbound POST the lexical
-  pass cannot trace in loose plugin JS/TS is not checked. The report names those files in its
+  `child_process` command, dynamic `require`, native `dlopen`, a value read from a private key,
+  raw credentials or `/proc/<pid>/environ` reaching a network call as read, a token/config
+  credential file or a derived secret reaching one, and `process.env` serialised whole by
+  `JSON.stringify`, `Object.entries`/`values` or `{...process.env}`) - not the signature scan a
+  bundled skill's files get, so a pipe-to-shell string, a config read, or a credential read or
+  outbound POST the lexical pass cannot trace in loose plugin JS/TS is not checked. The
+  credential-flow rules are lexical and bounded: they do not follow a path assembled segment
+  by segment (`join(homedir(), '.aws', 'credentials')`) or spliced (`'/pr' + 'oc/...'`), a
+  value returned from a function, an aliased `readFileSync`/`fetch`, a value stored in an
+  object field, `XMLHttpRequest`/`undici`/`got`/`axios.create` clients, a stream's
+  `.on('data')` handler, a shell command that reads the file itself
+  (`execSync('curl -d @/proc/1/environ ...')`), separate `process.env.<KEY>` reads, or
+  `.env`, `.git-credentials` and `.config/gh/hosts.yml`, which are not on the credential-path
+  list. The report names those files in its
   coverage notes whether or not `package.json` declares `openclaw.extensions`, shell files
   (`.sh`, `.bash`, `.zsh`) outside a declared skill are named as not read, and the Danger axis
   says so instead of claiming a clean malware scan. Any Python file that cannot be read, fails

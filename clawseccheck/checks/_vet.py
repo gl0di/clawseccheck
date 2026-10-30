@@ -5486,15 +5486,18 @@ _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
     ),
     "JS_SECRET_FILE_FLOW": (
         "credential file sent to the network",
-        "A bundled .js/.ts file reads a token or credential file (.npmrc, .netrc, a "
-        "secrets mount, browser cookies, ...) and its contents reach a network call. "
-        "That is how a client authenticates as you, and also how such a token is "
-        "stolen. Read the flagged call and confirm the destination is the service that "
-        "credential belongs to, and nowhere else.",
+        "A bundled .js/.ts file reads a credential file and a value from it reaches a "
+        "network call: a token or config file (.npmrc, .netrc, a secrets mount, browser "
+        "cookies, ...), or a key or the process environment only in derived form (a "
+        "signature, hash, length, or a TLS key option). That is how a client "
+        "authenticates as you, and also how a secret is stolen; this lexical pass cannot "
+        "tell the two apart. Read the flagged call and confirm the destination is the "
+        "service that credential belongs to, and nowhere else.",
     ),
     "JS_ENV_EXFIL_FLOW": (
         "whole process environment sent to the network",
-        "A bundled .js/.ts file serialises the entire process.env into a network call, "
+        "A bundled .js/.ts file serialises the entire process.env (JSON.stringify, "
+        "Object.entries/values or {...process.env}) into a network call, "
         "so every secret held in an environment variable leaves the machine. Read the "
         "flagged call and confirm the destination is the skill's own documented backend "
         "and that sending the full environment, rather than named variables, is needed.",
