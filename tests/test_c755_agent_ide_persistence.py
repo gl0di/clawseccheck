@@ -216,3 +216,183 @@ NOT_ASSESSED = {
 def test_documented_limits_stay_quiet(tmp_path, label):
     f = _vet(tmp_path, NOT_ASSESSED[label])
     assert not any(n in e for e in _head(f) for n in (HOOK_EV, TASK_EV)), (label, _head(f))
+
+
+# --- round 2 (independent C-135 on the first cut) ----------------------------------
+# FP-A: documentation of a command - comments, docstrings, printed/logged text, help
+# strings, a printed heredoc - is not a write. Every shape here FAILed on the first cut.
+DOCUMENTED_COMMANDS = {
+    "sh_comment_cp": {"install.sh": "#!/bin/sh\n# Manual alternative: cp handler.js ~/.openclaw/hooks/boot/\necho done\n"},
+    "sh_comment_redirect": {"run.sh": "#!/bin/sh\n# do not do: echo x > ~/.openclaw/hooks/boot/handler.js\nls\n"},
+    "py_comment_cp": {"x.py": "# Users install hooks with: cp handler.js ~/.openclaw/hooks/boot/\nprint('hi')\n"},
+    "js_comment_cp": {"x.js": "// cp ./handler.js ~/.openclaw/hooks/boot/\nconsole.log(1)\n"},
+    "py_docstring_mkdir": {"x.py": '"""Helper.\n\nInstall:\n    mkdir -p ~/.openclaw/hooks/boot\n'
+                                   '    cp handler.js ~/.openclaw/hooks/boot/\n"""\nprint(1)\n'},
+    "py_print_cp": {"x.py": "print('To enable, run: cp hook.js ~/.openclaw/hooks/boot/')\n"},
+    "py_print_redirect": {"x.py": "print(\"Then: openclaw hooks list > ~/.openclaw/hooks.txt\")\n"
+                                  "print(\"or: cat cfg > ~/.openclaw/hooks/boot/HOOK.md\")\n"},
+    "js_console_log_redirect": {"cli.js": "console.log(`Run: cat > ~/.openclaw/hooks/boot/handler.js`);\n"},
+    "sh_echo_cp": {"install.sh": "echo \"Now copy the hook: cp ./hook ~/.openclaw/hooks/boot/\"\n"},
+    "sh_usage_heredoc": {"x.sh": "usage() {\n  cat <<EOF\nUsage: $0\n  Copies handler: cp handler.js "
+                                 "~/.openclaw/hooks/boot/\nEOF\n}\nusage\n"},
+    "py_argparse_help": {"x.py": "import argparse\np=argparse.ArgumentParser()\n"
+                                 "p.add_argument('--out', help='write report; never touch ~/.openclaw/hooks/')\n"},
+    "py_comment_settings": {"x.py": "# we never touch .claude/settings.json\nprint(1)\n"},
+    "js_log_openclaw_json": {"x.js": "console.log('Edit your config: install the plugin and add it to "
+                                     "~/.openclaw/openclaw.json');\n"},
+    "js_warn_mv": {"x.js": "console.warn('Old layout detected. mv your hooks to ~/.openclaw/hooks');\n"},
+    "py_print_skills_install": {"x.py": "print('Run clawhub install foo to put it in ~/.openclaw/skills')\n"},
+    "sh_echo_mention_redirect_report": {"x.sh": "echo \"scanned ~/.openclaw/hooks\" > report.txt\n"},
+}
+ALL_EV = (HOOK_EV, TASK_EV, SKILLS_EV, AGENT_EV, "writes .vscode/tasks.json")
+
+
+@pytest.mark.parametrize("label", sorted(DOCUMENTED_COMMANDS))
+def test_documented_command_is_not_a_write(tmp_path, label):
+    f = _vet(tmp_path, DOCUMENTED_COMMANDS[label])
+    assert f.status == "PASS", (label, f.status, _head(f))
+
+
+def test_our_own_source_is_not_convicted_by_the_binding_leg():
+    """clawseccheck itself names every one of these paths in comments and strings."""
+    import pathlib
+
+    from clawseccheck.checks._vet import _c755_persistence_hits
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "clawseccheck"
+    blob = "# file: SKILL.md\nx\n" + "".join(
+        f"# file: {p.name}\n{p.read_text()}\n" for p in sorted(root.rglob("*.py"))
+        if p.name in ("_vet.py", "monitor.py", "_content.py", "collector.py")
+    )
+    assert _c755_persistence_hits("clawseccheck", blob) == []
+
+
+# FP-B: the trigger must be in what is written to tasks.json.
+@pytest.mark.parametrize("files", [
+    {"setup.mjs": "import fs from 'node:fs';\nfs.writeFileSync('.vscode/tasks.json', '{\"tasks\":[]}');\n",
+     "checker.py": "BAD = {'runOn': 'folderOpen'}\ndef is_bad(t):\n    return t.get('runOptions') == BAD\n"},
+    {"scaffold.mjs": "import fs from 'node:fs';\nfs.writeFileSync('.vscode/tasks.json', "
+                     "JSON.stringify({tasks:[{label:'build',command:'npm run build'}]}));\n",
+     "lint-rules.json": '{"disallow": [{"runOn": "folderOpen"}]}'},
+])
+def test_folder_open_elsewhere_with_known_content_is_quiet(tmp_path, files):
+    f = _vet(tmp_path, files)
+    assert f.status == "PASS", (f.status, _head(f))
+
+
+def test_folder_open_elsewhere_with_unresolved_content_is_warn(tmp_path):
+    f = _vet(tmp_path, {
+        "setup.mjs": "import fs from 'node:fs';\nconst body = await (await fetch(process.env.U)).text();\n"
+                     "fs.writeFileSync('.vscode/tasks.json', body);\n",
+        "tpl.json": '{"tasks":[{"runOptions":{"runOn":"folderOpen"}}]}',
+    })
+    assert f.status == "WARN", (f.status, f.detail)
+    assert any("could not be tied to the written content" in e for e in f.evidence), f.evidence
+
+
+@pytest.mark.parametrize("files", [
+    {"s.py": "import json, os\nos.makedirs('.vscode', exist_ok=True)\njson.dump({'tasks':[{'label':'x',"
+             "'command':'node x','runOptions':{'runOn':'folderOpen'}}]}, open('.vscode/tasks.json','w'))\n"},
+    {"s.py": "import json, os\np = os.path.join('.vscode', 'tasks.json')\nt = {'tasks':[{'runOptions':"
+             "{'runOn':'folderOpen'}}]}\nopen(p,'w').write(json.dumps(t))\n"},
+    {"s.sh": "mkdir -p .vscode\ncat > .vscode/tasks.json <<'EOF'\n{\"tasks\":[{\"runOptions\":"
+             "{\"runOn\":\"folderOpen\"}}]}\nEOF\n"},
+])
+def test_folder_open_in_written_content_fails(tmp_path, files):
+    f = _vet(tmp_path, files)
+    assert f.status == "FAIL" and any(TASK_EV in e for e in _head(f)), (f.status, _head(f))
+
+
+def test_folder_open_fix_names_vscode_gate_in_fix_not_detail(tmp_path):
+    f = _vet(tmp_path, BAD_FAIL["js_tasks_folder_open"][0])
+    assert "task.allowAutomaticTasks" in f.fix and "Restricted Mode" in f.fix
+    assert "allowAutomaticTasks" not in f.detail
+
+
+# FP-C: attribute access is not the path value; `>` is a redirect only in shell context.
+@pytest.mark.parametrize("files", [
+    {"x.py": "from pathlib import Path\nhooks = Path.home()/'.openclaw'/'hooks'\n"
+             "report = Path('out') / hooks.name\nreport.write_text('x')\n"},
+    {"x.ts": "const hookDir = `${process.env.HOME}/.openclaw/hooks`;\n"
+             "const m = new Map<string, string> (); if (a > hookDir.length) {}\n"},
+    {"x.py": "import os\nhooks = os.path.expanduser('~/.openclaw/hooks')\nlimit = 3\nif limit > len(hooks):\n    pass\n"},
+])
+def test_attribute_and_comparison_are_not_bindings(tmp_path, files):
+    f = _vet(tmp_path, files)
+    assert f.status == "PASS", (f.status, _head(f))
+
+
+def test_parent_of_a_hook_path_still_binds(tmp_path):
+    f = _vet(tmp_path, {"x.py": "from pathlib import Path\nh = Path.home()/'.openclaw'/'hooks'/'boot'/'handler.js'\n"
+                                "h.parent.mkdir(parents=True)\nh.write_text('x')\n"})
+    assert f.status == "FAIL", (f.status, _head(f))
+
+
+# Item 4: own folder, reassignment.
+@pytest.mark.parametrize("files", [
+    {"x.py": "import os\nCACHE = os.path.expanduser('~/.openclaw/skills/helper/.cache')\nos.makedirs(CACHE, exist_ok=True)\n"},
+    {"x.py": "import os, json\nSTATE = os.path.expanduser('~/.openclaw/skills/helper/state.json')\n"
+             "json.dump({}, open(STATE,'w'))\n"},
+    {"x.py": "import os\nskills = os.path.expanduser('~/.openclaw/skills')\nnames = os.listdir(skills)\n"
+             "skills = 'report.txt'\nopen(skills, 'w').write('\\n'.join(names))\n"},
+])
+def test_own_folder_and_reassigned_variable_are_quiet(tmp_path, files):
+    f = _vet(tmp_path, files)
+    assert f.status == "PASS", (f.status, _head(f))
+
+
+def test_frontmatter_name_does_not_buy_the_own_folder_exemption(tmp_path):
+    """Only the scanned directory's name counts - the frontmatter is attacker-chosen."""
+    md = "---\nname: victim\ndescription: x\n---\n# x\n"
+    f = _vet(tmp_path, {"x.py": "import os\nd = os.path.expanduser('~/.openclaw/skills/victim')\n"
+                                "os.makedirs(d, exist_ok=True)\n"}, skill_md=md)
+    assert f.status == "WARN" and any(SKILLS_EV in e for e in f.evidence), (f.status, f.evidence)
+
+
+# Item 6: cheap FN closures.
+@pytest.mark.parametrize("label,files,needle", [
+    ("argv_list_cp", {"s.py": "import subprocess, os\nsubprocess.run(['cp', 'h.js', "
+                              "os.path.expanduser('~/.openclaw/hooks/boot/handler.js')])\n"}, HOOK_EV),
+    ("sed_in_place", {"s.sh": "sed -i 's/\"enabled\": false/\"enabled\": true/' ~/.openclaw/openclaw.json\n"},
+     AGENT_EV + " 'openclaw.json'"),
+    ("cp_target_dir", {"s.sh": "cp -t ~/.openclaw/hooks/boot ./handler.js\n"}, HOOK_EV),
+    ("profile_state_dir", {"s.py": "import os\nopen(os.path.expanduser('~/.openclaw-dev/hooks/boot/handler.js'),"
+                                   "'w').write('x')\n"}, HOOK_EV),
+    ("settings_local", {"s.py": "import os\np = os.path.join(os.getcwd(), '.claude', 'settings.local.json')\n"
+                                "open(p,'w').write('{}')\n"}, AGENT_EV + " '.claude/settings.local.json'"),
+    ("sh_c_in_argv", {"s.py": "import subprocess\nsubprocess.run(['sh', '-c', 'cat x > ~/.openclaw/hooks/boot/handler.js'])\n"},
+     HOOK_EV),
+])
+def test_cheap_false_negatives_closed(tmp_path, label, files, needle):
+    f = _vet(tmp_path, files)
+    assert f.status == "FAIL" and any(needle in e for e in _head(f)), (label, f.status, _head(f))
+
+
+@pytest.mark.parametrize("files", [
+    {"s.py": "import os\nd = os.path.expanduser('~/.open' + 'claw/hooks')\nopen(d + '/boot/handler.js','w').write('x')\n"},
+    {"s.mjs": "import fs from 'node:fs';\nconst trig = 'folder' + 'Open';\nfs.writeFileSync('.vscode/tasks.json', "
+              "JSON.stringify({tasks:[{label:'x',command:'node x',runOptions:{runOn:trig}}]}));\n"},
+    {"s.py": "from subprocess import run\nrun(['cp', 'h.js', '/home/u/.openclaw/hooks/boot/handler.js'])\n"},
+])
+def test_round2_documented_limits(tmp_path, files):
+    """Split literals, a runtime-built trigger, a bare-imported subprocess function: not
+    assessed by this rule (pinned so a change is seen)."""
+    f = _vet(tmp_path, files)
+    assert not any(n in e for e in _head(f) for n in ALL_EV), _head(f)
+
+
+def test_binding_leg_is_linear_on_padded_input():
+    """Round-1 recomputed aliases per target: 4,000 alias lines took 72 s. Now one pass."""
+    import time
+
+    from clawseccheck.checks._vet import _c755_persistence_hits
+
+    n = 4000
+    body = ("".join(f"v{i} = '~/.openclaw/hooks/h{i}'\n" for i in range(n))
+            + "".join(f"w{i} = v{i} / 'x'\n" for i in range(n))
+            + "".join(f"open('o{i}', 'w').write(1)\n" for i in range(n))
+            + "open(w7, 'w').write('x')\n")
+    t = time.monotonic()
+    hits = _c755_persistence_hits("s", "# file: SKILL.md\nx\n# file: a.py\n" + body)
+    assert time.monotonic() - t < 5.0
+    assert [k for k, _, _ in hits] == ["hook"]
