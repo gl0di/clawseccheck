@@ -18759,13 +18759,15 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
 #             read twice keeps both), and a sink hits if ANY is in window.       #
 #   direct  - crit additionally needs the value not provably REDUCED: it is    #
 #             DERIVED (-> JS_SECRET_FILE_FLOW, warn) only when it passes an      #
-#             allowlisted reducer (crypto MAC/hash/sign chain, `.length`/`.size`/ #
-#             `.byteLength`, `.includes/.startsWith/.endsWith/.test/.match`, a   #
-#             comparison) or is the TLS `key`/`cert`/`ca`/`pfx`/`passphrase`     #
+#             allowlisted reducer on a RESOLVED receiver (a crypto MAC/hash/sign #
+#             call or a create*().update().digest() chain, `.length`/`.size`/    #
+#             `.byteLength`, `.includes/.startsWith/.endsWith` on the secret,    #
+#             `/re/.test(secret)`, a comparison) or is the TLS `key`/`cert`/`ca`/`pfx`/`passphrase`     #
 #             option of a TLS client call it is a direct argument of. Every      #
-#             other transform -- a user function, slice, replace, join, a        #
-#             carrier -- stays direct (fail-closed): an AWS SigV4 client and an  #
-#             exfiltrator differ only in that reducer step.                      #
+#             other transform -- a user function, slice, replace, join, match,  #
+#             a carrier -- stays direct (fail-closed), and so does every reducer #
+#             name the file defines for itself (`_JS_SHADOW_RE`): an AWS SigV4   #
+#             client and an exfiltrator differ only in that reducer step.        #
 # Severity: a secret no client sends as-is (process environ, private key, raw    #
 # AWS credentials, wallet/keystore, keychain) reaching a sink directly is crit,  #
 # the grade analyze_python gives CRED_EXFIL_FLOW. A token/config file (.npmrc, a #
@@ -18871,19 +18873,55 @@ _JS_PIPE_RE = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*|\))\s*\.\s*pipe\s*\(\s*([
 # `.replace()`, `.join()` or a `body: {key: secret}` member escape crit (security review
 # of the first cut). Reducers: the crypto MAC/hash/sign family (createHmac/createHash/
 # createSign/createVerify/sign/verify/timingSafeEqual, and `.update(...)` on such a
-# chain), a boolean test (`.includes/.startsWith/.endsWith/.test/.match`), a size
-# (`.length/.size/.byteLength`), `.digest`, or a comparison operator. Measured shapes
+# chain ending in `.digest`/`.sign`), a boolean test (`.includes/.startsWith/.endsWith`
+# on the secret, a RegExp literal's `.test`), a size (`.length/.size/.byteLength`), or a
+# comparison operator. Measured shapes
 # that need it: an AWS SigV4 client HMACs ~/.aws/credentials and calls sts; a tool posts
 # `/proc/self/environ`'s length; one tests `environ.includes(...)`.
-_JS_REDUCER_CALLEES = frozenset(
-    {"createHmac", "createHash", "createSign", "createVerify", "sign", "verify",
-     "timingSafeEqual", "includes", "startsWith", "endsWith", "test", "match"}
-)
+# Callees that REDUCE an argument, each only on a resolved receiver (round-2 review: a
+# bare `sign`/`test`/`includes` may be a user function returning its input):
+#   crypto create*/sign/verify/timingSafeEqual - on a `crypto` binding, or destructured
+#     from it; `.update(...)` - chained directly onto such a create* call (or on a name
+#     assigned one) AND the chain ends in `.digest(...)`/`.sign(...)`;
+#   `.test(...)` - on a RegExp literal.
+# `match` is deliberately absent everywhere: it RETURNS the matched text
+# (`data.match(/[\s\S]*/)[0]` is the whole secret).
+_JS_CRYPTO_CREATE = frozenset({"createHmac", "createHash", "createSign", "createVerify"})
+_JS_CRYPTO_REDUCERS = _JS_CRYPTO_CREATE | {"sign", "verify", "timingSafeEqual"}
+# Members that reduce the secret they are read off (a size or a boolean test).
 _JS_REDUCER_MEMBERS = frozenset(
-    {"length", "size", "byteLength", "includes", "startsWith", "endsWith", "test",
-     "match", "digest"}
+    {"length", "size", "byteLength", "includes", "startsWith", "endsWith"}
 )
-_JS_CRYPTO_CHAIN_RE = re.compile(r"create(?:Hmac|Hash|Sign|Verify)\s*\(")
+_JS_CRYPTO_NS_BIND_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*['\"](?:node:)?crypto['\"]\s*\)"
+    r"|\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['\"](?:node:)?crypto['\"]"
+)
+_JS_CRYPTO_DESTRUCTURE_RE = re.compile(
+    r"\{([^{}]{1,300})\}\s*=\s*require\(\s*['\"](?:node:)?crypto['\"]\s*\)"
+    r"|\bimport\s*\{([^{}]{1,300})\}\s*from\s+['\"](?:node:)?crypto['\"]"
+)
+# A file that declares or assigns its own function under a reducer's name (`function
+# sign(`, `const test =`, `sign = (x) => x`, a method `update(x) {`, an object member
+# `digest: (x) =>`, `String.prototype.includes = ...`) gets NO reducer credit for that
+# name at all -- fail-closed, since the local definition may return its input.
+# (`length`/`size`/`byteLength` are left out: they are data properties of the read
+# value, which no assignment elsewhere in the file can turn back into the secret, and
+# `arr.length = 0` is ubiquitous.)
+_JS_REDUCER_NAMES = (
+    _JS_CRYPTO_REDUCERS | _JS_REDUCER_MEMBERS | {"update", "digest", "test", "match"}
+) - {"length", "size", "byteLength"}
+_JS_SHADOW_RE = re.compile(
+    r"\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("
+    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?::\s*[\w$.<>\[\]|& ]{1,80}?\s*)?=(?![=>])"
+    r"|\.\s*([A-Za-z_$][\w$]*)\s*=(?![=>])"
+    r"|(?:^|[{};,])\s*(?:(?:async|static|get|set)\s+)*([A-Za-z_$][\w$]*)\s*\([^()\n]{0,200}\)\s*\{"
+    r"|(?:^|[{,])\s*([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^()\n]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+    re.M,
+)
+_JS_CRYPTO_OBJ_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:([A-Za-z_$][\w$]*)\s*\.\s*)?"
+    r"(createHmac|createHash|createSign)\s*\("
+)
 _JS_COMPARISON_OPS = ("===", "!==", "==", "!=", "<=", ">=", "<", ">")
 # A secret handed to a TLS-capable client AS its identity option is authentication, not
 # exfiltration -- but only when the `{...}` holding it is itself a direct argument of
@@ -19030,7 +19068,7 @@ def _js_frames(text: str) -> "list[list]":
                 top[2] = i
                 stack.pop()
             elif ch == "$" and i + 1 < n and text[i + 1] == "{":
-                f = ["${", i + 1, n, "", []]
+                f = ["${", i + 1, n, "", [], i + 1]
                 frames.append(f)
                 stack.append(f)
                 i += 2
@@ -19040,7 +19078,7 @@ def _js_frames(text: str) -> "list[list]":
         if ch in "'\"":
             quote = ch
         elif ch == "`":
-            f = ["`", i, n, "", []]
+            f = ["`", i, n, "", [], i]
             frames.append(f)
             stack.append(f)
         elif ch == "(":
@@ -19050,11 +19088,11 @@ def _js_frames(text: str) -> "list[list]":
             k = j
             while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$."):
                 k -= 1
-            f = ["(", i, n, text[k:j], []]
+            f = ["(", i, n, text[k:j], [], k]
             frames.append(f)
             stack.append(f)
         elif ch in "{[":
-            f = [ch, i, n, "", []]
+            f = [ch, i, n, "", [], i]
             frames.append(f)
             stack.append(f)
         elif ch in ")]}":
@@ -19067,7 +19105,7 @@ def _js_frames(text: str) -> "list[list]":
     return frames
 
 
-def _js_postfix_reduces(text: str, p: int, frames: list) -> bool:
+def _js_postfix_reduces(text: str, p: int, frames: list, shadowed=()) -> bool:
     """Does the member chain starting at `p` (`.a.b(...)[i]...`) pass through a known
     reducer member, or end in a comparison operator?"""
     opens = {f[1]: f for f in frames}
@@ -19085,7 +19123,7 @@ def _js_postfix_reduces(text: str, p: int, frames: list) -> bool:
         m = re.match(r"\.\s*([A-Za-z_$][\w$]*)\s*", text[p : p + 80])
         if not m:
             break
-        if m.group(1) in _JS_REDUCER_MEMBERS:
+        if m.group(1) in _JS_REDUCER_MEMBERS and m.group(1) not in shadowed:
             return True
         q = p + m.end()
         if q < n and text[q] == "(" and q in opens:
@@ -19095,6 +19133,58 @@ def _js_postfix_reduces(text: str, p: int, frames: list) -> bool:
     return text[p : p + 3].startswith(_JS_COMPARISON_OPS) and text[p : p + 2] != "=>"
 
 
+class _JsFlowCtx:
+    """File-level bindings the reducer and TLS tests resolve receivers against."""
+
+    __slots__ = ("tls", "crypto_ns", "crypto_fns", "crypto_objs", "shadowed")
+
+    def __init__(self, tls=_JS_TLS_MODULES, crypto_ns=("crypto",), crypto_fns=(),
+                 crypto_objs=(), shadowed=()):
+        self.tls = set(tls)
+        self.crypto_ns = set(crypto_ns)
+        self.crypto_fns = set(crypto_fns)
+        self.crypto_objs = set(crypto_objs)
+        self.shadowed = set(shadowed)
+
+    @classmethod
+    def of(cls, masked: str) -> "_JsFlowCtx":
+        tls = set(_JS_TLS_MODULES) | {
+            (m.group(1) or m.group(3))
+            for m in _JS_NET_NS_BIND_RE.finditer(masked)
+            if (m.group(2) or m.group(4)) in _JS_TLS_MODULES and (m.group(1) or m.group(3))
+        }
+        shadowed = {
+            name
+            for m in _JS_SHADOW_RE.finditer(masked)
+            for name in m.groups()
+            if name in _JS_REDUCER_NAMES
+        }
+        if "crypto" not in masked:
+            return cls(tls, shadowed=shadowed)
+        ns = {"crypto"} | {
+            (m.group(1) or m.group(2)) for m in _JS_CRYPTO_NS_BIND_RE.finditer(masked)
+        }
+        fns: set = set()
+        for m in _JS_CRYPTO_DESTRUCTURE_RE.finditer(masked):
+            for entry in (m.group(1) or m.group(2) or "").split(","):
+                parts = [x.strip() for x in re.split(r":|\s+as\s+", entry.strip())]
+                if parts and parts[0] in _JS_CRYPTO_REDUCERS and parts[-1]:
+                    fns.add(parts[-1])
+        objs: set = set()
+        finals = [x for x in ("digest", "sign") if x not in shadowed]
+        for m in _JS_CRYPTO_OBJ_RE.finditer(masked) if finals else ():
+            name, recv, fn = m.group(1), m.group(2), m.group(3)
+            if fn in shadowed or not ((recv in ns) if recv else (fn in fns)):
+                continue
+            if re.search(r"(?<![\w$.])" + re.escape(name) + r"\s*\.\s*(?:"
+                         + "|".join(finals) + r")\s*\(", masked[m.end():]):
+                objs.add(name)
+        return cls(tls, ns, fns, objs, shadowed)
+
+
+_JS_DEFAULT_CTX = _JsFlowCtx()
+
+
 def _js_is_tls_callee(callee: str, tls_receivers) -> bool:
     parts = callee.strip(".").split(".")
     return (
@@ -19102,28 +19192,89 @@ def _js_is_tls_callee(callee: str, tls_receivers) -> bool:
     )
 
 
+def _js_is_crypto_call(callee: str, names, ctx: "_JsFlowCtx") -> bool:
+    """`callee` (a frame's dotted name) is one of `names` on a resolved crypto binding."""
+    parts = callee.split(".")
+    last = parts[-1]
+    if last not in names:
+        return False
+    if len(parts) == 1:
+        return last in ctx.crypto_fns
+    return parts[-2] in ctx.crypto_ns
+
+
+def _js_chain_ends_in_digest(text: str, p: int, frames: list, shadowed=()) -> bool:
+    """From `p`, the member chain is `.update(...)`* then `.digest(...)`/`.sign(...)`."""
+    opens = {f[1]: f for f in frames}
+    n = len(text)
+    while True:
+        m = re.match(r"\s*\.\s*([A-Za-z_$][\w$]*)\s*", text[p : p + 80])
+        if not m:
+            return False
+        q = p + m.end()
+        if q >= n or text[q] != "(" or q not in opens:
+            return False
+        if m.group(1) in ("digest", "sign"):
+            return m.group(1) not in shadowed
+        if m.group(1) != "update":
+            return False
+        p = opens[q][2] + 1
+
+
+def _js_callee_reduces(text: str, f: list, frames: list, ctx: "_JsFlowCtx") -> bool:
+    """Does the call frame `f` reduce its arguments? Only on a RESOLVED receiver - see
+    `_JS_CRYPTO_CREATE`'s comment; an unbound `sign(...)`/`obj.update(...)` does not."""
+    callee = f[3]
+    parts = callee.split(".")
+    last = parts[-1]
+    if last in ctx.shadowed:
+        return False
+    if _js_is_crypto_call(callee, _JS_CRYPTO_REDUCERS, ctx):
+        return True
+    if last == "sign" and len(parts) >= 2 and parts[-2] in ctx.crypto_objs:
+        return True
+    if last == "test" and f[5] > 0 and text[f[5] - 1] == "/" and (
+        len(parts) == 1 or re.fullmatch(r"[dgimsuyv]*", parts[-2] or "")
+    ):
+        return True  # /re/flags.test(secret)
+    if last == "update":
+        if len(parts) >= 2 and parts[-2] in ctx.crypto_objs:
+            return True
+        if len(parts) == 2 and parts[0] == "":
+            # chained: `<create*(...) or .update(...)>.update(` -- find what it hangs on
+            j = f[5] - 1
+            while j >= 0 and text[j] in " \t\r\n":
+                j -= 1
+            prev = next((g for g in frames if g[0] == "(" and g[2] == j), None)
+            while prev is not None and prev[3].split(".")[-1] == "update" and prev[3].startswith("."):
+                j = prev[5] - 1
+                while j >= 0 and text[j] in " \t\r\n":
+                    j -= 1
+                prev = next((g for g in frames if g[0] == "(" and g[2] == j), None)
+            if prev is not None and _js_is_crypto_call(prev[3], _JS_CRYPTO_CREATE, ctx):
+                return _js_chain_ends_in_digest(text, f[2] + 1, frames, ctx.shadowed)
+    return False
+
+
 def _js_occurrence_is_direct(
     text: str, s: int, e: int, frames: list, outer_callee: str = "",
-    tls_receivers=_JS_TLS_MODULES,
+    ctx: "_JsFlowCtx" = _JS_DEFAULT_CTX,
 ) -> bool:
     """False only when the value at text[s:e] provably passes a known REDUCER before
     the end of `text` (see the module comment: an allowlist, fail-closed), or is a TLS
     identity option of the client call it is a direct argument of. `outer_callee` names
     the call whose argument list `text` is, if any."""
-    if _js_postfix_reduces(text, e, frames):
+    if _js_postfix_reduces(text, e, frames, ctx.shadowed):
         return False
     if text[:s].rstrip().endswith(_JS_COMPARISON_OPS) and not text[:s].rstrip().endswith("=>"):
         return False
     containing = sorted((f for f in frames if f[1] < s and e <= f[2]), key=lambda f: f[1])
     for idx, f in enumerate(containing):
-        kind, op, cl, callee = f[0], f[1], f[2], f[3]
+        kind, op, cl = f[0], f[1], f[2]
         if kind == "(":
-            last = callee.strip(".").split(".")[-1]
-            if last in _JS_REDUCER_CALLEES:
+            if _js_callee_reduces(text, f, frames, ctx):
                 return False
-            if last == "update" and _JS_CRYPTO_CHAIN_RE.search(text[max(0, op - 400) : op]):
-                return False
-            if cl < len(text) and _js_postfix_reduces(text, cl + 1, frames):
+            if cl < len(text) and _js_postfix_reduces(text, cl + 1, frames, ctx.shadowed):
                 return False
         elif kind == "{":
             member_start = max([c for c in f[4] if c < s], default=op) + 1
@@ -19137,9 +19288,9 @@ def _js_occurrence_is_direct(
                 continue
             parent = containing[idx - 1] if idx > 0 else None
             if parent is None:
-                if _js_is_tls_callee(outer_callee, tls_receivers):
+                if _js_is_tls_callee(outer_callee, ctx.tls):
                     return False
-            elif parent[0] == "(" and _js_is_tls_callee(parent[3], tls_receivers):
+            elif parent[0] == "(" and _js_is_tls_callee(parent[3], ctx.tls):
                 return False
     return True
 
@@ -19291,7 +19442,7 @@ def _js_rhs_text(masked: str, eq: int) -> str:
 
 
 def _js_value_direct_in_rhs(
-    masked: str, eq: int, s: int, e: int, tls_receivers=_JS_TLS_MODULES
+    masked: str, eq: int, s: int, e: int, ctx: "_JsFlowCtx" = _JS_DEFAULT_CTX
 ) -> bool:
     """Is masked[s:e] carried unreduced into the assignment whose `=` is at `eq`?
     Fail-closed: a span the RHS scan cannot place counts as direct."""
@@ -19300,7 +19451,7 @@ def _js_value_direct_in_rhs(
     if not (base <= s and e <= base + len(rhs)):
         return True
     return _js_occurrence_is_direct(
-        rhs, s - base, e - base, _js_frames(rhs), "", tls_receivers
+        rhs, s - base, e - base, _js_frames(rhs), "", ctx
     )
 
 
@@ -19341,11 +19492,7 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
         return True
 
     receivers, bound_names = _js_net_bindings(masked)
-    tls_receivers = set(_JS_TLS_MODULES) | {
-        (m.group(1) or m.group(3))
-        for m in _JS_NET_NS_BIND_RE.finditer(masked)
-        if (m.group(2) or m.group(4)) in _JS_TLS_MODULES and (m.group(1) or m.group(3))
-    }
+    fctx = _JsFlowCtx.of(masked)
     # (kind, start, end) of every credential-read call / env dump
     reads: "list[tuple[str, int, int]]" = []
     read_end_kind: "dict[int, str]" = {}
@@ -19367,7 +19514,7 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
         lhs = _js_statement_lhs_at(masked, start)
         if lhs:
             taint(lhs[0], kind, end, _js_value_direct_in_rhs(
-                masked, lhs[1], start, end, tls_receivers
+                masked, lhs[1], start, end, fctx
             ))
         cb = re.search(
             r"(?:\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*=>"
@@ -19418,7 +19565,7 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
                 if not uses:
                     continue
                 use_direct = any(
-                    _js_occurrence_is_direct(rhs, s, e, frames, "", tls_receivers)
+                    _js_occurrence_is_direct(rhs, s, e, frames, "", fctx)
                     for s, e in uses
                 )
                 for kind, _p, direct in near:
@@ -19486,7 +19633,7 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
                 if frames is None:
                     frames = _js_frames(args)
                 hits.add((kind, _js_occurrence_is_direct(
-                    args, rs - a0, min(re_, a1) - a0, frames, callee, tls_receivers
+                    args, rs - a0, min(re_, a1) - a0, frames, callee, fctx
                 )))
         if tainted_near:
             for name in tainted:
@@ -19499,7 +19646,7 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
                 if frames is None:
                     frames = _js_frames(args)
                 use_direct = any(
-                    _js_occurrence_is_direct(args, s, e, frames, callee, tls_receivers)
+                    _js_occurrence_is_direct(args, s, e, frames, callee, fctx)
                     for s, e in uses
                 )
                 for kind, _p, direct in near:
