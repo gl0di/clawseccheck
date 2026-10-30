@@ -3,6 +3,23 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+- **`--vet` catches agent and IDE config persistence written by a skill's script (B13).** The
+  October 2026 tensorlake worm persisted by writing editor and agent configs so its payload ran
+  again when a project was opened. A bundled script that writes into OpenClaw's managed hook
+  directory (`~/.openclaw/hooks/`), or writes `.vscode/tasks.json` while also shipping VS Code's
+  `runOn: folderOpen` auto-run trigger, now FAILs like a write to `openclaw.json` or
+  `.claude/settings.json` already did; a plain `tasks.json` write stays quiet. A script that
+  creates a skill under `~/.openclaw/skills/` is a WARN, because an installer does the same.
+- **The agent-config write rule no longer depends on spacing.** It used to pair the file name
+  with a write call by character distance, so the same `openclaw.json` edit FAILed with a compact
+  dict literal and passed once the literal was spaced out. The write is now tied to the path
+  through the call's destination argument or the variable that holds the path. Instructions in
+  SKILL.md prose, and a preinstall hook that downloads a runtime and runs a plain payload, are
+  unchanged.
+
 ## [4.4.4] - 2026-10-24
 
 **Two security fixes in the tool's own advice and printed commands, OpenClaw 2026.10.6, and a
