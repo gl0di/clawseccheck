@@ -3408,11 +3408,13 @@ def _norm_dm_policy(channel_name, value):
 #   qa-channel baseUrl                       [tag] qa-channel/src/accounts.ts:18
 #   synology-chat token                      [tag] synology-chat/src/accounts.ts:26
 # Predicate form - see `_IMPLICIT_DEFAULT_ACCOUNT_PREDICATES` below for each rule.
-# Single-account channels (no named accounts in the vendor's account list at all, so the
-# base node IS the running account whatever `accounts` holds): a2a
+# Single-account channels (the vendor never reads an account's own config from `accounts`,
+# so the base node IS what every running account reads, whatever `accounts` holds): a2a
 # ([tag] a2a/src/accounts.ts:6), reef ([tag] reef/src/channel.ts:126), msteams
 # ([tag] msteams/src/channel-config.ts:49, createTopLevelChannelConfigAdapter with no
-# listAccountIds -> ["default"], dist channel-config-helpers-Bi1bDD1D.mjs:219).
+# listAccountIds -> ["default"], dist channel-config-helpers-Bi1bDD1D.mjs:219), nostr
+# ([tag] nostr/src/accounts.ts:27-42: resolveNostrAccountBase builds every account from the
+# channel node alone; its config schema is additionalProperties:false with no `accounts`).
 #
 # Any channel NOT in these three tables (a third-party channel plugin, or a channel
 # added after 2026.10.9) is UNGROUNDED, and its base node is KEPT: dropping it is the
@@ -3420,8 +3422,9 @@ def _norm_dm_policy(channel_name, value):
 # choice, 2026-10-30: 0 of the 10 openclaw.json* files under ~/.openclaw has any channel
 # with a non-empty `accounts`, and every fixture channel with `accounts` is telegram or
 # slack (both grounded), so no real or fixture config changes verdict through the
-# default. The env-var route (e.g. `$SLACK_BOT_TOKEN`) is invisible from the config file
-# and stays the documented residual false negative described in the docstring below.
+# default. The env-var route (e.g. `$SLACK_BOT_TOKEN`) is not read and stays the documented
+# residual false negative described in the docstring below (including the part of it the
+# config's own `env` block sets, which IS in the file).
 _IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
     "telegram": ("botToken", "tokenFile"),
     "x": ("userId", "clientId", "refreshToken"),
@@ -3439,7 +3442,7 @@ _IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
 }
 
 # Channels whose vendor account list never names an account from `accounts`.
-_SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "msteams"})
+_SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "msteams", "nostr"})
 
 # Top-level `channels.*` keys that are config blocks, not channels (dist
 # evaluation-Cxe0aZKk.mjs:795 RESERVED_CHANNEL_CONFIG_KEYS).
@@ -3564,10 +3567,7 @@ _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES = {
         )
         or _has_configured_secret_input(n.get("authToken"))
     ),
-    # [tag] nostr/src/types.ts:24-29 (resolveImplicitAccountId). The implicit id is
-    # `defaultAccount` when set, so it can coincide with a configured account; that
-    # collision is not modelled and the base node is kept (the non-fail-open side).
-    "nostr": lambda n: _has_configured_secret_input(n.get("privateKey")),
+    # nostr is a single-account channel (`_SINGLE_ACCOUNT_CHANNELS`), not a predicate.
 }
 
 
@@ -3612,33 +3612,60 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 # adding it back would read a base policy the entry overrides: a spurious FAIL.
 #
 # Which keys are that entry: the vendor finds the default account's entry with
-# `resolveAccountKey` (dist account-lookup-BAaS-Jak.mjs:26-51): the exact key wins, else any
-# key whose normalized form equals "default". The normalizer is trim + lowercase by
-# default, and `normalizeAccountId` (agent-id canonicalization, dist agent-id-D1-Q6vR4.mjs
-# :14-20: trim, lowercase, invalid characters to "-", leading/trailing dashes dropped) when
-# the channel passes it (telegram, irc, clickclack, twitch, tlon, nextcloud-talk at the tag)
-# OR when the runtime plugin-metadata snapshot carries an account-key policy for the
-# channel - which is not observable from the config file. So the WIDER canonicalization is
-# applied to every channel: a key it maps to "default" suppresses the raw base node. Where
-# only the narrower trim+lowercase would apply, that over-reads the collision and can drop a
-# live base node (a false negative) - the chosen direction, because the opposite error is a
-# spurious FAIL. The entry must be an object: `{...base, ...accountConfig}` with a null /
-# string / array entry leaves the base policy in force, and `_resolved_channel_nodes`
-# already falls back to the raw node for such a block. A DISABLED default entry still
-# suppresses it: the merged account carries `enabled: false` and the vendor runs nothing
-# for it (slack accounts.ts:166-170, telegram accounts.ts:130-134, x accounts.ts:34 [tag]).
+# `resolveAccountKey` (dist account-lookup-BAaS-Jak.mjs:26-51). The exact key `default`
+# always wins. Otherwise a key matches when `normalize(key) == "default"`, where `normalize`
+# is - per channel, read at the tag - one of:
+#   trim + lowercase (the SDK default, `normalizeLowercaseStringOrEmpty`) for every channel
+#     that resolves the account through `createAccountListHelpers(...).resolveAccountConfig`
+#     or `resolveAccountEntry` without passing a normalizer: discord, feishu, googlechat,
+#     imessage, line, mattermost, slack, sms, synology-chat, whatsapp, x, zalo, zalouser
+#     (e.g. [tag] slack/src/accounts.ts:66-81, x/src/accounts.ts:20-26,
+#     whatsapp/src/account-config.ts:12). Unknown/third-party channels get the same rule.
+#   `normalizeAccountId` (agent-id canonicalization, dist agent-id-D1-Q6vR4.mjs:14-20: trim,
+#     lowercase, runs of invalid characters to "-", leading/trailing dashes dropped) where the
+#     channel passes it: clickclack ([tag] clickclack/src/accounts.ts:85), irc
+#     (irc/src/accounts.ts:40), raft (raft/src/accounts.ts:23), qa-channel
+#     (qa-channel/src/accounts.ts:16), telegram (telegram/src/account-config.ts:14-17),
+#     matrix (matrix/src/account-selection.ts:102), nextcloud-talk
+#     (nextcloud-talk/configured-state.ts:17), twitch (twitch/src/config.ts:51-55).
+#   exact key only for buzz (`root.accounts?.[accountId]`, [tag] buzz/src/types.ts:58).
+#   signal: its plugin manifest declares a `channelAccountKeyPolicies` entry
+#     (`canonicalAliasesRequireOwnField: "account"`, [tag] signal/openclaw.plugin.json:13-15;
+#     loaded at runtime through the plugin-metadata snapshot, dist account-lookup:27-30). With a
+#     policy, a trim+lowercase match counts directly, and a wider `normalizeAccountId` match
+#     counts only when that entry has its own non-blank `account` string.
+# The entry must be an object: `{...base, ...accountConfig}` with a null / string / array
+# entry leaves the base policy in force, and `_resolved_channel_nodes` already falls back to
+# the raw node for such a block. A DISABLED default entry still counts as the default
+# account: the merged account carries `enabled: false` and the vendor runs nothing for it
+# ([tag] slack/src/accounts.ts:166-170, telegram/src/accounts.ts:130-134, x/src/accounts.ts:34).
 #
-# Exceptions, read at the tag:
+# Channels where the raw base is the default account whatever `accounts` holds:
 #   tlon      the default account's config is the RAW channel node, never merged with
-#             `accounts.default` (resolveMergedTlonAccountConfig, tlon/src/types.ts:54-60),
-#             so the base node stays.
-#   a2a / reef / msteams  no named accounts at all - the base is the only account.
-#   twitch    the default account is `accounts.default` overlaid with a fixed subset of base
-#             fields (getAccountConfig, twitch/src/config.ts:36-90) - never the raw base, and
-#             that subset holds no dmPolicy/groupPolicy - so the raw base is not added.
+#             `accounts.default` (resolveMergedTlonAccountConfig, tlon/src/types.ts:54-60).
+#   a2a / reef / msteams / nostr  single-account channels (see above).
+# twitch is NOT special-cased: with no default entry the raw base is added, and with one it is
+# not. The vendor's default account there is `accounts.default` overlaid with a fixed subset
+# of base fields (getAccountConfig, twitch/src/config.ts:36-90) - in neither case the raw base
+# or the merge - but that subset holds no dmPolicy/groupPolicy, so no verdict read here differs.
 _BASE_IS_THE_DEFAULT_ACCOUNT = frozenset({"tlon"}) | _SINGLE_ACCOUNT_CHANNELS
+_DEFAULT_KEY_CANONICAL_CHANNELS = frozenset({
+    "clickclack", "irc", "raft", "qa-channel", "telegram", "matrix", "nextcloud-talk", "twitch",
+})
+_DEFAULT_KEY_EXACT_CHANNELS = frozenset({"buzz"})
+_DEFAULT_KEY_OWN_FIELD = {"signal": "account"}
 _ACCOUNT_ID_VALID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}", re.IGNORECASE)
 _ACCOUNT_ID_INVALID_CHARS_RE = re.compile(r"[^a-z0-9_-]+")
+# ECMAScript WhiteSpace + LineTerminator - what `String.prototype.trim` strips. Python's
+# `str.strip()` differs (it strips U+001C-U+001F, keeps U+FEFF).
+_JS_TRIM_CHARS = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
+    "\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _js_trim(value: str) -> str:
+    return value.strip(_JS_TRIM_CHARS)
 
 
 def _canonical_account_id(key) -> str | None:
@@ -3647,7 +3674,7 @@ def _canonical_account_id(key) -> str | None:
     representable form."""
     if not isinstance(key, str):
         return None
-    trimmed = key.strip()
+    trimmed = _js_trim(key)
     if not trimmed:
         return None
     lowered = trimmed.lower()
@@ -3657,12 +3684,37 @@ def _canonical_account_id(key) -> str | None:
     return canonical or None
 
 
+def _is_default_account_entry(name: str, key, entry) -> bool:
+    """True when configured ``accounts[key]`` is the entry the vendor reads as channel
+    *name*'s default account - the per-channel key matching grounded above."""
+    if not isinstance(entry, dict) or not isinstance(key, str):
+        return False
+    if key == "default":
+        return True
+    if name in _DEFAULT_KEY_EXACT_CHANNELS:
+        return False
+    lowered_match = _js_trim(key).lower() == "default"
+    own_field = _DEFAULT_KEY_OWN_FIELD.get(name)
+    if own_field is not None:
+        if lowered_match:
+            return True
+        value = entry.get(own_field)
+        return (
+            _canonical_account_id(key) == "default"
+            and isinstance(value, str)
+            and bool(_js_trim(value))
+        )
+    if name in _DEFAULT_KEY_CANONICAL_CHANNELS:
+        return _canonical_account_id(key) == "default"
+    return lowered_match
+
+
 def _base_node_runs_unmerged(name: str, c: dict) -> bool:
     """True when channel *c*'s RAW base node runs as an account of its own beside its
     configured ``accounts``: a non-empty ``accounts`` block, a base node that spawns the
     implicit default account (``_channel_has_implicit_default_account``), and no
-    configured object entry that IS the default account (see the grounding above). The one
-    gate every consumer that re-adds the base node goes through.
+    configured entry that IS the default account (``_is_default_account_entry``). The gate
+    the verdict consumers listed at ``_live_channel_nodes`` re-add the base node through.
     """
     if not isinstance(c, dict):
         return False
@@ -3674,14 +3726,30 @@ def _base_node_runs_unmerged(name: str, c: dict) -> bool:
     if name in _BASE_IS_THE_DEFAULT_ACCOUNT:
         return True
     return not any(
-        isinstance(entry, dict) and _canonical_account_id(key) == "default"
-        for key, entry in accounts.items()
+        _is_default_account_entry(name, key, entry) for key, entry in accounts.items()
     )
 
 
 def _live_channel_nodes(name: str, c: dict) -> list:
     """``_resolved_channel_nodes(c)`` plus the raw base node when it runs unmerged
-    (``_base_node_runs_unmerged``) - every node a running account of channel *name* reads."""
+    (``_base_node_runs_unmerged``) - every node a running account of channel *name* reads.
+
+    Verdict consumers that go through this gate: ``_open_channels`` (B2/B55),
+    ``_b171_open_channels``, ``_open_wildcard_group_channels``,
+    ``_resolved_default_input_channels`` (the gate directly), B372's
+    ``_allow_bots_account_nodes`` (the gate directly), B140, B371,
+    ``risk._open_group_channels``, ``risk._open_channel_entries``' mention reading and A1's
+    ``_unpolicied_open_wildcard_group_channels``.
+
+    NOT every walk does. Known remaining raw ``[c] + accounts.values()`` walks, which count
+    the base node always (the false-positive direction; pre-existing, none produces a FAIL):
+    ``risk._open_channel_entries``' non-wildcard branch, ``risk._channels_with_visibility_all``,
+    ``risk._has_multi_user_channel``, ``behavioral._group_untrusted_origin_channels``,
+    ``_external_input_channels``, ``_untrusted_input_channels``,
+    ``_substituted_dm_policy_channels``, ``_channels_with_context_visibility_all``,
+    ``_capability._one_id_bounded_channels``, and the flag-presence reads in
+    ``_config.check_dangerous_overrides`` and ``_agents.check_sender_identity``.
+    """
     nodes = list(_resolved_channel_nodes(c))
     if _base_node_runs_unmerged(name, c):
         nodes.append(c)

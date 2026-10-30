@@ -26,9 +26,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import FAIL, PASS
 from clawseccheck.checks import (
-    _BASE_IS_THE_DEFAULT_ACCOUNT,
     _IMPLICIT_DEFAULT_ACCOUNT_KEYS,
     _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES,
     _SINGLE_ACCOUNT_CHANNELS,
@@ -112,7 +113,8 @@ VESTIGIAL = {
 
 def _channel(case: str) -> str:
     for name in sorted(
-        {*_IMPLICIT_DEFAULT_ACCOUNT_KEYS, *_IMPLICIT_DEFAULT_ACCOUNT_PREDICATES}, key=len,
+        {*_IMPLICIT_DEFAULT_ACCOUNT_KEYS, *_IMPLICIT_DEFAULT_ACCOUNT_PREDICATES,
+         *_SINGLE_ACCOUNT_CHANNELS}, key=len,
         reverse=True,
     ):
         if case == name or case.startswith(name + "-"):
@@ -306,37 +308,135 @@ EVERY = {
 # a configured account that closes every surface it inherits from the base
 CLOSED = {"dmPolicy": "pairing", "groupPolicy": "allowlist", "allowFrom": ["u1"],
           "groups": {"g1": {"requireMention": True}}}
-# accounts block -> does the raw base still run as its own account (for an ordinary channel)?
-DEFAULT_SHAPES = {
-    "no-default": ({"w": dict(CLOSED)}, True),
-    "default": ({"default": dict(CLOSED)}, False),
-    "Default": ({"Default": dict(CLOSED)}, False),
-    "padded": ({" default ": dict(CLOSED)}, False),
-    "canonical": ({"default!": dict(CLOSED)}, False),
-    "disabled-default": ({"default": {"enabled": False}, "w": dict(CLOSED)}, False),
-    "non-object-default": ({"default": None, "w": dict(CLOSED)}, True),
-    "default-beside-other": ({"default": dict(CLOSED), "w": dict(CLOSED)}, False),
+
+# INDEPENDENT ORACLE, written from the vendor sources at tag v2026.10.9 (not imported from
+# the code under test): which configured key is the entry the vendor reads as the default
+# account, per channel class.
+KEYS = ["default", "Default", " default ", "DEFAULT", "default!", "-default-", "(default)",
+        "default."]
+_TRIM_LOWER_MATCH = {"default", "Default", " default ", "DEFAULT"}
+VENDOR_CLASS = {
+    # resolveAccountKey with no normalizer: trim + lowercase (+ unknown channels, SDK default)
+    **{n: "trim-lower" for n in (
+        "discord", "feishu", "googlechat", "imessage", "line", "mattermost", "slack", "sms",
+        "synology-chat", "whatsapp", "x", "zalo", "zalouser", "acme-chat")},
+    # normalizeAccountId passed: every key above canonicalizes to "default"
+    **{n: "canonical" for n in (
+        "clickclack", "irc", "raft", "qa-channel", "telegram", "matrix", "nextcloud-talk",
+        "twitch")},
+    "buzz": "exact",      # root.accounts?.[accountId]
+    "signal": "signal",   # manifest policy: lowercase direct, canonical only with own `account`
+    # the raw base is what the default (or only) account reads
+    **{n: "base" for n in ("tlon", "a2a", "reef", "msteams", "nostr")},
 }
-MATRIX = [(n, sh) for n in sorted(EVERY) for sh in sorted(DEFAULT_SHAPES)]
+_MATCHES = {
+    "trim-lower": _TRIM_LOWER_MATCH,
+    "canonical": set(KEYS),
+    "exact": {"default"},
+    "signal": _TRIM_LOWER_MATCH,  # without the entry's own `account`
+    "base": set(),
+}
+
+
+def _vendor_base_runs(name: str, key: str | None, entry=None) -> bool:
+    """Does the vendor run the raw base as its own account, given one extra configured key?"""
+    cls = VENDOR_CLASS[name]
+    if cls == "base" or key is None or not isinstance(entry, dict):
+        return True
+    if cls == "signal" and isinstance(entry.get("account"), str) and entry["account"].strip():
+        return False  # every KEY canonicalizes to "default" and the entry owns `account`
+    return key not in _MATCHES[cls]
+
+
+def test_the_oracle_covers_every_channel():
+    assert set(VENDOR_CLASS) == set(EVERY)
+
+
+# accounts block -> (key that may be the default entry, that entry)
+SHAPES = {f"key {k!r}": ({k: dict(CLOSED)}, k, CLOSED) for k in KEYS}
+SHAPES.update({
+    "no default": ({"w": dict(CLOSED)}, None, None),
+    "disabled default": ({"default": {"enabled": False}, "w": dict(CLOSED)}, "default",
+                         {"enabled": False}),
+    "non-object default": ({"default": None, "w": dict(CLOSED)}, "default", None),
+    "default beside another": ({"default": dict(CLOSED), "w": dict(CLOSED)}, "default", CLOSED),
+})
+MATRIX = [(n, sh) for n in sorted(EVERY) for sh in sorted(SHAPES)]
 
 
 def _expected_separate(name: str, shape: str) -> bool:
-    if name in _BASE_IS_THE_DEFAULT_ACCOUNT:  # tlon, a2a, reef, msteams: base IS the account
-        return True
-    return DEFAULT_SHAPES[shape][1]
+    _, key, entry = SHAPES[shape]
+    return _vendor_base_runs(name, key, entry)
 
 
 def test_the_gate_matches_the_vendor_default_account_rule():
     def ok(row):
         name, shape = row
-        c = {**EVERY[name], "dmPolicy": "open", "accounts": DEFAULT_SHAPES[shape][0]}
+        c = {**EVERY[name], "dmPolicy": "open", "accounts": SHAPES[shape][0]}
         return _base_node_runs_unmerged(name, c) is _expected_separate(name, shape)
     assert _misses(MATRIX, ok) == []
 
 
+def test_signal_wide_keys_count_only_with_their_own_account():
+    def runs(key, entry):
+        c = {**EVERY["signal"], "dmPolicy": "open", "accounts": {key: entry}}
+        return _base_node_runs_unmerged("signal", c)
+    for key in KEYS:
+        lowered = key in _TRIM_LOWER_MATCH
+        assert runs(key, {"dmPolicy": "pairing"}) is not lowered, key
+        assert runs(key, {"dmPolicy": "pairing", "account": "+1555"}) is False, key
+        assert runs(key, {"dmPolicy": "pairing", "account": "  "}) is not lowered, key
+
+
+def test_buzz_matches_the_exact_key_only():
+    def runs(key):
+        c = {**EVERY["buzz"], "dmPolicy": "open", "accounts": {key: dict(CLOSED)}}
+        return _base_node_runs_unmerged("buzz", c)
+    assert runs("default") is False
+    assert runs("Default") is True and runs(" default ") is True
+
+
+def test_nostr_with_accounts_still_reads_the_base():
+    """nostr has no `accounts` in its schema and resolveNostrAccountBase ignores it."""
+    for key in ("default", "w"):
+        c = {"dmPolicy": "open", "accounts": {key: dict(CLOSED)}}
+        assert _base_node_runs_unmerged("nostr", c) is True, key
+    assert _b2({"channels": {"nostr": {"dmPolicy": "open", "accounts": {
+        "default": {"dmPolicy": "pairing"}}}}}) == FAIL
+
+
+@pytest.mark.parametrize("mutant", ["canonical everywhere", "exact only"])
+def test_mutating_the_key_matcher_breaks_the_oracle(monkeypatch, mutant):
+    """Mutation check: both retracted matchers disagree with the vendor table."""
+    from clawseccheck.checks import _shared
+
+    def canonical(name, key, entry):
+        return isinstance(entry, dict) and _shared._canonical_account_id(key) == "default"
+
+    def exact(name, key, entry):
+        return isinstance(entry, dict) and key == "default"
+
+    monkeypatch.setattr(_shared, "_is_default_account_entry",
+                        canonical if mutant == "canonical everywhere" else exact)
+
+    def ok(row):
+        name, shape = row
+        c = {**EVERY[name], "dmPolicy": "open", "accounts": SHAPES[shape][0]}
+        return _base_node_runs_unmerged(name, c) is _expected_separate(name, shape)
+    assert _misses(MATRIX, ok) != []
+
+
+def test_the_reviewer_repro_discord_default_bang_fails_again():
+    cfg = {"channels": {"discord": {"token": V, "dmPolicy": "open", "allowFrom": ["*"],
+                                    "accounts": {"default!": {"dmPolicy": "pairing"}}}}}
+    assert _b2(cfg) == FAIL
+    cfg["channels"]["discord"]["accounts"] = {"Default": {"dmPolicy": "pairing"}}
+    assert _b2(cfg) == PASS
+
+
 def _consumers_agree(row) -> bool:
     name, shape = row
-    accounts = DEFAULT_SHAPES[shape][0]
+    accounts = SHAPES[shape][0]
     live = _expected_separate(name, shape)
     # base: open policy and an unrestricted wildcard group, no own allowFrom
     open_node = {**EVERY[name], "enabled": True, "dmPolicy": "open", "groupPolicy": "open",
@@ -344,7 +444,7 @@ def _consumers_agree(row) -> bool:
     cfg = {"channels": {name: open_node}}
     # the non-object default keeps the raw node through _resolved_channel_nodes' own
     # schema-drift fallback, so every consumer sees it regardless of the gate
-    seen = live or shape == "non-object-default"
+    seen = live or shape == "non-object default"
     got = {
         "_open_channels": name in _open_channels(cfg),
         "_b171_open_channels": name in _b171_open_channels(cfg),
@@ -379,7 +479,7 @@ def test_every_policy_consumer_follows_the_gate():
 def test_allow_bots_nodes_follow_the_gate():
     def ok(row):
         name, shape = row
-        c = {**EVERY[name], "accounts": DEFAULT_SHAPES[shape][0]}
+        c = {**EVERY[name], "accounts": SHAPES[shape][0]}
         root = {k: v for k, v in c.items() if k != "accounts"}
         return (root in _allow_bots_account_nodes(name, c)) is _expected_separate(name, shape)
     assert _misses([r for r in MATRIX if r[0] in ("discord", "slack", "tlon")], ok) == []

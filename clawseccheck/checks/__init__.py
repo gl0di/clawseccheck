@@ -116,6 +116,7 @@ from ._shared import (
     _BASE_IS_THE_DEFAULT_ACCOUNT,
     _base_node_runs_unmerged,
     _canonical_account_id,
+    _is_default_account_entry,
     _live_channel_nodes,
     _SINGLE_ACCOUNT_CHANNELS,
     _slack_implicit_default,

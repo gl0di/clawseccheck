@@ -1573,9 +1573,10 @@ def _allow_bots_account_nodes(name: str, c: dict) -> list:
     plus the implicit default account when one is really running beside them.
 
     The add-back goes through the shared ``_base_node_runs_unmerged`` gate (B-1002), the
-    same one every other consumer of the implicit default account uses. A configured entry
-    that IS the default account - matched the way the vendor's ``resolveAccountKey`` finds
-    it, so ``Default`` / `` default `` count too, and a disabled entry counts as well - is
+    one the verdict consumers listed at ``_live_channel_nodes`` use. A configured entry that
+    IS the default account - matched per channel the way the vendor's account lookup finds it
+    (``_is_default_account_entry``: for discord/slack/feishu/googlechat ``Default`` and
+    `` default `` count, ``default!`` does not), and a disabled entry counts as well - is
     one account with the implicit one (``listCombinedAccountIds`` builds a Set; its config
     is the merged ``accounts.default`` node already in the list), so the root is not added
     a second time. A non-object ``default`` entry leaves the base policy in force and keeps

@@ -355,9 +355,9 @@ class TestAccountNamedDefault:
 
     @pytest.mark.parametrize("key", ["Default", " default", "DEFAULT"])
     def test_a_case_or_space_variant_is_the_default_account_too(self, tmp_path, key):
-        """B-1002 grounded what this test used to leave open: the default account's config is
-        found with ``resolveAccountKey`` (dist account-lookup-BAaS-Jak.mjs), which matches a
-        key whose trimmed, lowercased form is ``default`` even when no normalizer is passed.
+        """B-1002 grounded what this test used to leave open: discord's default account
+        config is found with ``resolveAccountKey`` (dist account-lookup-BAaS-Jak.mjs) and no
+        normalizer, which matches a key whose trimmed, lowercased form is ``default``.
         So the variant entry IS the merged default account and the root is not a second
         one; the shared ``_base_node_runs_unmerged`` gate applies it to every consumer."""
         cfg = _ch(discord={**self._BASE, "accounts": {key: {"allowBots": False}}})
@@ -558,8 +558,8 @@ class TestDisabledDefaultAccountKeepsTheImplicitNode:
 
     A DISABLED object ``default`` is different, grounded in B-1002: the merged default
     account carries ``enabled: false`` and the vendor computes ``enabled`` from that merge
-    (slack accounts.ts:166-170, telegram accounts.ts:130-134, x accounts.ts:34 at tag
-    v2026.10.9), so the one default account is off and the root does not run either."""
+    (discord/src/accounts.ts:123-126 at tag v2026.10.9, the channel these tests run), so
+    the one default account is off and the root does not run either."""
 
     _BASE = {"token": "t", **_OPEN}
 
