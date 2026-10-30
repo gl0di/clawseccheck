@@ -18918,6 +18918,14 @@ _JS_SHADOW_RE = re.compile(
     r"|(?:^|[{,])\s*([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^()\n]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
     re.M,
 )
+_JS_CRYPTO_REBIND_RE = re.compile(
+    r"\b(?:const|let|var|function|class)\s+crypto\b"
+    r"|(?<![\w$.])crypto\s*=(?![=>])"
+    r"|[{,]\s*crypto\s*[,}:=]"
+    r"|\(\s*crypto\s*[,)=]"
+    r"|,\s*crypto\s*[,)=]"
+    r"|\bimport\s+(?:\*\s+as\s+)?crypto\s+from\s+['\"](?!(?:node:)?crypto['\"])"
+)
 _JS_CRYPTO_OBJ_RE = re.compile(
     r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:([A-Za-z_$][\w$]*)\s*\.\s*)?"
     r"(createHmac|createHash|createSign)\s*\("
@@ -19138,7 +19146,7 @@ class _JsFlowCtx:
 
     __slots__ = ("tls", "crypto_ns", "crypto_fns", "crypto_objs", "shadowed")
 
-    def __init__(self, tls=_JS_TLS_MODULES, crypto_ns=("crypto",), crypto_fns=(),
+    def __init__(self, tls=_JS_TLS_MODULES, crypto_ns=(), crypto_fns=(),
                  crypto_objs=(), shadowed=()):
         self.tls = set(tls)
         self.crypto_ns = set(crypto_ns)
@@ -19161,9 +19169,17 @@ class _JsFlowCtx:
         }
         if "crypto" not in masked:
             return cls(tls, shadowed=shadowed)
-        ns = {"crypto"} | {
-            (m.group(1) or m.group(2)) for m in _JS_CRYPTO_NS_BIND_RE.finditer(masked)
-        }
+        # Never trusted by NAME: a namespace counts only when bound to the node module.
+        # The bare global `crypto` counts only when nothing in the file declares,
+        # assigns, destructures or takes a parameter named `crypto` beyond those binds.
+        bound = [(m.group(1) or m.group(2)) for m in _JS_CRYPTO_NS_BIND_RE.finditer(masked)]
+        ns = set(bound)
+        rebinds = len(_JS_CRYPTO_REBIND_RE.findall(masked))
+        own = bound.count("crypto")
+        if rebinds > own:
+            ns.discard("crypto")
+        elif rebinds == 0:
+            ns.add("crypto")
         fns: set = set()
         for m in _JS_CRYPTO_DESTRUCTURE_RE.finditer(masked):
             for entry in (m.group(1) or m.group(2) or "").split(","):
