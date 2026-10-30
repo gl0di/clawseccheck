@@ -37,6 +37,7 @@ from .catalog import (
     BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN, ast_for,
 )
 
+from .scanbudget import ScanBudgetExceeded
 from .scoring import grade_for
 from .skillast import analyze_javascript, analyze_shell, capability_families
 
@@ -634,6 +635,14 @@ def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> b
         analyzer = analyze_shell if lang == "sh" else analyze_javascript
         try:
             result = analyzer(source, relpath)
+        except ScanBudgetExceeded as exc:
+            # B-1005 round 3: the JS credential-flow pass raises a COOPERATIVE budget
+            # stop (owner None) on a file past its work caps. This file was then not
+            # fully read, so it bars a PASS (an honest UNKNOWN), and the dossier still
+            # renders. A timer-owned deadline is someone else's and propagates.
+            if exc.owner is not None:
+                raise
+            return True
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             # B-983: `analyze_shell`/`analyze_javascript` are large recursive parsers with
             # no general depth bound (unlike the `py` branch's `ast.parse`, which this

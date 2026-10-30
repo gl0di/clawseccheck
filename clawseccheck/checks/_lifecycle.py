@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Callable, NamedTuple
 from .. import pathprobe
+from ..scanbudget import ScanBudgetExceeded
 from .. import attest as _attest
 from .. import openclawdist as _openclawdist  # B-502: C4 single-run version-rollback signal
 from .. import trajectory as _trajectory  # B-294/B189: session pivot for erased cron jobs (JSONL sidecar)
@@ -3092,6 +3093,13 @@ def _b349_assess_target(source: str, filename: str) -> "tuple[list, str | None]"
                 noted.append(finding.rule)
     except (RecursionError, ValueError):
         unreadable = unreadable or "could not be parsed"
+    except ScanBudgetExceeded as exc:
+        # B-1005 round 3: a cooperative work-cap stop from the JS credential-flow pass
+        # (owner None) means this hook was not fully read - say so, do not abort B349.
+        # A timer-owned deadline belongs to the caller and propagates.
+        if exc.owner is not None:
+            raise
+        unreadable = unreadable or "too large to analyse within the scan budget"
     return signals, noted, unreadable
 
 
