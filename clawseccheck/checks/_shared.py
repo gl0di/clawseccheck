@@ -3730,6 +3730,75 @@ def _base_node_runs_unmerged(name: str, c: dict) -> bool:
     )
 
 
+# B-1006: channels whose SIBLING accounts inherit the default account's entry as
+# shared defaults, grounded on OpenClaw v2026.10.9 (read; whatsapp also executed through the
+# installed dist's mergeAccountConfig). Value = (precedence, keys of the default entry that
+# are NOT shared):
+#   whatsapp   whatsapp/src/account-config.ts:9-42 - channelConfig = {...root, ...defaultShared}
+#              then mergeAccountConfig {...channelConfig, ...account}: the default entry
+#              OVERRIDES the root (so `accounts.default.dmPolicy: pairing` governs `work` even
+#              under a root `dmPolicy: open`). Not shared: enabled, name, authDir, selfChatMode.
+#   googlechat googlechat/src/accounts.ts:62-90 - {...defaultShared, ...{...root, ...account}}:
+#              the ROOT wins over the default entry; the default entry only fills keys the
+#              root and the account both leave unset. Not shared: enabled,
+#              dangerouslyAllowNameMatching, serviceAccount, serviceAccountFile.
+# Swept (extensions/*/src, every accounts/account-config resolver): no other channel spreads
+# the default entry into siblings - matrix, telegram, signal, slack, discord, feishu, imessage,
+# line, irc, mattermost, zalo, zalouser, sms, synology-chat, twitch (fixed field subset, no
+# policy), x, raft, qa-channel and clickclack merge root + the one account only.
+_DEFAULT_ENTRY_SHARED_TO_SIBLINGS = {
+    "whatsapp": ("default_over_root", frozenset({"enabled", "name", "authDir", "selfChatMode"})),
+    "googlechat": ("root_over_default", frozenset({
+        "enabled", "dangerouslyAllowNameMatching", "serviceAccount", "serviceAccountFile",
+    })),
+}
+_POLICY_KEYS = ("dmPolicy", "groupPolicy")
+
+
+def _resolved_account_nodes(name: str, c: dict) -> list:
+    """``_resolved_channel_nodes(c)`` for channel *name*, plus the default-entry inheritance
+    the vendor applies to sibling accounts (``_DEFAULT_ENTRY_SHARED_TO_SIBLINGS``).
+
+    Channels not in that table, a malformed ``accounts`` block, or no default entry: exactly
+    ``_resolved_channel_nodes(c)``. When several entries could be the default account and
+    none is the exact ``default`` key the vendor's pick is unclear, so a sibling keeps only
+    its own explicit policy keys (no inherited ``dmPolicy``/``groupPolicy``): the unclear case
+    never manufactures an open account.
+    """
+    plan = _DEFAULT_ENTRY_SHARED_TO_SIBLINGS.get(name)
+    accounts = c.get("accounts") if isinstance(c, dict) else None
+    if plan is None or not isinstance(accounts, dict) or not accounts:
+        return _resolved_channel_nodes(c)
+    if any(not isinstance(acc, dict) for acc in accounts.values()):
+        return _resolved_channel_nodes(c)
+    order, unshared = plan
+    defaults = [k for k, v in accounts.items() if _is_default_account_entry(name, k, v)]
+    if not defaults:
+        return _resolved_channel_nodes(c)
+    exact = "default" in defaults
+    chosen = "default" if exact else (defaults[0] if len(defaults) == 1 else None)
+    base = {k: v for k, v in c.items() if k not in ("accounts", "defaultAccount")}
+    shared = (
+        {k: v for k, v in accounts[chosen].items() if k not in unshared}
+        if chosen is not None else {}
+    )
+    out = []
+    for key, acc in accounts.items():
+        if key == chosen or (chosen is None and key in defaults):
+            out.append({**base, **acc})
+        elif order == "default_over_root":
+            node = {**base, **shared, **acc}
+            if chosen is None:
+                node = {**node, **{k: acc[k] for k in _POLICY_KEYS if k in acc}}
+                for k in _POLICY_KEYS:
+                    if k not in acc:
+                        node.pop(k, None)
+            out.append(node)
+        else:
+            out.append({**shared, **base, **acc})
+    return out or [c]
+
+
 def _live_channel_nodes(name: str, c: dict) -> list:
     """``_resolved_channel_nodes(c)`` plus the raw base node when it runs unmerged
     (``_base_node_runs_unmerged``) - every node a running account of channel *name* reads.
@@ -3750,7 +3819,7 @@ def _live_channel_nodes(name: str, c: dict) -> list:
     ``_capability._one_id_bounded_channels``, and the flag-presence reads in
     ``_config.check_dangerous_overrides`` and ``_agents.check_sender_identity``.
     """
-    nodes = list(_resolved_channel_nodes(c))
+    nodes = list(_resolved_account_nodes(name, c))
     if _base_node_runs_unmerged(name, c):
         nodes.append(c)
     return nodes

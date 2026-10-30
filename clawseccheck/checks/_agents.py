@@ -36,6 +36,7 @@ from ._shared import (
     _base_node_runs_unmerged,
     _channel_has_implicit_default_account,
     _live_channel_nodes,
+    _resolved_account_nodes,
     _channels,
     _channels_with_context_visibility_all,
     _config_unreadable,
@@ -49,7 +50,6 @@ from ._shared import (
     _key_advice,
     _mention_gate_scopes,
     _norm_group_policy,
-    _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
     _unclassified_leg_verbs,
@@ -1582,7 +1582,7 @@ def _allow_bots_account_nodes(name: str, c: dict) -> list:
     a second time. A non-object ``default`` entry leaves the base policy in force and keeps
     the root. See the grounding comment above ``_base_node_runs_unmerged``.
     """
-    nodes = list(_resolved_channel_nodes(c))
+    nodes = list(_resolved_account_nodes(name, c))
     if _base_node_runs_unmerged(name, c):
         nodes.append({k: v for k, v in c.items() if k != "accounts"})
     return nodes

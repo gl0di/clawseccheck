@@ -224,6 +224,7 @@ _pos_in_skill_md_section
 _prose_binding
 _read_jsonl_tail
 _reassembly
+_resolved_account_nodes
 _resolved_channel_nodes
 _retired_key_note
 _runtime_fetch_matches

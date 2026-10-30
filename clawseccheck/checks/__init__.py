@@ -118,6 +118,7 @@ from ._shared import (
     _canonical_account_id,
     _is_default_account_entry,
     _live_channel_nodes,
+    _resolved_account_nodes,
     _SINGLE_ACCOUNT_CHANNELS,
     _slack_implicit_default,
     _matrix_implicit_default,
