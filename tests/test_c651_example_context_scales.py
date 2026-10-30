@@ -924,7 +924,10 @@ def test_analyze_shell_matches_the_original_on_generated_scripts():
 
 def test_analyze_shell_matches_the_original_on_real_fixture_files():
     shells = _fixture_files(("*.sh", "*.bash", "*.zsh"), 40)
-    others = _fixture_files(("SKILL.md", "*.md", "*.py", "*.js", "*.txt"), 80)
+    # Every file, not a stride sample: the stride moved whenever a fixture was added, and
+    # the positive control below rode on which few files it happened to land on (adding
+    # four unrelated fixtures took it from 3 to 2). The whole set is ~700 files, <1 s.
+    others = _fixture_files(("SKILL.md", "*.md", "*.py", "*.js", "*.txt"), 1_000_000)
     files = shells + [o for o in others if o not in shells]
     assert len({str(f) for f in files}) >= 50
     fired = 0

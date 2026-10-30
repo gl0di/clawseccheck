@@ -74,6 +74,7 @@ from ._shared import (
     SECRET_KEY_RE,
     _DESTRUCTIVE_HINTS,
     _HOOK_EXEC_RE,
+    _MANIFEST_HEADER_RE,  # B-1004: per-file sections of a skill blob
     _agents_without_exec_gate,
     _config_unreadable,
     _custom,
@@ -2806,6 +2807,71 @@ def check_human_approval(ctx: Context) -> Finding:
     )
 
 
+# ---------- B42 leg (B-1004): node-gyp build steps in a skill's binding.gyp ----------
+# npm runs `node-gyp rebuild` for a package that ships a `binding.gyp` and declares no
+# install/preinstall script (grounded: @npmcli/run-script 10.0.4 `run-script-pkg.js`,
+# `gypfile !== false && isNodeGypPackage(path)`), and node-gyp then executes every
+# `actions`/`rules`/`postbuilds` argv in it - code at install time with NO lifecycle
+# script for the hook regex above to see. MAL-2026-18377 (`spectral-core`) is exactly
+# that: `gypfile: true`, a `type: none` target, one inline `node -e` action reading
+# /proc/1/environ and posting it. Before this leg, --vet read that package as INSTALL.
+#
+# WHY WARN, AND WHY THIS DISCRIMINATOR - measured 2026-10-30 on this box: 950 .gyp/.gypi
+# files (59 distinct) under /, of which 5 carry `actions` at all - the 2 lab samples of
+# this attack, node-sqlite3's and better-sqlite3's `deps/sqlite3.gyp`, and a Chromium
+# test file inside node-gyp. Every honest one runs a script FILE (`node ./extract.js`,
+# `node copy.js`, `python <path>.py`), and node-sqlite3's is ALSO a `type: none` target
+# with no sources - so "type none, no sources" would have convicted the most widely
+# installed native addon there is, and is not used. What separates the attack is an
+# INLINE interpreter (`node -e`, `python -c`, `sh -c`, ...), which nothing else can read
+# - a script file is scanned by the content scanners like any other file. The command is
+# also put through the SAME `_HOOK_EXEC_RE` a postinstall hook gets above, so the same
+# bytes earn the same verdict whichever install-time door they come through. 59 distinct
+# files is a small population, which is one more reason this is WARN and never FAIL: an
+# inline build step is unusual, not proven hostile.
+#
+# Scope, stated: every file named `binding.gyp` in the skill (the file node-gyp builds),
+# not a `.gyp`/`.gypi` it pulls in through `dependencies`/`includes`; `<!(...)` expansions
+# are NOT judged here, because `<!(node -p "require('node-addon-api').include")` is the
+# ordinary honest idiom and would WARN on every N-API addon. Both are read for the
+# dependency tree by deptree/B349.
+#
+# A binding.gyp that cannot be read is a WARN, not an UNKNOWN, and that is deliberate.
+# --vet drops every ring UNKNOWN (`_run_content_ring`: a ring UNKNOWN usually means "input
+# absent"), so an UNKNOWN here would read INSTALL - and gyp `eval`s the file, so
+# `'-' + 'e'` is all an author needs to make it unreadable to a literal parser while
+# node-gyp runs it unchanged. That is not ambiguity in the attacker's favour: gyp's own
+# `--check` mode (`input.py` `CheckedEval`) accepts plain literals only, and all 18
+# distinct root binding.gyp files on this box parse as one (2026-10-30), so a build
+# config that is NOT a plain literal is itself the unusual shape.
+_B42_GYP_FILE = "binding.gyp"
+
+
+def _b42_gyp_build_steps(name: str, blob: str, redact) -> list:
+    """WARN lines for the `binding.gyp` sections of one skill's blob."""
+    warns: list = []
+    for m in _MANIFEST_HEADER_RE.finditer(blob):
+        if m.group("name").strip() != _B42_GYP_FILE:
+            continue
+        capped: list = []
+        steps, variables = _deptree.extract_gyp_build_steps(m.group("body"), capped=capped)
+        for reason in capped:
+            warns.append(
+                f"{name}: {_B42_GYP_FILE} {reason}, so what node-gyp runs at install "
+                "time is unknown"
+            )
+        for step in steps:
+            command = " ".join(step.argv)
+            if not (_deptree.runs_inline_code(step.argv, variables) or _HOOK_EXEC_RE.search(command)):
+                continue
+            label = f" '{step.name}'" if step.name else ""
+            warns.append(
+                f"{name}: {_B42_GYP_FILE} {step.key[:-1]}{label} runs code when npm builds "
+                f"it at install time (node-gyp) -> '{redact(command)[:80]}'"
+            )
+    return warns
+
+
 def check_install_policy(ctx: Context) -> Finding:
     from ..logsafe import redact as _redact  # noqa: PLC0415
 
@@ -2830,6 +2896,9 @@ def check_install_policy(ctx: Context) -> Finding:
                     f"{name}: {kind}install hook runs code on install/update -> "
                     f"'{_redact(cmd)[:80]}'"
                 )
+    # B-1004: node-gyp build steps - install-time code with no lifecycle script at all.
+    for name, blob in skills.items():
+        warns.extend(_b42_gyp_build_steps(name, blob, _redact))
     # skill dirs writable by other local users (anyone can drop a skill the agent loads)
     perm_bad = _writable_skill_dirs(ctx)
     for path, who, mode in (perm_bad or [])[:6]:
@@ -3127,7 +3196,10 @@ def check_dependency_tree_hooks(ctx: Context) -> Finding:
     # differ in where the reader has to look, not in how dangerous they are.
     sites = [(h.package, h.relpath, h.phase, h.command, h.targets) for h in scan.hooks]
     sites += [
-        (d.package, d.relpath, _deptree.GYP_FILENAME, d.command, d.targets)
+        (d.package, d.relpath,
+         _deptree.GYP_FILENAME if getattr(d, "kind", "expansion") == "expansion"
+         else f"{_deptree.GYP_FILENAME} {d.kind}",  # B-1004: a build step, not `<!(...)`
+         d.command, d.targets)
         for d in scan.build_directives
     ]
 

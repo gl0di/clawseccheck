@@ -63,12 +63,30 @@ inline expression, no file) resolves to nothing and is never assessed, exactly a
 ``node-gyp-build`` is not. What is NOT followed, and is stated rather than implied: GYP's
 own ``includes`` directive can pull in a ``.gypi`` carrying further expansions. Following
 it is its own change with its own adversarial pass.
+
+GYP'S BUILD-STEP KEYS ARE READ TOO (B-1004). ``<!(...)`` is not the only way a
+``binding.gyp`` runs a command. A target's ``actions`` list is a build step whose
+``action`` argv node-gyp executes during ``node-gyp rebuild`` - again with no lifecycle
+script - and the malicious ``spectral-core`` package (MAL-2026-18377) used exactly that:
+a ``type: none`` target with an inline ``node -e`` action. Grounded against the gyp that
+node-gyp 12.3.0 vendors (``gyp/pylib/gyp``): ``input.py``'s ``LoadOneBuildFile`` reads the
+file as a Python expression (``eval`` with empty builtins); ``actions``, ``rules`` and
+``postbuilds`` are the target keys whose entries carry an ``action`` argv that the
+generators turn into a shell command (``generator/make.py`` ``WriteActions`` /
+``WriteRules``; ``postbuilds`` only on the mac flavor, via
+``xcode_emulation.GetSpecPostbuildCommands``); and a list key may carry gyp's ``=`` /
+``+`` / ``?`` merge suffix (``input.py`` ``MergeDicts``). ``copies`` only copies files
+and is not read. This module reads those keys with ``ast.literal_eval`` - literals only,
+nothing evaluated - and a file that is not a plain literal is DISCLOSED as unexamined,
+never read as clean. ``conditions`` are not evaluated: an action under any branch counts.
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import shlex
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -98,6 +116,17 @@ MAX_GYP_EXPANSIONS = 40
 # 4 KB is far above any real command (the longest measured on this box is 47 bytes).
 MAX_GYP_COMMAND_BYTES = 4096
 MAX_GYP_MARKERS = 2000
+
+# B-1004: bounds on the build-step walk. The literal parse is already bounded by
+# MAX_GYP_BYTES (and CPython's own parser nesting limit); these bound the walk over the
+# parsed value and how many build steps one file may contribute. A hit is disclosed.
+MAX_GYP_ACTIONS = 40
+MAX_GYP_NODES = 50_000
+
+# The gyp target keys whose entries carry an `action` argv that is executed (see the
+# module docstring for where each is grounded). Matched after stripping gyp's
+# `=`/`+`/`?` list-merge suffix.
+GYP_EXEC_KEYS = ("actions", "rules", "postbuilds")
 
 # node-gyp's default build config, at the package root. See the module docstring for why
 # only this path is read and no nested or `gypfile`-redirected one is.
@@ -152,6 +181,23 @@ class BuildDirective:
     relpath: str
     command: str
     targets: tuple = ()
+    # B-1004: which gyp construct this came from - "expansion" for `<!(...)`, else the
+    # build-step key (`actions` / `rules` / `postbuilds`). Evidence only.
+    kind: str = "expansion"
+
+
+@dataclass(frozen=True)
+class GypBuildStep:
+    """One `action` argv from a gyp `actions` / `rules` / `postbuilds` entry (B-1004).
+
+    `argv` is the list exactly as written, every element coerced to `str`; gyp variable
+    references (`<(x)`) are left unexpanded. `name` is the entry's `action_name` /
+    `rule_name` / `postbuild_name` when it is a string, else "".
+    """
+
+    key: str
+    name: str
+    argv: tuple
 
 
 @dataclass
@@ -527,6 +573,190 @@ def _is_commented_out(text: str, marker: int) -> bool:
     return False
 
 
+def _strip_merge_suffix(key: str) -> str:
+    """gyp's list-merge suffixes (`actions+`, `actions=`, `actions?`) name the same key."""
+    return key[:-1] if key[-1:] in ("=", "+", "?") else key
+
+
+def extract_gyp_build_steps(text: str, *, capped=None) -> tuple:
+    """Every build-step `action` argv in a gyp file's `actions`/`rules`/`postbuilds` (B-1004).
+
+    Returns `(steps, variables)`: a tuple of `GypBuildStep` and a dict of every string
+    value found under any `variables` dict (gyp's trailing `%` default marker stripped from
+    the name), for `runs_inline_code` to resolve a `<(name)` interpreter with.
+
+    The file is parsed with `ast.literal_eval`, which builds literals and evaluates nothing.
+    gyp itself `eval`s the file, so a file that gyp accepts but that is not a plain literal
+    (an expression such as `'a' + 'b'`) cannot be read here: that is disclosed through
+    *capped* as unexamined, never returned as "no build steps". So is a value that is not
+    a dict, and a walk that hits `MAX_GYP_NODES` or `MAX_GYP_ACTIONS`. The walk is
+    iterative, so a deep value cannot exhaust the interpreter's stack.
+    """
+    try:
+        with warnings.catch_warnings():
+            # An invalid escape in a gyp string ("\/") is a SyntaxWarning, not an error,
+            # and it must not print on the user's terminal.
+            warnings.simplefilter("ignore")
+            value = ast.literal_eval(text)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        _note_cap(capped, "build config is not a plain literal — its build steps were not examined")
+        return (), {}
+    if not isinstance(value, dict):
+        _note_cap(capped, "build config is not a plain literal — its build steps were not examined")
+        return (), {}
+
+    steps: list = []
+    variables: dict = {}
+    stack: list = [value]
+    nodes = 0
+    while stack:
+        nodes += 1
+        if nodes > MAX_GYP_NODES:
+            _note_cap(capped, "build config is too large to walk — the rest of its build steps were not examined")
+            break
+        cur = stack.pop()
+        if isinstance(cur, (list, tuple)):
+            stack.extend(cur)
+            continue
+        if not isinstance(cur, dict):
+            continue
+        for key, val in cur.items():
+            if not isinstance(key, str) or not key:
+                continue
+            base = _strip_merge_suffix(key)
+            if base == "variables" and isinstance(val, dict):
+                for vname, vval in val.items():
+                    if isinstance(vname, str) and isinstance(vval, str):
+                        variables.setdefault(vname.rstrip("%"), vval)
+            if base in GYP_EXEC_KEYS and isinstance(val, (list, tuple)):
+                for entry in val:
+                    if not isinstance(entry, dict):
+                        continue
+                    argv = entry.get("action")
+                    if isinstance(argv, str):
+                        argv = [argv]
+                    if not isinstance(argv, (list, tuple)) or not argv:
+                        continue
+                    if len(steps) >= MAX_GYP_ACTIONS:
+                        _note_cap(capped, "build-step cap reached — the rest of the build config was not examined")
+                        break
+                    label = next(
+                        (entry[k] for k in ("action_name", "rule_name", "postbuild_name")
+                         if isinstance(entry.get(k), str)),
+                        "",
+                    )
+                    steps.append(GypBuildStep(base, label[:80], tuple(str(a) for a in argv)))
+            stack.append(val)
+    return tuple(steps), variables
+
+
+# B-1004: interpreters that can run code passed on the command line, and the flags that
+# make them do so. Each flag is the interpreter's own documented inline-code switch:
+# node `-e/--eval` and `-p/--print`; python `-c`; POSIX shells `-c`; perl and ruby `-e`;
+# `cmd /c`; PowerShell `-Command`/`-EncodedCommand`. A short-option CLUSTER is accepted
+# where the interpreter allows one (`bash -lc`, `python -Bc`, `perl -ne`, `node -pe`).
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_INLINE_SHORT_RE = {
+    "node": re.compile(r"-(?:e|p|pe)\Z"),
+    "python": re.compile(r"-[A-Za-z]*c\Z"),
+    "shell": re.compile(r"-[A-Za-z]*c[A-Za-z]*\Z"),
+    "perl": re.compile(r"-[A-Za-z]*[eE][A-Za-z]*\Z"),
+    "ruby": re.compile(r"-[A-Za-z]*e\Z"),
+}
+# Options that consume the NEXT argv element, so that element is not the script path.
+_TAKES_VALUE = {
+    "node": frozenset({"-r", "--require", "--import", "--loader", "--experimental-loader",
+                       "-C", "--conditions", "--input-type", "--title"}),
+    "python": frozenset({"-W", "-X"}),
+    "shell": frozenset({"-o", "+o", "-O", "+O"}),
+    "perl": frozenset({"-I", "-M", "-m"}),
+    "ruby": frozenset({"-I", "-r"}),
+}
+_GYP_VAR_REF_RE = re.compile(r"[<>]\(([A-Za-z_][\w.]*)\)\Z")
+_GENERIC_INLINE = frozenset({"-e", "-c", "-p", "--eval", "--print", "/c", "/C"})
+
+
+def _interpreter_family(arg0: str) -> "str | None":
+    base = re.split(r"[\\/]", arg0)[-1].lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base in ("node", "nodejs"):
+        return "node"
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", base):
+        return "python"
+    if base in _SHELLS:
+        return "shell"
+    if base in ("perl", "ruby", "cmd"):
+        return base
+    if base in ("powershell", "pwsh"):
+        return "powershell"
+    return None
+
+
+def runs_inline_code(argv, variables=None) -> bool:
+    """True when *argv* starts an interpreter on code given in the argv itself (B-1004).
+
+    `["node", "-e", "<js>"]` - the MAL-2026-18377 shape - is True; `["node", "./extract.js",
+    ...]`, the shape a real native build uses (node-sqlite3 unpacks its bundled sources this
+    way), is False: a script FILE ships with the package and is read by the content
+    scanners, an inline string has nothing else to read it.
+
+    A leading `env` (and its `NAME=value` / flag arguments) is skipped. An interpreter
+    named through a gyp variable (`<(n)`) is resolved against *variables*, three hops at
+    most. One that still cannot be resolved counts as inline when its first argument is
+    one of the common inline switches - an unknown program given `-e <code>` is not a
+    shape to wave through. Scanning stops at the first argument that is neither an option
+    nor an option's value: that is the script, and anything after it is the script's own.
+    """
+    args = [str(a) for a in argv]
+    while args and (re.split(r"[\\/]", args[0])[-1] == "env"):
+        args = args[1:]
+        while args and (args[0].startswith("-") or re.fullmatch(r"[A-Za-z_]\w*=.*", args[0], re.S)):
+            args = args[1:]
+    if not args:
+        return False
+    arg0 = args[0]
+    for _ in range(3):
+        m = _GYP_VAR_REF_RE.fullmatch(arg0)
+        if not m or not variables or not isinstance(variables.get(m.group(1)), str):
+            break
+        arg0 = variables[m.group(1)]
+    family = _interpreter_family(arg0.strip())
+    rest = args[1:]
+    if family is None:
+        return bool(rest) and rest[0] in _GENERIC_INLINE and bool(
+            _GYP_VAR_REF_RE.fullmatch(args[0]) or args[0].startswith(("$", "<", ">"))
+        )
+    if family == "cmd":
+        return any(a.lower() in ("/c", "/k") for a in rest[:3])
+    if family == "powershell":
+        for a in rest:
+            low = a.lower()
+            if low in ("-c", "-e", "-ec") or low.startswith(("-com", "-enc")):
+                return True
+            if not low.startswith("-"):
+                return False
+        return False
+    short_re = _INLINE_SHORT_RE[family]
+    takes_value = _TAKES_VALUE[family]
+    skip_next = False
+    for a in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if family == "node" and (a in ("--eval", "--print") or a.startswith(("--eval=", "--print="))):
+            return True
+        if short_re.fullmatch(a):
+            return True
+        if a in takes_value:
+            skip_next = True
+            continue
+        if a.startswith("-") or (family == "shell" and a.startswith("+")):
+            continue
+        return False
+    return False
+
+
 def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
     """Command-expansions in *pkg_dir*'s root `binding.gyp`, and any reason we fell short.
 
@@ -570,6 +800,22 @@ def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
         )
         for command in commands
     ]
+    # B-1004: a build step's argv is a command too, resolved by the SAME narrow resolver -
+    # so `["node", "./extract.js"]` has its file read and judged exactly like a
+    # `<!(node x.js)` expansion, and an inline `node -e` step (nothing on disk to read)
+    # yields no target, exactly as an inline expansion does.
+    steps, _variables = extract_gyp_build_steps(text, capped=notes)
+    for step in steps:
+        command = shlex.join(step.argv)
+        directives.append(
+            BuildDirective(
+                package=name,
+                relpath=relpath,
+                command=command[:200],
+                targets=resolve_hook_targets(command, pkg_dir),
+                kind=step.key,
+            )
+        )
     return directives, notes
 
 

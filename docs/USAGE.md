@@ -2227,8 +2227,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   when it, too, has to leave sinks out; it narrows that gap substantially rather than closing
   it outright.
 - **`--no-deptree`** skips the OpenClaw dependency-tree walk that feeds **B349** (a package in
-  `node_modules` whose install-time target - a lifecycle hook or a `binding.gyp`
-  command-expansion - carries a code-execution signal). The walk is on by default, read-only
+  `node_modules` whose install-time target - a lifecycle hook, or a `binding.gyp`
+  command-expansion or build step - carries a code-execution signal). The walk is on by default, read-only
   and offline, but it traverses the whole installed tree and reads outside your OpenClaw home
   (see "Full read scope" above), so this is the escape hatch on a very large tree or when you
   want the run confined. `--no-host` and `--no-sockets` skip host-monitor detection and the
