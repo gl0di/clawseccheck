@@ -271,6 +271,36 @@ def test_timestamp_pyc_inside_an_archive_is_silent(tmp_path):
     assert _run_check(z).status == PASS
 
 
+def test_long_member_name_cannot_hide_a_pyc(tmp_path):
+    # The display name of a member is truncated for evidence text; the suffix test must
+    # use the real name, or padding the path past the cap would hide the .pyc.
+    data = _pyc(_skill(tmp_path), UNCHECKED).read_bytes()
+    name = "pkg/" + "a" * (collector._UNTRUSTED_NAME_CAP + 50) + ".pyc"
+    z = tmp_path / "skill.zip"
+    z.write_bytes(_zip_with(data, name=name))
+    assert _run_check(z).status == FAIL
+
+
+def test_pyc_body_that_classifies_as_another_format_is_still_checked(tmp_path):
+    # Header classification keys on the member NAME, before any content sniffing: a .pyc
+    # whose body also looks like a tar (ustar magic at offset 257) must not skip it.
+    data = bytearray(_pyc(_skill(tmp_path), UNCHECKED).read_bytes())
+    data.extend(b"\0" * (262 - len(data)))
+    data[257:262] = b"ustar"
+    z = tmp_path / "skill.zip"
+    z.write_bytes(_zip_with(bytes(data)))
+    assert _run_check(z).status == FAIL
+
+
+def test_gzip_wrapped_pyc_is_checked(tmp_path):
+    import gzip
+
+    data = _pyc(_skill(tmp_path), UNCHECKED).read_bytes()
+    g = tmp_path / "m.cpython-314.pyc.gz"
+    g.write_bytes(gzip.compress(data))
+    assert _run_check(g).status == FAIL
+
+
 def test_remediation_is_published_for_the_docs_generator():
     from clawseccheck.catalog import remediation_for
     assert remediation_for("B398")["commands"]

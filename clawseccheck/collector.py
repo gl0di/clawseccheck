@@ -1951,9 +1951,19 @@ def decompress_and_classify(
     file_bytes: bytes,
     file_relpath: str,
     depth: int,
-    archive_stats: dict
+    archive_stats: dict,
+    raw_member_name: str | None = None,
 ) -> list[tuple[str, bytes, str, str | None]]:
-    """Recursively decompress and classify files from an archive."""
+    """Recursively decompress and classify files from an archive.
+
+    `raw_member_name` is the REAL (uncapped) name of an archive member; None for the
+    top-level file. B398 keys on it, before any content classification, so neither a
+    long name (the display name is truncated) nor a polyglot body can hide a .pyc.
+    """
+    if raw_member_name is not None:
+        _note_archive_member_pyc(
+            ctx, archive_stats.get("pyc_key") or str(skill_dir), file_relpath,
+            raw_member_name, file_bytes)
     try:
         classification, format_name = classify_bytes(file_bytes, len(file_bytes))
     except Exception as e:
@@ -1966,10 +1976,6 @@ def decompress_and_classify(
         return [(file_relpath, file_bytes, "BINARY", None)]
 
     if format_name not in ("ZIP", "tar", "gzip", "bz2", "xz"):
-        if "::" in file_relpath:
-            # B398: a .pyc INSIDE an archive (a bare archive target, or vendor.tgz in a dir).
-            _note_archive_member_pyc(
-                ctx, archive_stats.get("pyc_key") or str(skill_dir), file_relpath, file_bytes)
         return [(file_relpath, file_bytes, classification, format_name)]
         
     if depth > 3:
@@ -2068,7 +2074,9 @@ def decompress_and_classify(
                             return [(file_relpath, file_bytes, classification, format_name)]
 
                     sub_rel = f"{file_relpath}::{member_disp}"
-                    sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+                    sub_results = decompress_and_classify(
+                        ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                        raw_member_name=member_name)
                     results.extend(sub_results)
 
                 if ctx is not None:
@@ -2170,7 +2178,9 @@ def decompress_and_classify(
                             return [(file_relpath, file_bytes, classification, format_name)]
                             
                     sub_rel = f"{file_relpath}::{member_disp}"
-                    sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+                    sub_results = decompress_and_classify(
+                        ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                        raw_member_name=member.name)
                     results.extend(sub_results)
                 if ctx is not None:
                     ctx.file_manifest[file_relpath] = "decoded"
@@ -2222,7 +2232,9 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".gz") else f"{file_relpath}::extracted"
-            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            sub_results = decompress_and_classify(
+                ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                raw_member_name=sub_rel)
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2274,7 +2286,9 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
             sub_rel = file_relpath[:-4] if file_relpath.lower().endswith(".bz2") else f"{file_relpath}::extracted"
-            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            sub_results = decompress_and_classify(
+                ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                raw_member_name=sub_rel)
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2326,7 +2340,9 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".xz") else f"{file_relpath}::extracted"
-            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            sub_results = decompress_and_classify(
+                ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                raw_member_name=sub_rel)
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2567,14 +2583,16 @@ def _classify_pyc_header(header: bytes, total_size: int) -> bool:
     return int.from_bytes(header[4:8], "little") == PYC_UNCHECKED_HASH_FLAGS
 
 
-def _note_archive_member_pyc(ctx, key: str, member_rel: str, data: bytes) -> None:
+def _note_archive_member_pyc(
+    ctx, key: str, member_rel: str, raw_name: str, data: bytes
+) -> None:
     """B398: classify a .pyc archive member (header only; the bytes are never unmarshalled).
 
     Called from `decompress_and_classify` for members already read through the bounded
     archive reader, so its size / member / ratio caps (each of which records its own
     `limit_hits` entry) apply unchanged.
     """
-    if ctx is None or not member_rel.lower().endswith(".pyc"):
+    if ctx is None or not raw_name.lower().endswith(".pyc"):
         return
     if _classify_pyc_header(data[:PYC_HEADER_LEN], len(data)):
         lst = ctx.skill_unchecked_pycs.setdefault(key, [])
