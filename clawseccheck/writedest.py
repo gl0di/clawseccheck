@@ -146,6 +146,9 @@ def mask_code(body: str, lang: str) -> tuple[str, str, list[tuple[int, int, int]
                     j = k
                     continue
                 j += 1
+            if j >= n and lang == "sh":
+                i += 1  # never closed: a literal quote character, keep masking after it
+                continue
             end = min(n, j + len(q))
             inner_s, inner_e = i + len(q), min(n, j)
             docstring = False
@@ -230,10 +233,15 @@ def unquote(word: str) -> str:
 
 
 def sh_commands(text: str, lo: int, hi: int):
-    """Shell commands in text[lo:hi] at command position: yields (words, redirects,
+    """Shell commands in text[lo:hi] at command position: a list of (words, redirects,
     heredoc_cmd) where words are (start, end) spans and redirects the spans of `>`
-    targets. Returns None (no destinations - fail closed) on an unbalanced quote or
-    substitution."""
+    targets.
+
+    Never gives up on the whole text: one odd line must not hide every write after it.
+    A backslash escapes the next character outside single quotes; a quote or `$(`/`${`
+    still open at the end of the text is treated as ending at its own line, and parsing
+    resumes on the next line (a quote that closes on a later line is a real multi-line
+    word, as the shell itself reads it)."""
     cmds = []
     words: list[tuple[int, int]] = []
     redirs: list[tuple[int, int]] = []
@@ -255,6 +263,10 @@ def sh_commands(text: str, lo: int, hi: int):
             continue
         if c == "\\" and text[i + 1:i + 2] == "\n":
             i += 2
+            continue
+        if c == "#" and (i == lo or text[i - 1] in " \t\n;&|("):
+            nl = text.find("\n", i, hi)
+            i = hi if nl == -1 else nl
             continue
         if c in "\n;(){}" or text.startswith("&&", i) or text.startswith("||", i):
             flush()
@@ -291,10 +303,10 @@ def sh_commands(text: str, lo: int, hi: int):
         j, quote, depth = i, None, 0
         while j < hi:
             ch = text[j]
+            if ch == "\\" and quote != "'":
+                j += 2  # an escaped character, inside double quotes or outside quotes
+                continue
             if quote:
-                if ch == "\\" and quote == '"':
-                    j += 2
-                    continue
                 if ch == quote:
                     quote = None
             elif ch in "\"'`":
@@ -309,7 +321,11 @@ def sh_commands(text: str, lo: int, hi: int):
                 break
             j += 1
         if quote or depth:
-            return None
+            # Open to the end of the text: the shell would reject it, so read the word
+            # as ending at its own line and keep parsing what follows.
+            nl = text.find("\n", i, hi)
+            j = hi if nl == -1 else nl
+        j = min(j, hi)
         if want_redirect:
             redirs.append((i, j))
             want_redirect = False

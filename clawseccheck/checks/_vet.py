@@ -2434,9 +2434,13 @@ def _c755_persistence_hits(name: str, blob: str) -> list[tuple[str, str, str]]:
     agent_file / hook / tasks (FAIL-capable, same severity rule as the window leg) or
     skills / tasks_unresolved (WARN only)."""
     headers = _manifest_header_matches(blob)
-    nonprose = {h.group("name").strip(): h.group("body") for h in headers
-                if not h.group("name").strip().lower().endswith((".md", ".markdown", ".txt"))}
-    folder_open_elsewhere = any(_C755_FOLDER_OPEN_RE.search(b) for b in nonprose.values())
+    # Every shipped file by name: a copy source / template is read whatever its
+    # extension. Only real prose is left out of the skill-wide "trigger elsewhere" look.
+    shipped_files = {h.group("name").strip(): h.group("body") for h in headers}
+    folder_open_elsewhere = any(
+        _C755_FOLDER_OPEN_RE.search(b) for n, b in shipped_files.items()
+        if not (n.lower().endswith((".md", ".markdown", ".rst")) or n.lower().startswith("readme"))
+    )
     own_next = re.compile(rf"{_C755_GLUE}{re.escape(name)}(?![\w.-])") if name else None
     own_lit = re.compile(rf"""["'`]{re.escape(name)}["'`]""") if name else None
     found: dict[str, tuple[str, str, str]] = {}
@@ -2470,7 +2474,7 @@ def _c755_persistence_hits(name: str, blob: str) -> list[tuple[str, str, str]]:
                 ):
                     continue  # the skill's own folder (the scanned directory's name)
                 if kind == "tasks":
-                    shipped = [nonprose.get(_c755_unquote(f.masked[d[0]:d[1]]).rsplit("/", 1)[-1])
+                    shipped = [shipped_files.get(_c755_unquote(f.masked[d[0]:d[1]]).rsplit("/", 1)[-1])
                                for d in data]
                     if data and f.text_with(data, _C755_FOLDER_OPEN_RE):
                         pass  # the trigger is in the written content

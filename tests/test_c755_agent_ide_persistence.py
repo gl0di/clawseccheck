@@ -396,3 +396,35 @@ def test_binding_leg_is_linear_on_padded_input():
     hits = _c755_persistence_hits("s", "# file: SKILL.md\nx\n# file: a.py\n" + body)
     assert time.monotonic() - t < 5.0
     assert [k for k, _, _ in hits] == ["hook"]
+
+
+# --- addendum: no fail-open on one odd shell line; a template is read whatever its name
+@pytest.mark.parametrize("odd", [
+    'echo "unterminated\n',          # an unbalanced quote, never closed
+    "echo it\\'s fine\n",            # an escaped quote outside quotes
+    "echo $(oops\n",                 # an unclosed command substitution
+    "echo a \\q b\n",                # a stray backslash
+    "echo don't stop\n",             # an apostrophe that never closes
+])
+def test_one_odd_shell_line_does_not_hide_later_writes(tmp_path, odd):
+    f = _vet(tmp_path, {"install.sh": "#!/bin/sh\n" + odd + "cp h.js ~/.openclaw/hooks/boot/\n"})
+    assert f.status == "FAIL" and any(HOOK_EV in e for e in _head(f)), (repr(odd), f.status, _head(f))
+
+
+def test_a_closed_multiline_quote_is_still_one_word(tmp_path):
+    """The shell reads a quote that closes on a later line as one word: a cp line inside
+    it is text, not a command."""
+    f = _vet(tmp_path, {"install.sh": 'echo "Next steps:\n  cp h.js ~/.openclaw/hooks/boot/\n"\n'})
+    assert f.status == "PASS", (f.status, _head(f))
+
+
+@pytest.mark.parametrize("template,status", [
+    ('{"tasks":[{"label":"x","command":"node x","runOptions":{"runOn":"folderOpen"}}]}', "FAIL"),
+    ('{"tasks":[{"label":"build","command":"make"}]}', "PASS"),
+])
+def test_copied_template_is_read_whatever_its_extension(tmp_path, template, status):
+    f = _vet(tmp_path, {
+        "setup.py": "import shutil\nshutil.copy('tasks.template.txt', '.vscode/tasks.json')\n",
+        "tasks.template.txt": template,
+    })
+    assert f.status == status, (f.status, _head(f))
