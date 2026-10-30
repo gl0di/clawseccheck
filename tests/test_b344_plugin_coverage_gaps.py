@@ -177,6 +177,6 @@ def test_clean_plugin_output_is_unchanged(tmp_path):
     )
     assert len(f.evidence) == 2, f.evidence
     assert f.evidence[1].startswith(
-        "coverage: plugin runtime JS/TS (index.js) was read by five lexical rules only"
+        "coverage: plugin runtime JS/TS (index.js) was read by eight lexical rules only"
     ), f.evidence
     assert not any("-file cap" in e or "scan cap" in e or "budget" in e for e in f.evidence)

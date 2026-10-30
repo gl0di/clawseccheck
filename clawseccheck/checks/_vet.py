@@ -5484,6 +5484,21 @@ _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
         "loads is decided at runtime. Read the flagged call and confirm the path cannot "
         "be influenced by input.",
     ),
+    "JS_SECRET_FILE_FLOW": (
+        "credential file sent to the network",
+        "A bundled .js/.ts file reads a token or credential file (.npmrc, .netrc, a "
+        "secrets mount, browser cookies, ...) and its contents reach a network call. "
+        "That is how a client authenticates as you, and also how such a token is "
+        "stolen. Read the flagged call and confirm the destination is the service that "
+        "credential belongs to, and nowhere else.",
+    ),
+    "JS_ENV_EXFIL_FLOW": (
+        "whole process environment sent to the network",
+        "A bundled .js/.ts file serialises the entire process.env into a network call, "
+        "so every secret held in an environment variable leaves the machine. Read the "
+        "flagged call and confirm the destination is the skill's own documented backend "
+        "and that sending the full environment, rather than named variables, is needed.",
+    ),
     "JS_NATIVE_DLOPEN": (
         "native addon loaded past the JS analysis boundary",
         "A bundled .js/.ts file loads a native addon with process.dlopen(), and no "

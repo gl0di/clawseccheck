@@ -18722,6 +18722,316 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
     r"\bprocess\.dlopen\s*\(",
 )
 
+# --------------------------------------------------------------------------- #
+# B-1005: JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW / JS_ENV_EXFIL_FLOW -- the JS #
+# twin of analyze_python's CRED_EXFIL_FLOW. Before this, `analyze_javascript` had no     #
+# read-a-secret-then-send rule at all, so an install-time `node evil.js` that    #
+# read /proc/1/environ and POSTed it to an unlisted host (the spectral-core      #
+# shape, GHSA-jpgq-34qx-jwwc / MAL-2026-18377) vetted INSTALL: the only JS       #
+# coverage was the text layer, which B-425 deliberately narrowed so a bare       #
+# /proc/*/environ counts only beside a credential word. Undoing B-425 would      #
+# resurrect the FP it fixed; this is a FLOW rule instead, so it never fires on   #
+# a file that merely reads its own environ (measured: OpenClaw's own dist reads  #
+# `/proc/${pid}/environ` in several bundles that also call fetch/https -- a      #
+# file-level co-occurrence rule would convict OpenClaw itself).                  #
+#                                                                                #
+# Shape, lexical and bounded (no JS parser):                                     #
+#   source  - a read call (readFileSync / readFile / promises.readFile /         #
+#             createReadStream / openSync, or execSync/execFileSync/spawnSync    #
+#             of a command string) whose FIRST argument is a credential path:    #
+#             `_CRED_PATH_RE`, plus the JS-only spellings of /proc/<pid>/environ #
+#             (template `${pid}`, string concat, path.join("/proc", pid,         #
+#             "environ")), or a name bound to such a path literal;               #
+#   taint   - the name the read is assigned to, a readFile callback's data       #
+#             parameter, or a `.then(x =>` param; then names assigned from an    #
+#             expression mentioning a tainted name (fixpoint, hop-bounded);      #
+#   sink    - fetch / axios, http(s)/http2 request|get, net/tls connect,         #
+#             dns lookup|resolve*, new WebSocket, navigator.sendBeacon, and      #
+#             `.write/.end/.send` on a name assigned FROM one of those calls,    #
+#             resolved through the module's own binding (`const h =              #
+#             require('https')` counts, an unrelated `.request(` does not);      #
+#   flow    - a tainted name (or the read call itself, inline) appears in the    #
+#             sink call's own argument span, AFTER the taint and within          #
+#             `_JS_FLOW_WINDOW` characters of it. The window is the scoping      #
+#             proxy a lexical pass has: `data` tainted at the top of a 2 MB      #
+#             bundle must not convict an unrelated `fetch(url, {body: data})`    #
+#             10,000 lines later.                                                 #
+# Severity: a secret no client sends as-is (process environ, private key, raw   #
+# AWS credentials, wallet/keystore, keychain) reaching a sink is crit, the same  #
+# grade analyze_python gives CRED_EXFIL_FLOW. A token/config file (.npmrc, a     #
+# secrets mount, Cookies, ...) is warn -- see `_js_cred_path_kind`: presenting   #
+# it to a server IS its purpose, so the flow alone cannot convict. A whole-      #
+# `process.env`                                                                   #
+# serialisation (JSON.stringify(process.env) / Object.entries(process.env) /     #
+# {...process.env}) reaching a sink is warn only -- telemetry/debug tools that   #
+# ship their own environment to their own backend share the exact shape.        #
+# --------------------------------------------------------------------------- #
+_JS_FLOW_WINDOW = 4000  # chars between a taint and the sink it reaches, per hop
+_JS_FLOW_MAX_HOPS = 4
+_JS_FLOW_MAX_TAINTED = 64
+_JS_ARG_SPAN_CAP = 3000
+
+# /proc/<pid>/environ spellings _CRED_PATH_RE cannot see because the pid is computed.
+_JS_PROC_ENVIRON_DYN_RE = re.compile(
+    r"/proc/\$\{[^}`\n]{1,60}\}/environ"
+    r"|['\"`]/proc/?['\"`]\s*\+\s*[^;\n]{1,60}?\+\s*['\"`]/?environ['\"`]"
+    r"|\bjoin\s*\(\s*['\"`]/proc/?['\"`]\s*,\s*[^;\n]{1,60}?,\s*['\"`]environ['\"`]\s*\)",
+    re.I,
+)
+_JS_CRED_HARD_RE = re.compile(
+    r"\.ssh/id_[a-z0-9_]+(?![a-z0-9_]|\.pub\b|-cert\.pub\b)|"
+    r"\bid_rsa\b(?!\.pub\b|-cert\.pub\b)|\bid_ed25519\b(?!\.pub\b|-cert\.pub\b)|"
+    r"\.aws/credentials|login\.keychain|wallet\.dat|keystore\.json|"
+    r"/proc/(?:self|\d+)/environ",
+    re.I,
+)
+_JS_READ_CALL_RE = re.compile(
+    r"\b(?:readFileSync|readFile|createReadStream|openSync|execSync|execFileSync|spawnSync)"
+    r"\s*\("
+)
+_JS_ENV_DUMP_RE = re.compile(
+    r"\bJSON\.stringify\s*\(\s*process\.env\s*[,)]"
+    r"|\bObject\.(?:entries|values)\s*\(\s*process\.env\s*\)"
+    r"|\{\s*\.\.\.process\.env\s*\}"
+)
+_JS_PATH_BIND_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]{1,300})"
+)
+_JS_ASSIGN_RE = re.compile(
+    r"(?:\b(?:const|let|var)\s+|(?<![\w$.]))([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]{1,600})"
+)
+_JS_NET_MODULES = ("http", "https", "http2", "net", "tls", "dns", "dgram")
+_JS_NET_NS_BIND_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+import|require)\s*\(\s*"
+    r"['\"](?:node:)?(http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]\s*\)"
+    r"|\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['\"](?:node:)?"
+    r"(http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]"
+)
+_JS_NET_DESTRUCTURE_RE = re.compile(
+    r"\{\s*([^{}]{1,200}?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?"
+    r"(?:http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]\s*\)"
+    r"|\bimport\s*\{\s*([^{}]{1,200}?)\s*\}\s*from\s+['\"](?:node:)?"
+    r"(?:http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]"
+)
+_JS_NET_METHODS = frozenset(
+    {"request", "get", "connect", "createConnection", "lookup", "resolve", "resolve4",
+     "resolve6", "resolveTxt", "resolveAny", "resolveCname", "resolveMx", "createSocket"}
+)
+_JS_SINK_CALL_RE = re.compile(
+    r"(?<![\w$.])(fetch|axios|sendBeacon)\s*(?:\.\s*(?:post|put|patch|request|get)\s*)?\("
+    r"|\bnavigator\s*\.\s*sendBeacon\s*\("
+    r"|\bnew\s+WebSocket\s*\("
+    r"|(?<![\w$])([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\("
+    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\("
+)
+
+
+_JS_FLOW_RULE = {
+    "cred": "JS_CRED_EXFIL_FLOW",
+    "credsoft": "JS_SECRET_FILE_FLOW",
+    "env": "JS_ENV_EXFIL_FLOW",
+}
+
+
+def _js_call_args(text: str, open_idx: int, cap: int = _JS_ARG_SPAN_CAP) -> str:
+    """The text between the `(` at `open_idx` and its matching `)`, quote-aware and
+    bounded by `cap` characters (an unclosed call yields the capped prefix)."""
+    depth = 0
+    quote = None
+    i = open_idx
+    end = min(len(text), open_idx + cap)
+    while i < end:
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1 : i]
+        i += 1
+    return text[open_idx + 1 : end]
+
+
+def _js_first_arg(args: str) -> str:
+    depth = 0
+    quote = None
+    for i, ch in enumerate(args):
+        if quote:
+            if ch == quote and (i == 0 or args[i - 1] != "\\"):
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return args[:i]
+    return args
+
+
+def _js_cred_path_kind(text: str) -> "str | None":
+    """"cred" for a secret no legitimate client ever sends as-is (process environ, a
+    private key, raw AWS credentials, a wallet/keystore, the macOS keychain); "credsoft"
+    for the rest of `_CRED_PATH_RE` -- token/config files (.npmrc, .netrc, .pypirc,
+    .docker/config, .kube/config, a secrets mount, browser Cookies, gcloud config) whose
+    whole PURPOSE is to be presented to a server as the user's own auth material, so
+    "read it, then a network call carries it" is the normal client shape as well as the
+    theft shape. Measured on the clawbench corpus: blog-studio reads
+    `~/.openclaw/workspace/secrets/github-token.txt` and sends it as an Authorization
+    header to api.github.com. Same bytes, attacker host: no static discriminator, so
+    credsoft is WARN (JS_SECRET_FILE_FLOW), never FAIL. None when not a credential path."""
+    if _JS_CRED_HARD_RE.search(text) or _JS_PROC_ENVIRON_DYN_RE.search(text):
+        return "cred"
+    if _CRED_PATH_RE.search(text):
+        return "credsoft"
+    return None
+
+
+def _js_name_used(name: str, text: str) -> bool:
+    """`name` appears in `text` as a value -- not as a `.property` and not as an
+    object-literal key (`{data: 1}`)."""
+    for m in re.finditer(r"(?<![\w$.])" + re.escape(name) + r"(?![\w$])", text):
+        tail = text[m.end() : m.end() + 3]
+        if re.match(r"\s*:(?!:)", tail):
+            prev = text[: m.start()].rstrip()[-1:]
+            if prev in ("{", ","):
+                continue
+        return True
+    return False
+
+
+def _js_net_bindings(masked: str) -> "tuple[set, set]":
+    receivers = set(_JS_NET_MODULES)
+    names: set = set()
+    for m in _JS_NET_NS_BIND_RE.finditer(masked):
+        bound = m.group(1) or m.group(3)
+        if bound:
+            receivers.add(bound)
+    for m in _JS_NET_DESTRUCTURE_RE.finditer(masked):
+        group = m.group(1) or m.group(2)
+        for entry in (group or "").split(","):
+            parts = re.split(r":\s*|\s+as\s+", entry.strip())
+            if parts and parts[0].strip() in _JS_NET_METHODS and parts[-1].strip():
+                names.add(parts[-1].strip())
+    return receivers, names
+
+
+def _js_statement_lhs(masked: str, pos: int) -> "str | None":
+    """The simple name assigned by the statement containing `pos`, if any."""
+    start = max(0, pos - 300)
+    seg = masked[start:pos]
+    cut = max(seg.rfind(";"), seg.rfind("\n"), seg.rfind("{"), seg.rfind("}"))
+    seg = seg[cut + 1 :]
+    m = re.match(
+        r"\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])", seg
+    )
+    return m.group(1) if m else None
+
+
+def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
+    """(rule, sink_offset) for each JS_CRED_EXFIL_FLOW / JS_ENV_EXFIL_FLOW hit."""
+    if "environ" not in masked and not _CRED_PATH_RE.search(masked) and "process.env" not in masked:
+        return []
+    # names bound to a credential path literal: `const P = '/proc/1/environ'`
+    path_names: "dict[str, str]" = {}
+    for m in _JS_PATH_BIND_RE.finditer(masked):
+        if _JS_READ_CALL_RE.search(m.group(2)):
+            continue
+        pk = _js_cred_path_kind(m.group(2))
+        if pk:
+            path_names.setdefault(m.group(1), pk)
+    # tainted: name -> (kind, offset of the taint)
+    tainted: "dict[str, tuple[str, int]]" = {}
+    # inline reads: spans of cred-read calls, (kind, start, end)
+    reads: "list[tuple[str, int, int]]" = []
+    for m in _JS_READ_CALL_RE.finditer(masked):
+        args = _js_call_args(masked, m.end() - 1)
+        first = _js_first_arg(args).strip()
+        kind = _js_cred_path_kind(first) or path_names.get(first)
+        if not kind:
+            continue
+        end = m.end() + len(args) + 1
+        reads.append((kind, m.start(), end))
+        lhs = _js_statement_lhs(masked, m.start())
+        if lhs:
+            tainted.setdefault(lhs, (kind, end))
+        cb = re.search(
+            r"(?:\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*=>"
+            r"|function\s*[\w$]*\s*\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*))",
+            args,
+        )
+        if cb:
+            tainted.setdefault(cb.group(1) or cb.group(2), (kind, m.end()))
+        then = re.match(r"\s*\.\s*then\s*\(\s*(?:async\s*)?\(?\s*([A-Za-z_$][\w$]*)", masked[end : end + 80])
+        if then:
+            tainted.setdefault(then.group(1), (kind, end))
+    for m in _JS_ENV_DUMP_RE.finditer(masked):
+        reads.append(("env", m.start(), m.end()))
+        lhs = _js_statement_lhs(masked, m.start())
+        if lhs:
+            tainted.setdefault(lhs, ("env", m.end()))
+    if not reads:
+        return []
+    # propagation: NAME2 = <expr mentioning a tainted NAME>, after it and within the window
+    assigns = [(m.group(1), m.start(), m.group(2)) for m in _JS_ASSIGN_RE.finditer(masked)]
+    for _ in range(_JS_FLOW_MAX_HOPS):
+        grew = False
+        for lhs, pos, rhs in assigns:
+            if lhs in tainted or len(tainted) >= _JS_FLOW_MAX_TAINTED:
+                continue
+            for name, (kind, tpos) in list(tainted.items()):
+                if tpos <= pos <= tpos + _JS_FLOW_WINDOW and _js_name_used(name, rhs):
+                    tainted[lhs] = (kind, pos)
+                    grew = True
+                    break
+        if not grew:
+            break
+    receivers, bound_names = _js_net_bindings(masked)
+    sink_calls: "list[tuple[int, int]]" = []  # (call start, open-paren index)
+    sink_recv: "dict[str, int]" = {}
+    for m in _JS_SINK_CALL_RE.finditer(masked):
+        recv, meth, bare = m.group(2), m.group(3), m.group(4)
+        if recv is not None:
+            if not (
+                (recv in receivers and meth in _JS_NET_METHODS)
+                or (recv in ("globalThis", "window", "self") and meth == "fetch")
+            ):
+                continue
+        elif bare is not None and bare not in bound_names:
+            continue
+        sink_calls.append((m.start(), m.end() - 1))
+        lhs = _js_statement_lhs(masked, m.start())
+        if lhs:
+            sink_recv.setdefault(lhs, m.start())
+    # second pass for .write/.end/.send on receivers discovered above
+    if sink_recv:
+        for m in re.finditer(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*\.\s*(write|end|send)\s*\(", masked):
+            if m.group(1) in sink_recv and m.start() > sink_recv[m.group(1)]:
+                sink_calls.append((m.start(), m.end() - 1))
+    out: "list[tuple[str, int]]" = []
+    seen: set = set()
+    for start, open_idx in sorted(set(sink_calls)):
+        args = _js_call_args(masked, open_idx)
+        a0, a1 = open_idx, open_idx + len(args)
+        kinds = {kind for kind, rs, re_ in reads if a0 < rs and re_ <= a1 + 1}
+        for name, (kind, tpos) in tainted.items():
+            if tpos <= start <= tpos + _JS_FLOW_WINDOW and _js_name_used(name, args):
+                kinds.add(kind)
+        hit = next((k for k in ("cred", "credsoft", "env") if k in kinds), None)
+        if hit and start not in seen:
+            seen.add(start)
+            out.append((_JS_FLOW_RULE[hit], start))
+    return out
+
 
 def _js_block_comment_spans(source: str) -> list[tuple[int, int]]:
     """Every `/* ... */` block-comment span in `source`, as `(start, end)` character
@@ -18797,6 +19107,15 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
       JS_NATIVE_DLOPEN (warn) - process.dlopen(): a direct native-addon (.node) load,
         the native-boundary escape that bypasses JS-level analysis. Node's docs say
         require() should be preferred over calling dlopen directly.
+      JS_CRED_EXFIL_FLOW (crit) - a private key, raw AWS credentials, a wallet/keystore,
+        the keychain, or /proc/<pid>/environ is read and
+        the contents reach a network sink (B-1005; the analyze_python CRED_EXFIL_FLOW
+        twin). Bounded lexical flow - see `_js_exfil_flows`.
+      JS_SECRET_FILE_FLOW (warn) - a token/config credential file (.npmrc, .netrc, a
+        secrets mount, Cookies, ...) reaches a network sink: also the normal shape of a
+        client presenting the user's own token, so never FAIL.
+      JS_ENV_EXFIL_FLOW (warn) - the whole process.env is serialised into a network
+        sink. warn, not crit: telemetry/debug tools share the exact shape.
 
     Benign JS - static eval, JSON.parse(atob(token)), local require, base64 decode
     without eval - stays silent. Comments are masked so documented examples don't fire."""
@@ -18859,6 +19178,36 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
             "require() of a non-literal (variable/template) \u2014 a dynamic, "
             "possibly attacker-influenced module path",
         )
+
+    for rule, pos in _js_exfil_flows(masked):
+        ln = masked.count("\n", 0, pos) + 1
+        # Literal rule ids at each add() - tests/test_b743_js_warn_remediation.py extracts
+        # (rule, severity) pairs from these call sites; a variable here would hide them.
+        if rule == "JS_CRED_EXFIL_FLOW":
+            add(
+                "JS_CRED_EXFIL_FLOW",
+                "crit",
+                ln,
+                "a private key, raw cloud credentials or process-environment contents "
+                "flow into a network sink (read secret -> send out)",
+            )
+        elif rule == "JS_SECRET_FILE_FLOW":
+            add(
+                "JS_SECRET_FILE_FLOW",
+                "warn",
+                ln,
+                "a token/config credential file (.npmrc, .netrc, a secrets mount, ...) is "
+                "read and its contents reach a network call \u2014 normal for a client "
+                "authenticating as you, and exactly how such a token is stolen",
+            )
+        else:
+            add(
+                "JS_ENV_EXFIL_FLOW",
+                "warn",
+                ln,
+                "the whole process environment is serialised into a network sink "
+                "\u2014 every env-var secret leaves the machine",
+            )
 
     for m in _JS_NATIVE_DLOPEN_RE.finditer(masked):
         ln = masked.count("\n", 0, m.start()) + 1

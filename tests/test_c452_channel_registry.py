@@ -117,7 +117,7 @@ _CHANNELS = {
     ),
     "lexical_loose_code": (
         "vet",
-        "plugin JS/TS the Danger pass read with the five lexical rules only; bars "
+        "plugin JS/TS the Danger pass read with the eight lexical rules only; bars "
         "Persistence/Connections PASS and hedges Danger PASS",
         None,
     ),

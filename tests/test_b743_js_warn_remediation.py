@@ -183,7 +183,9 @@ def test_the_class_guard_bites_on_the_shape_it_replaced():
 
     warn_rules = {r for r, sev in by_sev.items() if sev != "crit"}
     pre_b743_table = {"JS_CHILD_PROCESS_DYNAMIC", "JS_DYNAMIC_REQUIRE"}
-    assert sorted(warn_rules - pre_b743_table) == ["JS_NATIVE_DLOPEN"], (
+    # B-1005 added two more warn rules (JS_SECRET_FILE_FLOW, JS_ENV_EXFIL_FLOW); they are
+    # uncovered by the pre-B-743 table too, so the control asserts membership, not equality.
+    assert "JS_NATIVE_DLOPEN" in warn_rules - pre_b743_table, (
         "the guard must flag the rule that had no advice of its own — this is exactly "
         "the state the tree shipped in"
     )

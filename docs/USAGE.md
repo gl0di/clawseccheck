@@ -2011,10 +2011,12 @@ python3 audit.py --log audit.log            # also write log to a local file
   `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Python the plugin
   ships outside its declared skills gets the same AST/taint pass a bundled skill's does, so a
   remote code loader at the plugin root is convicted exactly as it is one directory lower;
-  runtime JS/TS gets five lexical rules only (obfuscated eval, remote fetch-then-eval, dynamic
-  `child_process` command, dynamic `require`, native `dlopen`) - not the signature scan a
-  bundled skill's files get, so a pipe-to-shell string, a config or credential read or an
-  outbound POST in loose plugin JS/TS is not checked. The report names those files in its
+  runtime JS/TS gets eight lexical rules only (obfuscated eval, remote fetch-then-eval, dynamic
+  `child_process` command, dynamic `require`, native `dlopen`, a private-key, raw-credential or
+  `/proc/<pid>/environ` read reaching a network call, a token/config credential file reaching
+  one, the whole `process.env` sent out) - not the signature scan a bundled skill's files get,
+  so a pipe-to-shell string, a config read, or a credential read or outbound POST the lexical
+  pass cannot trace in loose plugin JS/TS is not checked. The report names those files in its
   coverage notes whether or not `package.json` declares `openclaw.extensions`, shell files
   (`.sh`, `.bash`, `.zsh`) outside a declared skill are named as not read, and the Danger axis
   says so instead of claiming a clean malware scan. Any Python file that cannot be read, fails

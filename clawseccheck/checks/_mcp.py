@@ -1149,7 +1149,7 @@ def vet_plugin(
             entries.extend(_manifest_value_text(x) for x in val)
     # C-633: the JS/TS coverage note is no longer emitted here. It used to be gated on
     # `entries` (declared extensions), so a plugin without them said nothing about its
-    # loose JS/TS being read by five lexical rules only. It is emitted after the tree
+    # loose JS/TS being read by eight lexical rules only. It is emitted after the tree
     # sweep below, naming the files that pass actually read; `entries` is kept for the
     # declared-but-not-shipped fallback.
     notes.append("coverage: node_modules/ (third-party npm deps) excluded from the content scan")
@@ -1385,7 +1385,7 @@ def vet_plugin(
     # one - after the reader landed, a plugin shipping install.py printed "no executable
     # code to analyze", which is a claim about the ARTIFACT and was simply untrue.
     analysed_loose_code: list[str] = []
-    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s five lexical rules
+    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s eight lexical rules
     # and nothing else (no B13 text-signature scan, no content ring). Only files that
     # were actually read land here: one over `_PLUGIN_JS_MAX_BYTES` (`js_capped`) or cut
     # off by the budget already rides a VET-COVERAGE finding and must not also be
@@ -1710,11 +1710,14 @@ def vet_plugin(
             "" if len(lexical_loose_code) <= 3 else f" (+{len(lexical_loose_code) - 3} more)"
         )
         notes.append(
-            f"coverage: plugin runtime JS/TS ({shown_js}{more_js}) was read by five lexical "
+            f"coverage: plugin runtime JS/TS ({shown_js}{more_js}) was read by eight lexical "
             "rules only (obfuscated eval, remote fetch-then-eval, dynamic child_process "
-            "command, dynamic require, native dlopen); NOT checked: pipe-to-shell strings, "
-            "config or credential reads, outbound POSTs - not a full runtime analysis; "
-            "review these files before trusting"
+            "command, dynamic require, native dlopen, a private-key, raw-credential or "
+            "process-environ read reaching a network call, a token/config credential file "
+            "reaching one, the whole process.env sent out); NOT checked: pipe-to-shell "
+            "strings, config reads, and any credential read or outbound POST the lexical "
+            "pass cannot trace - not a full runtime analysis; review these files before "
+            "trusting"
         )
     elif entries:
         # Declared entry points but nothing swept (e.g. build output not shipped): the
@@ -1977,9 +1980,9 @@ def vet_plugin(
             # hashes `detail`, so moving it would orphan every existing ignore entry.
             (
                 "Read the JS/TS and shell files named in the coverage notes before "
-                "installing - this vet ran five lexical JS/TS rules only and did not read "
-                "shell files, so pipe-to-shell strings, config or credential reads and "
-                "outbound POSTs in them were not checked."
+                "installing - this vet ran eight lexical JS/TS rules only and did not read "
+                "shell files, so pipe-to-shell strings, config reads, and credential reads "
+                "or outbound POSTs the lexical pass cannot trace were not checked."
                 if lexical_loose_code or unread_shell else
                 "Skim the JS/TS entry files anyway \u2014 this vet's JS pass is lexical, not a full runtime analysis."
             ),
