@@ -27,19 +27,20 @@ def _run(installs, build):
 
 
 def test_an_empty_record_passes_on_2026_10_6_and_warns_before():
-    assert _run({}, "2026.10.6").status == PASS
+    for build in ("2026.10.6", "2026.10.7", "2026.10.8", "2026.10.9"):
+        assert _run({}, build).status == PASS, build
     for build in ("2026.10.1", "2026.10.4", "2026.10.5"):
         f = _run({}, build)
         assert f.status == WARN and f.evidence == ["plugins.installs"], build
 
 
 @pytest.mark.parametrize("value", [{"a": {}}, {"a": None}, [], [1], None, "x", "", 0, False, 7])
-@pytest.mark.parametrize("build", ["2026.10.4", "2026.10.5", "2026.10.6"])
+@pytest.mark.parametrize("build", ["2026.10.4", "2026.10.5", "2026.10.6", "2026.10.9"])
 def test_every_other_present_value_is_still_named(value, build):
     f = _run(value, build)
     assert f.status == WARN and f.evidence == ["plugins.installs"], (value, build)
 
 
 def test_past_the_validated_window_the_finder_is_not_applied_at_all():
-    f = _run({}, "2026.10.7")
+    f = _run({}, "2026.10.10")
     assert f.status == PASS and "was NOT checked" in f.detail
