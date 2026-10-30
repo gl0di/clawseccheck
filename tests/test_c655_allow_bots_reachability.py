@@ -21,6 +21,9 @@ Review round (same task): the defaults reading applies only to a stanza that HOL
 CREDENTIAL and only to the six channels whose schema declares ``allowBots``; a defaulted
 allowlist counts only when a live (not ``enabled: false``) group/room/guild/channel is listed;
 and a configured ``default`` account that is disabled does not drop the implicit node.
+(Superseded by B-1002, which grounded both open points against the vendor: a disabled
+object ``default`` and a case/space variant of the id DO drop it; a non-object ``default``
+still does not.)
 
 Offline and read-only: the build is injected through ``Context.installed_dist_version``.
 """
@@ -351,13 +354,14 @@ class TestAccountNamedDefault:
         assert _run(cfg, tmp_path, "2026.9.7").status == PASS
 
     @pytest.mark.parametrize("key", ["Default", " default", "DEFAULT"])
-    def test_a_case_or_space_variant_is_not_assumed_to_dedupe(self, tmp_path, key):
-        """Whether the vendor normalizes a configured id before the Set dedupe is a per-
-        channel option that ships out of tree. PASS is the direction a wrong guess hurts, so
-        only the exact id ``default`` (identical strings in a Set, certain) drops the implicit
-        account; any variant keeps it and the unset key WARNs."""
+    def test_a_case_or_space_variant_is_the_default_account_too(self, tmp_path, key):
+        """B-1002 grounded what this test used to leave open: the default account's config is
+        found with ``resolveAccountKey`` (dist account-lookup-BAaS-Jak.mjs), which matches a
+        key whose trimmed, lowercased form is ``default`` even when no normalizer is passed.
+        So the variant entry IS the merged default account and the root is not a second
+        one; the shared ``_base_node_runs_unmerged`` gate applies it to every consumer."""
         cfg = _ch(discord={**self._BASE, "accounts": {key: {"allowBots": False}}})
-        assert _run(cfg, tmp_path, "2026.9.7").status == WARN
+        assert _run(cfg, tmp_path, "2026.9.7").status == PASS
 
     def test_slack_default_account_is_unchanged(self, tmp_path):
         cfg = _ch(slack={**_OPEN, "accounts": {"default": {"allowBots": False}}})
@@ -549,13 +553,22 @@ class TestUnrecognisedGroupPolicy:
 
 
 class TestDisabledDefaultAccountKeepsTheImplicitNode:
-    """That a disabled configured ``default`` also takes the credential-carrying root down is
-    NOT confirmed (the Set dedupe is, the disabled-root consequence is not), so the implicit
-    node is kept: the verdict is the pre-C-655 one."""
+    """A NON-OBJECT configured ``default`` leaves the base policy in force (the vendor's
+    ``{...base, ...accountConfig}`` adds nothing from it), so the implicit node is kept.
+
+    A DISABLED object ``default`` is different, grounded in B-1002: the merged default
+    account carries ``enabled: false`` and the vendor computes ``enabled`` from that merge
+    (slack accounts.ts:166-170, telegram accounts.ts:130-134, x accounts.ts:34 at tag
+    v2026.10.9), so the one default account is off and the root does not run either."""
 
     _BASE = {"token": "t", **_OPEN}
 
-    @pytest.mark.parametrize("default_entry", [{"enabled": False}, None, "x", []])
+    def test_a_disabled_default_takes_the_root_down_with_it(self, tmp_path):
+        cfg = _ch(discord={**self._BASE, "accounts": {
+            "default": {"enabled": False}, "b": {"allowBots": False}}})
+        assert _run(cfg, tmp_path, "2026.9.7").status == PASS
+
+    @pytest.mark.parametrize("default_entry", [None, "x", []])
     def test_the_implicit_node_stays_beside_a_default_that_is_not_a_live_account(
             self, tmp_path, default_entry):
         cfg = _ch(discord={**self._BASE, "accounts": {

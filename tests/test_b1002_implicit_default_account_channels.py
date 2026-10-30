@@ -9,30 +9,46 @@ was re-enumerated from all 28 channel plugins of OpenClaw 2026.10.9 (grounding c
 ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS``), and a channel that is not one of them keeps its base node
 instead of dropping it.
 
-Five consumers read the predicate: ``_open_channels`` (B2/B55), ``_open_wildcard_group_channels``
-(B140 / behavioral / RISK), ``_resolved_default_input_channels``, ``_b171_open_channels`` and
-B372's ``_allow_bots_account_nodes``. Each is exercised below on the same twin shapes.
+The base node is re-added through ONE gate, ``_base_node_runs_unmerged`` (wrapped by
+``_live_channel_nodes``), read by ``_open_channels`` (B2/B55), ``_b171_open_channels``,
+``_open_wildcard_group_channels`` (behavioral arming, RISK chains, ``_capability``),
+``_resolved_default_input_channels``, B372's ``_allow_bots_account_nodes``, and - since the
+C-135 round 2 - B140 (``check_wildcard_group_ingress``), B371
+(``check_channel_mention_gate_bypass``), ``risk._open_group_channels`` (RISK-21) and A1's
+``_unpolicied_open_wildcard_group_channels``. Each is exercised below.
+
+C-135 round 2 (BLOCKER): when a configured entry IS the default account (``default``, or a
+key the vendor's account lookup normalizes to it), it and the implicit default account are one
+account whose config is the merge, so the raw base must NOT be re-added - doing so read a
+base policy the entry overrides as a B2 FAIL.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from clawseccheck.catalog import FAIL, PASS
 from clawseccheck.checks import (
+    _BASE_IS_THE_DEFAULT_ACCOUNT,
     _IMPLICIT_DEFAULT_ACCOUNT_KEYS,
     _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES,
     _SINGLE_ACCOUNT_CHANNELS,
+    _base_node_runs_unmerged,
+    _canonical_account_id,
     _channel_has_implicit_default_account,
     _open_channels,
     _open_wildcard_group_channels,
+    check_channel_mention_gate_bypass,
     check_gateway,
+    check_wildcard_group_ingress,
 )
 from clawseccheck.checks._agents import _allow_bots_account_nodes
 from clawseccheck.checks._config import _b171_open_channels
-from clawseccheck.checks._shared import _resolved_default_input_channels
+from clawseccheck.checks._shared import (
+    _resolved_default_input_channels,
+    _unpolicied_open_wildcard_group_channels,
+)
 from clawseccheck.collector import Context
+from clawseccheck.risk import _open_group_channels
 
 # Placeholder credential values. Nothing here is secret-shaped; OpenClaw's implicit-account
 # predicates only test presence, never format.
@@ -117,22 +133,36 @@ def _b2(cfg: dict) -> str:
     return check_gateway(ctx).status
 
 
+def _misses(cases, check):
+    """Run *check* over every case; return the ids whose expectation failed. One test item
+    per question keeps the collected count proportional to behaviours, not to table rows
+    (the suite's test-count claim is a guarded band)."""
+    bad = []
+    for case in cases:
+        try:
+            if not check(case):
+                bad.append(case)
+        except AssertionError as exc:  # a helper's own assert
+            bad.append(f"{case}: {exc}")
+    return bad
+
+
 # ------------------------------------------------------------------ the predicate itself
 
-@pytest.mark.parametrize("case", sorted(LIVE))
-def test_live_base_credentials_spawn_the_implicit_account(case):
-    assert _channel_has_implicit_default_account(_channel(case), LIVE[case]) is True
+def test_live_base_credentials_spawn_the_implicit_account():
+    assert _misses(sorted(LIVE), lambda c: _channel_has_implicit_default_account(
+        _channel(c), LIVE[c]) is True) == []
 
 
-@pytest.mark.parametrize("case", sorted(VESTIGIAL))
-def test_vestigial_base_does_not(case):
-    assert _channel_has_implicit_default_account(_channel(case), VESTIGIAL[case]) is False
+def test_vestigial_base_does_not():
+    assert _misses(sorted(VESTIGIAL), lambda c: _channel_has_implicit_default_account(
+        _channel(c), VESTIGIAL[c]) is False) == []
 
 
-@pytest.mark.parametrize("name", sorted(_SINGLE_ACCOUNT_CHANNELS))
-def test_single_account_channels_always_keep_the_base(name):
+def test_single_account_channels_always_keep_the_base():
     """a2a / reef / msteams list exactly one account whatever `accounts` holds."""
-    assert _channel_has_implicit_default_account(name, {}) is True
+    assert _misses(sorted(_SINGLE_ACCOUNT_CHANNELS),
+                   lambda n: _channel_has_implicit_default_account(n, {}) is True) == []
 
 
 def test_an_ungrounded_channel_keeps_its_base_node():
@@ -140,9 +170,9 @@ def test_an_ungrounded_channel_keeps_its_base_node():
     assert _channel_has_implicit_default_account("acme-chat", {}) is True
 
 
-@pytest.mark.parametrize("name", ["defaults", "modelByChannel"])
-def test_reserved_channel_blocks_are_not_channels(name):
-    assert _channel_has_implicit_default_account(name, {"token": V}) is False
+def test_reserved_channel_blocks_are_not_channels():
+    for name in ("defaults", "modelByChannel"):
+        assert _channel_has_implicit_default_account(name, {"token": V}) is False, name
 
 
 def test_an_unreadable_trim_target_keeps_the_base_node():
@@ -153,15 +183,14 @@ def test_an_unreadable_trim_target_keeps_the_base_node():
 
 # ----------------------------------------------------- B2 end to end (the task's table)
 
-@pytest.mark.parametrize("case", sorted(LIVE))
-def test_b2_open_live_base_fails_with_and_without_accounts(case):
-    assert _b2(_cfg(case, LIVE[case], accounts=None)) == FAIL
-    assert _b2(_cfg(case, LIVE[case])) == FAIL
+def test_b2_open_live_base_fails_with_and_without_accounts():
+    assert _misses(sorted(LIVE), lambda c: (
+        _b2(_cfg(c, LIVE[c], accounts=None)) == FAIL and _b2(_cfg(c, LIVE[c])) == FAIL
+    )) == []
 
 
-@pytest.mark.parametrize("case", sorted(VESTIGIAL))
-def test_b2_vestigial_open_base_passes_once_accounts_override_it(case):
-    assert _b2(_cfg(case, VESTIGIAL[case])) == PASS
+def test_b2_vestigial_open_base_passes_once_accounts_override_it():
+    assert _misses(sorted(VESTIGIAL), lambda c: _b2(_cfg(c, VESTIGIAL[c])) == PASS) == []
 
 
 def test_b2_ungrounded_channel_open_base_is_not_a_clean_pass():
@@ -176,50 +205,48 @@ def test_b2_restricted_live_base_still_passes():
     assert _b2({"channels": {"slack": node}}) == PASS
 
 
-# ------------------------------------------------------------- the other four consumers
+# ------------------------------------------------------------- the other consumers
 
-@pytest.mark.parametrize("case", ["x", "whatsapp", "slack-socket", "slack-http", "slack-relay",
-                                  "slack-user", "telegram"])
-def test_open_channels_and_b171_keep_the_live_base(case):
-    cfg = _cfg(case, LIVE[case])
-    assert _open_channels(cfg) == [_channel(case)]
-    assert _b171_open_channels(cfg) == [_channel(case)]
-
-
-@pytest.mark.parametrize("case", ["x", "slack-socket-no-app", "slack-http-no-secret"])
-def test_open_channels_and_b171_drop_the_vestigial_base(case):
-    cfg = _cfg(case, VESTIGIAL[case])
-    assert _open_channels(cfg) == []
-    assert _b171_open_channels(cfg) == []
+def test_open_channels_and_b171_keep_the_live_base():
+    def ok(case):
+        cfg = _cfg(case, LIVE[case])
+        return _open_channels(cfg) == [_channel(case)] == _b171_open_channels(cfg)
+    assert _misses(["x", "whatsapp", "slack-socket", "slack-http", "slack-relay",
+                    "slack-user", "telegram"], ok) == []
 
 
-@pytest.mark.parametrize("case", ["x", "whatsapp", "slack-socket", "slack-relay", "telegram"])
-def test_wildcard_group_live_base_survives_a_disabled_account(case):
-    """The ~3708 consumer (`_open_wildcard_group_channels`)."""
-    node = {**LIVE[case], "enabled": True, "groups": {"*": {}},
-            "accounts": {"retired": {"enabled": False}}}
-    cfg = {"channels": {_channel(case): node}}
-    assert _channel(case) in _open_wildcard_group_channels(cfg)
+def test_open_channels_and_b171_drop_the_vestigial_base():
+    def ok(case):
+        cfg = _cfg(case, VESTIGIAL[case])
+        return _open_channels(cfg) == [] == _b171_open_channels(cfg)
+    assert _misses(["x", "slack-socket-no-app", "slack-http-no-secret"], ok) == []
 
 
-@pytest.mark.parametrize("case", ["x", "slack-socket-no-app"])
-def test_wildcard_group_on_a_vestigial_base_is_silent(case):
-    node = {**VESTIGIAL[case], "enabled": True, "groups": {"*": {}},
-            "accounts": {"retired": {"enabled": False}}}
-    assert _open_wildcard_group_channels({"channels": {_channel(case): node}}) == {}
+def test_wildcard_group_follows_the_live_base_beside_a_disabled_account():
+    def node(creds):
+        return {**creds, "enabled": True, "groups": {"*": {}},
+                "accounts": {"retired": {"enabled": False}}}
+    assert _misses(["x", "whatsapp", "slack-socket", "slack-relay", "telegram"], lambda c: (
+        _channel(c) in _open_wildcard_group_channels({"channels": {_channel(c): node(LIVE[c])}})
+    )) == []
+    assert _misses(["x", "slack-socket-no-app"], lambda c: (
+        _open_wildcard_group_channels({"channels": {_channel(c): node(VESTIGIAL[c])}}) == {}
+    )) == []
 
 
-@pytest.mark.parametrize("case", ["x", "whatsapp", "slack-socket", "telegram"])
-def test_resolved_default_input_sees_the_live_base(case):
+def test_resolved_default_input_sees_the_live_base():
     """Base writes no dmPolicy, the one account disables DMs: the live base account still
     runs on the resolved default, so the channel is reported (B-619's repro-3 shape)."""
-    node = {**LIVE[case], "enabled": True,
-            "accounts": {"work": {"dmPolicy": "disabled"}}}
-    assert _resolved_default_input_channels({"channels": {_channel(case): node}}) == [
-        _channel(case)
-    ]
-    vestigial = {"enabled": True, "accounts": node["accounts"]}
-    assert _resolved_default_input_channels({"channels": {_channel(case): vestigial}}) == []
+    accounts = {"work": {"dmPolicy": "disabled"}}
+
+    def ok(case):
+        live = {**LIVE[case], "enabled": True, "accounts": accounts}
+        vestigial = {"enabled": True, "accounts": accounts}
+        return (_resolved_default_input_channels({"channels": {_channel(case): live}})
+                == [_channel(case)]
+                and _resolved_default_input_channels({"channels": {_channel(case): vestigial}})
+                == [])
+    assert _misses(["x", "whatsapp", "slack-socket", "telegram"], ok) == []
 
 
 def test_allow_bots_nodes_include_a_live_slack_base():
@@ -254,3 +281,175 @@ def test_reverting_the_table_reopens_the_false_pass(monkeypatch):
     for case in ("x", "whatsapp", "slack-socket"):
         assert _b2(_cfg(case, LIVE[case])) == PASS
     assert _b2(_cfg("telegram", LIVE["telegram"])) == FAIL
+
+
+# ===================================================== C-135 round 2: the default account
+
+# One live base credential set per channel: all 28 channel plugins of OpenClaw 2026.10.9,
+# plus an ungrounded channel name.
+EVERY = {
+    "telegram": {"botToken": V}, "x": {"clientId": V}, "whatsapp": {"authDir": "/srv/wa"},
+    "discord": {"token": V}, "googlechat": {"serviceAccountFile": "/srv/sa.json"},
+    "zalo": {"botToken": V}, "zalouser": {"profile": V}, "imessage": {"cliPath": "/c"},
+    "raft": {"profile": V}, "signal": {"account": "+1"}, "buzz": {"relayUrl": V},
+    "qa-channel": {"baseUrl": V}, "synology-chat": {"token": V},
+    "slack": {"botToken": V, "appToken": V},
+    "matrix": {"homeserver": "https://m.example", "accessToken": V},
+    "feishu": {"appId": V, "appSecret": V},
+    "nextcloud-talk": {"baseUrl": "https://nc.example", "botSecret": V},
+    "irc": {"host": "h", "nick": "n"}, "mattermost": {"baseUrl": V, "botToken": V},
+    "clickclack": {"baseUrl": V, "token": V, "workspace": "w"},
+    "line": {"channelAccessToken": V}, "tlon": {"ship": "~zod"}, "twitch": {"username": "u"},
+    "sms": {"accountSid": V}, "nostr": {"privateKey": V}, "a2a": {}, "reef": {}, "msteams": {},
+    "acme-chat": {"token": V},
+}
+# a configured account that closes every surface it inherits from the base
+CLOSED = {"dmPolicy": "pairing", "groupPolicy": "allowlist", "allowFrom": ["u1"],
+          "groups": {"g1": {"requireMention": True}}}
+# accounts block -> does the raw base still run as its own account (for an ordinary channel)?
+DEFAULT_SHAPES = {
+    "no-default": ({"w": dict(CLOSED)}, True),
+    "default": ({"default": dict(CLOSED)}, False),
+    "Default": ({"Default": dict(CLOSED)}, False),
+    "padded": ({" default ": dict(CLOSED)}, False),
+    "canonical": ({"default!": dict(CLOSED)}, False),
+    "disabled-default": ({"default": {"enabled": False}, "w": dict(CLOSED)}, False),
+    "non-object-default": ({"default": None, "w": dict(CLOSED)}, True),
+    "default-beside-other": ({"default": dict(CLOSED), "w": dict(CLOSED)}, False),
+}
+MATRIX = [(n, sh) for n in sorted(EVERY) for sh in sorted(DEFAULT_SHAPES)]
+
+
+def _expected_separate(name: str, shape: str) -> bool:
+    if name in _BASE_IS_THE_DEFAULT_ACCOUNT:  # tlon, a2a, reef, msteams: base IS the account
+        return True
+    return DEFAULT_SHAPES[shape][1]
+
+
+def test_the_gate_matches_the_vendor_default_account_rule():
+    def ok(row):
+        name, shape = row
+        c = {**EVERY[name], "dmPolicy": "open", "accounts": DEFAULT_SHAPES[shape][0]}
+        return _base_node_runs_unmerged(name, c) is _expected_separate(name, shape)
+    assert _misses(MATRIX, ok) == []
+
+
+def _consumers_agree(row) -> bool:
+    name, shape = row
+    accounts = DEFAULT_SHAPES[shape][0]
+    live = _expected_separate(name, shape)
+    # base: open policy and an unrestricted wildcard group, no own allowFrom
+    open_node = {**EVERY[name], "enabled": True, "dmPolicy": "open", "groupPolicy": "open",
+                 "groups": {"*": {"requireMention": False}}, "accounts": accounts}
+    cfg = {"channels": {name: open_node}}
+    # the non-object default keeps the raw node through _resolved_channel_nodes' own
+    # schema-drift fallback, so every consumer sees it regardless of the gate
+    seen = live or shape == "non-object-default"
+    got = {
+        "_open_channels": name in _open_channels(cfg),
+        "_b171_open_channels": name in _b171_open_channels(cfg),
+        "_open_wildcard_group_channels": name in _open_wildcard_group_channels(cfg),
+        "risk._open_group_channels": name in _open_group_channels(cfg),
+    }
+    # the A1 leg reads only a node that writes no dmPolicy/groupPolicy at all
+    bare = {**EVERY[name], "enabled": True, "groups": {"*": {}}, "accounts": accounts}
+    got["_unpolicied_open_wildcard_group_channels"] = (
+        name in _unpolicied_open_wildcard_group_channels({"channels": {name: bare}})
+    )
+    bad = [k for k, v in got.items() if v is not seen]
+    # resolved-default: base writes no dmPolicy; every configured account declares one
+    rdi_accounts = {
+        # flat and nested forms: matrix/googlechat declare DM policy only as `dm.policy`
+        k: ({"dmPolicy": "disabled", "dm": {"policy": "disabled"},
+             **({"enabled": False} if v.get("enabled") is False else {})}
+            if isinstance(v, dict) else v)
+        for k, v in accounts.items()
+    }
+    rdi_node = {**EVERY[name], "enabled": True, "accounts": rdi_accounts}
+    if (name in _resolved_default_input_channels({"channels": {name: rdi_node}})) is not live:
+        bad.append("_resolved_default_input_channels")
+    assert not bad, bad
+    return True
+
+
+def test_every_policy_consumer_follows_the_gate():
+    assert _misses(MATRIX, _consumers_agree) == []
+
+
+def test_allow_bots_nodes_follow_the_gate():
+    def ok(row):
+        name, shape = row
+        c = {**EVERY[name], "accounts": DEFAULT_SHAPES[shape][0]}
+        root = {k: v for k, v in c.items() if k != "accounts"}
+        return (root in _allow_bots_account_nodes(name, c)) is _expected_separate(name, shape)
+    assert _misses([r for r in MATRIX if r[0] in ("discord", "slack", "tlon")], ok) == []
+
+
+def test_the_c135_blocker_repro_is_a_pass_again():
+    cfg = {"channels": {"slack": {"botToken": V, "appToken": V, "dmPolicy": "open",
+                                  "accounts": {"default": {"dmPolicy": "pairing"}}}}}
+    assert _b2(cfg) == PASS
+    cfg["channels"]["slack"]["accounts"] = {"w": {"dmPolicy": "pairing"}}
+    assert _b2(cfg) == FAIL
+
+
+def test_tlon_default_entry_does_not_hide_the_raw_base():
+    """tlon's default account reads the RAW channel node (tlon/src/types.ts:54-60)."""
+    cfg = {"channels": {"tlon": {"ship": "~zod", "dmPolicy": "open",
+                                 "accounts": {"default": {"dmPolicy": "pairing"}}}}}
+    assert _b2(cfg) == FAIL
+
+
+def test_canonical_account_id_mirrors_the_vendor():
+    cases = [("default", "default"), ("Default", "default"), (" DEFAULT ", "default"),
+             ("default!", "default"), ("-default-", "default"), ("work", "work"), ("", None),
+             ("!!!", None), (5, None)]
+    assert [(k, _canonical_account_id(k)) for k, _ in cases] == cases
+
+
+# ------------------------------------------- B140 / B371 now see the live implicit account
+
+_WILDCARD_SLACK = {"botToken": V, "appToken": V, "groupPolicy": "open",
+                   "groups": {"*": {"requireMention": False}}}
+_RESTRICTED_ACCOUNT = {"w": {"groupPolicy": "allowlist", "allowFrom": ["u1"],
+                             "groups": {"g1": {"requireMention": True}}}}
+
+
+def _status(check, cfg):
+    ctx = Context(home=Path("/nonexistent"))
+    ctx.config = cfg
+    return check(ctx).status
+
+
+def test_live_base_wildcard_group_is_seen_by_b140_and_b371():
+    live = {"channels": {"slack": {**_WILDCARD_SLACK, "accounts": _RESTRICTED_ACCOUNT}}}
+    vestigial = {"channels": {"slack": {**_WILDCARD_SLACK, "appToken": None,
+                                        "accounts": _RESTRICTED_ACCOUNT}}}
+    merged = {"channels": {"slack": {**_WILDCARD_SLACK, "accounts": {
+        "default": _RESTRICTED_ACCOUNT["w"]}}}}
+    for check in (check_wildcard_group_ingress, check_channel_mention_gate_bypass):
+        assert _status(check, live) != PASS, check.__name__
+        assert _status(check, vestigial) == PASS, check.__name__
+        assert _status(check, merged) == PASS, check.__name__
+
+
+def test_risk_open_group_channels_sees_the_live_base():
+    cfg = {"channels": {"slack": {**_WILDCARD_SLACK, "accounts": _RESTRICTED_ACCOUNT}}}
+    assert "slack" in _open_group_channels(cfg)
+
+
+# ----------------------------------------------------------------- round-2 mutation check
+
+def test_ignoring_the_default_account_reopens_the_blocker(monkeypatch):
+    """Without the default-account guard in the gate, the blocker repro FAILs again."""
+    from clawseccheck.checks import _shared
+
+    def no_guard(name, c):
+        accounts = c.get("accounts") if isinstance(c, dict) else None
+        return bool(isinstance(accounts, dict) and accounts
+                    and _shared._channel_has_implicit_default_account(name, c))
+
+    monkeypatch.setattr(_shared, "_base_node_runs_unmerged", no_guard)
+    cfg = {"channels": {"slack": {"botToken": V, "appToken": V, "dmPolicy": "open",
+                                  "accounts": {"default": {"dmPolicy": "pairing"}}}}}
+    assert _b2(cfg) == FAIL

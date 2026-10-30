@@ -43,6 +43,7 @@ _B62_HIGH_SURPRISE
 _B65_TRIGGER_RE
 _B65_WINDOW
 _B74_ROLE_BLOCK_RE
+_BASE_IS_THE_DEFAULT_ACCOUNT
 _CODEX_APPSERVER_RUNTIME_CAVEAT
 _CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ
 _CODE_MODE_AUTO_DEFAULT_MIN
@@ -136,7 +137,9 @@ _b62_surprising_families
 _b63_scan
 _b737_provenance
 _b737_provenance_sentences
+_base_node_runs_unmerged
 _blank_fences
+_canonical_account_id
 _canonical_ipv4
 _channel_has_implicit_default_account
 _check_unicode_obfuscation
@@ -184,6 +187,7 @@ _layer_exec_policy
 _legacy_ssrf_alias_startup_blocked
 _levenshtein
 _literal_key_functional
+_live_channel_nodes
 _local_sink_exfil_hits
 _loopback_ip
 _mcp_fs_root_is_broad
