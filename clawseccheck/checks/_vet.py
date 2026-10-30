@@ -5475,10 +5475,12 @@ _JS_SIGNING_CLIENT_DISCLOSURE = (
     "credential file (a private key, raw cloud credentials, or a process environment) "
     "and passing a value from it to a network call. That signal has a known limit: a "
     "signing client that reads a credential file and sends a derived signature is "
-    "shape-identical to exfiltration; this rule cannot separate them. If you authored "
-    "this skill or already trust its source, read the flagged call and confirm the "
-    "value sent is a signature or hash for the service the credential belongs to, "
-    "never the credential itself."
+    "shape-identical to exfiltration; this rule cannot separate them, nor a hash, "
+    "fingerprint or extracted field of the file from the secret itself, nor a process "
+    "manager sending a process environment to its own socket. If you authored this "
+    "skill or already trust its source, read the flagged call and confirm the value "
+    "sent is a signature, hash, fingerprint or extracted field sent to the service the "
+    "credential belongs to, never the credential itself."
 )
 
 _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
@@ -5500,8 +5502,8 @@ _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
         "credential file sent to the network",
         "A bundled .js/.ts file reads a credential file and a value from it reaches a "
         "network call: a token or config file (.npmrc, .netrc, a secrets mount, browser "
-        "cookies, ...), or a key or the process environment only as its length, a "
-        "boolean test of it, or a TLS key option. That is how a client "
+        "cookies, ...), or a key or the process environment only as its length "
+        "or as a TLS key option. That is how a client "
         "authenticates as you, and also how a secret is stolen; this lexical pass cannot "
         "tell the two apart. Read the flagged call and confirm the destination is the "
         "service that credential belongs to, and nowhere else.",
