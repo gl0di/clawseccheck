@@ -69,6 +69,7 @@ def mask_code(body: str, lang: str) -> tuple[str, str, list[tuple[int, int, int]
                 if v[k] != "\n":
                     v[k] = " "
 
+    no_closer: set[str] = set()  # quote types proven never to close from here on
     i = 0
     while i < n:
         c = body[i]
@@ -118,6 +119,9 @@ def mask_code(body: str, lang: str) -> tuple[str, str, list[tuple[int, int, int]
                 continue
             i += 1
             continue
+        if c in no_closer:
+            i += 1  # an earlier quote of this type already ran to the end unclosed
+            continue
         if c in "\"'`" and not (lang == "py" and c == "`"):
             triple = lang == "py" and body.startswith(c * 3, i)
             q = c * 3 if triple else c
@@ -147,6 +151,7 @@ def mask_code(body: str, lang: str) -> tuple[str, str, list[tuple[int, int, int]
                     continue
                 j += 1
             if j >= n and lang == "sh":
+                no_closer.add(q)  # none closes later either: no rescan per later quote
                 i += 1  # never closed: a literal quote character, keep masking after it
                 continue
             end = min(n, j + len(q))
@@ -248,6 +253,7 @@ def sh_commands(text: str, lo: int, hi: int):
     heredoc = False
     want_redirect = False
     skip_next = False
+    unclosed = False  # a quote/substitution was proven never to close: words end at lines
     i = lo
 
     def flush():
@@ -303,6 +309,8 @@ def sh_commands(text: str, lo: int, hi: int):
         j, quote, depth = i, None, 0
         while j < hi:
             ch = text[j]
+            if unclosed and ch == "\n":
+                break  # one linear pass: no rescan to the end of the text per word
             if ch == "\\" and quote != "'":
                 j += 2  # an escaped character, inside double quotes or outside quotes
                 continue
@@ -320,9 +328,11 @@ def sh_commands(text: str, lo: int, hi: int):
             elif depth == 0 and (ch in " \t\r\n;&|<>(){}"):
                 break
             j += 1
-        if quote or depth:
+        if (quote or depth) and not unclosed:
             # Open to the end of the text: the shell would reject it, so read the word
-            # as ending at its own line and keep parsing what follows.
+            # as ending at its own line and keep parsing what follows. Proven once -
+            # every later word ends at its own line without rescanning.
+            unclosed = True
             nl = text.find("\n", i, hi)
             j = hi if nl == -1 else nl
         j = min(j, hi)

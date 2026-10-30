@@ -2439,7 +2439,8 @@ def _c755_persistence_hits(name: str, blob: str) -> list[tuple[str, str, str]]:
     shipped_files = {h.group("name").strip(): h.group("body") for h in headers}
     folder_open_elsewhere = any(
         _C755_FOLDER_OPEN_RE.search(b) for n, b in shipped_files.items()
-        if not (n.lower().endswith((".md", ".markdown", ".rst")) or n.lower().startswith("readme"))
+        if not (n.lower().endswith((".md", ".markdown", ".rst"))
+                or n.lower() in ("readme", "readme.txt"))
     )
     own_next = re.compile(rf"{_C755_GLUE}{re.escape(name)}(?![\w.-])") if name else None
     own_lit = re.compile(rf"""["'`]{re.escape(name)}["'`]""") if name else None
