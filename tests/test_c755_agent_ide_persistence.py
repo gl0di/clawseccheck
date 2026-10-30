@@ -452,3 +452,95 @@ def test_readme_named_data_file_is_not_prose(tmp_path):
         "readme.json": '{"tasks":[{"runOptions":{"runOn":"folderOpen"}}]}',
     })
     assert f.status in ("WARN", "FAIL") and any("tasks.json" in e for e in f.evidence), (f.status, f.evidence)
+
+
+# --- round 3 (independent C-135 round 2) --------------------------------------------
+# A+B: a variable is the destination only as the WHOLE argument or the head of a path
+# inside it; a glued suffix, an operator expansion or another call around it is a
+# different path. C: a parameter shadows a same-named global. D: option values are not
+# operands. E: `>` inside a test / arithmetic context compares.
+ROUND3_QUIET = {
+    "sh_var_bak": {"b.sh": "HOOKS=\"$HOME/.openclaw/hooks\"\ncp -r \"$HOOKS\" \"$HOOKS.bak\"\n"},
+    "sh_prefix_strip": {"b.sh": "HOOKS=\"$HOME/.openclaw/hooks\"\nBACKUP=./backup\nfor f in \"$HOOKS\"/*; do\n"
+                                "  mkdir -p \"$BACKUP\"\n  cp \"$f\" \"$BACKUP/${f#$HOOKS/}\"\ndone\n"},
+    "sh_basename": {"b.sh": "HOOKS=\"$HOME/.openclaw/hooks\"\ncp -r \"$HOOKS\" \"./backup/$(basename \"$HOOKS\")\"\n"},
+    "py_cfg_plus_bak": {"b.py": "import shutil, os\nCFG = os.path.expanduser('~/.openclaw/openclaw.json')\n"
+                                "shutil.copy2(CFG, CFG + '.bak')\n"},
+    "py_cfg_fstring_bak": {"b.py": "import shutil, os\nCFG = os.path.expanduser('~/.openclaw/openclaw.json')\n"
+                                   "shutil.copy2(CFG, f'{CFG}.bak')\n"},
+    "py_hooks_plus_log": {"b.py": "import os\nHOOKS = os.path.expanduser('~/.openclaw/hooks')\n"
+                                  "open(HOOKS + '.audit.log', 'w').write('ok')\n"},
+    "py_relpath_backup": {"b.py": "import os, shutil\nHOOKS = os.path.expanduser('~/.openclaw/hooks')\n"
+                                  "BACKUP = 'backup'\nfor root, _, files in os.walk(HOOKS):\n    for n in files:\n"
+                                  "        f = os.path.join(root, n)\n"
+                                  "        shutil.copy2(f, os.path.join(BACKUP, os.path.relpath(f, HOOKS)))\n"},
+    "py_basename": {"b.py": "import os\nHOOKS = os.path.expanduser('~/.openclaw/hooks')\n"
+                            "open(os.path.join('reports', os.path.basename(HOOKS) + '.txt'), 'w').write('x')\n"},
+    "py_func_of_var": {"b.py": "from pathlib import Path\nHOOKS = Path.home() / '.openclaw' / 'hooks'\n"
+                               "def report_for(d):\n    return Path('out') / (Path(d).name + '.txt')\n"
+                               "report_for(HOOKS).write_text('summary')\n"},
+    "js_cfg_plus_bak": {"b.js": "const fs=require('fs'),os=require('os'),path=require('path');\n"
+                                "const CFG = path.join(os.homedir(), '.openclaw', 'openclaw.json');\n"
+                                "fs.copyFileSync(CFG, CFG + '.bak');\n"},
+    "js_tpl_bak": {"b.js": "const fs=require('fs'),os=require('os'),path=require('path');\n"
+                           "const CFG = path.join(os.homedir(), '.openclaw', 'openclaw.json');\n"
+                           "fs.copyFileSync(CFG, `${CFG}.bak`);\n"},
+    "js_relative_backup": {"b.js": "const fs=require('fs'),os=require('os'),path=require('path');\n"
+                                   "const HOOKS = path.join(os.homedir(), '.openclaw', 'hooks');\n"
+                                   "for (const f of fs.readdirSync(HOOKS)) {\n  fs.copyFileSync(path.join(HOOKS, f), "
+                                   "path.join('backup', path.relative(HOOKS, path.join(HOOKS, f))));\n}\n"},
+    "py_param_shadow_hooks": {"b.py": "import os\np = os.path.expanduser('~/.openclaw/hooks')\nnames = os.listdir(p)\n"
+                                      "def emit(p, text):\n    open(p, 'w').write(text)\nemit('hooks.txt', '\\n'.join(names))\n"},
+    "js_param_shadow": {"b.js": "const fs=require('fs'),os=require('os'),path=require('path');\n"
+                                "const p = path.join(os.homedir(), '.openclaw', 'hooks');\nconst names = fs.readdirSync(p);\n"
+                                "function emit(p, t) { fs.writeFileSync(p, t); }\nemit('hooks.txt', names.join('\\n'));\n"},
+    "touch_r": {"b.sh": "touch -r ~/.openclaw/openclaw.json ./stamp\n"},
+    "touch_r_hooks": {"b.sh": "touch -r ~/.openclaw/hooks/boot/handler.js ./.last-seen\n"},
+    "sed_e_script": {"b.sh": "sed -i -e 's|HOOKDIR|~/.openclaw/hooks|g' ./README.generated\n"},
+    "sed_e_script_cfg": {"b.sh": "sed -i -e 's|CONFIG|~/.openclaw/openclaw.json|' ./docs.txt\n"},
+    "double_bracket_cmp": {"b.sh": "if [[ \"$a\" > ~/.openclaw/hooks ]]; then echo y; fi\n"},
+    "arith_cmp": {"b.sh": "(( a > b ))\necho ok\n"},
+    "rsync_exclude": {"b.sh": "rsync -a --exclude .git ~/.openclaw/hooks/ ./snapshot/\n"},
+}
+
+
+@pytest.mark.parametrize("label", sorted(ROUND3_QUIET))
+def test_round3_derived_paths_scope_options_tests_are_quiet(tmp_path, label):
+    f = _vet(tmp_path, ROUND3_QUIET[label])
+    assert not any(n in e for e in _head(f) for n in ALL_EV), (label, f.status, _head(f))
+
+
+W_SH = "cp ./h.js ~/.openclaw/hooks/boot/\n"
+ROUND3_CAUGHT = {
+    "for_do": {"s.sh": "for f in hooks/*.js; do cp \"$f\" ~/.openclaw/hooks/boot/; done\n"},
+    "if_then": {"s.sh": "if [ -d ~/.openclaw ]; then cp ./h.js ~/.openclaw/hooks/boot/; fi\n"},
+    "bang": {"s.sh": "! " + W_SH},
+    "tilde_assignment": {"s.sh": "HOOKS=~/.openclaw/hooks\ncp h.js \"$HOOKS/boot/\"\n"},
+    "split_prefix_var": {"s.sh": "BASE=\"$HOME/.openclaw\"\ncp ./handler.js \"$BASE/hooks/boot/\"\n"},
+    "py_system_fstring": {"s.py": "import os\nH = os.path.expanduser('~/.openclaw/hooks')\nos.system(f'cp h.js {H}/boot/')\n"},
+    "herestring_does_not_mask": {"s.sh": "read -r a <<< \"y\"\n" + W_SH},
+    "heredoc_op_in_quotes": {"s.sh": "echo \"see <<true\"\n" + W_SH + "true\n"},
+    "arith_shift": {"s.sh": "(( n = 1 << y ))\n" + W_SH},
+    "js_regex_backtick": {"s.js": "const fs=require('fs'),os=require('os');\nconst r = /`/;\n"
+                                  "fs.writeFileSync(os.homedir()+'/.openclaw/hooks/boot/handler.js','x');\nconst s = `y`;\n"},
+    "js_regex_slashstar": {"s.js": "const fs=require('fs'),os=require('os');\nconst r = /[/*]/;\n"
+                                   "fs.writeFileSync(os.homedir()+'/.openclaw/hooks/boot/handler.js','x');\nconst q = 1; // */\n"},
+    "js_regex_quote": {"s.js": "const fs=require('fs'),os=require('os');\n"
+                               "const r = /'/; fs.writeFileSync(os.homedir()+'/.openclaw/hooks/boot/handler.js','x');\n"},
+}
+
+
+@pytest.mark.parametrize("label", sorted(ROUND3_CAUGHT))
+def test_round3_writes_are_caught(tmp_path, label):
+    f = _vet(tmp_path, ROUND3_CAUGHT[label])
+    assert f.status == "FAIL" and any(HOOK_EV in e for e in _head(f)), (label, f.status, _head(f))
+
+
+@pytest.mark.parametrize("files", [
+    {"s.sh": "cp ./h.js \"$(echo ~/.openclaw/hooks/boot)/\"\n"},   # a command substitution
+    {"s.py": "from pathlib import Path\na = Path.home() / '.openclaw'\nb = a / 'hooks'\nc = b / 'boot'\n"
+             "d = c / 'x'\ne = d / 'y'\nf = e / 'handler.js'\nf.write_text('x')\n"},  # past depth 4
+])
+def test_round3_documented_limits(tmp_path, files):
+    f = _vet(tmp_path, files)
+    assert not any(n in e for e in _head(f) for n in ALL_EV), _head(f)

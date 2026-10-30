@@ -45,9 +45,31 @@ _JS_EXEC_RE = re.compile(
 )
 _WRITE_MODE_RE = re.compile(r"""^\s*(?:mode\s*=\s*)?[rbtfu]*["'][^"'\n]*[wax+]""")
 _SH_WRAPPERS = frozenset({"sudo", "doas", "command", "exec", "env", "nohup", "time"})
+# Reserved words that may precede a command on the same line (`do cp ...`, `! cp ...`).
+_SH_KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{",
+                          "fi", "done"})
+# Options whose VALUE is the next word (never a file operand). `-t` is the destination
+# for cp/mv/ln/install and is read from here.
+_TGT = frozenset({"-t", "--target-directory", "-S", "--suffix"})
+_OPT_VALUES = {
+    "cp": _TGT, "mv": _TGT, "ln": _TGT,
+    "install": _TGT | {"-m", "--mode", "-o", "--owner", "-g", "--group", "-M"},
+    "rsync": frozenset({"-e", "--rsh", "--exclude", "--include", "--filter", "-f",
+                        "--exclude-from", "--include-from", "--files-from", "--link-dest",
+                        "--compare-dest", "--copy-dest", "--backup-dir", "--suffix",
+                        "--chmod", "--chown", "-T", "--temp-dir", "--partial-dir",
+                        "--log-file", "--password-file"}),
+    "touch": frozenset({"-r", "--reference", "-d", "--date", "-t"}),
+    "sed": frozenset({"-e", "--expression", "-f", "--file", "-l", "--line-length"}),
+    "mkdir": frozenset({"-m", "--mode", "--context"}),
+}
 _SH_LAST = frozenset({"cp", "mv", "install", "ln", "rsync"})
 _SH_ALL = frozenset({"tee", "touch", "mkdir"})
 _HEREDOC_RE = re.compile(r"""<<-?[ \t]*(["']?)([A-Za-z_]\w*)\1""")
+_HEREDOC_OP_RE = re.compile(r"(?<!<)<<(?!<)")
+# A `/` that starts a JS regex literal follows one of these (or a keyword below).
+_JS_REGEX_PREV = frozenset("(,=:[!&|?{};+-*%<>~^")
+_JS_REGEX_KW_RE = re.compile(r"(?:return|typeof|case|in|of|void|delete|throw|new|yield|await)$")
 _SH_ASSIGN_WORD_RE = re.compile(r"[A-Za-z_]\w*=")
 SPAN = 600  # chars read for one statement / call argument list
 
@@ -97,8 +119,16 @@ def mask_code(body: str, lang: str) -> tuple[str, str, list[tuple[int, int, int]
             # heredoc: the line just ended opens one or more bodies
             ls = body.rfind("\n", 0, i) + 1
             hm = None
-            for hm in _HEREDOC_RE.finditer("".join(out[ls:i])):
-                pass
+            line_code = "".join(code[ls:i])
+            line_out = "".join(out[ls:i])
+            for cm in _HEREDOC_OP_RE.finditer(line_code):
+                # `<<` outside quotes (blanked in the code view), not `<<<`, not a
+                # shift inside `(( ))` / `$(( ))`, with a word delimiter after it
+                if "((" in line_code[:cm.start()] and "))" in line_code[cm.end():]:
+                    continue
+                dm = _HEREDOC_RE.match(line_out, cm.start())
+                if dm:
+                    hm = dm
             if hm is not None:
                 delim, strip = hm.group(2), body[ls + hm.start() + 2: ls + hm.start() + 3] == "-"
                 k = i + 1
@@ -121,6 +151,33 @@ def mask_code(body: str, lang: str) -> tuple[str, str, list[tuple[int, int, int]
             continue
         if c in no_closer:
             i += 1  # an earlier quote of this type already ran to the end unclosed
+            continue
+        if lang == "js" and c == "/":
+            k = i - 1
+            while k >= 0 and code[k] in " \t":
+                k -= 1
+            prev = code[k] if k >= 0 else "\n"
+            if prev in _JS_REGEX_PREV or prev == "\n" or _JS_REGEX_KW_RE.search(
+                    "".join(code[max(0, k - 9):k + 1])):
+                # a regex literal: skip it whole so a quote or `/*` inside never opens a
+                # string or comment. Unsure (no closing `/` on the line) -> division.
+                j, cls = i + 1, False
+                while j < n and body[j] != "\n":
+                    ch = body[j]
+                    if ch == "\\":
+                        j += 2
+                        continue
+                    if ch == "[":
+                        cls = True
+                    elif ch == "]":
+                        cls = False
+                    elif ch == "/" and not cls:
+                        break
+                    j += 1
+                if j < n and body[j] == "/":
+                    i = j + 1
+                    continue
+            i += 1
             continue
         if c in "\"'`" and not (lang == "py" and c == "`"):
             triple = lang == "py" and body.startswith(c * 3, i)
@@ -254,13 +311,14 @@ def sh_commands(text: str, lo: int, hi: int):
     want_redirect = False
     skip_next = False
     unclosed = False  # a quote/substitution was proven never to close: words end at lines
+    test = False  # inside `[[ ]]`, `[ ]` or `test`: `<`/`>` compare
     i = lo
 
     def flush():
-        nonlocal words, redirs, heredoc
+        nonlocal words, redirs, heredoc, test
         if words or redirs:
             cmds.append((words, redirs, heredoc))
-        words, redirs, heredoc = [], [], False
+        words, redirs, heredoc, test = [], [], False, False
 
     while i < hi:
         c = text[i]
@@ -274,7 +332,12 @@ def sh_commands(text: str, lo: int, hi: int):
             nl = text.find("\n", i, hi)
             i = hi if nl == -1 else nl
             continue
-        if c in "\n;(){}" or text.startswith("&&", i) or text.startswith("||", i):
+        if text.startswith("((", i) and all(text[a:b] in _SH_KEYWORDS for a, b in words):
+            close = text.find("))", i + 2, hi)
+            i = hi if close == -1 else close + 2  # arithmetic: `<`/`>` are operators
+            continue
+        if c in "\n;()}" or (c == "{" and text[i + 1:i + 2] in (" ", "\t", "\n", "")) or \
+                text.startswith("&&", i) or text.startswith("||", i):
             flush()
             i += 2 if text.startswith(("&&", "||"), i) else 1
             continue
@@ -294,7 +357,12 @@ def sh_commands(text: str, lo: int, hi: int):
             while k < hi and text[k] in "<>&|-":
                 k += 1
             op = text[op_s:k]
-            if op.startswith("<<"):
+            if test:
+                i = k  # inside [[ ]] / [ ] / test: a comparison, not a redirect
+                continue
+            if op.startswith("<<<"):
+                skip_next = True  # a here-string: the word is data, not a file
+            elif op.startswith("<<"):
                 heredoc = True
                 skip_next = True
             elif ">&" in op and (text[k:k + 1].isdigit() or text[k:k + 1] == "-"):
@@ -325,7 +393,7 @@ def sh_commands(text: str, lo: int, hi: int):
                 continue
             elif ch in ")}" and depth:
                 depth -= 1
-            elif depth == 0 and (ch in " \t\r\n;&|<>(){}"):
+            elif depth == 0 and (ch in " \t\r\n;&|<>()"):
                 break
             j += 1
         if (quote or depth) and not unclosed:
@@ -344,10 +412,41 @@ def sh_commands(text: str, lo: int, hi: int):
         elif not words and _SH_ASSIGN_WORD_RE.match(text, i, j):
             pass  # VAR=value prefix assignment
         else:
+            wt = text[i:j]
+            if wt in ("[[", "[", "test") and all(
+                    text[a:b] in _SH_KEYWORDS for a, b in words):
+                test = True
+            elif wt in ("]]", "]"):
+                test = False
             words.append((i, j))
         i = j
     flush()
     return cmds
+
+
+def _split_opts(text: str, cmd: str, args):
+    """(plain words, {option: value span}) - an option that takes a value consumes it,
+    so `touch -r REF`, `sed -e SCRIPT`, `rsync --exclude PAT` never read the value as a
+    file operand."""
+    takes = _OPT_VALUES.get(cmd, frozenset())
+    plain, vals = [], {}
+    k = 0
+    while k < len(args):
+        a = args[k]
+        t = unquote(text[a[0]:a[1]])
+        if t.startswith("-") and t != "-":
+            if "=" in t and t.startswith("--"):
+                name = t.split("=", 1)[0]
+                vals[name] = (a[0] + text[a[0]:a[1]].index("=") + 1, a[1])
+            elif t in takes and k + 1 < len(args):
+                vals[t] = args[k + 1]
+                k += 1
+            else:
+                vals.setdefault(t, None)
+        else:
+            plain.append(a)
+        k += 1
+    return plain, vals
 
 
 def _cmd_dests(text: str, words: list[tuple[int, int]]):
@@ -355,6 +454,9 @@ def _cmd_dests(text: str, words: list[tuple[int, int]]):
     k = 0
     while k < len(words):
         w = unquote(text[words[k][0]:words[k][1]]).rsplit("/", 1)[-1]
+        if w in _SH_KEYWORDS:
+            k += 1
+            continue
         if w in _SH_WRAPPERS:
             k += 1
             while k < len(words) and text[words[k][0]:words[k][1]].startswith("-"):
@@ -364,25 +466,21 @@ def _cmd_dests(text: str, words: list[tuple[int, int]]):
     if k >= len(words):
         return [], False, []
     cmd = unquote(text[words[k][0]:words[k][1]]).rsplit("/", 1)[-1]
-    args = words[k + 1:]
-    opts = [a for a in args if text[a[0]:a[1]].startswith("-")]
-    plain = [a for a in args if not text[a[0]:a[1]].startswith("-")]
+    plain, vals = _split_opts(text, cmd, words[k + 1:])
     if cmd in _SH_LAST:
-        for idx, a in enumerate(args):
-            t = text[a[0]:a[1]]
-            if t in ("-t", "--target-directory") and idx + 1 < len(args):
-                return [args[idx + 1]], False, [p for p in plain if p != args[idx + 1]]
-            if t.startswith("--target-directory="):
-                return [(a[0] + len("--target-directory="), a[1])], False, plain
-        if cmd == "install" and any(text[o[0]:o[1]] in ("-d", "--directory") for o in opts):
+        for name in ("-t", "--target-directory"):
+            if vals.get(name):
+                return [vals[name]], False, plain
+        if cmd == "install" and ("-d" in vals or "--directory" in vals):
             return plain, True, []
         if len(plain) >= 2:
             return [plain[-1]], False, plain[:-1]
         return [], False, []
     if cmd in _SH_ALL:
         return plain, cmd == "mkdir", []
-    if cmd == "sed" and any(text[o[0]:o[1]].startswith(("-i", "--in-place")) for o in opts):
-        scripted = any(text[o[0]:o[1]] in ("-e", "-f", "--expression", "--file") for o in opts)
+    if cmd == "sed" and any(o.startswith("--in-place") or (o.startswith("-i") or (
+            not o.startswith("--") and "i" in o[1:])) for o in vals):
+        scripted = any(vals.get(o) for o in ("-e", "-f", "--expression", "--file"))
         return (plain if scripted else plain[1:]), False, []
     if cmd == "dd":
         return [(a[0] + 3, a[1]) for a in plain if text[a[0]:a[1]].startswith("of=")], False, []
@@ -401,10 +499,10 @@ def _sh_dests(text: str, lo: int, hi: int, heredocs, out: list) -> None:
             ls = text.rfind("\n", 0, redirs[0][0]) + 1
             data = [(s, e) for hl, s, e in heredocs if hl == ls]
         for r in redirs:
-            out.append((r[0], r[1], False, data))
+            out.append((r[0], r[1], False, data, True))
         dests, is_dir, dsrc = _cmd_dests(text, words)
         for d in dests:
-            out.append((d[0], d[1], is_dir, dsrc))
+            out.append((d[0], d[1], is_dir, dsrc, True))
 
 
 def _string_inner(text: str, s: int, e: int) -> tuple[int, int] | None:
@@ -435,7 +533,7 @@ def _argv_dests(masked: str, elems: list[tuple[int, int]], out: list) -> None:
     words = [(lits[i] if lits[i] else elems[i]) for i in range(len(elems))]
     dests, is_dir, dsrc = _cmd_dests(masked, words)
     for d in dests:
-        out.append((d[0], d[1], is_dir, dsrc))
+        out.append((d[0], d[1], is_dir, dsrc, d in lits))
 
 
 def _with_handle_data(masked: str, code: str, pairs, call_end: int) -> list[tuple[int, int]]:
@@ -474,12 +572,12 @@ def dest_spans(masked: str, code: str, lang: str, heredocs) -> list:
         if not args:
             continue
         if cm.group("w0"):
-            out.append((*args[0], False, args[1:2]))
+            out.append((*args[0], False, args[1:2], False))
         elif cm.group("d0"):
-            out.append((*args[0], True, []))
+            out.append((*args[0], True, [], False))
         elif cm.group("w1"):
             if len(args) > 1:
-                out.append((*args[1], False, args[:1]))
+                out.append((*args[1], False, args[:1], False))
         elif len(args) > 1 and _WRITE_MODE_RE.match(masked[args[1][0]:args[1][1]]):
             close = args[-1][1]
             data: list[tuple[int, int]] = []
@@ -497,7 +595,7 @@ def dest_spans(masked: str, code: str, lang: str, heredocs) -> list:
                         data = dargs[:1]
             if not data:
                 data = _with_handle_data(masked, code, pairs, close + 1)
-            out.append((*args[0], False, data))
+            out.append((*args[0], False, data, False))
     for mm in _METHOD_RE.finditer(code):
         args = call_args(masked, pairs, mm.end() - 1)
         if mm.group("op"):
@@ -519,7 +617,7 @@ def dest_spans(masked: str, code: str, lang: str, heredocs) -> list:
             else:
                 break
         data = args[:1] if mm.group("w") in ("write_text", "write_bytes") else []
-        out.append((i, end, bool(mm.group("d")), data))
+        out.append((i, end, bool(mm.group("d")), data, False))
     exec_rx = _PY_EXEC_RE if lang == "py" else _JS_EXEC_RE
     for em in exec_rx.finditer(code):
         args = call_args(masked, pairs, em.end() - 1)

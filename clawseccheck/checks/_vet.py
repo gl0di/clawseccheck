@@ -63,6 +63,7 @@ from ..writedest import (  # C-755: the parser half of the binding leg
     stmt_end as _c755_stmt_end,
     sh_commands as _c755_sh_words,
     dest_spans as _c755_dest_spans,
+    bracket_table as _c755_bracket_table,
     unquote as _c755_unquote,
     SPAN as _C755_SPAN,
 )
@@ -2288,6 +2289,16 @@ _C755_ASSIGN_RE = re.compile(
     r"(?P<var>[A-Za-z_]\w*)[ \t]*(?::[^=\n;]{0,60})?=(?![=>~])",
     re.M,
 )
+# Shell: `VAR=value` with no spaces, tilde values allowed (`HOOKS=~/.openclaw/hooks`),
+# at the start of a command (after `;`, `&&`, `then`, `do`, ...).
+_C755_SH_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|]|\b(?:then|do|else)\s)[ \t]*(?:export\s+|local\s+|readonly\s+|"
+    r"declare\s+(?:-\w+\s+)?)?(?P<var>[A-Za-z_]\w*)=(?!=)",
+    re.M,
+)
+# A file worth parsing names one of these somewhere (a target may be split across a
+# variable and a literal tail, so the whole target need not appear in one place).
+_C755_PREFILTER_RE = re.compile(r"\.(?:openclaw|claude|vscode)\b")
 _C755_TEMP_RE = re.compile(
     r"\b(?:tmp_path|tmpdir|mkdtemp|mktemp|TemporaryDirectory|gettempdir)\b|"
     r"os\.tmpdir\s*\(|(?<![\w.])/(?:var/)?tmp/"
@@ -2302,9 +2313,29 @@ _C755_CONTENT_RE = re.compile(r"[{\[]")  # written data that is a JSON/object li
 _C755_MAX_DEPTH = 4
 
 
+_C755_PATH_CALL = (r"(?:os\.path\.join|posixpath\.join|ntpath\.join|path\.join|path\.resolve|"
+                   r"pathlib\.Path|PurePosixPath|PurePath|Path)")
+# The variable IS the destination, or the head of a path inside it (C-135 round 2):
+# `V`, `V.parent`, `V / ...`, `V + '/...'`, `join(V, ...)`, `Path(V)...`, `V.joinpath(...)`.
+# A suffix glued on (`V + '.bak'`, `f'{V}.bak'`), an operator expansion (`${f#$V/}`) or V
+# as the argument of another call (basename/relpath) is a DIFFERENT path.
+_C755_HEAD_VAR_RE = re.compile(
+    rf"(?:{_C755_PATH_CALL}\s*\(\s*(?P<c>[A-Za-z_]\w*)\s*(?=[,)])"
+    r"|(?P<v>[A-Za-z_]\w*)(?:\s*\.\s*parent\b)?\s*(?:(?P<op>/|\+)|\.\s*joinpath\s*\(|$))"
+)
+_C755_SH_HEAD_RE = re.compile(r"""^["']?\$(?:\{(?P<b>[A-Za-z_]\w*)\}|(?P<v>[A-Za-z_]\w*))["']?(?=/|$)""")
+_C755_HOLE_HEAD_RE = re.compile(r"""^(?:\$\{|\{)(?P<v>[A-Za-z_]\w*)\}(?=/)""")
+_C755_STR_RE = re.compile(r"""[rRbBuUfF]{0,2}("|'|`)((?:\\.|(?!\1).)*)\1""", re.S)
+_C755_PY_DEF_RE = re.compile(r"(?m)^([ \t]*)(?:async\s+)?def\s+\w+\s*\(")
+_C755_PY_LAMBDA_RE = re.compile(r"\blambda\b([^:\n]*):")
+_C755_JS_FUNC_RE = re.compile(r"\bfunction\b\s*\*?\s*[\w$]*\s*\(")
+_C755_JS_ARROW_RE = re.compile(r"(?:\(([^()\n]*)\)|\b([A-Za-z_$][\w$]*))\s*=>")
+_C755_PARAM_NAME_RE = re.compile(r"^[\s*.]*([A-Za-z_$][\w$]*)")
+
+
 class _C755File:
-    """One code file: masked views, destinations, assignments, and memoized
-    variable resolution (each assignment resolved at most once)."""
+    """One code file: masked views, destinations, assignments, function scopes, and a
+    memoized resolution of each assignment's path value (resolved at most once)."""
 
     def __init__(self, body: str, lang: str):
         self.lang = lang
@@ -2312,17 +2343,17 @@ class _C755File:
         self.masked, self.code, heredocs = _c755_mask(body, lang)
         self.dests = _c755_dest_spans(self.masked, self.code, lang, heredocs)
         self.assign: dict[str, list[tuple[int, int, int]]] = {}  # in source order
-        view = self.code if lang != "sh" else self.masked
-        for am in _C755_ASSIGN_RE.finditer(view):
+        rx = _C755_SH_ASSIGN_RE if lang == "sh" else _C755_ASSIGN_RE
+        for am in rx.finditer(self.code if lang != "sh" else self.masked):
             s = am.end()
             e = _c755_stmt_end(self.masked, s) if lang != "sh" else self._sh_value_end(s)
             self.assign.setdefault(am.group("var"), []).append((am.start("var"), s, e))
-        self._memo: dict[tuple[str, int], tuple] = {}
-        # Every target match and every reference to an assigned variable, found ONCE
-        # per file and looked up by bisect - span queries never rescan text.
-        self.tmatch = sorted((m.start(), m.end(), k, m.group(0)) for k, rx in _C755_TARGETS
-                             for m in rx.finditer(self.masked))
-        self.tstarts = [t[0] for t in self.tmatch]
+        self._memo: dict[tuple[str, int], tuple[str, str]] = {}
+        self.scopes: dict[str, list[tuple[int, int]]] = {}  # param name -> bodies
+        for bs, be, params in (self._function_scopes() if lang != "sh" else []):
+            for p in params:
+                self.scopes.setdefault(p, []).append((bs, be))
+        # data-span references (any whole-value use), indexed once per file
         self.reflist: list[tuple[int, str, int]] = []  # (pos, name, attribute position)
         if lang == "sh":
             for m in _C755_SHVAR_RE.finditer(self.masked):
@@ -2338,13 +2369,75 @@ class _C755File:
                 self.reflist.append((m.start(), m.group(1), at))
         self.refstarts = [r[0] for r in self.reflist]
 
-    def _token(self, ts: int, te: int) -> str:
-        """The contiguous path token around a target match (C-135 case_00587's rule:
-        a backup/template marker counts only inside the destination's own token)."""
-        while ts > 0 and _PATH_TOKEN_CHARS_RE.match(self.masked[ts - 1]):
-            ts -= 1
-        return self.masked[ts:te]
+    # -- scopes ---------------------------------------------------------------------
+    def _params(self, s: int, e: int) -> set[str]:
+        out = set()
+        for p in self.code[s:e].split(","):
+            m = _C755_PARAM_NAME_RE.match(p)
+            if m:
+                out.add(m.group(1))
+        return out
 
+    def _function_scopes(self) -> list[tuple[int, int, set[str]]]:
+        """(body start, body end, parameter names) of each function / lambda / arrow.
+        A parameter shadows a same-named outer variable inside that body."""
+        code, n = self.code, len(self.code)
+        pairs = _c755_bracket_table(code)
+        scopes: list[tuple[int, int, set[str]]] = []
+        if self.lang == "py":
+            for m in _C755_PY_DEF_RE.finditer(code):
+                op = m.end() - 1
+                close = pairs.get(op, (n, []))[0]
+                indent = len(m.group(1).expandtabs())
+                ls = code.find("\n", close)
+                end = n
+                k = ls + 1 if ls != -1 else n
+                while k < n:
+                    le = code.find("\n", k)
+                    le = n if le == -1 else le
+                    line = code[k:le]
+                    if line.strip() and len(line.expandtabs()) - len(line.expandtabs().lstrip()) <= indent:
+                        end = k
+                        break
+                    k = le + 1
+                scopes.append((close, end, self._params(op + 1, close)))
+            for m in _C755_PY_LAMBDA_RE.finditer(code):
+                end = _c755_stmt_end(self.masked, m.end())
+                scopes.append((m.end(), end, self._params(m.start(1), m.end(1))))
+        else:
+            for m in _C755_JS_FUNC_RE.finditer(code):
+                op = m.end() - 1
+                close = pairs.get(op, (n, []))[0]
+                brace = code.find("{", close)
+                if brace != -1 and brace in pairs:
+                    scopes.append((brace, pairs[brace][0], self._params(op + 1, close)))
+            for m in _C755_JS_ARROW_RE.finditer(code):
+                params = self._params(m.start(1), m.end(1)) if m.group(1) is not None else {m.group(2)}
+                k = m.end()
+                while k < n and code[k] in " \t":
+                    k += 1
+                end = pairs[k][0] if k < n and code[k] == "{" and k in pairs else \
+                    _c755_stmt_end(self.masked, k)
+                scopes.append((k, end, params))
+        return scopes
+
+    def _last_assign(self, var: str, pos: int):
+        """The last assignment of *var* before *pos* in the scope that owns the name at
+        *pos*: inside a function that takes *var* as a parameter, only assignments in
+        that body count (the parameter itself is never resolved)."""
+        lst = self.assign.get(var)
+        if not lst:
+            return None
+        lo = -1
+        for s, e in self.scopes.get(var, ()):
+            if s <= pos < e:
+                lo = max(lo, s)
+        k = bisect.bisect_left(lst, (pos,)) - 1
+        if k < 0 or lst[k][0] < lo:
+            return None
+        return lst[k]
+
+    # -- path values ----------------------------------------------------------------
     def _sh_value_end(self, s: int) -> int:
         words = _c755_sh_words(self.masked, s, min(len(self.masked), s + _C755_SPAN))
         if words and words[0][0]:
@@ -2352,10 +2445,68 @@ class _C755File:
         nl = self.masked.find("\n", s)
         return len(self.masked) if nl == -1 else nl
 
+    def _value(self, var: str, pos: int, depth: int) -> tuple[str, str]:
+        """(normalised path, raw text chain) of *var*'s value at *pos*."""
+        a = self._last_assign(var, pos)
+        if a is None or depth >= _C755_MAX_DEPTH:
+            return "", ""
+        key = (var, a[0])
+        if key not in self._memo:
+            self._memo[key] = ("", "")  # cycle guard
+            self._memo[key] = self.path(a[1], a[2], depth + 1)
+        return self._memo[key]
+
+    def _norm_word(self, raw: str, pos: int, depth: int) -> tuple[str, str]:
+        """A shell word (or a word inside a string handed to a shell): quotes dropped; a
+        leading `$V` / `${V}` / f-string `{V}` followed by `/` (or ending the word) takes
+        V's value; any other expansion is dropped - `$V.bak`, `${f#$V/}` and
+        `$(basename "$V")` are different paths, not V."""
+        m = _C755_SH_HEAD_RE.match(raw) or _C755_HOLE_HEAD_RE.match(raw)
+        val, chain, rest = "", "", raw
+        if m:
+            val, chain = self._value(m.group("v") or m.groupdict().get("b"), pos, depth)
+            rest = raw[m.end():]
+        rest = re.sub(r"\$\([^)]*\)?|\$\{[^}]*\}?|\$\w+|\{\w+\}|[\"'`]", "", rest)
+        return val + rest, chain + raw
+
+    def _norm_code(self, s: int, e: int, depth: int) -> str:
+        """Python / JS expression: its string literals' contents joined with `/`; a
+        template / f-string hole at a literal's start followed by `/` takes the value
+        of the variable it names, any other hole is dropped."""
+        parts = []
+        for m in _C755_STR_RE.finditer(self.masked, s, e):
+            content = m.group(2)
+            hm = _C755_HOLE_HEAD_RE.match(content)
+            if hm:
+                content = self._value(hm.group("v"), m.start(), depth)[0] + content[hm.end():]
+            parts.append(re.sub(r"\$?\{[^{}]*\}", "", content))
+        return "/".join(parts)
+
+    def path(self, s: int, e: int, depth: int = 0, shell_word: bool = False) -> tuple[str, str]:
+        """(normalised path, raw text chain) that a destination / assignment span names."""
+        while s < e and self.masked[s] in " \t\n":
+            s += 1
+        while e > s and self.masked[e - 1] in " \t\n;":
+            e -= 1
+        raw = self.masked[s:e]
+        if self.lang == "sh" or shell_word:
+            return self._norm_word(raw, s, depth)
+        while s < e and self.masked[s] == "(":
+            s += 1
+        hm = _C755_HEAD_VAR_RE.match(self.code, s, e)
+        if hm:
+            var = hm.group("c") or hm.group("v")
+            ok = bool(hm.group("c")) or hm.group("op") == "/" or hm.end() == e or \
+                self.code[hm.end() - 1:hm.end()] == "("
+            if hm.group("op") == "+":
+                ok = bool(re.match(r"""\s*[fFrR]?["'`](?:/|\\|\$\{|\{)""", self.masked[hm.end():e]))
+            if ok:
+                val, chain = self._value(var, s, depth)
+                return val + "/" + self._norm_code(hm.end(), e, depth), chain + raw
+        return self._norm_code(s, e, depth), raw
+
     def refs(self, s: int, e: int) -> set[tuple[str, int]]:
-        """Whole-value variable references in [s, e): (name, position). A name whose
-        attribute/call/subscript starts inside the span is not the path value (a method
-        receiver span ends right at its dot, so the receiver itself still counts)."""
+        """Whole-value references in a DATA span (what is written, not where)."""
         found: set[tuple[str, int]] = set()
         k = bisect.bisect_left(self.refstarts, s)
         while k < len(self.reflist) and self.reflist[k][0] < e:
@@ -2364,39 +2515,6 @@ class _C755File:
                 found.add((name, pos))
             k += 1
         return found
-
-    def resolve(self, s: int, e: int, depth: int = 0) -> list[tuple[str, str, int, int, str]]:
-        """(kind, matched text, match end, span end, path token) for every target the span
-        names, directly or through the last assignment of each whole-value variable
-        before it."""
-        hits = []
-        k = bisect.bisect_left(self.tstarts, s)
-        while k < len(self.tmatch) and self.tmatch[k][0] < e:
-            ts, te, kind, text = self.tmatch[k]
-            if te <= e:
-                hits.append((kind, text, te, e, self._token(ts, te)))
-            k += 1
-        if hits and self._throwaway(s, e):
-            hits = []
-        if depth >= _C755_MAX_DEPTH:
-            return hits
-        for var, pos in self.refs(s, e):
-            a = self._last_assign(var, pos)
-            if a is None:
-                continue
-            key = (var, a[0])
-            if key not in self._memo:
-                self._memo[key] = ()  # cycle guard
-                self._memo[key] = tuple(self.resolve(a[1], a[2], depth + 1))
-            hits.extend(self._memo[key])
-        return hits
-
-    def _last_assign(self, var: str, pos: int):
-        lst = self.assign.get(var)
-        if not lst:
-            return None
-        k = bisect.bisect_left(lst, (pos,)) - 1
-        return lst[k] if k >= 0 else None
 
     def text_with(self, spans, rx, depth: int = 0) -> bool:  # data spans only - few
         """True when *rx* matches inside any span, or the last value of a whole-value
@@ -2411,20 +2529,16 @@ class _C755File:
                         return True
         return False
 
-    def _throwaway(self, s: int, e: int) -> bool:
-        expr = self.masked[s:e]
-        if _C755_HOME_RE.search(expr) or _PARENT_TRAVERSAL_RE.search(expr):
+    def throwaway(self, chain: str) -> bool:
+        """The destination's text (through its variable chain) is rooted in a temp dir
+        and nothing in it anchors on the home directory."""
+        if _C755_HOME_RE.search(chain) or _PARENT_TRAVERSAL_RE.search(chain):
             return False
-        if _C755_TEMP_RE.search(expr):
+        if _C755_TEMP_RE.search(chain):
             return True
-        for vm in re.finditer(r"\$\{?([A-Za-z_]\w*)\}?", expr):
+        for vm in re.finditer(r"\$\{?([A-Za-z_]\w*)\}?", chain):
             var = vm.group(1)
             if var.upper() in _CONVENTIONAL_TMP_VARS and var not in self.assign:
-                return True
-        for var, pos in self.refs(s, e):
-            a = self._last_assign(var, pos)
-            if a and len(self.assign[var]) == 1 and _C755_TEMP_RE.search(self.masked[a[1]:a[2]]) \
-                    and not _C755_HOME_RE.search(self.masked[a[1]:a[2]]):
                 return True
         return False
 
@@ -2442,8 +2556,7 @@ def _c755_persistence_hits(name: str, blob: str) -> list[tuple[str, str, str]]:
         if not (n.lower().endswith((".md", ".markdown", ".rst"))
                 or n.lower() in ("readme", "readme.txt"))
     )
-    own_next = re.compile(rf"{_C755_GLUE}{re.escape(name)}(?![\w.-])") if name else None
-    own_lit = re.compile(rf"""["'`]{re.escape(name)}["'`]""") if name else None
+    own_next = re.compile(rf"/+{re.escape(name)}(?![\w.-])") if name else None
     found: dict[str, tuple[str, str, str]] = {}
     for h in headers:
         fname = h.group("name").strip()
@@ -2451,45 +2564,52 @@ def _c755_persistence_hits(name: str, blob: str) -> list[tuple[str, str, str]]:
         if not low.endswith(_C755_CODE_EXTS):
             continue
         body = h.group("body")
-        if not any(rx.search(body) for _k, rx in _C755_TARGETS):
-            continue  # every bound path is a literal somewhere in the file
+        if not (_C755_PREFILTER_RE.search(body) or _AGENT_CONTEXT_FILES_RE.search(body)):
+            continue  # every bound path has one of these literals somewhere in the file
         if _pos_in_test_fixture_file(blob, h.start("body"), headers):
             continue
         lang = "sh" if low.endswith(_C755_SH_EXTS) else "py" if low.endswith(".py") else "js"
         f = _C755File(body, lang)
         cover = {True: -1, False: -1}
-        for s, e, is_dir, data in sorted(f.dests, key=lambda d: (d[0], -d[1])):
+        for s, e, is_dir, data, shw in sorted(f.dests, key=lambda d: (d[0], -d[1])):
             if e <= cover[is_dir]:
                 continue  # nested in a destination already resolved: a subset of it
             cover[is_dir] = e
-            for kind, path, mend, vend, token in f.resolve(s, e):
+            eff, chain = f.path(s, e, shell_word=shw)
+            if not eff or f.throwaway(chain):
+                continue
+            for kind, rx in _C755_TARGETS:
                 if kind in found or (is_dir and kind != "skills"):
                     continue
-                if re.match(r"\.\w", f.masked[mend:mend + 2]):
-                    continue  # a different file: openclaw.json.bak, tasks.json.example
-                if kind == "agent_file" and _BACKUP_PATH_MARKER_RE.search(token) and not \
-                        _PARENT_TRAVERSAL_RE.search(token):
-                    continue  # a backup/template copy, not the live file
-                if kind == "skills" and own_next is not None and (
-                    own_next.match(f.masked, mend, vend) or own_lit.search(f.masked, s, e)
-                ):
-                    continue  # the skill's own folder (the scanned directory's name)
-                if kind == "tasks":
-                    shipped = [shipped_files.get(_c755_unquote(f.masked[d[0]:d[1]]).rsplit("/", 1)[-1])
-                               for d in data]
-                    if data and f.text_with(data, _C755_FOLDER_OPEN_RE):
-                        pass  # the trigger is in the written content
-                    elif any(t is not None and _C755_FOLDER_OPEN_RE.search(t) for t in shipped):
-                        pass  # the shipped template file copied in carries it
-                    elif folder_open_elsewhere and not any(t is not None for t in shipped) and not (
-                        data and f.text_with(data, _C755_CONTENT_RE)
-                    ):
-                        kind = "tasks_unresolved"  # content unknown, trigger elsewhere: WARN
-                        if kind in found:
-                            continue
-                    else:
-                        continue  # the written content is known and carries no trigger
-                found[kind] = (kind, *_c755_evidence(name, kind, path))
+                for m in rx.finditer(eff):
+                    if re.match(r"\.\w", eff[m.end():m.end() + 2]):
+                        continue  # a different file: openclaw.json.bak, tasks.json.example
+                    ts = m.start()
+                    while ts > 0 and _PATH_TOKEN_CHARS_RE.match(eff[ts - 1]):
+                        ts -= 1
+                    token = eff[ts:m.end()]
+                    if kind == "agent_file" and _BACKUP_PATH_MARKER_RE.search(token) and not \
+                            _PARENT_TRAVERSAL_RE.search(token):
+                        continue  # a backup/template copy, not the live file
+                    if kind == "skills" and own_next is not None and own_next.match(eff, m.end()):
+                        continue  # the skill's own folder (the scanned directory's name)
+                    k = kind
+                    if kind == "tasks":
+                        shipped = [shipped_files.get(
+                            _c755_unquote(f.masked[d[0]:d[1]]).rsplit("/", 1)[-1]) for d in data]
+                        if data and f.text_with(data, _C755_FOLDER_OPEN_RE):
+                            pass  # the trigger is in the written content
+                        elif any(t is not None and _C755_FOLDER_OPEN_RE.search(t) for t in shipped):
+                            pass  # the shipped template file copied in carries it
+                        elif folder_open_elsewhere and not any(t is not None for t in shipped) \
+                                and not (data and f.text_with(data, _C755_CONTENT_RE)):
+                            k = "tasks_unresolved"  # content unknown, trigger elsewhere: WARN
+                            if k in found:
+                                break
+                        else:
+                            break  # the written content is known and carries no trigger
+                    found[k] = (k, *_c755_evidence(name, k, m.group(0)))
+                    break
     if "tasks" in found:
         found.pop("tasks_unresolved", None)
     return list(found.values())
