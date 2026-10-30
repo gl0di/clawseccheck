@@ -8,20 +8,23 @@ WHAT GYP RUNS (B-1004). Grounded against the gyp that node-gyp 12.2.0/12.3.0 ven
 expression (``eval`` with empty builtins); ``actions``, ``rules`` and ``postbuilds`` are the
 target keys whose entries carry an ``action`` argv that the generators turn into a shell
 command (``generator/make.py`` ``WriteActions`` / ``WriteRules``; ``postbuilds`` only on
-the mac flavor, via ``xcode_emulation.GetSpecPostbuildCommands``). A list key may carry
-gyp's ``=`` / ``+`` / ``?`` merge suffix (``input.py`` ``MergeDicts``), and
-``ProcessVariablesAndConditionsInDict`` recurses into EVERY dict - so a ``conditions``
-list inside an action entry can supply or extend its ``action``. Variable references
-(``<(v)``, ``>(v)``, and the list splice ``<@(v)``) are expanded before anything runs.
-``includes`` and ``dependencies`` pull further build files into the same build.
+the mac flavor). A list key may carry a merge suffix (``=`` / ``+`` / ``?``,
+``MergeDicts``) or a list filter (``!`` exclude / ``/`` regex, ``ProcessListFiltersInDict``),
+and ``ProcessVariablesAndConditionsInDict`` recurses into EVERY dict - so a ``conditions``
+list inside an action entry can supply or extend its ``action``, and every key of a dict
+is also visible to it as the automatic variable ``_<key>`` (``_inputs``, ``_outputs``).
+References are ``<(v)``, ``>(v)``, ``^(v)`` (early / late / late-late) and the list splice
+``<@(v)``, with names matching ``[-a-zA-Z0-9_.]``. ``includes`` and ``dependencies`` pull
+further build files into the same build.
 
-HOW THIS READS IT. ``ast.literal_eval``: literals only, nothing evaluated. Anything this
-cannot resolve soundly is reported as UNEXAMINED rather than dropped - a non-literal file,
-nested conditions around an ``action``, a variable reference that decides what program
-runs - because each of those is a way to make a literal reader see nothing while gyp runs
-the command unchanged. Variables are collected from every ``variables`` dict in the file
-with ALL their values (gyp scopes them per dict, this does not), and a reference is tried
-against each value, so a second same-named definition cannot hide the one gyp uses.
+HOW THIS READS IT. ``ast.literal_eval``: literals only, nothing evaluated. What it cannot
+resolve is reported as UNEXAMINED rather than dropped - a non-literal file, nested
+conditions or a list filter on an ``action``, a reference no file read here defines, more
+variable combinations than are tried - because each of those is a way to make a literal
+reader see nothing while gyp runs the command unchanged. Variables are collected from
+every ``variables`` dict with ALL their values; gyp scopes them per dict and this does
+not, so a reference is tried against every value seen for that name. That over-approximates
+(it can flag a value gyp would not pick); it does not model gyp's scoping.
 """
 from __future__ import annotations
 
@@ -33,10 +36,11 @@ import warnings
 from dataclasses import dataclass
 
 # Bounds on the walk over the parsed value and on what one file may contribute. The text
-# itself is bounded by the caller (deptree.MAX_GYP_BYTES). A hit is disclosed via *capped*.
+# itself is bounded by the caller (deptree.MAX_GYP_BYTES). A hit is disclosed.
 MAX_GYP_ACTIONS = 40
 MAX_GYP_NODES = 50_000
 MAX_ARGV_CANDIDATES = 32
+MAX_NESTED_COMMANDS = 3
 
 GYP_EXEC_KEYS = ("actions", "rules", "postbuilds")
 _COND_KEYS = ("conditions", "target_conditions")
@@ -49,12 +53,14 @@ class GypBuildStep:
     `argv` is the list as written (each element coerced to `str`), references unexpanded.
     `name` is the entry's `action_name` / `rule_name` / `postbuild_name`, or "".
     `unexamined` is non-empty when the argv could not be assembled from the file alone.
+    `local_vars` holds gyp's automatic `_<key>` variables of the entry and its target.
     """
 
     key: str
     name: str
     argv: tuple
     unexamined: str = ""
+    local_vars: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -62,7 +68,7 @@ class GypBuildConfig:
     steps: tuple = ()
     # name -> tuple of every value seen for it (a str, or a tuple of str for a list).
     variables: dict = None  # type: ignore[assignment]
-    # `includes` entries and `dependencies` entries that name another build file.
+    # (kind, value): `includes` entries, and `dependencies` entries naming a build file.
     references: tuple = ()
 
 
@@ -82,17 +88,36 @@ def _argv_of(value) -> "tuple | None":
     return None
 
 
+def _auto_vars(d: dict) -> dict:
+    """gyp's automatic `_<key>` variables for one dict (str and list-of-str values)."""
+    out: dict = {}
+    for k, v in d.items():
+        if not isinstance(k, str) or not k or k[-1] in "=+?!/":
+            continue
+        if isinstance(v, (str, int)) and not isinstance(v, bool):
+            out["_" + k] = (str(v),)
+        elif isinstance(v, (list, tuple)) and all(isinstance(x, str) for x in v):
+            out["_" + k] = (tuple(v),)
+    return out
+
+
 def _entry_argvs(entry: dict) -> "tuple[list, str]":
     """Every argv an action entry can end up with, and an unexamined reason if any.
 
     gyp processes `conditions` inside the entry itself, so a branch may set (`action`,
     `action=`) or extend (`action+`) the argv. Conditions are not evaluated: every branch is
-    a candidate. Conditions nested inside a branch are not followed - that is reported.
+    a candidate. Nested conditions, and a list filter (`action!` / `action/`), are reported.
     """
     base = None
     plus: list = []
+    why = ""
     for k, v in entry.items():
-        if not isinstance(k, str) or _strip_merge_suffix(k) != "action":
+        if not isinstance(k, str):
+            continue
+        if k in ("action!", "action/"):
+            why = "its command is rewritten by a gyp list filter (action! / action/)"
+            continue
+        if _strip_merge_suffix(k) != "action":
             continue
         argv = _argv_of(v)
         if argv is None:
@@ -106,7 +131,6 @@ def _entry_argvs(entry: dict) -> "tuple[list, str]":
         out.append(base)
     for add in plus:
         out.append((base or ()) + add)
-    why = ""
     for ck in _COND_KEYS:
         conds = entry.get(ck)
         if not isinstance(conds, (list, tuple)):
@@ -122,6 +146,9 @@ def _entry_argvs(entry: dict) -> "tuple[list, str]":
                         continue
                     if _strip_merge_suffix(k) in _COND_KEYS:
                         why = "its command is assembled by nested gyp conditions"
+                        continue
+                    if k in ("action!", "action/"):
+                        why = "its command is rewritten by a gyp list filter (action! / action/)"
                         continue
                     if _strip_merge_suffix(k) != "action":
                         continue
@@ -166,6 +193,7 @@ def parse_gyp_build_config(text: str, *, capped=None) -> GypBuildConfig:
             continue
         if not isinstance(cur, dict):
             continue
+        holder_vars = None
         for key, val in cur.items():
             if not isinstance(key, str) or not key:
                 continue
@@ -184,10 +212,13 @@ def parse_gyp_build_config(text: str, *, capped=None) -> GypBuildConfig:
                     if item not in seen:
                         seen.append(item)
             elif base == "includes" and isinstance(val, (list, tuple)):
-                refs.extend(str(x) for x in val if isinstance(x, str))
+                refs.extend(("includes", str(x)) for x in val if isinstance(x, str))
             elif base == "dependencies" and isinstance(val, (list, tuple)):
-                refs.extend(x for x in val if isinstance(x, str) and _GYP_FILE_REF_RE.search(x))
+                refs.extend(("dependencies", x) for x in val
+                            if isinstance(x, str) and _GYP_FILE_REF_RE.search(x))
             elif base in GYP_EXEC_KEYS and isinstance(val, (list, tuple)):
+                if holder_vars is None:
+                    holder_vars = _auto_vars(cur)
                 for entry in val:
                     if not isinstance(entry, dict):
                         continue
@@ -197,11 +228,13 @@ def parse_gyp_build_config(text: str, *, capped=None) -> GypBuildConfig:
                          if isinstance(entry.get(k), str)),
                         "",
                     )[:80]
+                    local = {**holder_vars, **_auto_vars(entry)}
                     for argv in argvs or ([()] if why else []):
                         if len(steps) >= MAX_GYP_ACTIONS:
                             _note(capped, "has more build steps than are examined — the rest were not")
                             break
-                        steps.append(GypBuildStep(base, label, tuple(argv), why))
+                        steps.append(GypBuildStep(base, label, tuple(argv), why,
+                                                  tuple(sorted(local.items()))))
             stack.append(val)
     return GypBuildConfig(
         steps=tuple(steps),
@@ -218,11 +251,12 @@ def _note(capped, reason: str) -> None:
 # --------------------------------------------------------------------------------------
 # Variable expansion
 # --------------------------------------------------------------------------------------
-_REF_RE = re.compile(r"[<>]\(([A-Za-z_][\w.]*)\)")
-_SPLICE_RE = re.compile(r"[<>]@\(([A-Za-z_][\w.]*)\)\Z")
-# A whole-token reference to something this file cannot define: a gyp variable, or a make
-# / shell variable (`$(CC)`, `${X}`) the generator leaves for the build to expand.
-_WHOLE_REF_RE = re.compile(r"(?:[<>]@?\([A-Za-z_][\w.]*\)|\$\([A-Za-z_]\w*\)|\$\{[A-Za-z_]\w*\})\Z")
+_NAME = r"[-a-zA-Z0-9_.]+"
+_REF_RE = re.compile(r"[<>^]\((" + _NAME + r")\)")
+_SPLICE_RE = re.compile(r"[<>^]@\((" + _NAME + r")\)\Z")
+# A whole-token reference to something a build file cannot define: a gyp variable, or a
+# make / shell variable (`$(CC)`, `${X}`) the generator leaves for the build to expand.
+_WHOLE_REF_RE = re.compile(r"(?:[<>^]@?\(" + _NAME + r"\)|\$\([A-Za-z_]\w*\)|\$\{[A-Za-z_]\w*\})\Z")
 UNRESOLVED = "\x00"  # prefix marking an argv element that still holds an unresolved reference
 
 
@@ -235,22 +269,21 @@ def _expand_token(tok: str, variables: dict, depth: int = 0) -> list:
         return [tok]
     values = [v for v in variables.get(m.group(1), ()) if isinstance(v, str)]
     if not values:
-        # Leave this reference in place but keep expanding any others in the token.
         head, tail = tok[: m.end()], tok[m.end():]
         rest = _expand_token(tail, variables, depth) if _REF_RE.search(tail) else [tail]
         return [UNRESOLVED + head + r.lstrip(UNRESOLVED) for r in rest]
     out: list = []
     for v in values:
-        for r in _expand_token(tok[: m.start()] + v + tok[m.end():], variables, depth + 1):
-            out.append(r)
+        out.extend(_expand_token(tok[: m.start()] + v + tok[m.end():], variables, depth + 1))
     return out
 
 
 def _candidates(variables) -> dict:
     """Normalise to name -> tuple of candidate values (a str, or a tuple for a gyp list).
 
-    `parse_gyp_build_config` already returns that shape; a plain `{name: value}` mapping
-    (one value per name, a list meaning a gyp list) is accepted too.
+    `parse_gyp_build_config` returns that shape; so must every caller that merges several
+    files' variables (a LIST here is read as ONE gyp list value, not as candidates). A plain
+    `{name: value}` mapping is accepted too.
     """
     out: dict = {}
     for k, v in (variables or {}).items():
@@ -263,10 +296,11 @@ def _candidates(variables) -> dict:
     return out
 
 
-def expand_argv(argv, variables) -> list:
-    """Candidate argvs after gyp variable expansion, capped at MAX_ARGV_CANDIDATES."""
+def expand_argv(argv, variables) -> "tuple[list, bool]":
+    """Candidate argvs after gyp variable expansion, and whether a bound was hit."""
     variables = _candidates(variables)
     per: list = []
+    capped = False
     for tok in argv:
         tok = str(tok)
         sm = _SPLICE_RE.match(tok)
@@ -274,72 +308,82 @@ def expand_argv(argv, variables) -> list:
             lists = [v for v in variables.get(sm.group(1), ()) if isinstance(v, tuple)]
             per.append([tuple(lst) for lst in lists] or [(UNRESOLVED + tok,)])
             continue
-        per.append([(t,) for t in _expand_token(tok, variables)][:MAX_ARGV_CANDIDATES])
+        expanded = _expand_token(tok, variables)
+        if len(expanded) > MAX_ARGV_CANDIDATES:
+            capped = True
+        per.append([(t,) for t in expanded[:MAX_ARGV_CANDIDATES]])
     out: list = []
     for combo in itertools.product(*per):
-        out.append(tuple(t for part in combo for t in part))
         if len(out) >= MAX_ARGV_CANDIDATES:
+            capped = True
             break
-    return out
+        out.append(tuple(t for part in combo for t in part))
+    return out, capped
 
 
 # --------------------------------------------------------------------------------------
 # Command classification
 # --------------------------------------------------------------------------------------
-# Script-file extensions: the argument that is the program's own script file. Scanning for
-# an inline-code switch stops there - after it, every argument is the script's own.
+_PLAIN_FILE_RE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,5}\Z")
 _SCRIPT_EXT_RE = re.compile(
     r"\.(?:js|mjs|cjs|ts|mts|cts|py|pyw|sh|bash|zsh|pl|pm|rb|php|lua|ps1|psm1|bat|cmd|tcl|awk)\Z",
     re.I,
 )
-# Any plain file operand (`x.c`, `out/gen.h`): a compiler's `-c x.c`, not inline code.
-_PLAIN_FILE_RE = re.compile(r"[\w./\\-]+\.[A-Za-z0-9]{1,5}\Z")
 _SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash", "mksh", "yash", "fish",
                      "tcsh", "csh"})
-# Wrappers that run the command named after their own options.
-_WRAPPERS = frozenset({"env", "nice", "nohup", "timeout", "command", "exec", "xargs",
-                       "busybox", "stdbuf", "setsid", "ionice", "chrt", "taskset", "sudo",
-                       "doas", "time"})
-_FETCHERS = frozenset({"curl", "wget"})
+_FETCHERS = frozenset({"curl", "wget", "aria2c"})
+# A make recipe expands `$(shell ...)` and the shell expands `$(...)` once make has turned
+# `$$` into `$`, and backticks: inside ANY argument, not only argv[0].
+_SUBST_RE = re.compile(r"\$\(shell[\s)]|\$\$\(|`")
 
-# Each interpreter's own inline-code switch, documented by that interpreter: node / bun
-# `-e`/`--eval` and `-p`/`--print`; python `-c` (glued allowed, after no-argument flags);
-# POSIX shells `-c`; perl `-e`/`-E`; ruby `-e`; php `-r`; lua `-e`; osascript `-e`;
-# deno's `eval` subcommand; `cmd /c` and `/k`; PowerShell `-Command`/`-c` and
-# `-EncodedCommand`/`-e`/`-ec` (abbreviations such as `-co`/`-en` are accepted by
-# PowerShell but were NOT verified here, so they are not claimed).
+# Each interpreter's own inline-code switch, as that interpreter documents it. This is a
+# NAME LIST, and like any name list it is open-ended: an interpreter not named here is not
+# recognised. Covered: node / bun (`-e`/`--eval`, `-p`/`--print`, a `data:` module through
+# `--import`/`--require`/`--loader`), python / pypy (`-c`, glued after no-argument flags),
+# POSIX and csh-family shells (`-c`), perl (`-e`/`-E`), ruby (`-e`), php (`-r`), lua /
+# osascript / R / Rscript / julia / elixir / groovy / jrunscript / scala (`-e`; julia also
+# `-E`), expect / guile (`-c`), awk (its program text), deno's `eval` subcommand, su and
+# script (`-c`), `cmd /c` and `/k`, and PowerShell (anything but a `-File` script).
 _PY_INLINE_RE = re.compile(r"-[bBdEhiIOPqsSuvVx]*c")
 _PERL_INLINE_RE = re.compile(r"-[nplaswWtTuU0-9]*[eE]")
 _RUBY_INLINE_RE = re.compile(r"-[nplaswdvWy]*e")
 _SHELL_INLINE_RE = re.compile(r"-[A-Za-z]*c[A-Za-z]*\Z")
-# Options whose VALUE may look like a script file. Only used to keep scanning past that
-# value - never to stop - so an option missing here cannot hide an inline switch.
+_E_FAMILIES = frozenset({"lua", "osascript", "r", "rscript", "julia", "elixir", "groovy",
+                         "jrunscript", "scala"})
+# Options KNOWN to take the next argument as their value. An option not listed here does
+# not end the scan either: a long option without `=` is assumed to take a value, a short
+# one is not. What does end it is the first operand that is not such a value.
 _VALUE_OPTS = {
-    "node": frozenset({"-r", "--require", "--import", "--loader", "--experimental-loader",
-                       "--env-file", "--env-file-if-exists"}),
-    "python": frozenset({"-W", "-X"}),
-    "perl": frozenset({"-I", "-M", "-m"}),
-    "ruby": frozenset({"-I", "-r"}),
+    "node": frozenset({"-r", "-C", "-i"}),
+    "python": frozenset({"-W", "-X", "-Q"}),
+    "shell": frozenset({"-o", "+o", "-O", "+O"}),
+    "perl": frozenset({"-I", "-M", "-m", "-x"}),
+    "ruby": frozenset({"-I", "-r", "-C", "-E", "-F"}),
+    "awk": frozenset({"-F", "-v", "-W"}),
 }
 
 
 def _base(tok: str) -> str:
-    b = re.split(r"[\\/]", tok)[-1].lower()
+    b = re.split(r"[\\/]", tok.lstrip(UNRESOLVED))[-1].lower()
     return b[:-4] if b.endswith(".exe") else b
 
 
-def _family(arg0: str) -> "str | None":
-    b = _base(arg0)
+def _family(tok: str) -> "str | None":
+    b = _base(tok)
     if b in ("node", "nodejs", "bun"):
         return "node"
     if re.fullmatch(r"(?:python|pypy)(?:\d+(?:\.\d+)?t?)?", b):
         return "python"
     if b in _SHELLS:
         return "shell"
-    if b in ("perl", "ruby", "php", "deno", "osascript", "cmd"):
+    if b in ("perl", "ruby", "php", "deno", "cmd", "su", "script", "npm"):
         return b
-    if b in ("lua", "luajit") or re.fullmatch(r"lua\d+(?:\.\d+)?", b):
-        return "lua"
+    if b in ("awk", "gawk", "mawk", "nawk"):
+        return "awk"
+    if b in ("expect", "guile"):
+        return "c-flag"
+    if b in ("lua", "luajit") or re.fullmatch(r"lua\d+(?:\.\d+)?", b) or b in _E_FAMILIES:
+        return "e-flag"
     if b in ("powershell", "pwsh"):
         return "powershell"
     return None
@@ -356,82 +400,6 @@ def _plain_script_command(code: str) -> bool:
     return bool(words) and bool(_SCRIPT_EXT_RE.search(words[0]) or words[0].startswith(("./", "../")))
 
 
-_WRAPPER_VALUE_OPTS = {
-    "env": {"-u", "--unset", "-C", "--chdir"},
-    "nice": {"-n", "--adjustment"},
-    "timeout": {"-s", "--signal", "-k", "--kill-after"},
-    "xargs": {"-a", "--arg-file", "-d", "--delimiter", "-E", "-e", "-I", "-i", "-L", "-l",
-              "-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars"},
-    "stdbuf": {"-i", "-o", "-e"}, "exec": {"-a"}, "ionice": {"-c", "-n", "-p"},
-    "chrt": {"-p"}, "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-U"}, "doas": {"-u", "-C"},
-}
-
-
-def _is_program(tok: str) -> bool:
-    b = _base(tok)
-    return b in _WRAPPERS or b in _FETCHERS or b == "eval" or _family(tok) is not None
-
-
-def _strip_wrappers(args: list) -> "tuple[list, bool]":
-    """Drop leading wrapper commands and their own options.
-
-    Returns `(argv, node_options_inline)`: the wrapped argv, and whether an `env`
-    assignment put a `data:` module into NODE_OPTIONS. Each wrapper's own value-taking
-    options consume their value (`env -u NAME`, `nice -n 5`, `timeout -s KILL 5`); an
-    option this does not know is skipped and the search for the program goes on, and if
-    the token reached is not a known program the next few are tried too - so an unknown
-    wrapper option cannot hide the interpreter behind its value.
-    """
-    node_opts = False
-    for _ in range(6):
-        if not args or _base(args[0]) not in _WRAPPERS:
-            return args, node_opts
-        w = _base(args[0])
-        rest = list(args[1:])
-        if w == "busybox":
-            args = rest
-            continue
-        takes = _WRAPPER_VALUE_OPTS.get(w, set())
-        i = 0
-        while i < len(rest):
-            a = rest[i]
-            if w == "env" and (a in ("-S", "--split-string") or a.startswith(("-S", "--split-string="))):
-                if a in ("-S", "--split-string"):
-                    s, after = (rest[i + 1] if i + 1 < len(rest) else ""), rest[i + 2:]
-                else:
-                    s, after = (a.split("=", 1)[1] if a.startswith("--") else a[2:]), rest[i + 1:]
-                try:
-                    rest = shlex.split(s) + after
-                except ValueError:
-                    rest = s.split() + after
-                i = 0
-                continue
-            if w == "env" and re.fullmatch(r"[A-Za-z_]\w*=.*", a, re.S):
-                if a.startswith("NODE_OPTIONS=") and "data:" in a:
-                    node_opts = True
-                i += 1
-                continue
-            if a.startswith("-") and a != "-":
-                i += 2 if a in takes else 1
-                continue
-            if w == "timeout" and re.fullmatch(r"[\d.]+[smhd]?", a):
-                i += 1
-                continue
-            if w in ("chrt", "taskset", "nice") and re.fullmatch(r"[\dxa-fA-F,-]+", a):
-                i += 1
-                continue
-            break
-        rest = rest[i:]
-        if rest and not _is_program(rest[0]):
-            # Keep looking: an unknown option's value may stand where the program goes.
-            for j in range(1, min(4, len(rest))):
-                if _is_program(rest[j]):
-                    rest = rest[j:]
-                    break
-        args = rest
-    return args, node_opts
-
-
 def classify_build_step(argv, variables=None) -> "tuple[str, str] | None":
     """What a build-step argv runs, when it is something no other scanner can read.
 
@@ -439,15 +407,18 @@ def classify_build_step(argv, variables=None) -> "tuple[str, str] | None":
     which the content scanners read like any other file), else `(kind, what)`:
 
       ("inline", "<interpreter>")  code passed on the command line;
-      ("shell", "<shell>")         an inline shell command - often an honest one-liner
+      ("shell", "<what>")          an inline shell command - often an honest one-liner
                                    (`sh -c "cd x && make"`), never proof of anything;
-      ("fetch", "<curl|wget>")     a download at build time;
-      ("unresolved", "<why>")      the program or its switches come from a reference this
-                                   file does not resolve, so what runs was not examined.
+      ("fetch", "<tool>")          a download / registry fetch at build time;
+      ("unresolved", "<why>")      what runs depends on something this scan did not resolve.
 
-    A candidate argv is tried for every value a referenced variable has.
+    Every argv position is tried, not only argv[0], so a wrapper this does not know
+    (`chroot / node -e`, `find -exec node -e`) cannot hide the interpreter behind it.
     """
-    results = [_classify_one(list(a)) for a in expand_argv(argv, variables or {})]
+    cands, capped = expand_argv(argv, variables or {})
+    if capped:
+        return ("unresolved", "it has more gyp variable combinations than are examined")
+    results = [_classify_any(list(a), 0) for a in cands]
     for kind in ("inline", "shell", "fetch", "unresolved"):
         for r in results:
             if r is not None and r[0] == kind:
@@ -459,103 +430,190 @@ def _unresolved(tok: str) -> bool:
     return tok.startswith(UNRESOLVED)
 
 
-def _classify_one(args: list) -> "tuple[str, str] | None":
-    args, node_opts = _strip_wrappers(args)
-    if not args:
-        return None
-    if node_opts and _family(args[0].lstrip(UNRESOLVED)) == "node":
-        return ("inline", "node")
-    if _base(args[0]) == "eval":
-        return ("shell", "eval")
+def _undefined_ref(tok: str) -> str:
+    m = re.search(r"[<>^]@?\(" + _NAME + r"\)", tok)
+    return m.group(0) if m else tok.lstrip(UNRESOLVED)
+
+
+def _classify_any(args: list, depth: int) -> "tuple[str, str] | None":
+    if not args or depth > MAX_NESTED_COMMANDS:
+        return ("unresolved", "commands are nested deeper than are examined") if args else None
+    found: list = []
+    for tok in args:
+        raw = tok.lstrip(UNRESOLVED)
+        if _SUBST_RE.search(raw):
+            found.append(("shell", "a make/shell command substitution"))
+        if raw.startswith("NODE_OPTIONS=") and "data:" in raw:
+            found.append(("inline", "node (NODE_OPTIONS)"))
+    found.append(_classify_head(args))
+    for i in range(1, len(args)):
+        b = _base(args[i])
+        if b == "env":
+            for j in range(i + 1, len(args)):
+                a = args[j].lstrip(UNRESOLVED)
+                s = None
+                if a in ("-S", "--split-string") and j + 1 < len(args):
+                    s = args[j + 1].lstrip(UNRESOLVED)
+                elif a.startswith("--split-string="):
+                    s = a.split("=", 1)[1]
+                elif a.startswith("-S") and len(a) > 2:
+                    s = a[2:]
+                if s is not None:
+                    try:
+                        found.append(_classify_any(shlex.split(s), depth + 1))
+                    except ValueError:
+                        found.append(("unresolved", "env -S carries an unparseable command"))
+                    break
+        elif _is_program(b):
+            found.append(_classify_at(args, i))
+    if _base(args[0]) == "env":
+        for j in range(1, len(args)):
+            a = args[j].lstrip(UNRESOLVED)
+            if a in ("-S", "--split-string") and j + 1 < len(args):
+                try:
+                    found.append(_classify_any(shlex.split(args[j + 1].lstrip(UNRESOLVED)), depth + 1))
+                except ValueError:
+                    found.append(("unresolved", "env -S carries an unparseable command"))
+                break
+    for kind in ("inline", "shell", "fetch", "unresolved"):
+        for r in found:
+            if r is not None and r[0] == kind:
+                return r
+    return None
+
+
+def _is_program(b: str) -> bool:
+    return (b in _FETCHERS or b in ("certutil", "npx", "git", "eval")
+            or _family(b) is not None)
+
+
+def _classify_head(args: list) -> "tuple[str, str] | None":
+    """argv[0] handled specially: a program named only by a reference."""
     arg0 = args[0]
     raw0 = arg0.lstrip(UNRESOLVED)
-    if _unresolved(arg0):
-        if not _WHOLE_REF_RE.match(raw0):
-            arg0 = raw0  # a reference inside a path: judge the program by its basename
-        elif raw0.startswith(("<@", ">@")):
-            return ("unresolved", "the command is spliced in from a gyp list variable this file does not define")
-        else:
-            # A program named only by an undefined reference. An inline switch right after
-            # it, followed by something that is not a plain file, is the only shape judged.
-            rest = args[1:]
-            if len(rest) >= 2 and rest[0] in ("-e", "-p", "-c", "--eval", "--print", "/c", "/C") \
-                    and not _PLAIN_FILE_RE.match(rest[1].lstrip(UNRESOLVED)):
-                return ("unresolved", f"an undefined program reference ({raw0}) is given inline code")
-            return None
-    elif re.fullmatch(r"\$\([A-Za-z_]\w*\)|\$\{[A-Za-z_]\w*\}", raw0):
+    if _unresolved(arg0) and _WHOLE_REF_RE.match(raw0):
+        if raw0[1:2] == "@":
+            return ("unresolved", f"the command is spliced in from {raw0}, which no build file read here defines")
+        rest = args[1:]
+        if len(rest) >= 2 and rest[0].lstrip(UNRESOLVED) in ("-e", "-p", "-c", "--eval", "--print", "/c", "/C") \
+                and not _PLAIN_FILE_RE.match(rest[1].lstrip(UNRESOLVED)):
+            return ("unresolved", f"a program named by {raw0}, which no build file read here defines, "
+                                  "is given inline code")
+        return None
+    if re.fullmatch(r"\$\([A-Za-z_]\w*\)|\$\{[A-Za-z_]\w*\}", raw0):
         return None  # a make/shell variable (`$(CC)`): resolved by the build, not a script host
-    fam = _family(arg0)
-    b = _base(arg0)
+    return _classify_at(args, 0)
+
+
+def _classify_at(args: list, i: int) -> "tuple[str, str] | None":
+    b = _base(args[i])
+    rest = [a for a in args[i + 1:]]
+    plain = [a.lstrip(UNRESOLVED) for a in rest]
+    if b in _FETCHERS or b == "npx":
+        return ("fetch", b)
+    if b == "certutil":
+        return ("fetch", b) if any(a.lower().lstrip("-/") == "urlcache" for a in plain) else None
+    if b == "git":
+        ops = [a for a in plain if not a.startswith("-")]
+        return ("fetch", "git " + ops[0]) if ops and ops[0] in ("clone", "fetch", "pull", "submodule") else None
+    if b == "eval":
+        return ("shell", "eval")
+    fam = _family(b)
     if fam is None:
-        return ("fetch", b) if b in _FETCHERS else None
-    rest = args[1:]
+        return None
     if fam == "cmd":
-        for i, a in enumerate(rest):
-            if a.lower() in ("/c", "/k"):
-                code = " ".join(t.lstrip(UNRESOLVED) for t in rest[i + 1:])
+        for j, a in enumerate(plain):
+            low = a.lower()
+            if low.startswith(("/c", "/k")):
+                code = " ".join([a[2:]] + plain[j + 1:]).strip()
                 return None if _plain_script_command(code) else ("shell", "cmd")
             if not a.startswith("/"):
                 return None
         return None
-    if fam == "deno":
-        for a in rest:
-            if a == "eval":
-                return ("inline", "deno")
-            if not a.startswith("-"):
+    if fam == "powershell":
+        # Quiet only for the forms read here: `-File <script>` and `-Command <script>`.
+        # Every other invocation (abbreviated switches, a positional command) is an inline
+        # PowerShell command; PowerShell's own parameter grammar is NOT modelled.
+        for j, a in enumerate(plain):
+            low = a.lower().lstrip("-/")
+            if a[:1] in "-/" and low in ("file", "f"):
                 return None
-        return None
-    prev = ""
-    for i, a0 in enumerate(rest):
-        a = a0.lstrip(UNRESOLVED)
-        if _unresolved(a0):
-            if _SCRIPT_EXT_RE.search(a) and prev not in _VALUE_OPTS.get(fam, ()):
-                return None  # `<(DEPTH)/tools/gen.py`: the script file, its dir unresolved
-            return ("unresolved", "a gyp variable this file does not define decides the interpreter's arguments")
-        nxt = rest[i + 1].lstrip(UNRESOLVED) if i + 1 < len(rest) else ""
-        hit = None
-        if fam == "node":
-            if a in ("-e", "-p", "-pe", "--eval", "--print") or a.startswith(("--eval=", "--print=")):
-                hit = ("inline", b)
-            elif (a in ("--import", "--require", "-r", "--loader", "--experimental-loader") and nxt.startswith("data:")) \
-                    or re.match(r"--(?:import|require|loader|experimental-loader)=data:", a):
-                hit = ("inline", b)
-            elif a == "--":
-                return None
-        elif fam == "python":
-            if _PY_INLINE_RE.match(a):
-                hit = ("inline", b)
-            elif a == "-m" or a == "--":
-                return None
-        elif fam == "perl":
-            if _PERL_INLINE_RE.match(a):
-                hit = ("inline", b)
-        elif fam == "ruby":
-            if _RUBY_INLINE_RE.match(a):
-                hit = ("inline", b)
-        elif fam == "php":
-            if a in ("-r", "--run") or (a.startswith("-r") and len(a) > 2):
-                hit = ("inline", b)
-        elif fam in ("lua", "osascript"):
-            if a.startswith("-e"):
-                hit = ("inline", b)
-        elif fam == "shell":
-            if _SHELL_INLINE_RE.match(a) or a == "--command":
+            if a[:1] in "-/" and low in ("command", "c"):
+                nxt = plain[j + 1] if j + 1 < len(plain) else ""
                 return None if _plain_script_command(nxt) else ("shell", b)
-            if a == "--":
-                return None
-        elif fam == "powershell":
-            low = a.lower()
-            if low in ("-command", "-c", "-encodedcommand", "-e", "-ec"):
-                if low in ("-command", "-c") and _plain_script_command(nxt):
-                    return None
-                return ("shell", b)
-            if low in ("-file", "-f"):
-                return None
-        if hit:
+        return ("shell", b)
+    if fam == "npm":
+        ops = [a for a in plain if not a.startswith("-")]
+        if ops and ops[0] in ("exec", "x"):
+            return ("shell", "npm exec -c") if any(a in ("-c", "--call") or a.startswith("--call=")
+                                                    for a in plain) else ("fetch", "npm exec")
+        return None
+    if fam == "deno":
+        for a in plain:
+            if not a.startswith("-"):
+                return ("inline", "deno") if a == "eval" else None
+        return None
+    takes_value = False
+    for j, a0 in enumerate(rest):
+        a = a0.lstrip(UNRESOLVED)
+        nxt = plain[j + 1] if j + 1 < len(plain) else ""
+        if takes_value:
+            takes_value = False
+            if not a.startswith("-"):
+                continue  # the option's value; an option-shaped token is never swallowed
+        if _unresolved(a0):
+            if a.startswith("-") or not _PLAIN_FILE_RE.match(re.sub(r"[<>^]@?\(" + _NAME + r"\)", "x", a)):
+                return ("unresolved", f"its arguments use {_undefined_ref(a0)}, which no build file "
+                                      "read here defines")
+            return None  # `<(DEPTH)/tools/gen.py`: the script file, its directory unresolved
+        if fam == "awk" and (a in ("-f", "--file") or a.startswith("--file=")):
+            return None  # the program comes from a file, read like any other
+        hit = _inline_switch(fam, b, a, nxt)
+        if hit is not None:
             return hit
-        if _SCRIPT_EXT_RE.search(a) and prev not in _VALUE_OPTS.get(fam, ()):
-            return None  # the script file: what follows is the script's own arguments
-        prev = a
+        if a in ("--",) or (fam == "python" and a in ("-m", "-")):
+            return None
+        if a.startswith("-") or (fam == "shell" and a.startswith("+")):
+            takes_value = a in _VALUE_OPTS.get(fam, ()) or (a.startswith("--") and "=" not in a)
+            continue
+        if fam == "awk":
+            return ("inline", b)  # the first operand of awk is its program text
+        return None  # the script file: what follows is the script's own arguments
+    return None
+
+
+def _inline_switch(fam: str, b: str, a: str, nxt: str) -> "tuple[str, str] | None":
+    if fam == "node":
+        if a in ("-e", "-p", "-pe", "--eval", "--print") or a.startswith(("--eval=", "--print=")):
+            return ("inline", b)
+        if (a in ("--import", "--require", "-r", "--loader", "--experimental-loader")
+                and nxt.startswith("data:")) or re.match(
+                    r"--(?:import|require|loader|experimental-loader)=data:", a):
+            return ("inline", b)
+    elif fam == "python":
+        if _PY_INLINE_RE.match(a):
+            return ("inline", b)
+    elif fam == "perl":
+        if _PERL_INLINE_RE.match(a):
+            return ("inline", b)
+    elif fam == "ruby":
+        if _RUBY_INLINE_RE.match(a):
+            return ("inline", b)
+    elif fam == "php":
+        if a in ("-r", "--run") or (a.startswith("-r") and len(a) > 2):
+            return ("inline", b)
+    elif fam == "e-flag":
+        if a.startswith("-e") or a in ("--eval", "-E", "--print"):
+            return ("inline", b)
+    elif fam == "c-flag":
+        if a == "-c":
+            return ("inline", b)
+    elif fam == "awk":
+        if a in ("-e", "--source") or a.startswith("--source="):
+            return ("inline", b)
+    elif fam in ("shell", "su", "script"):
+        if _SHELL_INLINE_RE.match(a) or a == "--command":
+            return None if _plain_script_command(nxt) else ("shell", b)
     return None
 
 
@@ -563,11 +621,3 @@ def runs_inline_code(argv, variables=None) -> bool:
     """True when *argv* runs inline interpreter code or an inline shell command."""
     r = classify_build_step(argv, variables)
     return r is not None and r[0] in ("inline", "shell")
-
-
-_EXEC_TEXT_RE = re.compile(r"<!@?\(|['\"](?:actions|rules|postbuilds)[=+?]?['\"]\s*:")
-
-
-def gyp_text_runs_commands(text: str) -> bool:
-    """Cheap textual test: does a build config carry a `<!(...)` or a build-step key?"""
-    return bool(_EXEC_TEXT_RE.search(text or ""))

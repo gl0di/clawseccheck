@@ -88,7 +88,6 @@ from .gypbuild import (  # noqa: F401 - re-exported: B-1004 build steps
     GypBuildConfig,
     GypBuildStep,
     classify_build_step,
-    gyp_text_runs_commands,
     parse_gyp_build_config,
     runs_inline_code,
 )

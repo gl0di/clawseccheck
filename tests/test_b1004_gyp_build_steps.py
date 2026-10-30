@@ -204,8 +204,8 @@ def test_references_are_collected_but_expansions_and_same_file_targets_are_not()
         "{'includes': ['common.gypi'], 'targets': [{'dependencies': ['deps/x.gyp:x', 'local_t',"
         " \"<!(node -p \\\"require('node-addon-api').gyp\\\")\"]}]}"
     )
-    assert cfg.references[:2] == ("common.gypi", "deps/x.gyp:x")
-    assert "local_t" not in cfg.references
+    assert cfg.references[:2] == (("includes", "common.gypi"), ("dependencies", "deps/x.gyp:x"))
+    assert all(v != "local_t" for _, v in cfg.references)
 
 
 # ---------------------------------------------------------------------------
@@ -479,3 +479,123 @@ def test_b349_unreadable_build_config_is_unknown(tmp_path):
     f = check_dependency_tree_hooks(_Ctx(nm))
     assert f.status == UNKNOWN
     assert any("not a plain literal" in e for e in f.evidence)
+
+
+# ---------------------------------------------------------------------------
+# C-135 round 2 - every case through the real path (vet_skill -> B42 / dossier)
+# ---------------------------------------------------------------------------
+
+def _act(argv, extra: str = "", top: str = "") -> str:
+    """A binding.gyp with one action; *extra* is spliced into the action entry, *top* into
+    the top-level dict."""
+    return ("{" + top + "'targets': [{'target_name': 't', 'type': 'none', 'actions': [{"
+            "'action_name': 'a', 'inputs': [], 'outputs': ['x'], 'action': " + repr(list(argv))
+            + extra + "}]}]}")
+
+
+_ROUND2 = [
+    # item 1: variables resolve at the call site (t4 / n20 / n21)
+    ("t4 list splice", {"binding.gyp": _act(["<@(cmd)"], top="'variables': {'cmd': ['node', '-e', 'x']}, ")}, "runs inline node code"),
+    ("n20 switch from a variable", {"binding.gyp": _act(["node", "<(f)", "x"], top="'variables': {'f': '-e'}, ")}, "runs inline node code"),
+    ("n21 both from variables", {"binding.gyp": _act(["<(n)", "<(f)", "x"], top="'variables': {'n': 'node', 'f': '-e'}, ")}, "runs inline node code"),
+    # item 2: wrapper depth
+    ("n1 env x7", {"binding.gyp": _act(["env"] * 7 + ["node", "-pe", "1"])}, "runs inline node code"),
+    # item 3: option tokens with a script extension do not end the scan
+    ("n2 --title=x.js", {"binding.gyp": _act(["node", "--title=x.js", "-e", "1"])}, "runs inline node code"),
+    ("--title x.js", {"binding.gyp": _act(["node", "--title", "x.js", "-e", "1"])}, "runs inline node code"),
+    ("n17 python -Xa.py", {"binding.gyp": _act(["python3", "-Xa.py", "-c", "1"])}, "runs inline python3 code"),
+    ("perl -i.js", {"binding.gyp": _act(["perl", "-i.js", "-e", "1"])}, "runs inline perl code"),
+    ("bash --rcfile a.sh", {"binding.gyp": _act(["bash", "--rcfile", "a.sh", "-c", "echo"])}, "inline shell command"),
+    # item 4: list filters
+    ("n3 action!", {"binding.gyp": _act(["node", "safe.js", "-e", "1"], extra=", 'action!': ['safe.js']"),
+                    "safe.js": "//\n"}, "list filter"),
+    ("action/", {"binding.gyp": _act(["node", "safe.js", "-e", "1"], extra=", 'action/': [['exclude', 'safe']]"),
+                 "safe.js": "//\n"}, "list filter"),
+    # item 5: variable syntax and gyp's automatic variables
+    ("n4 ^(n)", {"binding.gyp": _act(["^(n)", "-e", "1"], top="'variables': {'n': 'node'}, ")}, "runs inline node code"),
+    ("dashed name", {"binding.gyp": _act(["<(my-interp)", "-e", "1"], top="'variables': {'my-interp': 'node'}, ")}, "runs inline node code"),
+    ("n22 _key", {"binding.gyp": _act(["<(_p)", "<(_f)", "<(_c)"], extra=", 'p': 'node', 'f': '-e', 'c': '1'")}, "runs inline node code"),
+    ("n23 _inputs idiom", {"binding.gyp": "{'targets': [{'target_name': 't', 'type': 'none', 'actions': [{'action_name': 'a', "
+                           "'inputs': ['tools/gen.py', 'data.txt'], 'outputs': ['x'], 'action': ['python', '<@(_inputs)', '<@(_outputs)']}]}]}",
+                           "tools/gen.py": "print(1)\n"}, None),
+    ("undefined is named truly", {"binding.gyp": _act(["node", "<(nowhere)", "1"])}, "which no build file read here defines"),
+    # item 6: the combination cap is not a PASS
+    ("n6 cap", {"binding.gyp": "{'targets': [{'target_name': 't', 'type': 'none', 'variables': {'a': 'gcc'}, 'conditions': ["
+                + ", ".join(f"['OS==\"n{i}\"', {{'variables': {{'b': '--x{i}', 'a': 'cc{i}'}}}}]" for i in range(40))
+                + "], 'actions': [{'action_name': 'a', 'inputs': [], 'outputs': ['x'], 'action': ['<(a)', '<(b)', '1']}]}]}"},
+     "more gyp variable combinations"),
+    # item 7: node-gyp's implicit root includes
+    ("n5 common.gypi", {"binding.gyp": "{'targets': [{'target_name': 't', 'sources': ['a.cc']}]}", "a.cc": "int x;\n",
+                        "common.gypi": "{'target_defaults': {'actions': [{'action_name': 'a', 'inputs': [], 'outputs': ['x'], 'action': ['node', '-e', '1']}]}}"},
+     "common.gypi action 'a' runs inline node code"),
+    ("n5b config.gypi", {"binding.gyp": "{'targets': [{'target_name': 't', 'sources': ['a.cc']}]}", "a.cc": "int x;\n",
+                         "config.gypi": "{'target_defaults': {'actions': [{'action_name': 'a', 'inputs': [], 'outputs': ['x'], 'action': ['node', '-e', '1']}]}}"},
+     "config.gypi action 'a' runs inline node code"),
+    # item 8: make / shell substitution in any argument
+    ("n24 $(shell", {"binding.gyp": _act(["touch", '$(shell node -e "1")'])}, "command substitution"),
+    ("n25 $$(", {"binding.gyp": _act(["touch", '$$(node -e "1")'])}, "command substitution"),
+    ("backtick", {"binding.gyp": _act(["touch", "`node -e 1`"])}, "command substitution"),
+    # item 9: interpreter at any position, more interpreters and fetchers
+    ("n8 chroot", {"binding.gyp": _act(["chroot", "/", "node", "-e", "1"])}, "runs inline node code"),
+    ("find -exec", {"binding.gyp": _act(["find", ".", "-exec", "node", "-e", "1", ";"])}, "runs inline node code"),
+    ("n9 awk", {"binding.gyp": _act(["awk", 'BEGIN{system("true")}'])}, "runs inline awk code"),
+    ("n7 powershell -enc", {"binding.gyp": _act(["powershell", "-NoP", "-enc", "AAAA"])}, "inline shell command"),
+    ("cmd /cnode", {"binding.gyp": _act(["cmd", "/cnode -e 1"])}, "inline shell command"),
+    ("git clone", {"binding.gyp": _act(["git", "clone", "https://example.invalid/r"])}, "fetches with git clone"),
+    ("Rscript", {"binding.gyp": _act(["Rscript", "-e", "1"])}, "runs inline rscript code"),
+    # item 10: an included file named by a command expansion
+    ("includes <!", {"binding.gyp": "{'includes': ['<!(node -p \"x\")'], 'targets': []}"}, "named by a command expansion"),
+    # honest shapes stay quiet on the real path
+    ("n18 honest mix", {"binding.gyp": "{'targets': [{'target_name': 't', 'type': 'none', 'actions': ["
+                        "{'action_name': 'p', 'inputs': [], 'outputs': ['x'], 'action': ['python3', 'tools/protoc_wrapper.py', '--include', 'x', '-c', 'cfg', '-e', 'x']},"
+                        "{'action_name': 'f', 'inputs': [], 'outputs': ['x'], 'action': ['<(PRODUCT_DIR)/flatc', '-c', '-o', 'out', 'schema.fbs']},"
+                        "{'action_name': 'c', 'inputs': [], 'outputs': ['x'], 'action': ['cmake', '-S', '.', '-B', 'build']},"
+                        "{'action_name': 'n', 'inputs': [], 'outputs': ['x'], 'action': ['node', 'tools/gen.js', '<@(_inputs)']}]}]}",
+                        "tools/protoc_wrapper.py": "print(1)\n", "tools/gen.js": "//\n"}, None),
+    ("n19 honest per-OS", {"binding.gyp": _act([], extra="").replace("'action': [], ", "")
+                           .replace("'outputs': ['x']", "'outputs': ['x'], 'conditions': [['OS==\"win\"', {'action': ['cmd', '/c', 'build.bat']}], "
+                                    "['OS!=\"win\"', {'action': ['bash', 'build.sh']}]]"),
+                           "build.sh": "make\n"}, None),
+]
+
+
+@pytest.mark.parametrize("label,files,expect", _ROUND2, ids=[c[0] for c in _ROUND2])
+def test_round2_through_vet(tmp_path, label, files, expect):
+    d = _skill(tmp_path, files)
+    detail = _b42_detail(d)
+    if expect is None:
+        assert detail == "", detail
+    else:
+        assert detail.startswith("WARN") and expect in detail, detail
+        prof = build_profile(vet_skill(d), str(d), "skill")
+        reasons = {a.axis: a.reason for a in prof.axes}
+        assert "no executable code" not in reasons["persistence"], label
+
+
+def test_unpacked_archive_target_that_could_not_be_unpacked_warns(tmp_path):
+    """C-135 round 2 item 10: a directory with an oversized binding.gyp WARNs, so an archive
+    the collector refused to unpack must not read clean."""
+    import tarfile
+
+    src = _skill(tmp_path / "src", {"binding.gyp": "#" + "pad" * 400_000 + "\n" + _INLINE_STEP})
+    tg = tmp_path / "big.tgz"
+    with tarfile.open(tg, "w:gz") as t:
+        for f in src.iterdir():
+            t.add(f, arcname=f"package/{f.name}")
+    assert "was not unpacked in full" in _b42_detail(tg)
+    md = tmp_path / "SKILL.md"
+    md.write_text("---\nname: m\ndescription: x\n---\n# m\n")
+    assert _b42_vet(md) is None  # a bare non-archive file is not an archive
+
+
+def test_install_policy_variables_are_tuples_at_the_call_site(tmp_path):
+    """C-135 round 2 item 1, at the function that broke: check_install_policy itself."""
+    from clawseccheck.checks import check_install_policy
+    from clawseccheck.collector import Context
+
+    d = _skill(tmp_path, {"binding.gyp": _act(["<(n)", "<(f)", "x"], top="'variables': {'n': 'node', 'f': '-e'}, ")})
+    ctx = Context(home=d)
+    ctx.installed_skills = {"s": ""}
+    f = check_install_policy(ctx)
+    assert f.status == WARN and "runs inline node code" in f.detail
+    assert getattr(f, "gyp_build_code", False)

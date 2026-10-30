@@ -2845,7 +2845,11 @@ _B42_GYP_FILE = "binding.gyp"
 _B42_GYP_MAX_FILES = 16
 _B42_GYP_FIX = (
     " For a binding.gyp build step: install with `npm install --ignore-scripts` (which also "
-    "skips the automatic node-gyp build) until you have read the named step."
+    "skips the automatic node-gyp build) until you have read the named step. Not covered by "
+    "this check: a `<!(...)` command expansion in the skill's own build files, the "
+    "msvs_prebuild/msvs_postbuild, make_global_settings and *_wrapper keys, a binding.gyp "
+    "spelled in another case on a case-insensitive filesystem, `python -m <module>`, "
+    "interpreters it does not name, and a plugin's root binding.gyp under --vet-plugin."
 )
 
 
@@ -2895,6 +2899,11 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
             continue
         prefix, _, inner = rel.rpartition("::")
         archives.setdefault(prefix, {})[posixpath.normpath(inner)] = item
+    if (not archives and not pathprobe.is_dir(root) and pathprobe.is_file(root)
+            and re.search(r"\.(?:tgz|tar|tar\.gz|tar\.bz2|tar\.xz|zip)\Z", root.name, re.I)):
+        # The target is a file (an archive) and nothing in it was unpacked: a directory
+        # holding an oversized binding.gyp WARNs, so this must not read as clean either.
+        out.append(("", None, None))
     for prefix, members in archives.items():
         anchors = [p for p in members if posixpath.basename(p) == "package.json"] or \
                   [p for p in members if posixpath.basename(p) == _B42_GYP_FILE]
@@ -2926,12 +2935,24 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
     return out
 
 
+# node-gyp passes the package root's own `config.gypi` and `common.gypi` to gyp as `-I`
+# includes when they exist (node-gyp 12.2.0 `lib/configure.js`: `configNames`, `findConfigs`,
+# `argv.push('-I', config)`), and gyp merges every `-I` include into each build file - so a
+# `target_defaults` action there runs like one in binding.gyp. Absent is normal (a fresh
+# package has no config.gypi; node-gyp generates its own under build/).
+_B42_IMPLICIT_INCLUDES = ("config.gypi", "common.gypi")
+
+
 def _b42_gyp_build_steps(ctx: Context, name: str, redact) -> list:
     """WARN lines for one skill's root binding.gyp (and the build files it pulls in)."""
     import posixpath
 
     warns: list = []
     for where, read, manifest in _b42_gyp_sources(ctx, name):
+        if read is None:  # an archive target this run could not unpack
+            warns.append(f"{name}: {where}the archive was not unpacked in full, so a "
+                         f"{_B42_GYP_FILE} in it was not read")
+            continue
         text, notes = read(_B42_GYP_FILE)
         for note in notes:
             warns.append(f"{name}: {where}{_B42_GYP_FILE}: {note}, so what node-gyp runs "
@@ -2941,6 +2962,14 @@ def _b42_gyp_build_steps(ctx: Context, name: str, redact) -> list:
         trigger = _b42_gyp_trigger(manifest)
         queue = [(_B42_GYP_FILE, text)]
         seen = {_B42_GYP_FILE}
+        for implicit in _B42_IMPLICIT_INCLUDES:
+            sub, sub_notes = read(implicit)
+            seen.add(implicit)
+            for note in sub_notes:
+                warns.append(f"{name}: {where}{implicit} (included by node-gyp): {note}, so "
+                             "what node-gyp runs from it is unknown")
+            if sub is not None:
+                queue.append((implicit, sub))
         configs: list = []
         while queue:
             rel, body = queue.pop(0)
@@ -2950,11 +2979,14 @@ def _b42_gyp_build_steps(ctx: Context, name: str, redact) -> list:
                 warns.append(f"{name}: {where}{rel} {reason}, so what node-gyp runs from it "
                              "is unknown")
             configs.append((rel, cfg))
-            for ref in cfg.references:
-                target = ref.split(":", 1)[0] if not ref.startswith("<") else ref
+            for kind, ref in cfg.references:
+                target = ref.split(":", 1)[0] if kind == "dependencies" and not ref.startswith("<") else ref
                 if "<!" in target:
-                    continue  # a command expansion: not judged here (see the note above)
-                if re.search(r"[<>$]", target):
+                    if kind == "includes":
+                        warns.append(f"{name}: {where}{rel} includes a file named by a command "
+                                     f"expansion ('{redact(ref)[:60]}'), which was not examined")
+                    continue  # a dependency named by `<!(...)` (node-addon-api's idiom): not judged
+                if re.search(r"[<>^$]", target):
                     warns.append(f"{name}: {where}{rel} references another build file through "
                                  f"a variable ('{redact(ref)[:60]}'), which was not read")
                     continue
@@ -2973,11 +3005,11 @@ def _b42_gyp_build_steps(ctx: Context, name: str, redact) -> list:
                                  f"was not read ({why})")
                     continue
                 queue.append((path, sub))
+        # name -> TUPLE of candidate values: gypbuild reads a list as one gyp list value.
         variables: dict = {}
         for _rel, cfg in configs:
             for k, vals in (cfg.variables or {}).items():
-                merged = variables.setdefault(k, [])
-                merged.extend(v for v in vals if v not in merged)
+                variables[k] = tuple(dict.fromkeys((*variables.get(k, ()), *vals)))
         for rel, cfg in configs:
             for step in cfg.steps:
                 label = f" '{step.name}'" if step.name else ""
@@ -2985,14 +3017,15 @@ def _b42_gyp_build_steps(ctx: Context, name: str, redact) -> list:
                 if step.unexamined:
                     warns.append(f"{head} was not examined: {step.unexamined} ({trigger})")
                     continue
-                verdict = _deptree.classify_build_step(step.argv, variables)
+                verdict = _deptree.classify_build_step(
+                    step.argv, {**variables, **dict(step.local_vars)})
                 if verdict is None:
                     continue
                 kind, what = verdict
                 does = {
                     "inline": f"runs inline {what} code",
                     "shell": f"runs an inline shell command ({what})",
-                    "fetch": f"downloads with {what}",
+                    "fetch": f"downloads or fetches with {what}",
                 }.get(kind, f"was not examined: {what}")
                 warns.append(f"{head} {does} ({trigger}) -> '{redact(' '.join(step.argv))[:80]}'")
     return warns
@@ -3032,7 +3065,7 @@ def check_install_policy(ctx: Context) -> Finding:
     for path, who, mode in (perm_bad or [])[:6]:
         warns.append(f"{who}-writable skill dir {path} (mode {mode:o})")
     if warns:
-        return _finding(
+        finding = _finding(
             "B42",
             WARN,
             "Install-time supply-chain risk: " + "; ".join(warns[:8]),
@@ -3041,6 +3074,10 @@ def check_install_policy(ctx: Context) -> Finding:
             "auto-update until each hook is trusted." + (_B42_GYP_FIX if gyp_warns else ""),
             warns + notes,
         )
+        # Read by dossier.py: a build step that runs code, or a build file this could not
+        # read, is code present with no reader for the Persistence/Connections axes.
+        finding.gyp_build_code = bool(gyp_warns)
+        return finding
     return _finding(
         "B42",
         PASS,
