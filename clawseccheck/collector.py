@@ -1953,8 +1953,11 @@ def _inner_raw_name(raw_member_name: str | None, file_relpath: str, ext: str) ->
     name, which yields one that never ends in .pyc.
     """
     raw = raw_member_name if raw_member_name is not None else file_relpath
-    if raw.lower().endswith(ext):
-        return raw[: -len(ext)]
+    # Any known compression suffix, not only the one this branch sniffed: a wrapper named
+    # x.pyc.gz whose bytes are really xz is still named x.pyc by its author.
+    for suffix in (".gzip", ".gz", ".bz2", ".xz"):
+        if raw.lower().endswith(suffix):
+            return raw[: -len(suffix)]
     return raw + "::extracted"
 
 

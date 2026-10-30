@@ -315,6 +315,16 @@ def test_long_named_compressed_pyc_inside_a_zip_is_checked(tmp_path, ext):
     assert _run_check(z).status == FAIL
 
 
+@pytest.mark.parametrize("wrapper_name", ["m.pyc.gz", "m.pyc.gzip", "m.pyc.bz2"])
+def test_wrapper_whose_suffix_disagrees_with_its_bytes_is_checked(tmp_path, wrapper_name):
+    import lzma
+
+    data = _pyc(_skill(tmp_path), UNCHECKED).read_bytes()
+    z = tmp_path / wrapper_name
+    z.write_bytes(lzma.compress(data))  # xz bytes under a .gz / .gzip / .bz2 name
+    assert _run_check(z).status == FAIL
+
+
 def test_remediation_is_published_for_the_docs_generator():
     from clawseccheck.catalog import remediation_for
     assert remediation_for("B398")["commands"]
