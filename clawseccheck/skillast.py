@@ -18723,9 +18723,9 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
 )
 
 # --------------------------------------------------------------------------- #
-# B-1005: JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW / JS_ENV_EXFIL_FLOW -- the JS #
-# twin of analyze_python's CRED_EXFIL_FLOW. Before this, `analyze_javascript` had no     #
-# read-a-secret-then-send rule at all, so an install-time `node evil.js` that    #
+# B-1005: JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW / JS_ENV_EXFIL_FLOW -- the   #
+# JS twin of analyze_python's CRED_EXFIL_FLOW. Before this, analyze_javascript   #
+# had no read-a-secret-then-send rule, so an install-time `node evil.js` that    #
 # read /proc/1/environ and POSTed it to an unlisted host (the spectral-core      #
 # shape, GHSA-jpgq-34qx-jwwc / MAL-2026-18377) vetted INSTALL: the only JS       #
 # coverage was the text layer, which B-425 deliberately narrowed so a bare       #
@@ -18755,21 +18755,54 @@ _JS_NATIVE_DLOPEN_RE = re.compile(
 #             `_JS_FLOW_WINDOW` characters of it. The window is the scoping      #
 #             proxy a lexical pass has: `data` tainted at the top of a 2 MB      #
 #             bundle must not convict an unrelated `fetch(url, {body: data})`    #
-#             10,000 lines later.                                                 #
-# Severity: a secret no client sends as-is (process environ, private key, raw   #
-# AWS credentials, wallet/keystore, keychain) reaching a sink is crit, the same  #
-# grade analyze_python gives CRED_EXFIL_FLOW. A token/config file (.npmrc, a     #
+#             10,000 lines later. Every taint event of a name is kept (a name    #
+#             read twice keeps both), and a sink hits if ANY is in window.       #
+#   direct  - crit additionally needs the value not provably REDUCED: it is    #
+#             DERIVED (-> JS_SECRET_FILE_FLOW, warn) only when it passes an      #
+#             allowlisted reducer (crypto MAC/hash/sign chain, `.length`/`.size`/ #
+#             `.byteLength`, `.includes/.startsWith/.endsWith/.test/.match`, a   #
+#             comparison) or is the TLS `key`/`cert`/`ca`/`pfx`/`passphrase`     #
+#             option of a TLS client call it is a direct argument of. Every      #
+#             other transform -- a user function, slice, replace, join, a        #
+#             carrier -- stays direct (fail-closed): an AWS SigV4 client and an  #
+#             exfiltrator differ only in that reducer step.                      #
+# Severity: a secret no client sends as-is (process environ, private key, raw    #
+# AWS credentials, wallet/keystore, keychain) reaching a sink directly is crit,  #
+# the grade analyze_python gives CRED_EXFIL_FLOW. A token/config file (.npmrc, a #
 # secrets mount, Cookies, ...) is warn -- see `_js_cred_path_kind`: presenting   #
-# it to a server IS its purpose, so the flow alone cannot convict. A whole-      #
-# `process.env`                                                                   #
-# serialisation (JSON.stringify(process.env) / Object.entries(process.env) /     #
-# {...process.env}) reaching a sink is warn only -- telemetry/debug tools that   #
-# ship their own environment to their own backend share the exact shape.        #
+# it to a server IS its purpose, so the flow alone cannot convict. process.env   #
+# serialised whole -- exactly three spellings: JSON.stringify(process.env),      #
+# Object.entries/values(process.env), {...process.env} -- reaching a sink is     #
+# warn only: telemetry/debug tools ship their own environment to their backend.  #
+#                                                                                #
+# Documented limits (lexical, no parser; each is a false NEGATIVE, never a FAIL): #
+#   - paths assembled segment by segment (`join(homedir(), '.aws',               #
+#     'credentials')`) or spliced (`'/pr' + 'oc/self/environ'`); only the        #
+#     /proc/<pid>/environ concat/join/template spellings are recognised;         #
+#   - a value returned from a function, stored in an object field              #
+#     (`o.k = read(...)`), destructured, or flowing through a stream's           #
+#     `.on('data')` handler (`.pipe(<request>)` IS followed);                     #
+#   - aliased readFileSync / fetch (`const r = fs.readFileSync; r(p)`);          #
+#   - clients other than the listed sinks: XMLHttpRequest, undici, got,          #
+#     axios.create() instances, ...;                                             #
+#   - a shell command that reads the file itself, e.g.                           #
+#     `execSync('curl -d @/proc/1/environ ...')` (the command string is the      #
+#     read's argument, but no JS value carries the secret);                      #
+#   - process.env read key by key (`process.env.AWS_SECRET_ACCESS_KEY`);         #
+#   - `.env`, `.git-credentials`, `.config/gh/hosts.yml`: not on _CRED_PATH_RE.  #
 # --------------------------------------------------------------------------- #
 _JS_FLOW_WINDOW = 4000  # chars between a taint and the sink it reaches, per hop
 _JS_FLOW_MAX_HOPS = 4
-_JS_FLOW_MAX_TAINTED = 64
+_JS_FLOW_MAX_TAINTED = 512
 _JS_ARG_SPAN_CAP = 3000
+# Work bounds. A file past one of these is not truncated silently: the pass raises
+# ScanBudgetExceeded, which every caller already turns into an honest UNKNOWN (the
+# same contract `_MAX_REACHED_SINKS` uses). No measured real file comes near them:
+# they count credential-path READS and sinks that sit inside a taint's window, not
+# ordinary calls.
+_JS_FLOW_MAX_READS = 2000
+_JS_FLOW_MAX_EVENTS = 8000
+_JS_FLOW_MAX_SINK_CHECKS = 8000
 
 # /proc/<pid>/environ spellings _CRED_PATH_RE cannot see because the pid is computed.
 _JS_PROC_ENVIRON_DYN_RE = re.compile(
@@ -18798,7 +18831,8 @@ _JS_PATH_BIND_RE = re.compile(
     r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]{1,300})"
 )
 _JS_ASSIGN_RE = re.compile(
-    r"(?:\b(?:const|let|var)\s+|(?<![\w$.]))([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]{1,600})"
+    r"(?:\b(?:const|let|var)\s+|(?<![\w$.]))([A-Za-z_$][\w$]*)\s*"
+    r"(?::\s*[\w$.<>\[\]|& ]{1,80}?\s*)?=(?![=>])"
 )
 _JS_NET_MODULES = ("http", "https", "http2", "net", "tls", "dns", "dgram")
 _JS_NET_NS_BIND_RE = re.compile(
@@ -18807,10 +18841,14 @@ _JS_NET_NS_BIND_RE = re.compile(
     r"|\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s+['\"](?:node:)?"
     r"(http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]"
 )
+# B-1005 round 2: the name list is captured WITH its surrounding blanks and stripped in
+# Python. The earlier `\{\s*([^{}]{1,200}?)\s*\}` let `\s*` and the lazy class both
+# claim the same blanks, so one `{` before a long run of spaces was re-tried at every
+# split - a quadratic scan on attacker-chosen whitespace.
 _JS_NET_DESTRUCTURE_RE = re.compile(
-    r"\{\s*([^{}]{1,200}?)\s*\}\s*=\s*require\(\s*['\"](?:node:)?"
+    r"\{([^{}]{1,200})\}\s*=\s*require\(\s*['\"](?:node:)?"
     r"(?:http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]\s*\)"
-    r"|\bimport\s*\{\s*([^{}]{1,200}?)\s*\}\s*from\s+['\"](?:node:)?"
+    r"|\bimport\s*\{([^{}]{1,200})\}\s*from\s+['\"](?:node:)?"
     r"(?:http|https|http2|net|tls|dns|dgram)(?:/promises)?['\"]"
 )
 _JS_NET_METHODS = frozenset(
@@ -18823,6 +18861,45 @@ _JS_SINK_CALL_RE = re.compile(
     r"|\bnew\s+WebSocket\s*\("
     r"|(?<![\w$])([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\("
     r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\("
+)
+_JS_PIPE_RE = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*|\))\s*\.\s*pipe\s*\(\s*([A-Za-z_$][\w$]*)")
+
+# Round 2 (crit needs the secret ITSELF at the sink). FAIL-closed by construction: a
+# value read from a hard secret is DIRECT (crit) unless it provably passes through a
+# known REDUCER on its way to the sink -- an explicit allowlist, never "anything that is
+# not a known carrier", because the latter let any user function, `.slice()`,
+# `.replace()`, `.join()` or a `body: {key: secret}` member escape crit (security review
+# of the first cut). Reducers: the crypto MAC/hash/sign family (createHmac/createHash/
+# createSign/createVerify/sign/verify/timingSafeEqual, and `.update(...)` on such a
+# chain), a boolean test (`.includes/.startsWith/.endsWith/.test/.match`), a size
+# (`.length/.size/.byteLength`), `.digest`, or a comparison operator. Measured shapes
+# that need it: an AWS SigV4 client HMACs ~/.aws/credentials and calls sts; a tool posts
+# `/proc/self/environ`'s length; one tests `environ.includes(...)`.
+_JS_REDUCER_CALLEES = frozenset(
+    {"createHmac", "createHash", "createSign", "createVerify", "sign", "verify",
+     "timingSafeEqual", "includes", "startsWith", "endsWith", "test", "match"}
+)
+_JS_REDUCER_MEMBERS = frozenset(
+    {"length", "size", "byteLength", "includes", "startsWith", "endsWith", "test",
+     "match", "digest"}
+)
+_JS_CRYPTO_CHAIN_RE = re.compile(r"create(?:Hmac|Hash|Sign|Verify)\s*\(")
+_JS_COMPARISON_OPS = ("===", "!==", "==", "!=", "<=", ">=", "<", ">")
+# A secret handed to a TLS-capable client AS its identity option is authentication, not
+# exfiltration -- but only when the `{...}` holding it is itself a direct argument of
+# that client call (https.request/get, tls.connect, http2.connect, new https.Agent,
+# tls.createSecureContext / SecureContext), never nested under body/headers/data or
+# wrapped in a carrier first.
+_JS_TLS_OPTION_RE = re.compile(
+    r"^\s*['\"]?(?:key|cert|ca|pfx|passphrase)['\"]?\s*:", re.I
+)
+_JS_TLS_METHODS = frozenset(
+    {"request", "get", "connect", "Agent", "SecureContext", "createSecureContext"}
+)
+_JS_TLS_MODULES = ("https", "tls", "http2")
+_JS_KEYWORDS = frozenset(
+    {"return", "typeof", "await", "yield", "new", "delete", "void", "in", "of",
+     "instanceof", "case", "else", "do", "if", "while", "for", "this"}
 )
 
 
@@ -18896,17 +18973,185 @@ def _js_cred_path_kind(text: str) -> "str | None":
     return None
 
 
-def _js_name_used(name: str, text: str) -> bool:
-    """`name` appears in `text` as a value -- not as a `.property` and not as an
-    object-literal key (`{data: 1}`)."""
-    for m in re.finditer(r"(?<![\w$.])" + re.escape(name) + r"(?![\w$])", text):
+_JS_NAME_RE_CACHE: dict = {}
+
+
+def _js_name_uses(name: str, text: str) -> "list[tuple[int, int]]":
+    """Spans where `name` appears in `text` as a value -- not as a `.property` and not
+    as an object-literal key (`{data: 1}`)."""
+    rx = _JS_NAME_RE_CACHE.get(name)
+    if rx is None:
+        if len(_JS_NAME_RE_CACHE) > 4096:
+            _JS_NAME_RE_CACHE.clear()
+        # `.name` is a property, but `...name` (spread) is the value itself
+        rx = re.compile(r"(?:(?<=\.\.\.)|(?<![\w$.]))" + re.escape(name) + r"(?![\w$])")
+        _JS_NAME_RE_CACHE[name] = rx
+    out = []
+    for m in rx.finditer(text):
         tail = text[m.end() : m.end() + 3]
         if re.match(r"\s*:(?!:)", tail):
             prev = text[: m.start()].rstrip()[-1:]
             if prev in ("{", ","):
                 continue
-        return True
-    return False
+        out.append((m.start(), m.end()))
+    return out
+
+
+def _js_name_used(name: str, text: str) -> bool:
+    return bool(_js_name_uses(name, text))
+
+
+def _js_frames(text: str) -> "list[list]":
+    """One linear, quote/template-aware pass over an expression: every bracket frame as
+    `[kind, open, close, callee, comma_positions]`. kind is "(", "{", "[", "`" (a
+    template literal) or "${" (a template hole); `close` is len(text) if unclosed; the
+    callee of a "(" is the dotted name right before it ("" for a grouping paren)."""
+    frames: list = []
+    stack: list = []
+    quote = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        top = stack[-1] if stack else None
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if top is not None and top[0] == "`":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "`":
+                top[2] = i
+                stack.pop()
+            elif ch == "$" and i + 1 < n and text[i + 1] == "{":
+                f = ["${", i + 1, n, "", []]
+                frames.append(f)
+                stack.append(f)
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch == "`":
+            f = ["`", i, n, "", []]
+            frames.append(f)
+            stack.append(f)
+        elif ch == "(":
+            j = i
+            while j > 0 and text[j - 1] in " \t":
+                j -= 1
+            k = j
+            while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$."):
+                k -= 1
+            f = ["(", i, n, text[k:j], []]
+            frames.append(f)
+            stack.append(f)
+        elif ch in "{[":
+            f = [ch, i, n, "", []]
+            frames.append(f)
+            stack.append(f)
+        elif ch in ")]}":
+            if stack and stack[-1][0] != "`":
+                stack[-1][2] = i
+                stack.pop()
+        elif ch == "," and top is not None:
+            top[4].append(i)
+        i += 1
+    return frames
+
+
+def _js_postfix_reduces(text: str, p: int, frames: list) -> bool:
+    """Does the member chain starting at `p` (`.a.b(...)[i]...`) pass through a known
+    reducer member, or end in a comparison operator?"""
+    opens = {f[1]: f for f in frames}
+    n = len(text)
+    while True:
+        while p < n and text[p] in " \t\r\n":
+            p += 1
+        if text[p : p + 2] == "?.":
+            p += 1
+        if p < n and text[p] == "[" and p in opens:
+            p = opens[p][2] + 1
+            continue
+        if p >= n or text[p] != ".":
+            break
+        m = re.match(r"\.\s*([A-Za-z_$][\w$]*)\s*", text[p : p + 80])
+        if not m:
+            break
+        if m.group(1) in _JS_REDUCER_MEMBERS:
+            return True
+        q = p + m.end()
+        if q < n and text[q] == "(" and q in opens:
+            p = opens[q][2] + 1
+        else:
+            p = p + len(m.group(0).rstrip())
+    return text[p : p + 3].startswith(_JS_COMPARISON_OPS) and text[p : p + 2] != "=>"
+
+
+def _js_is_tls_callee(callee: str, tls_receivers) -> bool:
+    parts = callee.strip(".").split(".")
+    return (
+        len(parts) >= 2 and parts[-1] in _JS_TLS_METHODS and parts[-2] in tls_receivers
+    )
+
+
+def _js_occurrence_is_direct(
+    text: str, s: int, e: int, frames: list, outer_callee: str = "",
+    tls_receivers=_JS_TLS_MODULES,
+) -> bool:
+    """False only when the value at text[s:e] provably passes a known REDUCER before
+    the end of `text` (see the module comment: an allowlist, fail-closed), or is a TLS
+    identity option of the client call it is a direct argument of. `outer_callee` names
+    the call whose argument list `text` is, if any."""
+    if _js_postfix_reduces(text, e, frames):
+        return False
+    if text[:s].rstrip().endswith(_JS_COMPARISON_OPS) and not text[:s].rstrip().endswith("=>"):
+        return False
+    containing = sorted((f for f in frames if f[1] < s and e <= f[2]), key=lambda f: f[1])
+    for idx, f in enumerate(containing):
+        kind, op, cl, callee = f[0], f[1], f[2], f[3]
+        if kind == "(":
+            last = callee.strip(".").split(".")[-1]
+            if last in _JS_REDUCER_CALLEES:
+                return False
+            if last == "update" and _JS_CRYPTO_CHAIN_RE.search(text[max(0, op - 400) : op]):
+                return False
+            if cl < len(text) and _js_postfix_reduces(text, cl + 1, frames):
+                return False
+        elif kind == "{":
+            member_start = max([c for c in f[4] if c < s], default=op) + 1
+            member = text[member_start:s]
+            is_option = bool(_JS_TLS_OPTION_RE.match(member)) or (
+                not member.strip()
+                and _JS_TLS_OPTION_RE.match(text[s:e] + ":")
+                and text[e:].lstrip()[:1] in (",", "}")
+            )
+            if not is_option:
+                continue
+            parent = containing[idx - 1] if idx > 0 else None
+            if parent is None:
+                if _js_is_tls_callee(outer_callee, tls_receivers):
+                    return False
+            elif parent[0] == "(" and _js_is_tls_callee(parent[3], tls_receivers):
+                return False
+    return True
+
+
+def _js_callee_before(text: str, open_idx: int) -> str:
+    j = open_idx
+    while j > 0 and text[j - 1] in " \t":
+        j -= 1
+    k = j
+    while k > 0 and (text[k - 1].isalnum() or text[k - 1] in "_$."):
+        k -= 1
+    return text[k:j]
 
 
 def _js_net_bindings(masked: str) -> "tuple[set, set]":
@@ -18917,28 +19162,154 @@ def _js_net_bindings(masked: str) -> "tuple[set, set]":
         if bound:
             receivers.add(bound)
     for m in _JS_NET_DESTRUCTURE_RE.finditer(masked):
-        group = m.group(1) or m.group(2)
-        for entry in (group or "").split(","):
+        group = (m.group(1) or m.group(2) or "").strip()
+        for entry in group.split(","):
             parts = re.split(r":\s*|\s+as\s+", entry.strip())
             if parts and parts[0].strip() in _JS_NET_METHODS and parts[-1].strip():
                 names.add(parts[-1].strip())
     return receivers, names
 
 
+_JS_LHS_TAIL_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?::\s*[\w$.<>\[\]|& ]{1,80}?)?\s*$"
+)
+_JS_CONT_PREV = set("=,([{+-*/?:|&!<>")
+_JS_CONT_NEXT = set(".?:+-*/|&,)]")
+
+
+def _js_statement_lhs_at(masked: str, pos: int) -> "tuple[str, int] | None":
+    """(name, offset of its `=`) for the assignment whose right-hand side contains
+    `pos`, or None. Scans BACK from `pos` to the nearest top-level `=`: it crosses the
+    calls/arrays/object literals the value sits in, accepts a comma declaration
+    (`var a=require("fs"),b=a.readFileSync(...)` names `b`), a TypeScript annotation
+    (`const e: string = ...`) and a line continuation, and stops at `;`, a block `{`,
+    a top-level `,` before any `=` (the value is an argument or a comma operand, not
+    assigned) or a statement-ending newline. Member targets (`obj.x = ...`) and
+    destructuring return None - see the documented limits."""
+    i = pos - 1
+    lo = max(0, pos - 2000)
+    depth = 0
+    quote = None
+    while i >= lo:
+        ch = masked[i]
+        if quote:
+            if ch == quote and (i == 0 or masked[i - 1] != "\\"):
+                quote = None
+            i -= 1
+            continue
+        if ch in "'\"`":
+            quote = ch
+        elif ch in ")]}":
+            depth += 1
+        elif ch in "([{":
+            if depth == 0:
+                if ch == "{":
+                    j = i - 1
+                    while j >= lo and masked[j] in " \t\r\n":
+                        j -= 1
+                    prev = masked[j] if j >= lo else ""
+                    if not prev or prev == ")" or prev == ">" or prev.isalnum() or prev in "_$;{}":
+                        return None  # a block body, not an object literal
+            else:
+                depth -= 1
+        elif depth == 0:
+            if ch == ";":
+                return None
+            if ch == ",":
+                return None
+            if ch == "\n":
+                j = i - 1
+                while j >= lo and masked[j] in " \t\r":
+                    j -= 1
+                k = i + 1
+                while k < pos and masked[k] in " \t\r\n":
+                    k += 1
+                prev = masked[j] if j >= lo else ""
+                nxt = masked[k] if k < pos else ""
+                if prev not in _JS_CONT_PREV and nxt not in _JS_CONT_NEXT:
+                    return None
+            if ch == "=":
+                before = masked[i - 1] if i > 0 else ""
+                after = masked[i + 1] if i + 1 < len(masked) else ""
+                if after in "=>" or before in "=!<>":
+                    i -= 1
+                    continue
+                head = masked[max(0, i - 120) : i]
+                if before in "+-*/%|&?":
+                    head = head.rstrip("+-*/%|&?")
+                m = _JS_LHS_TAIL_RE.search(head)
+                if not m or m.group(1) in _JS_KEYWORDS:
+                    return None
+                return m.group(1), i
+        i -= 1
+    return None
+
+
 def _js_statement_lhs(masked: str, pos: int) -> "str | None":
-    """The simple name assigned by the statement containing `pos`, if any."""
-    start = max(0, pos - 300)
-    seg = masked[start:pos]
-    cut = max(seg.rfind(";"), seg.rfind("\n"), seg.rfind("{"), seg.rfind("}"))
-    seg = seg[cut + 1 :]
-    m = re.match(
-        r"\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])", seg
+    hit = _js_statement_lhs_at(masked, pos)
+    return hit[0] if hit else None
+
+
+def _js_rhs_text(masked: str, eq: int) -> str:
+    """The right-hand side after the `=` at `eq`, up to its top-level end (`;`, `,`, an
+    unmatched closer, or a statement-ending newline), capped."""
+    end = min(len(masked), eq + 1 + _JS_ARG_SPAN_CAP)
+    depth = 0
+    quote = None
+    i = eq + 1
+    while i < end:
+        ch = masked[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in ";,":
+            break
+        elif depth == 0 and ch == "\n":
+            j = i - 1
+            while j > eq and masked[j] in " \t\r":
+                j -= 1
+            k = i + 1
+            while k < end and masked[k] in " \t\r\n":
+                k += 1
+            if j > eq and masked[j] not in _JS_CONT_PREV and (
+                k >= end or masked[k] not in _JS_CONT_NEXT
+            ):
+                break
+        i += 1
+    return masked[eq + 1 : i]
+
+
+def _js_value_direct_in_rhs(
+    masked: str, eq: int, s: int, e: int, tls_receivers=_JS_TLS_MODULES
+) -> bool:
+    """Is masked[s:e] carried unreduced into the assignment whose `=` is at `eq`?
+    Fail-closed: a span the RHS scan cannot place counts as direct."""
+    rhs = _js_rhs_text(masked, eq)
+    base = eq + 1
+    if not (base <= s and e <= base + len(rhs)):
+        return True
+    return _js_occurrence_is_direct(
+        rhs, s - base, e - base, _js_frames(rhs), "", tls_receivers
     )
-    return m.group(1) if m else None
+
+
+_JS_SEVERITY_ORDER = ("cred", "credsoft", "env")
 
 
 def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
-    """(rule, sink_offset) for each JS_CRED_EXFIL_FLOW / JS_ENV_EXFIL_FLOW hit."""
+    """(rule, sink_offset) for each JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW /
+    JS_ENV_EXFIL_FLOW hit. Raises ScanBudgetExceeded past the `_JS_FLOW_MAX_*` bounds."""
     if "environ" not in masked and not _CRED_PATH_RE.search(masked) and "process.env" not in masked:
         return []
     # names bound to a credential path literal: `const P = '/proc/1/environ'`
@@ -18949,10 +19320,35 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
         pk = _js_cred_path_kind(m.group(2))
         if pk:
             path_names.setdefault(m.group(1), pk)
-    # tainted: name -> (kind, offset of the taint)
-    tainted: "dict[str, tuple[str, int]]" = {}
-    # inline reads: spans of cred-read calls, (kind, start, end)
+    # Every taint EVENT per name: (kind, offset, direct). A name read twice - a harmless
+    # file first, a secret later - keeps both; a sink hits if ANY event is in window.
+    tainted: "dict[str, list]" = {}
+    n_events = 0
+
+    def taint(name: str, kind: str, pos: int, direct: bool) -> bool:
+        nonlocal n_events
+        evs = tainted.get(name)
+        if evs is None:
+            if len(tainted) >= _JS_FLOW_MAX_TAINTED:
+                raise ScanBudgetExceeded
+            evs = tainted[name] = []
+        if any(p == pos for _k, p, _d in evs):
+            return False
+        evs.append((kind, pos, direct))
+        n_events += 1
+        if n_events > _JS_FLOW_MAX_EVENTS:
+            raise ScanBudgetExceeded
+        return True
+
+    receivers, bound_names = _js_net_bindings(masked)
+    tls_receivers = set(_JS_TLS_MODULES) | {
+        (m.group(1) or m.group(3))
+        for m in _JS_NET_NS_BIND_RE.finditer(masked)
+        if (m.group(2) or m.group(4)) in _JS_TLS_MODULES and (m.group(1) or m.group(3))
+    }
+    # (kind, start, end) of every credential-read call / env dump
     reads: "list[tuple[str, int, int]]" = []
+    read_end_kind: "dict[int, str]" = {}
     for m in _JS_READ_CALL_RE.finditer(masked):
         args = _js_call_args(masked, m.end() - 1)
         first = _js_first_arg(args).strip()
@@ -18960,42 +19356,76 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
         if not kind:
             continue
         end = m.end() + len(args) + 1
-        reads.append((kind, m.start(), end))
-        lhs = _js_statement_lhs(masked, m.start())
+        start = m.start()
+        # widen the span to the receiver (`fs.readFileSync`, `fs.promises.readFile`)
+        while start > 0 and (masked[start - 1].isalnum() or masked[start - 1] in "_$."):
+            start -= 1
+        reads.append((kind, start, end))
+        if len(reads) > _JS_FLOW_MAX_READS:
+            raise ScanBudgetExceeded
+        read_end_kind[end] = kind
+        lhs = _js_statement_lhs_at(masked, start)
         if lhs:
-            tainted.setdefault(lhs, (kind, end))
+            taint(lhs[0], kind, end, _js_value_direct_in_rhs(
+                masked, lhs[1], start, end, tls_receivers
+            ))
         cb = re.search(
             r"(?:\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*=>"
             r"|function\s*[\w$]*\s*\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*))",
             args,
         )
         if cb:
-            tainted.setdefault(cb.group(1) or cb.group(2), (kind, m.end()))
+            taint(cb.group(1) or cb.group(2), kind, m.end(), True)
         then = re.match(r"\s*\.\s*then\s*\(\s*(?:async\s*)?\(?\s*([A-Za-z_$][\w$]*)", masked[end : end + 80])
         if then:
-            tainted.setdefault(then.group(1), (kind, end))
+            taint(then.group(1), kind, end, True)
     for m in _JS_ENV_DUMP_RE.finditer(masked):
         reads.append(("env", m.start(), m.end()))
-        lhs = _js_statement_lhs(masked, m.start())
+        lhs = _js_statement_lhs_at(masked, m.start())
         if lhs:
-            tainted.setdefault(lhs, ("env", m.end()))
+            taint(lhs[0], "env", m.end(), True)
     if not reads:
         return []
-    # propagation: NAME2 = <expr mentioning a tainted NAME>, after it and within the window
-    assigns = [(m.group(1), m.start(), m.group(2)) for m in _JS_ASSIGN_RE.finditer(masked)]
+    reads.sort(key=lambda r: r[1])
+    read_starts = [r[1] for r in reads]
+
+    def events_near(name: str, pos: int) -> list:
+        return [ev for ev in tainted.get(name, ()) if ev[1] <= pos <= ev[1] + _JS_FLOW_WINDOW]
+
+    # propagation: NAME2 = <rhs mentioning a tainted NAME>, after it and within the window
+    assigns = []
+    for m in _JS_ASSIGN_RE.finditer(masked):
+        eq = m.end() - 1
+        assigns.append((m.group(1), eq))
     for _ in range(_JS_FLOW_MAX_HOPS):
         grew = False
-        for lhs, pos, rhs in assigns:
-            if lhs in tainted or len(tainted) >= _JS_FLOW_MAX_TAINTED:
+        positions = sorted(p for evs in tainted.values() for _k, p, _d in evs)
+        for lhs, eq in assigns:
+            k = bisect.bisect_right(positions, eq)
+            if k == 0 or positions[k - 1] < eq - _JS_FLOW_WINDOW:
                 continue
-            for name, (kind, tpos) in list(tainted.items()):
-                if tpos <= pos <= tpos + _JS_FLOW_WINDOW and _js_name_used(name, rhs):
-                    tainted[lhs] = (kind, pos)
-                    grew = True
-                    break
+            rhs = None
+            for name in list(tainted):
+                if name == lhs:
+                    continue
+                near = events_near(name, eq)
+                if not near:
+                    continue
+                if rhs is None:
+                    rhs = _js_rhs_text(masked, eq)
+                    frames = _js_frames(rhs)
+                uses = _js_name_uses(name, rhs)
+                if not uses:
+                    continue
+                use_direct = any(
+                    _js_occurrence_is_direct(rhs, s, e, frames, "", tls_receivers)
+                    for s, e in uses
+                )
+                for kind, _p, direct in near:
+                    if taint(lhs, kind, eq, direct and use_direct):
+                        grew = True
         if not grew:
             break
-    receivers, bound_names = _js_net_bindings(masked)
     sink_calls: "list[tuple[int, int]]" = []  # (call start, open-paren index)
     sink_recv: "dict[str, int]" = {}
     for m in _JS_SINK_CALL_RE.finditer(masked):
@@ -19017,19 +19447,76 @@ def _js_exfil_flows(masked: str) -> "list[tuple[str, int]]":
         for m in re.finditer(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*\.\s*(write|end|send)\s*\(", masked):
             if m.group(1) in sink_recv and m.start() > sink_recv[m.group(1)]:
                 sink_calls.append((m.start(), m.end() - 1))
-    out: "list[tuple[str, int]]" = []
-    seen: set = set()
+    found: "dict[int, set]" = {}  # sink offset -> {(kind, direct)}
+    # `.pipe(<sink receiver>)` on a tainted stream, or straight off the read call.
+    if sink_recv:
+        for m in _JS_PIPE_RE.finditer(masked):
+            src, dst = m.group(1), m.group(2)
+            if dst not in sink_recv or m.start() < sink_recv[dst]:
+                continue
+            if src == ")":
+                kind = read_end_kind.get(m.start(1) + 1)
+                if kind:
+                    found.setdefault(m.start(), set()).add((kind, True))
+            else:
+                for kind, _p, direct in events_near(src, m.start()):
+                    found.setdefault(m.start(), set()).add((kind, direct))
+    positions = sorted(p for evs in tainted.values() for _k, p, _d in evs)
+    checks = 0
     for start, open_idx in sorted(set(sink_calls)):
+        k = bisect.bisect_right(positions, start)
+        tainted_near = k > 0 and positions[k - 1] >= start - _JS_FLOW_WINDOW
+        r0 = bisect.bisect_right(read_starts, open_idx)
+        inline_possible = r0 < len(reads) and reads[r0][1] <= open_idx + _JS_ARG_SPAN_CAP
+        if not (tainted_near or inline_possible):
+            continue
+        checks += 1
+        if checks > _JS_FLOW_MAX_SINK_CHECKS:
+            raise ScanBudgetExceeded
         args = _js_call_args(masked, open_idx)
-        a0, a1 = open_idx, open_idx + len(args)
-        kinds = {kind for kind, rs, re_ in reads if a0 < rs and re_ <= a1 + 1}
-        for name, (kind, tpos) in tainted.items():
-            if tpos <= start <= tpos + _JS_FLOW_WINDOW and _js_name_used(name, args):
-                kinds.add(kind)
-        hit = next((k for k in ("cred", "credsoft", "env") if k in kinds), None)
-        if hit and start not in seen:
-            seen.add(start)
-            out.append((_JS_FLOW_RULE[hit], start))
+        a0, a1 = open_idx + 1, open_idx + 1 + len(args)
+        frames = None
+        callee = _js_callee_before(masked, open_idx)
+        hits = found.setdefault(start, set())
+        for idx in range(r0, len(reads)):
+            kind, rs, re_ = reads[idx]
+            if rs >= a1:
+                break
+            if re_ <= a1 + 1:
+                if frames is None:
+                    frames = _js_frames(args)
+                hits.add((kind, _js_occurrence_is_direct(
+                    args, rs - a0, min(re_, a1) - a0, frames, callee, tls_receivers
+                )))
+        if tainted_near:
+            for name in tainted:
+                near = events_near(name, start)
+                if not near:
+                    continue
+                uses = _js_name_uses(name, args)
+                if not uses:
+                    continue
+                if frames is None:
+                    frames = _js_frames(args)
+                use_direct = any(
+                    _js_occurrence_is_direct(args, s, e, frames, callee, tls_receivers)
+                    for s, e in uses
+                )
+                for kind, _p, direct in near:
+                    hits.add((kind, direct and use_direct))
+    out: "list[tuple[str, int]]" = []
+    for start in sorted(found):
+        hits = found[start]
+        if not hits:
+            continue
+        if ("cred", True) in hits:
+            rule = "JS_CRED_EXFIL_FLOW"
+        else:
+            # a DERIVED value of a hard secret (hashed, signed, measured, a TLS key)
+            # is as ambiguous as a token file: WARN, never FAIL.
+            kinds = {k for k, _d in hits}
+            rule = "JS_SECRET_FILE_FLOW" if kinds & {"cred", "credsoft"} else "JS_ENV_EXFIL_FLOW"
+        out.append((rule, start))
     return out
 
 
@@ -19107,15 +19594,19 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
       JS_NATIVE_DLOPEN (warn) - process.dlopen(): a direct native-addon (.node) load,
         the native-boundary escape that bypasses JS-level analysis. Node's docs say
         require() should be preferred over calling dlopen directly.
-      JS_CRED_EXFIL_FLOW (crit) - a private key, raw AWS credentials, a wallet/keystore,
-        the keychain, or /proc/<pid>/environ is read and
-        the contents reach a network sink (B-1005; the analyze_python CRED_EXFIL_FLOW
-        twin). Bounded lexical flow - see `_js_exfil_flows`.
+      JS_CRED_EXFIL_FLOW (crit) - a value read from a private key, raw AWS credentials,
+        a wallet/keystore, the keychain or /proc/<pid>/environ reaches a network call
+        unreduced: as-is or only through plain re-encoding carriers (B-1005; the
+        analyze_python CRED_EXFIL_FLOW twin). Bounded lexical flow - see
+        `_js_exfil_flows` and its documented limits.
       JS_SECRET_FILE_FLOW (warn) - a token/config credential file (.npmrc, .netrc, a
-        secrets mount, Cookies, ...) reaches a network sink: also the normal shape of a
-        client presenting the user's own token, so never FAIL.
-      JS_ENV_EXFIL_FLOW (warn) - the whole process.env is serialised into a network
-        sink. warn, not crit: telemetry/debug tools share the exact shape.
+        secrets mount, Cookies, ...) reaches a network call, or a hard secret reaches
+        one only in derived form (hashed, signed, measured, a TLS key option): also the
+        normal shape of a client authenticating as the user, so never FAIL.
+      JS_ENV_EXFIL_FLOW (warn) - process.env serialised whole by one of three spellings
+        (JSON.stringify(process.env), Object.entries/values(process.env),
+        {...process.env}) reaches a network call. warn, not crit: telemetry/debug tools
+        share the exact shape.
 
     Benign JS - static eval, JSON.parse(atob(token)), local require, base64 decode
     without eval - stays silent. Comments are masked so documented examples don't fire."""
@@ -19188,25 +19679,28 @@ def analyze_javascript(source: str, filename: str = "<skill>") -> list[ASTFindin
                 "JS_CRED_EXFIL_FLOW",
                 "crit",
                 ln,
-                "a private key, raw cloud credentials or process-environment contents "
-                "flow into a network sink (read secret -> send out)",
+                "a value read from a private key, raw cloud credentials or the process "
+                "environment (/proc/<pid>/environ) reaches a network call unreduced "
+                "(read secret -> send out)",
             )
         elif rule == "JS_SECRET_FILE_FLOW":
             add(
                 "JS_SECRET_FILE_FLOW",
                 "warn",
                 ln,
-                "a token/config credential file (.npmrc, .netrc, a secrets mount, ...) is "
-                "read and its contents reach a network call \u2014 normal for a client "
-                "authenticating as you, and exactly how such a token is stolen",
+                "a value from a credential file reaches a network call \u2014 a token/"
+                "config file (.npmrc, .netrc, a secrets mount, ...) or a key only in "
+                "derived form (hashed, signed, measured, a TLS key) \u2014 normal for a "
+                "client authenticating as you, and also how a secret is stolen",
             )
         else:
             add(
                 "JS_ENV_EXFIL_FLOW",
                 "warn",
                 ln,
-                "the whole process environment is serialised into a network sink "
-                "\u2014 every env-var secret leaves the machine",
+                "process.env is serialised whole (JSON.stringify, Object.entries/values "
+                "or {...process.env}) into a network call \u2014 every env-var secret "
+                "leaves the machine",
             )
 
     for m in _JS_NATIVE_DLOPEN_RE.finditer(masked):
