@@ -3760,10 +3760,8 @@ def _resolved_account_nodes(name: str, c: dict) -> list:
     the vendor applies to sibling accounts (``_DEFAULT_ENTRY_SHARED_TO_SIBLINGS``).
 
     Channels not in that table, a malformed ``accounts`` block, or no default entry: exactly
-    ``_resolved_channel_nodes(c)``. When several entries could be the default account and
-    none is the exact ``default`` key the vendor's pick is unclear, so every candidate is
-    tried and each account yields one node per candidate: the unclear case never hides an
-    open policy.
+    ``_resolved_channel_nodes(c)``. When several entries match ``default`` the vendor picks
+    the exact key ``default`` if present, else the first matching key in insertion order.
     """
     plan = _DEFAULT_ENTRY_SHARED_TO_SIBLINGS.get(name)
     accounts = c.get("accounts") if isinstance(c, dict) else None
@@ -3775,26 +3773,20 @@ def _resolved_account_nodes(name: str, c: dict) -> list:
     defaults = [k for k, v in accounts.items() if _is_default_account_entry(name, k, v)]
     if not defaults:
         return _resolved_channel_nodes(c)
-    exact = "default" in defaults
-    chosen = "default" if exact else (defaults[0] if len(defaults) == 1 else None)
+    # The vendor's pick is deterministic (resolveAccountKey): the exact key ``default`` if
+    # present, else the first key in insertion order that matches ``default`` after
+    # trim + lowercase.
+    chosen = "default" if "default" in defaults else defaults[0]
     base = {k: v for k, v in c.items() if k not in ("accounts", "defaultAccount")}
-    # Unclear pick: evaluate each candidate default entry and emit one node per candidate, so
-    # a sibling is open if ANY reading of the config opens it (never hide an open policy).
-    candidates = [chosen] if chosen is not None else defaults
+    shared = {k: v for k, v in accounts[chosen].items() if k not in unshared}
     out = []
     for key, acc in accounts.items():
-        if key in candidates:
+        if key == chosen:
             out.append({**base, **acc})
-            if chosen is not None:
-                continue
-        for cand in candidates:
-            if cand == key:
-                continue
-            shared = {k: v for k, v in accounts[cand].items() if k not in unshared}
-            if order == "default_over_root":
-                out.append({**base, **shared, **acc})
-            else:
-                out.append({**shared, **base, **acc})
+        elif order == "default_over_root":
+            out.append({**base, **shared, **acc})
+        else:
+            out.append({**shared, **base, **acc})
     return out or [c]
 
 

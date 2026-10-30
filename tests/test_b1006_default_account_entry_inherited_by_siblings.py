@@ -61,15 +61,18 @@ def test_whatsapp_no_default_entry_is_the_pre_existing_walk():
     assert _b2("whatsapp", node) == FAIL  # live implicit base account stays open
 
 
-def test_whatsapp_unclear_default_pick_never_hides_an_open_policy():
-    # Two candidate default entries, neither the exact key: the pick is unclear, so the
-    # resolver must keep every reading - one of them (the empty candidate) leaves the open
-    # root policy standing, and hiding it would be a fail-open false PASS.
-    node = _wa(accounts={" default": {"dmPolicy": "pairing"}, "DEFAULT": {}, "work": {}})
-    nodes = _resolved_account_nodes("whatsapp", node)
-    assert any(n.get("dmPolicy") == "open" for n in nodes)
-    assert any(n.get("dmPolicy") == "pairing" for n in nodes)
-    assert _b2("whatsapp", node) == FAIL
+def test_whatsapp_ambiguous_default_key_follows_the_vendor_first_match():
+    # Vendor resolveAccountKey: no exact "default" key -> first key matching default after
+    # trim+lowercase wins. The later disabled candidate must not leak its open policy.
+    closed = _wa(dmPolicy="pairing", accounts={
+        "Default": {"dmPolicy": "pairing"},
+        "DEFAULT": {"enabled": False, "dmPolicy": "open", "allowFrom": ["*"]},
+        "work": {}})
+    closed.pop("allowFrom", None)
+    assert _b2("whatsapp", closed) == PASS
+    opened = _wa(accounts={" default": {"enabled": False}, "DEFAULT": {"dmPolicy": "pairing"},
+                           "work": {}})
+    assert _b2("whatsapp", opened) == FAIL  # first match is the disabled one: root stays open
 
 
 def test_googlechat_root_still_wins_over_the_default_entry():
