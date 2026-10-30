@@ -1531,8 +1531,10 @@ def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
 _ALLOW_BOTS_SCHEMA_CHANNELS = ("clickclack", "discord", "feishu", "googlechat", "matrix", "slack")
 # What makes a stanza a RUNNING account, per channel, read from the same bundled metadata (the
 # credential properties, matching the ``channelEnvVars`` each plugin lists). Discord, GoogleChat
-# and Feishu are already in ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS`` / its Feishu branch and are read
-# through ``_channel_has_implicit_default_account``; the rest are listed here. A stanza with no
+# and Feishu are read through ``_channel_has_implicit_default_account`` (its key table and
+# predicate table); the rest are listed here. These keys answer "is this stanza a running
+# account", not "does the base node spawn an implicit default account" - for the latter, Slack
+# and Matrix have their own transport/auth rules in that helper. A stanza with no
 # credential (``{}``, ``{"enabled": true}``, an empty token) cannot be running, so the defaults
 # reading must not count it. The env-var route (``$SLACK_BOT_TOKEN``) is not visible from the
 # config file: the same documented false negative as the implicit default account's.
@@ -1780,7 +1782,9 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
     OWN reachability (its merged dmPolicy/groupPolicy/wildcard groups, ``enabled: false``
     included): a closed account beside an open one adds nothing. A Discord base node that
     carries a ``token`` while ``accounts`` is configured is a live implicit default account
-    (``_channel_has_implicit_default_account``); Slack has no such account. Both the explicit
+    (``_channel_has_implicit_default_account``); so is a Slack base node whose transport's
+    credentials are complete (identity token plus appToken / signingSecret / relay trio, per
+    that helper's Slack rule - B-1002 corrected the earlier "Slack has none"). Both the explicit
     and the unset scan walk that SAME node list (``_allow_bots_account_nodes``), so a root
     ``allowBots: true`` beside an account that sets false reads like the same config with the
     root key omitted; and the implicit node is dropped when a configured, enabled account is
