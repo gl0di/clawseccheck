@@ -2025,7 +2025,9 @@ python3 audit.py --log audit.log            # also write log to a local file
   `.on('data')` handler, a shell command that reads the file itself
   (`execSync('curl -d @/proc/1/environ ...')`), separate `process.env.<KEY>` reads, or
   `.env`, `.git-credentials` and `.config/gh/hosts.yml`, which are not on the credential-path
-  list. The report names those files in its
+  list. A signing client that reads a credential file and sends a derived signature (an AWS
+  SigV4-style request) is shape-identical to exfiltration and is reported as theft (a FAIL when a skill is
+  vetted); the finding's advice says so. The report names those files in its
   coverage notes whether or not `package.json` declares `openclaw.extensions`, shell files
   (`.sh`, `.bash`, `.zsh`) outside a declared skill are named as not read, and the Danger axis
   says so instead of claiming a clean malware scan. Any Python file that cannot be read, fails
