@@ -519,7 +519,7 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~20,109 lines (restated 2026-10-30 for B-1005, +~1085: the JS "
+    "skillast.py": "~20,172 lines (restated 2026-10-30 for B-1005, +~1148: the JS "
                    "credential-read-to-sink flow pass in `analyze_javascript` -- "
                    "JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW / JS_ENV_EXFIL_FLOW, with its "
                    "frame scanner and bounded LHS/RHS parsing. A new detector family, so the "

