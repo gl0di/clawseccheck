@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck import audit, deptree
+from clawseccheck import audit, deptree, gypbuild
 from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import check_dependency_tree_hooks, vet_skill
 from clawseccheck.dossier import build_profile
@@ -108,12 +108,12 @@ def test_audit_b42_matches_vet(tmp_path, fixture, status):
 
 
 # ---------------------------------------------------------------------------
-# deptree.extract_gyp_build_steps - literal parse, grounded keys
+# gypbuild.parse_gyp_build_config - literal parse, grounded keys
 # ---------------------------------------------------------------------------
 
 def _argvs(text: str):
-    steps, _ = deptree.extract_gyp_build_steps(text)
-    return sorted((s.key, s.argv) for s in steps)
+    cfg = deptree.parse_gyp_build_config(text)
+    return sorted((s.key, s.argv) for s in cfg.steps)
 
 
 def test_reads_actions_rules_and_postbuilds_anywhere_including_conditions():
@@ -134,10 +134,32 @@ def test_reads_actions_rules_and_postbuilds_anywhere_including_conditions():
     ]
 
 
+def test_conditions_inside_an_action_entry_supply_the_argv():
+    """C-135 item 7: gyp processes conditions in every dict, so a branch inside the entry
+    can set (`action`, `action=`) or extend (`action+`) the argv."""
+    text = """{'targets': [{'actions': [{
+        'action_name': 'a', 'inputs': [], 'outputs': [],
+        'conditions': [['OS=="linux"', {'action': ['node', '-e', 'x']}, {'action=': ['true']}]],
+    }, {
+        'action_name': 'b', 'inputs': [], 'outputs': [], 'action': ['node'],
+        'conditions': [['1==1', {'action+': ['-e', 'y']}]],
+    }]}]}"""
+    argvs = [a for _, a in _argvs(text)]
+    assert ("node", "-e", "x") in argvs and ("true",) in argvs
+    assert ("node", "-e", "y") in argvs
+
+
+def test_nested_conditions_inside_an_action_entry_are_unexamined():
+    text = """{'targets': [{'actions': [{'action_name': 'a', 'inputs': [], 'outputs': [],
+        'conditions': [['1', {'conditions': [['1', {'action': ['node', '-e', 'x']}]]}]]}]}]}"""
+    cfg = deptree.parse_gyp_build_config(text)
+    assert [s.unexamined != "" for s in cfg.steps] == [True]
+
+
 def test_json_style_build_config_is_read():
     """The real sample was written as JSON, which is also a Python literal."""
-    steps, _ = deptree.extract_gyp_build_steps((BAD / "binding.gyp").read_text())
-    assert [s.argv[:2] for s in steps] == [("node", "-e")]
+    cfg = deptree.parse_gyp_build_config((BAD / "binding.gyp").read_text())
+    assert [s.argv[:2] for s in cfg.steps] == [("node", "-e")]
 
 
 @pytest.mark.parametrize("text", [
@@ -145,101 +167,267 @@ def test_json_style_build_config_is_read():
     "['not', 'a', 'dict']",
     "{'targets': [",  # malformed
     "{'a': true}",  # JSON keyword: gyp itself rejects it too, we still claim nothing
+    "﻿{'targets': []}",  # BOM: gyp's own eval rejects it as well
 ])
 def test_a_config_that_is_not_a_plain_literal_dict_is_disclosed(text):
     capped: list = []
-    steps, _ = deptree.extract_gyp_build_steps(text, capped=capped)
-    assert steps == ()
+    cfg = deptree.parse_gyp_build_config(text, capped=capped)
+    assert cfg.steps == ()
     assert capped
 
 
 def test_no_build_steps_is_not_a_cap():
     capped: list = []
-    assert deptree.extract_gyp_build_steps("{'targets': [{'sources': ['a.cc']}]}", capped=capped) == ((), {})
-    assert capped == []
+    cfg = deptree.parse_gyp_build_config("{'targets': [{'sources': ['a.cc']}]}", capped=capped)
+    assert cfg.steps == () and capped == []
 
 
 def test_build_step_cap_is_disclosed():
     actions = ", ".join(
         f"{{'action_name': 'a{i}', 'action': ['node', 'f{i}.js']}}"
-        for i in range(deptree.MAX_GYP_ACTIONS + 5)
+        for i in range(gypbuild.MAX_GYP_ACTIONS + 5)
     )
     capped: list = []
-    steps, _ = deptree.extract_gyp_build_steps(f"{{'targets': [{{'actions': [{actions}]}}]}}", capped=capped)
-    assert len(steps) == deptree.MAX_GYP_ACTIONS
+    cfg = deptree.parse_gyp_build_config(f"{{'targets': [{{'actions': [{actions}]}}]}}", capped=capped)
+    assert len(cfg.steps) == gypbuild.MAX_GYP_ACTIONS
     assert capped
 
 
 def test_deep_nesting_does_not_raise():
     capped: list = []
-    deptree.extract_gyp_build_steps("[" * 5000 + "]" * 5000, capped=capped)
+    deptree.parse_gyp_build_config("[" * 5000 + "]" * 5000, capped=capped)
     assert capped
 
 
+def test_references_are_collected_but_expansions_and_same_file_targets_are_not():
+    cfg = deptree.parse_gyp_build_config(
+        "{'includes': ['common.gypi'], 'targets': [{'dependencies': ['deps/x.gyp:x', 'local_t',"
+        " \"<!(node -p \\\"require('node-addon-api').gyp\\\")\"]}]}"
+    )
+    assert cfg.references[:2] == ("common.gypi", "deps/x.gyp:x")
+    assert "local_t" not in cfg.references
+
+
 # ---------------------------------------------------------------------------
-# deptree.runs_inline_code - the discriminator
+# gypbuild.classify_build_step - the discriminator
 # ---------------------------------------------------------------------------
 
+def _kind(argv, variables=None):
+    r = deptree.classify_build_step(argv, variables or {})
+    return r and r[0]
+
+
 @pytest.mark.parametrize("argv", [
-    ["node", "-e", "x"],
-    ["node", "--eval", "x"],
-    ["node", "--eval=x"],
-    ["node", "-p", "x"],
-    ["node", "-pe", "x"],
-    ["node", "--no-warnings", "-e", "x"],
-    ["node", "-r", "./pre.js", "-e", "x"],
-    ["/usr/bin/node", "-e", "x"],
-    ["node.exe", "-e", "x"],
-    ["nodejs", "-e", "x"],
-    ["env", "node", "-e", "x"],
-    ["/usr/bin/env", "FOO=1", "node", "-e", "x"],
-    ["python3", "-c", "x"],
-    ["python", "-Bc", "x"],
-    ["python3.12", "-c", "x"],
-    ["sh", "-c", "x"],
-    ["bash", "-lc", "x"],
-    ["bash", "-o", "pipefail", "-c", "x"],
-    ["perl", "-ne", "x"],
-    ["ruby", "-e", "x"],
-    ["cmd", "/c", "x"],
-    ["powershell", "-NoProfile", "-Command", "x"],
-    ["pwsh", "-EncodedCommand", "eA=="],
+    ["node", "-e", "x"], ["node", "--eval", "x"], ["node", "--eval=x"], ["node", "-p", "x"],
+    ["node", "-pe", "x"], ["node", "--no-warnings", "-e", "x"], ["node", "-r", "./pre.js", "-e", "x"],
+    ["/usr/bin/node", "-e", "x"], ["node.exe", "-e", "x"], ["NODE", "-e", "x"], ["nodejs", "-e", "x"],
+    # C-135 item 4: an unlisted value-taking option no longer hides the switch
+    ["node", "--disable-warning", "DEP0040", "-p", "x"], ["node", "--unhandled-rejections", "strict", "-p", "x"],
+    ["node", "--env-file", "/dev/null", "-p", "x"], ["node", "--inspect-port", "9", "-p", "x"],
+    ["python3", "--check-hash-based-pycs", "default", "-c", "x"],
+    ["node", "--import", "data:text/javascript,1", "x.js"], ["node", "--import=data:text/javascript,1"],
+    # item 5: wrappers
+    ["env", "node", "-e", "x"], ["/usr/bin/env", "FOO=1", "node", "-e", "x"], ["env", "-u", "X", "node", "-pe", "x"],
+    ["env", "-C", "/tmp", "node", "-p", "x"], ["env", "--chdir", "/tmp", "node", "-p", "x"],
+    ["env", "-S", "node -e x"], ["env", "NODE_OPTIONS=--import=data:text/javascript,1", "node", "x.js"],
+    ["nice", "node", "--eval", "x"], ["nice", "-n", "5", "node", "-e", "x"], ["timeout", "5", "python3", "-Ic", "x"],
+    ["timeout", "-s", "KILL", "5", "node", "-e", "x"], ["nohup", "node", "-e", "x"], ["command", "node", "-e", "x"],
+    ["xargs", "-0", "node", "-e", "x"], ["timeout", "--unknown-opt", "v", "node", "-e", "x"],
+    # item 6: interpreters and glued switches
+    ["python3", "-c", "x"], ["python", "-Bc", "x"], ["python3.12", "-c", "x"], ["python3.13t", "-c", "x"],
+    ["pypy3", "-c", "x"], ["python3", "-cimport os"], ["perl", "-ne", "x"], ["perl", "-eprint 1"],
+    ["ruby", "-e", "x"], ["ruby", "-eputs 1"], ["php", "-r", "x"], ["lua", "-e", "x"], ["osascript", "-e", "x"],
+    ["deno", "eval", "x"], ["bun", "-e", "x"],
 ])
 def test_inline_interpreter_shapes(argv):
-    assert deptree.runs_inline_code(argv)
+    assert _kind(argv) == "inline", argv
+
+
+@pytest.mark.parametrize("argv", [
+    ["sh", "-c", "x"], ["bash", "-lc", "cd x && make"], ["bash", "-o", "pipefail", "-c", "x"],
+    ["ash", "-c", "x"], ["fish", "-c", "x"], ["tcsh", "-c", "x"], ["csh", "-c", "x"], ["mksh", "-c", "x"],
+    ["busybox", "sh", "-c", "x"], ["cmd", "/c", "dir"], ["cmd.exe", "/q", "/s", "/d", "/c", "dir"],
+    ["CMD", "/C", "dir"], ["powershell", "-NoProfile", "-Command", "Get-Date"],
+    ["pwsh", "-EncodedCommand", "eA=="], ["eval", "true"],
+])
+def test_inline_shell_shapes(argv):
+    assert _kind(argv) == "shell", argv
 
 
 @pytest.mark.parametrize("argv", [
     ["node", "./extract.js", "a.tar.gz", "out"],  # node-sqlite3
     ["node", "copy.js", "out", ""],  # better-sqlite3
     ["node", "build.js", "-e", "prod"],  # a flag AFTER the script is the script's own
+    ["node", "x.js", "--", "-e"], ["node", "--", "-e", "x"],
     ["python", "<(DEPTH)/gen.py", "-o", "out"],  # Chromium testdata in node-gyp
-    ["python", "-m", "grpc_tools.protoc", "-I."],
-    ["bash", "script.sh", "-c", "x"],
-    ["node", "-r", "./pre.js", "main.js"],
-    ["protoc", "-e", "x"],  # not an interpreter
-    ["<(unresolved)", "build.js"],
-    [],
+    ["python", "-m", "grpc_tools.protoc", "-I."], ["python", "gen-code.py", "-c", "cfg.json"],
+    ["bash", "script.sh", "-c", "x"], ["node", "-r", "./pre.js", "main.js"], ["node", "-c", "x.js"],
+    ["protoc", "-e", "x"], ["<(unresolved)", "build.js"], ["<(python)", "gen.py"], [],
+    # C-135 item 1: paths and resolved variables
+    ["<(PRODUCT_DIR)/mytool", "-p", "x"], ["$(srcdir)/tool", "-e", "x"], ["$(CC)", "-c", "x.c"],
+    ["<(cc)", "-c", "x.c"], ["./tools/gen", "-e", "x"], ["xcrun", "clang", "-c", "x.c"],
+    # item 2: script files with words the old joined-string pattern matched
+    ["bash", "scripts/gen.sh"], ["bash", "-e", "gen.sh"], ["bash", "-eu", "gen.sh"], ["sh", "-x", "gen.sh"],
+    ["powershell", "-NoProfile", "-File", "build.ps1"], ["powershell", "-ExecutionPolicy", "Bypass", "-File", "build.ps1"],
+    ["pwsh", "-File", "build.ps1"], ["python", "tools/base64_embed.py", "in", "out"],
+    ["python", "embed.py", "--encoding=base64", "x"], ["python", "download.py", "https://example.invalid/x.tar.gz"],
+    # item 3: an inline switch that runs one plain script file
+    ["cmd", "/c", "build.bat"], ["sh", "-c", "./build.sh"], ["powershell", "-Command", "./build.ps1"],
+    ["env", "FOO=1", "python", "gen.py"], ["python", "-W", "ignore", "gen.py"], ["perl", "-I", "lib", "gen.pl"],
 ])
 def test_script_file_and_non_interpreter_shapes(argv):
-    assert not deptree.runs_inline_code(argv)
+    assert deptree.classify_build_step(argv, {}) is None, argv
+
+
+def test_a_download_at_build_time_is_named():
+    assert deptree.classify_build_step(["curl", "-o", "x", "https://example.invalid/x"], {}) == ("fetch", "curl")
+
+
+def test_a_resolved_non_interpreter_variable_stays_quiet():
+    assert deptree.classify_build_step(["<(cc)", "-c", "x.c"], {"cc": "gcc"}) is None
+    assert deptree.classify_build_step(["<(cc)", "-c", "x"], {"cc": "gcc"}) is None
 
 
 def test_a_gyp_variable_interpreter_is_resolved():
-    assert deptree.runs_inline_code(["<(n)", "-e", "x"], {"n": "node"})
-    assert deptree.runs_inline_code(["<(a)", "-e", "x"], {"a": "<(b)", "b": "node"})
-    assert not deptree.runs_inline_code(["<(n)", "build.js"], {"n": "node"})
+    assert _kind(["<(n)", "-e", "x"], {"n": "node"}) == "inline"
+    assert _kind(["<(a)", "-e", "x"], {"a": "<(b)", "b": "node"}) == "inline"
+    assert deptree.classify_build_step(["<(n)", "build.js"], {"n": "node"}) is None
 
 
-def test_an_unresolved_variable_with_an_inline_switch_counts():
-    assert deptree.runs_inline_code(["<(who_knows)", "-e", "x"], {})
+def test_every_value_of_a_redefined_variable_is_tried():
+    """gyp scopes variables per dict; a second same-named definition must not hide one."""
+    assert _kind(["<(n)", "-e", "x"], {"n": ("gcc", "node")}) == "inline"
+
+
+def test_list_splice_and_switch_from_a_variable():
+    """C-135 item 7: `<@(cmd)` and `node <(f)` are expanded before the argv is judged."""
+    assert _kind(["<@(cmd)"], {"cmd": ["node", "-e", "x"]}) == "inline"
+    assert _kind(["node", "<(f)", "x"], {"f": "-e"}) == "inline"
+    assert _kind(["<@(cmd)"], {}) == "unresolved"
+    assert _kind(["node", "<(f)", "x"], {}) == "unresolved"
+
+
+def test_an_unresolved_program_given_inline_code_is_unresolved():
+    assert _kind(["<(who_knows)", "-e", "require('x')"], {}) == "unresolved"
 
 
 def test_variables_feed_the_resolver_from_the_file():
     text = "{'variables': {'n%': 'node'}, 'targets': [{'actions': [{'action': ['<(n)', '-e', 'x']}]}]}"
-    steps, variables = deptree.extract_gyp_build_steps(text)
-    assert variables == {"n": "node"}
-    assert deptree.runs_inline_code(steps[0].argv, variables)
+    cfg = deptree.parse_gyp_build_config(text)
+    assert cfg.variables == {"n": ("node",)}
+    assert deptree.runs_inline_code(cfg.steps[0].argv, cfg.variables)
+
+
+# ---------------------------------------------------------------------------
+# B42 end to end on constructed skills (C-135 items 8-13)
+# ---------------------------------------------------------------------------
+
+_INLINE_STEP = ("{'targets': [{'target_name': 't', 'type': 'none', 'actions': [{'action_name': 'a',"
+                " 'inputs': [], 'outputs': ['x'], 'action': ['node', '-e', 'console.log(1)']}]}]}")
+_FILE_STEP = ("{'targets': [{'target_name': 't', 'type': 'none', 'actions': [{'action_name': 'a',"
+              " 'inputs': [], 'outputs': ['x'], 'action': ['node', './gen.js']}]}]}")
+
+
+def _skill(tmp_path: Path, files: dict, manifest=None) -> Path:
+    d = tmp_path / "s"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: s\ndescription: Native helper.\n---\n# s\n")
+    (d / "package.json").write_text(json.dumps(manifest or {"name": "s", "version": "1.0.0", "gypfile": True}))
+    for rel, body in files.items():
+        p = d / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return d
+
+
+def _b42_detail(path: Path) -> str:
+    b42 = _b42_vet(path)
+    return "" if b42 is None else b42.status + " " + b42.detail
+
+
+def test_included_file_is_followed(tmp_path):
+    bad = _skill(tmp_path / "b", {"binding.gyp": "{'includes': ['common.gypi'], 'targets': []}",
+                                  "common.gypi": "{'target_defaults': {'actions': [{'action_name': 'a', 'inputs': [],"
+                                                 " 'outputs': ['x'], 'action': ['node', '-e', 'console.log(1)']}]}}"})
+    assert "common.gypi action 'a' runs inline node code" in _b42_detail(bad)
+    clean = _skill(tmp_path / "c", {"binding.gyp": "{'includes': ['common.gypi'], 'targets': []}",
+                                    "common.gypi": "{'variables': {'x': '1'}}"})
+    assert _b42_vet(clean) is None
+
+
+def test_dependency_gyp_is_followed_and_a_missing_one_is_disclosed(tmp_path):
+    bad = _skill(tmp_path / "b", {"binding.gyp": "{'targets': [{'target_name': 't', 'dependencies': ['deps/x.gyp:x']}]}",
+                                  "deps/x.gyp": _INLINE_STEP})
+    assert "deps/x.gyp action 'a' runs inline node code" in _b42_detail(bad)
+    clean = _skill(tmp_path / "c", {"binding.gyp": "{'targets': [{'target_name': 't', 'dependencies': ['deps/x.gyp:x']}]}",
+                                    "deps/x.gyp": _FILE_STEP, "deps/gen.js": "// gen\n"})
+    assert _b42_vet(clean) is None
+    missing = _skill(tmp_path / "m", {"binding.gyp": "{'targets': [{'target_name': 't', 'dependencies': ['../x.gyp:x']}]}"})
+    assert "was not read" in _b42_detail(missing)
+
+
+def test_zip_and_tgz_and_zip_in_dir_agree(tmp_path):
+    """C-135 item 9: a .zip member's blob header kept the archive prefix, so it was missed."""
+    import tarfile
+    import zipfile
+
+    src = _skill(tmp_path / "src", {"binding.gyp": _INLINE_STEP})
+    zp = tmp_path / "s.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for f in src.iterdir():
+            z.write(f, f.name)
+    tg = tmp_path / "s.tgz"
+    with tarfile.open(tg, "w:gz") as t:
+        for f in src.iterdir():
+            t.add(f, arcname=f"package/{f.name}")
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    (holder / "SKILL.md").write_text("# holder\n")
+    (holder / "s.zip").write_bytes(zp.read_bytes())
+    for target in (zp, tg, holder):
+        assert "runs inline node code" in _b42_detail(target), target.name
+
+
+def test_root_binding_gyp_is_read_from_disk_past_the_blob_caps(tmp_path):
+    """C-135 item 10: a padded binding.gyp, or one crowded out of the blob by 500+ files,
+    used to read PASS on a file nobody read."""
+    crowded = _skill(tmp_path / "c", {"binding.gyp": _INLINE_STEP,
+                                      **{f"a{i}.js": f"// {i}\n" for i in range(600)}})
+    assert "runs inline node code" in _b42_detail(crowded)
+    big = _skill(tmp_path / "b", {"binding.gyp": "#" + "pad" * 400_000 + "\n" + _INLINE_STEP})
+    assert "too large to examine" in _b42_detail(big)
+    header = _skill(tmp_path / "h", {"binding.gyp": "# file: notes.txt\n" + _INLINE_STEP})
+    assert "runs inline node code" in _b42_detail(header)
+
+
+def test_a_nested_binding_gyp_is_not_claimed_to_run(tmp_path):
+    """npm builds the ROOT binding.gyp only (@npmcli/node-gyp stats `${path}/binding.gyp`)."""
+    assert _b42_vet(_skill(tmp_path, {"src/binding.gyp": _INLINE_STEP})) is None
+
+
+@pytest.mark.parametrize("manifest,phrase", [
+    ({"name": "s", "gypfile": True}, "npm runs node-gyp for it on install"),
+    ({"name": "s", "gypfile": False}, "gypfile is false, so npm does not build it automatically"),
+    ({"name": "s", "scripts": {"install": "node-gyp rebuild"}}, "declares its own install/preinstall script"),
+    ({"name": "s", "scripts": {"preinstall": "true"}}, "declares its own install/preinstall script"),
+])
+def test_trigger_wording_is_true_for_the_manifest(tmp_path, manifest, phrase):
+    """C-135 item 12: the claim that npm builds it must match npm's own gate."""
+    f = vet_skill(_skill(tmp_path, {"binding.gyp": _INLINE_STEP}, manifest))
+    b42 = next(x for x in [f, *getattr(f, "ring_findings", [])] if x.id == "B42")
+    assert phrase in b42.detail
+    assert "npm install --ignore-scripts" in b42.fix
+
+
+def test_axes_do_not_say_there_is_no_code(tmp_path):
+    """C-135 item 13: B42 says the binding.gyp runs code; Persistence/Connections must not
+    answer 'no executable code to analyze' about the same skill."""
+    d = _skill(tmp_path, {"binding.gyp": _INLINE_STEP})
+    prof = build_profile(vet_skill(d), str(d), "skill")
+    reasons = {a.axis: a.reason for a in prof.axes}
+    for axis in ("persistence", "connections"):
+        assert "no executable code" not in reasons[axis]
+        assert "no reader" in reasons[axis]
 
 
 # ---------------------------------------------------------------------------

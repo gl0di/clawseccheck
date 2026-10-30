@@ -28,6 +28,7 @@ Honesty rules (project law §2.4 / §5):
 from __future__ import annotations
 
 import ast
+import re
 
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
@@ -37,6 +38,7 @@ from .catalog import (
     BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN, ast_for,
 )
 
+from .gypbuild import gyp_text_runs_commands
 from .scoring import grade_for
 from .skillast import analyze_javascript, analyze_shell, capability_families
 
@@ -586,7 +588,31 @@ def _skill_has_unread_language_code(ctx) -> bool:
     installed = getattr(ctx, "installed_skills", None) or {}
     js_map = getattr(ctx, "installed_skill_js", None) or {}
     sh_map = getattr(ctx, "installed_skill_shell", None) or {}
-    return any(js_map.get(name) for name in installed) or any(sh_map.get(name) for name in installed)
+    return (
+        any(js_map.get(name) for name in installed)
+        or any(sh_map.get(name) for name in installed)
+        or any(_blob_has_gyp_commands(blob) for blob in installed.values())
+    )
+
+
+# B-1004 (C-135 item 13): a binding.gyp whose build steps or `<!(...)` expansions node-gyp
+# runs is executable code too. B42 says so on the build axis, so Persistence/Connections
+# must not answer "no executable code to analyze" about the same skill: they get the same
+# "code is present, this scan has no reader for it here" reason as bundled JS/shell.
+_BLOB_FILE_HEADER_RE = re.compile(r"^# file: ([^\n]+)$", re.M)
+
+
+def _blob_has_gyp_commands(blob) -> bool:
+    if not isinstance(blob, str) or "binding.gyp" not in blob:
+        return False
+    heads = list(_BLOB_FILE_HEADER_RE.finditer(blob))
+    for i, m in enumerate(heads):
+        if m.group(1).rpartition("::")[2].strip().rsplit("/", 1)[-1] != "binding.gyp":
+            continue
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(blob)
+        if gyp_text_runs_commands(blob[m.end():end]):
+            return True
+    return False
 
 
 def _pool_has_unread_language_code(pool) -> bool:

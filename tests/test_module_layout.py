@@ -836,7 +836,7 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "dossier.py": "~1,233 lines - the vet-dossier renderer; over budget again after the "
+    "dossier.py": "~1,273 lines - the vet-dossier renderer; over budget again after the "
                   "C-633 partial-read Danger reason landed beside the C-636 own-source rework. "
                   "Tracked debt, not a design statement.",
     # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
