@@ -11447,8 +11447,12 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
     Python imports such a file without comparing it to its sibling ``.py``, so the
     readable source can be clean while the compiled code is not. The skill walk prunes
     ``__pycache__``, so the data comes from `collector._scan_skill_pycs` (header bytes
-    only, never executed, no symlink followed). No ordinary build writes this flag: a
-    default compile and a normal import both write a timestamp-based pyc.
+    only, never executed, no symlink followed) and, for archive members,
+    `collector._note_archive_member_pyc`. Default ``py_compile`` / ``compileall`` / pip /
+    a normal import all write timestamp-based pycs; a hash-unchecked one needs an explicit
+    non-default option (e.g. ``compileall --invalidation-mode unchecked-hash``), so a skill
+    shipping one is not a normal build artifact. The collector also records every gap on
+    ``ctx.limit_hits``, which is what floors the ``--vet`` verdict (the ring drops UNKNOWN).
 
     A ``.pyc`` with no sibling source is NOT flagged here: that was considered and left
     out, because stale caches of removed modules are common on real installs.
@@ -11456,12 +11460,7 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
     skills = getattr(ctx, "installed_skills", None)
     found = getattr(ctx, "skill_unchecked_pycs", {})
     gaps = getattr(ctx, "skill_pyc_gaps", {})
-    fix_fail = (
-        "Delete the skill's __pycache__ directories and treat the skill as untrusted: Python "
-        "runs a hash-unchecked .pyc without checking it against the source, so the .py files "
-        "you reviewed may not be what executes. Re-fetch the skill from its origin and "
-        "compare. A legitimate build does not produce this kind of .pyc."
-    )
+    gap_ev = [f"{Path(k).name}: {g}" for k, gl in sorted(gaps.items()) for g in gl]
     if found:
         ev = [f"{Path(k).name}: {rel}" for k, rels in sorted(found.items()) for rel in rels]
         extra = f" (+{len(ev) - 6} more)" if len(ev) > 6 else ""
@@ -11471,20 +11470,29 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
             FAIL,
             "Hash-unchecked compiled Python (.pyc) shipped in the skill: "
             + "; ".join(ev[:6]) + extra,
-            fix_fail,
-            ev,
+            "Delete the listed .pyc file(s) (they may sit in a __pycache__ directory, loose "
+            "beside the sources, or inside an archive) and treat the skill as untrusted: "
+            "Python runs a hash-unchecked .pyc without checking it against the source, so the "
+            ".py files you reviewed may not be what executes. Re-fetch the skill from its "
+            "origin and compare. Default py_compile, compileall and pip write timestamp-based "
+            "pycs; this kind needs an explicit non-default option, so a skill shipping it is "
+            "not a normal build artifact (a deliberate opt-in by a legitimate author is "
+            "possible but unusual)."
+            + (" Part of the skill could not be inspected for .pyc files either: "
+               + "; ".join(gap_ev[:3]) + "." if gap_ev else ""),
+            ev + [f"not inspected: {g}" for g in gap_ev],
         )
     if gaps:
-        ev = [f"{Path(k).name}: {g}" for k, gl in sorted(gaps.items()) for g in gl]
         return _custom(
             "B398",
             HIGH,
             UNKNOWN,
             "Could not fully inspect compiled Python (.pyc) in the skill: "
-            + "; ".join(ev[:6]) + (f" (+{len(ev) - 6} more)" if len(ev) > 6 else ""),
-            "Replace symlinked or unreadable __pycache__ entries with plain files (or delete "
-            "__pycache__) and re-run; compiled code that was not read is not cleared.",
-            ev,
+            + "; ".join(gap_ev[:6]) + (f" (+{len(gap_ev) - 6} more)" if len(gap_ev) > 6 else ""),
+            "Compiled code that was not read is not cleared. Remove symlinked or unreadable "
+            "__pycache__ entries (or delete __pycache__), reduce the number of directories "
+            "or .pyc files if a count cap was hit, and re-run.",
+            gap_ev,
             engine_degraded=True,
         )
     if not skills:

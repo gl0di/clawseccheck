@@ -8,8 +8,10 @@ payload is benign (it is never imported or executed by these tests).
 """
 from __future__ import annotations
 
+import io
 import os
 import py_compile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -152,3 +154,123 @@ def test_mutation_without_the_pyc_scan_the_dossier_is_install(tmp_path, monkeypa
     monkeypatch.setattr(collector, "_scan_skill_pycs", lambda base_dir, ctx: None)
     with pytest.raises(AssertionError):
         _assert_flagged(sk, capsys)
+
+
+# ---- C-135 round 1 follow-ups -------------------------------------------------------
+
+def _assert_gap_floors_dossier(sk: Path, capsys):
+    """A coverage gap must reach the dossier: never INSTALL, never the affirmative PASS text."""
+    out = _dossier(sk, capsys)
+    head = out.splitlines()[0]
+    assert "CAUTION" in head, head
+    persistence = [ln for ln in out.splitlines() if ln.strip().startswith("Persistence")]
+    assert persistence and "PASS" not in persistence[0]
+    assert "no dormant or staged code detected" not in out
+    return out
+
+
+def test_pyc_count_cap_floors_the_dossier(tmp_path, monkeypatch, capsys):
+    sk = _skill(tmp_path)
+    _pyc(sk, UNCHECKED, "zz.cpython-314.pyc")
+    for i in range(5):
+        _pyc(sk, TIMESTAMP, f"pad{i}.cpython-314.pyc")
+    monkeypatch.setattr(collector, "_PYC_SCAN_MAX_PYCS", 3)
+    _assert_gap_floors_dossier(sk, capsys)
+
+
+def test_dir_count_cap_floors_the_dossier(tmp_path, monkeypatch, capsys):
+    sk = _skill(tmp_path)
+    for i in range(6):
+        (sk / f"d{i}").mkdir()
+    monkeypatch.setattr(collector, "_PYC_SCAN_MAX_DIRS", 3)
+    out = _assert_gap_floors_dossier(sk, capsys)
+    assert "directory count cap" in out
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_unreadable_pycache_floors_the_dossier(tmp_path, capsys):
+    sk = _skill(tmp_path)
+    _pyc(sk, UNCHECKED)
+    cache = sk / "__pycache__"
+    cache.chmod(0)
+    try:
+        _assert_gap_floors_dossier(sk, capsys)
+    finally:
+        cache.chmod(0o755)
+
+
+def test_symlinked_pycache_floors_the_dossier(tmp_path, capsys):
+    sk = _skill(tmp_path)
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    os.symlink(real, sk / "__pycache__")
+    _assert_gap_floors_dossier(sk, capsys)
+
+
+def test_hit_and_gap_together_keep_both(tmp_path, monkeypatch):
+    sk = _skill(tmp_path)
+    _pyc(sk, UNCHECKED, "a.cpython-314.pyc")
+    os.symlink(tmp_path, sk / "sub_link_dir")  # not a __pycache__: ignored
+    other = sk / "pkg"
+    other.mkdir()
+    os.symlink(tmp_path, other / "__pycache__")
+    f = _run_check(sk)
+    assert f.status == FAIL
+    assert any(e.startswith("not inspected:") and "symlinked __pycache__" in e for e in f.evidence)
+
+
+def test_uppercase_pyc_suffix_is_found(tmp_path):
+    sk = _skill(tmp_path)
+    out = _pyc(sk, UNCHECKED)
+    os.rename(out, out.with_name("OUTPUT.CPYTHON-314.PYC"))
+    assert _run_check(sk).status == FAIL
+
+
+def test_header_shorter_than_a_loadable_pyc_is_inert(tmp_path):
+    sk = _skill(tmp_path)
+    (sk / "__pycache__").mkdir()
+    # flags == 1 but only 12 bytes: Python needs 16 header bytes plus a code object.
+    (sk / "__pycache__" / "x.cpython-314.pyc").write_bytes(b"\x00" * 4 + (1).to_bytes(4, "little") + b"\x00" * 4)
+    assert _run_check(sk).status == PASS
+    (sk / "__pycache__" / "y.cpython-314.pyc").write_bytes(b"\x00" * 4 + (1).to_bytes(4, "little") + b"\x00" * 8)
+    assert _run_check(sk).status == FAIL
+
+
+def _zip_with(pyc_bytes: bytes, name="pkg/__pycache__/m.cpython-314.pyc") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("SKILL.md", "---\nname: sk\ndescription: d\n---\n# sk\n")
+        zf.writestr(name, pyc_bytes)
+    return buf.getvalue()
+
+
+def test_unchecked_pyc_inside_a_bare_archive_target_fails(tmp_path, capsys):
+    out = _pyc(_skill(tmp_path), UNCHECKED)
+    z = tmp_path / "skill.zip"
+    z.write_bytes(_zip_with(out.read_bytes()))
+    f = _run_check(z)
+    assert f.status == FAIL and "m.cpython-314.pyc" in f.detail
+    main(["--vet-skill", str(z)])
+    assert capsys.readouterr().out.splitlines()[0].rstrip().endswith("DO-NOT-INSTALL")
+
+
+def test_unchecked_pyc_in_an_archive_inside_a_directory_fails(tmp_path):
+    sk = _skill(tmp_path)
+    out = _pyc(sk, UNCHECKED)
+    data = out.read_bytes()
+    out.unlink()
+    (sk / "__pycache__").rmdir()
+    (sk / "vendor.zip").write_bytes(_zip_with(data))
+    assert _run_check(sk).status == FAIL
+
+
+def test_timestamp_pyc_inside_an_archive_is_silent(tmp_path):
+    out = _pyc(_skill(tmp_path), TIMESTAMP)
+    z = tmp_path / "skill.zip"
+    z.write_bytes(_zip_with(out.read_bytes()))
+    assert _run_check(z).status == PASS
+
+
+def test_remediation_is_published_for_the_docs_generator():
+    from clawseccheck.catalog import remediation_for
+    assert remediation_for("B398")["commands"]

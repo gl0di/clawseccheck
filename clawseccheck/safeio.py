@@ -651,13 +651,11 @@ def pyc_header_flags(path: Path) -> int | None:
     ``import`` both run as the invoking OS user on this single-user local CLI: a ``.pyc``
     this call cannot open is, on that same principal, also a ``.pyc`` Python cannot open
     to execute - unreadable-to-audit implies unreadable-to-run, not "invisible attack".
-    That equivalence is the actual precondition, not an oversight; it would NOT hold
-    under privilege separation (an auditor running as a lower-priv user than the process
-    that later imports the package), which this tool does not assume. Emitting a
-    distinct disclosure for this branch would need a new note kind whose header wording
-    cli.py owns (`clawseccheck/cli.py`'s verify_self block matches `NOTE_UNCHECKED_PYC`
-    to text that asserts a *confirmed* detection) - reusing that kind here would
-    overclaim an unread file as a found one. See
+    That equivalence is the actual precondition, and it is valid ONLY for ``--verify-self``
+    (the auditor and the importer are the same OS user). It does NOT cover a pre-install
+    ``--vet`` of someone else's skill: there an unreadable ``.pyc`` is unknown, not inert,
+    and the vet caller (``collector._scan_skill_pycs``) records it as a coverage gap
+    instead of treating ``None`` as clean. See
     ``tests/test_b608_pyc_read_error_is_unknown_not_clean.py`` for the pinned behavior
     and the escalation this leaves open.
     """

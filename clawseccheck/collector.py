@@ -1966,6 +1966,10 @@ def decompress_and_classify(
         return [(file_relpath, file_bytes, "BINARY", None)]
 
     if format_name not in ("ZIP", "tar", "gzip", "bz2", "xz"):
+        if "::" in file_relpath:
+            # B398: a .pyc INSIDE an archive (a bare archive target, or vendor.tgz in a dir).
+            _note_archive_member_pyc(
+                ctx, archive_stats.get("pyc_key") or str(skill_dir), file_relpath, file_bytes)
         return [(file_relpath, file_bytes, classification, format_name)]
         
     if depth > 3:
@@ -2535,6 +2539,48 @@ def _media_is_well_terminated(fmt: str, data: bytes) -> bool:
 
 _PYC_SCAN_MAX_DIRS = 20000
 _PYC_SCAN_MAX_PYCS = 5000
+# Python needs a full 16-byte header (magic, flags, 8 bytes of mtime/size or source hash)
+# plus a code object to load a .pyc; a shorter file is inert and is not classified.
+_PYC_MIN_LOADABLE = 16
+
+
+def _note_pyc_gap(ctx, skill_dir: Path, msg: str) -> None:
+    """B398: record a .pyc the scan could not classify, on every channel a gap must reach.
+
+    `limit_hits` is what `dossier._danger_coverage_gap` folds into the verdict floor (so a
+    gap can never read INSTALL), `skill_pyc_gaps` feeds B398's own UNKNOWN, and
+    `_note_skill_gap` keeps the per-skill attribution the inventory reads.
+    """
+    key = str(skill_dir)
+    ctx.skill_pyc_gaps.setdefault(key, []).append(msg)
+    note_limit(ctx.limit_hits, LIMIT_DOMAIN_SKILL, f"B398: {msg}")
+    _note_skill_gap(ctx, skill_dir, f"B398: {msg}")
+
+
+def _classify_pyc_header(header: bytes, total_size: int) -> bool:
+    """True iff *header* (first bytes of a .pyc of *total_size* bytes) is unchecked-hash.
+
+    Files shorter than a loadable header are inert and never convict.
+    """
+    if total_size < _PYC_MIN_LOADABLE or len(header) < PYC_HEADER_LEN:
+        return False
+    return int.from_bytes(header[4:8], "little") == PYC_UNCHECKED_HASH_FLAGS
+
+
+def _note_archive_member_pyc(ctx, key: str, member_rel: str, data: bytes) -> None:
+    """B398: classify a .pyc archive member (header only; the bytes are never unmarshalled).
+
+    Called from `decompress_and_classify` for members already read through the bounded
+    archive reader, so its size / member / ratio caps (each of which records its own
+    `limit_hits` entry) apply unchanged.
+    """
+    if ctx is None or not member_rel.lower().endswith(".pyc"):
+        return
+    if _classify_pyc_header(data[:PYC_HEADER_LEN], len(data)):
+        lst = ctx.skill_unchecked_pycs.setdefault(key, [])
+        if member_rel not in lst:
+            lst.append(member_rel)
+            lst.sort()
 
 
 def _scan_skill_pycs(base_dir: Path, ctx) -> None:
@@ -2545,12 +2591,11 @@ def _scan_skill_pycs(base_dir: Path, ctx) -> None:
     it to the source. This reads ONLY the 8-byte header of each ``.pyc`` (never the code
     object, never unmarshalled/executed) and never follows a symlink: a symlinked
     ``__pycache__`` or ``.pyc`` is recorded as a gap (unknown), not as clean. Listing is
-    bounded; hitting a cap or an OSError is a gap too. Bare legacy ``.pyc`` files outside a
-    ``__pycache__`` are importable too, so they are classified the same way.
+    bounded by a COUNT of directories and of .pyc files; hitting a cap or an OSError is a
+    gap too. Bare legacy ``.pyc`` files outside a ``__pycache__`` are importable as well,
+    so they are classified the same way, and the suffix match is case-insensitive.
     """
-    key = str(base_dir)
     found: list[str] = []
-    gaps: list[str] = []
 
     def _rel(p: str) -> str:
         try:
@@ -2558,59 +2603,60 @@ def _scan_skill_pycs(base_dir: Path, ctx) -> None:
         except ValueError:
             return p
 
+    def _gap(msg: str) -> None:
+        _note_pyc_gap(ctx, base_dir, msg)
+
     def _onerr(exc: OSError) -> None:
-        gaps.append(f"{_rel(getattr(exc, 'filename', None) or str(base_dir))}: could not be listed")
+        _gap(f"{_rel(getattr(exc, 'filename', None) or str(base_dir))}: could not be listed")
 
     dirs_seen = 0
     pycs_seen = 0
-    capped = False
+    capped = None
     for root, dirnames, filenames in os.walk(base_dir, followlinks=False, onerror=_onerr):
         dirs_seen += 1
         if dirs_seen > _PYC_SCAN_MAX_DIRS:
-            capped = True
+            capped = f"directory count cap ({_PYC_SCAN_MAX_DIRS})"
             break
         keep = []
         for d in dirnames:
             full = os.path.join(root, d)
             if os.path.islink(full):
                 if d == "__pycache__":
-                    gaps.append(f"{_rel(full)}: symlinked __pycache__ not followed")
+                    _gap(f"{_rel(full)}: symlinked __pycache__ not followed")
                 continue
             keep.append(d)
         dirnames[:] = keep
         for fn in filenames:
-            if not fn.endswith(".pyc"):
+            if not fn.lower().endswith(".pyc"):
                 continue
             full = os.path.join(root, fn)
             pycs_seen += 1
             if pycs_seen > _PYC_SCAN_MAX_PYCS:
-                capped = True
+                capped = f".pyc file count cap ({_PYC_SCAN_MAX_PYCS})"
                 break
             try:
                 st = os.lstat(full)
             except OSError as exc:
-                gaps.append(f"{_rel(full)}: {exc.strerror or exc}")
+                _gap(f"{_rel(full)}: {exc.strerror or exc}")
                 continue
             if stat.S_ISLNK(st.st_mode):
-                gaps.append(f"{_rel(full)}: symlinked .pyc not followed")
+                _gap(f"{_rel(full)}: symlinked .pyc not followed")
                 continue
             if not stat.S_ISREG(st.st_mode):
                 continue
+            if st.st_size < _PYC_MIN_LOADABLE:
+                continue  # too short for Python to load at all: inert
             flags = pyc_header_flags(Path(full))
             if flags is None:
-                if st.st_size < PYC_HEADER_LEN:
-                    continue  # too short for Python to load at all: inert
-                gaps.append(f"{_rel(full)}: .pyc header could not be read")
+                _gap(f"{_rel(full)}: .pyc header could not be read")
             elif flags == PYC_UNCHECKED_HASH_FLAGS:
                 found.append(_rel(full).replace(os.sep, "/"))
         if capped:
             break
     if capped:
-        gaps.append("pyc scan stopped at its size cap; the rest of the skill was not looked at")
+        _gap(f"pyc scan stopped at its {capped}; the rest of the skill was not looked at")
     if found:
-        ctx.skill_unchecked_pycs[key] = sorted(found)
-    if gaps:
-        ctx.skill_pyc_gaps[key] = gaps
+        ctx.skill_unchecked_pycs[str(base_dir)] = sorted(found)
 
 
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
@@ -2929,6 +2975,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             "total_files_count": 0,
             "cumulative_decompressed_size": 0,
             "compressed_size": len(file_bytes),
+            "pyc_key": str(skill_dir),  # B398: attribute archive-member .pycs to the skill itself
         }
         
         # Recursively decompress and classify
