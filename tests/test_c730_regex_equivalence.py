@@ -518,6 +518,11 @@ def test_scanners_are_linear_time():
                 out = fn(text)
                 return out if isinstance(out, (str, list)) else sum(1 for _ in out)
 
-            t1 = _best(lambda: scan(small))
-            t2 = _best(lambda: scan(big), 2)
+            # Same repeat count for both sizes, and the two sizes are timed alternately, so a CPU-load
+            # burst lands on both rather than inflating whichever block happened to run during it
+            # (min-of-3 vs min-of-2 in separate blocks flaked on 3.12 under load, C-743).
+            t1 = t2 = float("inf")
+            for _ in range(7):
+                t1 = min(t1, _best(lambda: scan(small), 1))
+                t2 = min(t2, _best(lambda: scan(big), 1))
             assert t2 < 0.02 or t2 < 9 * t1, (fn.__name__, unit, t1, t2)
