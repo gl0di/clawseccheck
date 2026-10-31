@@ -594,7 +594,11 @@ def _pool_has_unread_language_code(pool) -> bool:
     """``_skill_has_unread_language_code`` folded over every Context in ``pool`` - same
     two-source fold as ``_pool_capabilities`` (see its docstring), via ``_pool_contexts``.
     """
-    return any(_skill_has_unread_language_code(ctx) for ctx in _pool_contexts(pool))
+    # B-1004: a B42 WARN that a binding.gyp build step runs code (or could not be read) is
+    # code present with no reader for these axes, same as bundled JS/shell.
+    return any(_skill_has_unread_language_code(ctx) for ctx in _pool_contexts(pool)) or any(
+        getattr(f, "gyp_build_code", False) for f in pool
+    )
 
 
 def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> bool:

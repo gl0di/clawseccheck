@@ -2808,6 +2808,231 @@ def check_human_approval(ctx: Context) -> Finding:
     )
 
 
+# ---------- B42 leg (B-1004): node-gyp build steps in a skill's binding.gyp ----------
+# npm runs `node-gyp rebuild` for a package whose ROOT holds a `binding.gyp`, when it
+# declares no install/preinstall script and `gypfile` is not false (grounded in the npm
+# 11.11.0 installed here: @npmcli/run-script 10.0.3 `run-script-pkg.js` gates on
+# `!scripts.install && !scripts.preinstall && gypfile !== false && isNodeGypPackage(path)`,
+# and @npmcli/node-gyp 5.0.0's `isNodeGypPackage` stats `${path}/binding.gyp`). node-gyp
+# then executes every `actions`/`rules`/`postbuilds` argv in that file and in the files it
+# pulls in through `includes`/`dependencies` - code at install time with NO lifecycle
+# script for the hook regex above to see. MAL-2026-18377 (`spectral-core`) is that shape:
+# `gypfile: true`, a `type: none` target, one inline `node -e` action. Before this leg,
+# --vet read it as INSTALL.
+#
+# WHAT IS JUDGED, AND WHY THIS AND NOT MORE. `gypbuild.classify_build_step`: a step that
+# runs inline interpreter code (`node -e`, `python -c`, ...), an inline shell command, a
+# curl/wget download, or whose program/switches come from a reference the file does not
+# resolve. NOT a step that runs a script FILE - the content scanners read that file like
+# any other, and honest native builds do exactly this (node-sqlite3 unpacks its sources
+# with `node ./extract.js` from a `type: none` target, so "type none, no sources" would
+# have convicted the most widely installed native addon there is). The joined command is
+# deliberately NOT put through `_HOOK_EXEC_RE`: on an argv that matches `bash
+# scripts/gen.sh` or `--encoding=base64` and contradicts the script-file rule above
+# (C-135, 2026-10-30). WARN only, never FAIL: an inline shell one-liner (`sh -c "cd x &&
+# make"`) is an ordinary idiom that could not be measured on this box.
+#
+# WHAT IS READ. The skill's ROOT `binding.gyp` - read from disk with deptree's bounded
+# reader, independent of the scan blob (whose file/byte caps can drop it), or from the
+# package root inside an archive target - plus every build file it references through
+# `includes`/`dependencies` that resolves inside the package. A file that cannot be read
+# (oversized, symlinked, not a plain literal, a reference outside the package or through
+# a variable) is a WARN saying so: a ring UNKNOWN is dropped by --vet, and `'-' + 'e'` is
+# all it takes to make gyp's input unreadable to a literal parser while node-gyp runs it.
+# gyp's own `--check` mode accepts plain literals only, and all 11 distinct root
+# binding.gyp files beside a package.json on this box parse as one (2026-10-30). A
+# `binding.gyp` below the root is NOT read: npm does not build it, and saying it would
+# run would be untrue.
+_B42_GYP_FILE = "binding.gyp"
+_B42_GYP_MAX_FILES = 16
+_B42_GYP_FIX = (
+    " For a binding.gyp build step: install with `npm install --ignore-scripts` (which also "
+    "skips the automatic node-gyp build) until you have read the named step. Not covered by "
+    "this check: a `<!(...)` command expansion in the skill's own build files, the "
+    "msvs_prebuild/msvs_postbuild, make_global_settings and *_wrapper keys, a binding.gyp "
+    "spelled in another case on a case-insensitive filesystem, `python -m <module>`, "
+    "interpreters it does not name, and a plugin's root binding.gyp under --vet-plugin."
+)
+
+
+def _b42_gyp_trigger(manifest) -> str:
+    """What is TRUE about npm building this package's root binding.gyp on install."""
+    if not isinstance(manifest, dict):
+        return "no package.json beside it, so npm does not build it on install"
+    scripts = manifest.get("scripts") if isinstance(manifest.get("scripts"), dict) else {}
+    if manifest.get("gypfile") is False:
+        return "gypfile is false, so npm does not build it automatically"
+    if scripts.get("install") or scripts.get("preinstall"):
+        return ("the package declares its own install/preinstall script, which npm runs "
+                "instead of building it automatically")
+    return "npm runs node-gyp for it on install"
+
+
+def _b42_gyp_sources(ctx: Context, name: str) -> list:
+    """`(where, read, manifest)` for each package root this skill ships.
+
+    `read(relpath)` returns `(text | None, notes)` with deptree's contract (empty notes and
+    None text = absent). A directory target is read from disk; an archive (the target
+    itself, or one inside the skill dir) from the collector's per-member records, rooted
+    at its shallowest package.json - npm's tarball layout nests it under `package/`.
+    """
+    import json
+    import posixpath
+
+    from ..collector import collect_skill_files  # noqa: PLC0415 - cached, no re-walk
+
+    dirs = getattr(ctx, "installed_skill_dirs", None) or {}
+    root = dirs.get(name) or (getattr(ctx, "home", None) if not dirs else None)
+    if root is None:
+        return []
+    root = Path(root)
+    out: list = []
+    if pathprobe.is_dir(root):
+        out.append(("", lambda rel, _r=root: _deptree.read_build_config(_r, rel),
+                    _deptree._read_manifest(root / "package.json")))
+    try:
+        records = collect_skill_files(root, ctx)
+    except OSError:
+        records = []
+    archives: dict = {}
+    for item in records:
+        rel = str(item.get("relpath", ""))
+        if "::" not in rel:
+            continue
+        prefix, _, inner = rel.rpartition("::")
+        archives.setdefault(prefix, {})[posixpath.normpath(inner)] = item
+    if (not archives and not pathprobe.is_dir(root) and pathprobe.is_file(root)
+            and re.search(r"\.(?:tgz|tar|tar\.gz|tar\.bz2|tar\.xz|zip)\Z", root.name, re.I)):
+        # The target is a file (an archive) and nothing in it was unpacked: a directory
+        # holding an oversized binding.gyp WARNs, so this must not read as clean either.
+        out.append(("", None, None))
+    for prefix, members in archives.items():
+        anchors = [p for p in members if posixpath.basename(p) == "package.json"] or \
+                  [p for p in members if posixpath.basename(p) == _B42_GYP_FILE]
+        if not anchors:
+            continue
+        pkg_dir = posixpath.dirname(min(anchors, key=lambda p: (p.count("/"), p)))
+
+        def _read(rel, _m=members, _d=pkg_dir):
+            path = posixpath.normpath(posixpath.join(_d, rel))
+            if path.startswith("../") or path == ".." or posixpath.isabs(rel):
+                return None, ["build config path leaves the package and was not followed"]
+            item = _m.get(path)
+            if item is None:
+                return None, []
+            text = item.get("text")
+            if item.get("classification") != "TEXT" or not isinstance(text, str):
+                return None, ["build config was not read as text"]
+            return text, []
+
+        manifest = None
+        mtext, _ = _read("package.json")
+        if mtext:
+            try:
+                manifest = json.loads(mtext)
+            except (ValueError, RecursionError):
+                manifest = None
+        archive = prefix.split("::")[0]
+        out.append(("" if archive == name else f"{archive}: ", _read, manifest))
+    return out
+
+
+# node-gyp passes the package root's own `config.gypi` and `common.gypi` to gyp as `-I`
+# includes when they exist (node-gyp 12.2.0 `lib/configure.js`: `configNames`, `findConfigs`,
+# `argv.push('-I', config)`), and gyp merges every `-I` include into each build file - so a
+# `target_defaults` action there runs like one in binding.gyp. Absent is normal (a fresh
+# package has no config.gypi; node-gyp generates its own under build/).
+_B42_IMPLICIT_INCLUDES = ("config.gypi", "common.gypi")
+
+
+def _b42_gyp_build_steps(ctx: Context, name: str, redact) -> list:
+    """WARN lines for one skill's root binding.gyp (and the build files it pulls in)."""
+    import posixpath
+
+    warns: list = []
+    for where, read, manifest in _b42_gyp_sources(ctx, name):
+        if read is None:  # an archive target this run could not unpack
+            warns.append(f"{name}: {where}the archive was not unpacked in full, so a "
+                         f"{_B42_GYP_FILE} in it was not read")
+            continue
+        text, notes = read(_B42_GYP_FILE)
+        for note in notes:
+            warns.append(f"{name}: {where}{_B42_GYP_FILE}: {note}, so what node-gyp runs "
+                         "from it is unknown")
+        if text is None:
+            continue
+        trigger = _b42_gyp_trigger(manifest)
+        queue = [(_B42_GYP_FILE, text)]
+        seen = {_B42_GYP_FILE}
+        for implicit in _B42_IMPLICIT_INCLUDES:
+            sub, sub_notes = read(implicit)
+            seen.add(implicit)
+            for note in sub_notes:
+                warns.append(f"{name}: {where}{implicit} (included by node-gyp): {note}, so "
+                             "what node-gyp runs from it is unknown")
+            if sub is not None:
+                queue.append((implicit, sub))
+        configs: list = []
+        while queue:
+            rel, body = queue.pop(0)
+            capped: list = []
+            cfg = _deptree.parse_gyp_build_config(body, capped=capped)
+            for reason in capped:
+                warns.append(f"{name}: {where}{rel} {reason}, so what node-gyp runs from it "
+                             "is unknown")
+            configs.append((rel, cfg))
+            for kind, ref in cfg.references:
+                target = ref.split(":", 1)[0] if kind == "dependencies" and not ref.startswith("<") else ref
+                if "<!" in target:
+                    if kind == "includes":
+                        warns.append(f"{name}: {where}{rel} includes a file named by a command "
+                                     f"expansion ('{redact(ref)[:60]}'), which was not examined")
+                    continue  # a dependency named by `<!(...)` (node-addon-api's idiom): not judged
+                if re.search(r"[<>^$]", target):
+                    warns.append(f"{name}: {where}{rel} references another build file through "
+                                 f"a variable ('{redact(ref)[:60]}'), which was not read")
+                    continue
+                path = posixpath.normpath(posixpath.join(posixpath.dirname(rel), target))
+                if path in seen:
+                    continue
+                seen.add(path)
+                if len(seen) > _B42_GYP_MAX_FILES:
+                    warns.append(f"{name}: {where}{_B42_GYP_FILE} references more build files "
+                                 "than are read; the rest were not examined")
+                    break
+                sub, sub_notes = read(path)
+                if sub is None:
+                    why = "; ".join(sub_notes) or "it is not in the package"
+                    warns.append(f"{name}: {where}{rel} references {redact(path)[:60]}, which "
+                                 f"was not read ({why})")
+                    continue
+                queue.append((path, sub))
+        # name -> TUPLE of candidate values: gypbuild reads a list as one gyp list value.
+        variables: dict = {}
+        for _rel, cfg in configs:
+            for k, vals in (cfg.variables or {}).items():
+                variables[k] = tuple(dict.fromkeys((*variables.get(k, ()), *vals)))
+        for rel, cfg in configs:
+            for step in cfg.steps:
+                label = f" '{step.name}'" if step.name else ""
+                head = f"{name}: {where}{rel} {step.key[:-1]}{label}"
+                if step.unexamined:
+                    warns.append(f"{head} was not examined: {step.unexamined} ({trigger})")
+                    continue
+                verdict = _deptree.classify_build_step(
+                    step.argv, {**variables, **dict(step.local_vars)})
+                if verdict is None:
+                    continue
+                kind, what = verdict
+                does = {
+                    "inline": f"runs inline {what} code",
+                    "shell": f"runs an inline shell command ({what})",
+                    "fetch": f"downloads or fetches with {what}",
+                }.get(kind, f"was not examined: {what}")
+                warns.append(f"{head} {does} ({trigger}) -> '{redact(' '.join(step.argv))[:80]}'")
+    return warns
+
+
 def check_install_policy(ctx: Context) -> Finding:
     from ..logsafe import redact as _redact  # noqa: PLC0415
 
@@ -2832,20 +3057,29 @@ def check_install_policy(ctx: Context) -> Finding:
                     f"{name}: {kind}install hook runs code on install/update -> "
                     f"'{_redact(cmd)[:80]}'"
                 )
+    # B-1004: node-gyp build steps - install-time code with no lifecycle script at all.
+    gyp_warns: list[str] = []
+    for name in skills:
+        gyp_warns.extend(_b42_gyp_build_steps(ctx, name, _redact))
+    warns.extend(gyp_warns)
     # skill dirs writable by other local users (anyone can drop a skill the agent loads)
     perm_bad = _writable_skill_dirs(ctx)
     for path, who, mode in (perm_bad or [])[:6]:
         warns.append(f"{who}-writable skill dir {path} (mode {mode:o})")
     if warns:
-        return _finding(
+        finding = _finding(
             "B42",
             WARN,
             "Install-time supply-chain risk: " + "; ".join(warns[:8]),
             "Review/disable any install hook you haven't read; pin skills to a reviewed "
             "commit; `chmod 700` skill dirs so only you can add skills; turn off skill "
-            "auto-update until each hook is trusted.",
+            "auto-update until each hook is trusted." + (_B42_GYP_FIX if gyp_warns else ""),
             warns + notes,
         )
+        # Read by dossier.py: a build step that runs code, or a build file this could not
+        # read, is code present with no reader for the Persistence/Connections axes.
+        finding.gyp_build_code = bool(gyp_warns)
+        return finding
     return _finding(
         "B42",
         PASS,
@@ -3129,7 +3363,10 @@ def check_dependency_tree_hooks(ctx: Context) -> Finding:
     # differ in where the reader has to look, not in how dangerous they are.
     sites = [(h.package, h.relpath, h.phase, h.command, h.targets) for h in scan.hooks]
     sites += [
-        (d.package, d.relpath, _deptree.GYP_FILENAME, d.command, d.targets)
+        (d.package, d.relpath,
+         _deptree.GYP_FILENAME if getattr(d, "kind", "expansion") == "expansion"
+         else f"{_deptree.GYP_FILENAME} {d.kind}",  # B-1004: a build step, not `<!(...)`
+         d.command, d.targets)
         for d in scan.build_directives
     ]
 

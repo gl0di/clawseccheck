@@ -845,9 +845,10 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "dossier.py": "~1,233 lines - the vet-dossier renderer; over budget again after the "
-                  "C-633 partial-read Danger reason landed beside the C-636 own-source rework. "
-                  "Tracked debt, not a design statement.",
+    "dossier.py": "~1,251 lines - the vet-dossier renderer; over budget since the C-633 "
+                  "partial-read Danger reason and the C-636 own-source rework (~1,246), plus "
+                  "B-1004's five lines reading B42's binding.gyp marker. Tracked debt, not a "
+                  "design statement.",
     # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
     # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
     # each restatement filing the split rather than doing it, and the file grew again
