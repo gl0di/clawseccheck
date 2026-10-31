@@ -2943,8 +2943,7 @@ Advisory checks are recorded for coverage but are not scored.
 - OWASP: LLM03 Supply Chain
 - What it checks: Skill ships a hash-unchecked compiled .pyc (PEP 552) that Python runs without checking the source
 - Remediation:
-  - command: `find <skill-dir> -type d -name __pycache__ -prune -exec rm -rf {} +`
-  - command: `find <skill-dir> -type f -iname '*.pyc' -delete`
+  - none
 
 ## Compound risk chains
 
