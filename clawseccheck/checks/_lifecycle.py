@@ -2903,8 +2903,13 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
     out: list = []
     if pathprobe.is_dir(root):
         dir_manifest = _deptree._read_manifest(root / "package.json")
-        if dir_manifest is None and pathprobe.exists(root / "package.json"):
-            dir_manifest = _B42_MANIFEST_UNREADABLE
+        if dir_manifest is None:
+            try:
+                present = pathprobe.exists(root / "package.json")
+            except OSError:
+                present = True  # cannot tell absent from unreadable: never read it as absent
+            if present:
+                dir_manifest = _B42_MANIFEST_UNREADABLE
         out.append(("", lambda rel, _r=root: _deptree.read_build_config(_r, rel), dir_manifest))
     # A root that is not on disk (the MCP surface sentinel home) has nothing to collect;
     # walking it would record a phantom .pyc "could not be listed" gap (B398) and floor a

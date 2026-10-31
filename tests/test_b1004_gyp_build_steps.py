@@ -95,6 +95,30 @@ def test_unreadable_manifest_is_not_reported_as_absent():
     assert "unknown" in unreadable and "does not build" not in unreadable
 
 
+def test_directory_manifest_probe_error_reads_as_unreadable(tmp_path, monkeypatch):
+    """If even the existence probe raises, the manifest is unreadable, never absent."""
+    from clawseccheck.checks import _lifecycle as L
+    from clawseccheck.collector import Context
+
+    skill = tmp_path / "skills" / "s"
+    skill.mkdir(parents=True)
+    (skill / "binding.gyp").write_text((BAD / "binding.gyp").read_text(encoding="utf-8"))
+    (skill / "package.json").write_text("{not json", encoding="utf-8")
+    real = L.pathprobe.exists
+
+    def boom(p):
+        if str(p).endswith("package.json"):
+            raise PermissionError(13, "denied")
+        return real(p)
+
+    monkeypatch.setattr(L.pathprobe, "exists", boom)
+    ctx = Context(home=str(tmp_path))
+    ctx.installed_skills = [{"name": "s"}]
+    ctx.installed_skill_dirs = {"s": skill}
+    sources = L._b42_gyp_sources(ctx, "s")
+    assert [m for (_w, _r, m) in sources] == [L._B42_MANIFEST_UNREADABLE]
+
+
 def _padded_manifest(depth: int, gypfile) -> str:
     """A package.json whose real fields sit beside a subtree nested `depth` levels deep."""
     deep = "[" * depth + "]" * depth
