@@ -2862,8 +2862,16 @@ _B42_GYP_FIX = (
 )
 
 
+# A package.json that exists but could not be parsed (too large, hostile, malformed) must not
+# read as an ABSENT one: absent says "npm does not build it", unreadable says "unknown".
+_B42_MANIFEST_UNREADABLE = object()
+
+
 def _b42_gyp_trigger(manifest) -> str:
     """What is TRUE about npm building this package's root binding.gyp on install."""
+    if manifest is _B42_MANIFEST_UNREADABLE:
+        return ("its package.json could not be read, so whether npm builds it on install is "
+                "unknown - treat it as built")
     if not isinstance(manifest, dict):
         return "no package.json beside it, so npm does not build it on install"
     scripts = manifest.get("scripts") if isinstance(manifest.get("scripts"), dict) else {}
@@ -2894,8 +2902,10 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
     root = Path(root)
     out: list = []
     if pathprobe.is_dir(root):
-        out.append(("", lambda rel, _r=root: _deptree.read_build_config(_r, rel),
-                    _deptree._read_manifest(root / "package.json")))
+        dir_manifest = _deptree._read_manifest(root / "package.json")
+        if dir_manifest is None and pathprobe.exists(root / "package.json"):
+            dir_manifest = _B42_MANIFEST_UNREADABLE
+        out.append(("", lambda rel, _r=root: _deptree.read_build_config(_r, rel), dir_manifest))
     # A root that is not on disk (the MCP surface sentinel home) has nothing to collect;
     # walking it would record a phantom .pyc "could not be listed" gap (B398) and floor a
     # clean vet verdict to UNKNOWN.
@@ -2938,12 +2948,18 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
             return text, []
 
         manifest = None
-        mtext, _ = _read("package.json")
+        mtext, mnotes = _read("package.json")
         if mtext:
+            # Third-party content: a depth limit would be an evasion (pad the manifest and
+            # `gypfile`/`scripts` stop being read), so read it the way the directory branch
+            # does - shallow, deeper subtrees elided rather than refused.
             try:
-                manifest = _loads_bounded(mtext)
+                value = _loads_shallow(mtext).value
             except (ValueError, RecursionError):
-                manifest = None
+                value = None
+            manifest = value if isinstance(value, dict) else _B42_MANIFEST_UNREADABLE
+        elif mnotes:
+            manifest = _B42_MANIFEST_UNREADABLE
         archive = prefix.split("::")[0]
         out.append(("" if archive == name else f"{archive}: ", _read, manifest))
     return out

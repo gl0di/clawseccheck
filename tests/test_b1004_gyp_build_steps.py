@@ -85,6 +85,44 @@ def test_archive_target_is_read_too(tmp_path):
     assert b42 is not None and b42.status == WARN
 
 
+def test_unreadable_manifest_is_not_reported_as_absent():
+    """An unparseable package.json must not read as 'npm does not build it'."""
+    from clawseccheck.checks._lifecycle import _B42_MANIFEST_UNREADABLE, _b42_gyp_trigger
+
+    absent = _b42_gyp_trigger(None)
+    unreadable = _b42_gyp_trigger(_B42_MANIFEST_UNREADABLE)
+    assert "does not build" in absent
+    assert "unknown" in unreadable and "does not build" not in unreadable
+
+
+def _padded_manifest(depth: int, gypfile) -> str:
+    """A package.json whose real fields sit beside a subtree nested `depth` levels deep."""
+    deep = "[" * depth + "]" * depth
+    return '{"name": "p", "gypfile": %s, "pad": %s}' % (gypfile, deep)
+
+
+def test_padded_archive_manifest_is_still_read(tmp_path):
+    """Padding the manifest with deep nesting must not hide gypfile (shallow read, not a refusal)."""
+    import tarfile
+    from clawseccheck.checks._lifecycle import _b42_gyp_sources
+    from clawseccheck.collector import Context
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "binding.gyp").write_text((BAD / "binding.gyp").read_text(encoding="utf-8"))
+    (src / "package.json").write_text(_padded_manifest(5000, "false"), encoding="utf-8")
+    tgz = tmp_path / "pkg.tgz"
+    with tarfile.open(tgz, "w:gz") as tar:
+        for f in src.iterdir():
+            tar.add(f, arcname=f"package/{f.name}")
+    ctx = Context(home=str(tmp_path))
+    ctx.installed_skills = [{"name": "pkg"}]
+    ctx.installed_skill_dirs = {"pkg": tgz}
+    sources = _b42_gyp_sources(ctx, "pkg")
+    manifests = [m for (_w, _r, m) in sources if isinstance(m, dict)]
+    assert manifests and manifests[0].get("gypfile") is False
+
+
 # ---------------------------------------------------------------------------
 # B42 in the audit (installed skills under an OpenClaw home)
 # ---------------------------------------------------------------------------
