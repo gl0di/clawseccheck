@@ -59,6 +59,14 @@ markers = [
 # keep it scoped to this one path rather than excluding fixtures/ wholesale.
 exclude = ["fixtures/unknown_b347_deaddrop_unparseable/**"]
 
+[tool.ruff.lint]
+# The rule set is pinned, not inherited from ruff's default. ruff 0.17 widened its
+# default selection (UP, I, RUF, PL, SIM, ...) and the Dependabot bump of the CI tools
+# turned the Lint step red on ~4000 findings with no source change. These are the
+# defaults the code has always been checked against; widening them is a deliberate
+# change of its own, not a side effect of a tool bump.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.ruff.lint.per-file-ignores]
 # The checks/ aggregator re-exports every topic module's symbols (incl. privates) so
 # they stay importable as `from clawseccheck.checks import X`. It deliberately has no

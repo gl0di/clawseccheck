@@ -5,5 +5,19 @@
   "devDependencies": {
     "clawhub": "0.23.3",
     "markdownlint-cli": "0.49.1"
+  },
+  "//overrides": [
+    "Transitive versions forced to the first patched release of each open advisory, because the pinned tools' own ranges cannot reach it.",
+    "undici: clawhub 0.23.3 (latest) pins 7.29.0 exactly; this runs in the token-holding publish job.",
+    "katex: micromark-extension-math 3.1.0 (latest, via markdownlint) requires ^0.16; markdownlint only uses its syntax extension, katex is imported by the unused HTML renderer.",
+    "markdown-it, js-yaml, smol-toml: markdownlint-cli 0.49.1 tilde ranges stop below the fix.",
+    "Drop an entry once the tool that pulls it in ships a range that includes the fix."
+  ],
+  "overrides": {
+    "undici": "7.30.1",
+    "katex": "0.18.2",
+    "markdown-it": "14.3.3",
+    "js-yaml": "5.4.1",
+    "smol-toml": "1.9.0"
   }
 }

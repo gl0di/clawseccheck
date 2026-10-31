@@ -207,8 +207,17 @@ from .collector import agent_roster
 #: configs and envs, and the vendor's answer identical on every row -- only its ``build``
 #: stamp moved. The chain is now 9.5 = ... = 10.5 = 10.6, measured row by row, and the floor
 #: stays where it is.
+#:
+#: The ceiling moved to 2026.10.9 on 2026-10-30. The battery was regenerated against the
+#: installed 2026.10.9 and compared with the 2026.10.6 one BY LABEL: 773 rows each, the same
+#: labels, configs and envs, and the vendor's answer identical on every row -- only its ``build``
+#: stamp moved. 2026.10.7 and 2026.10.8 were run over the same 773 cases out of their registry
+#: tarballs (with the installed tree's ``node_modules`` on the resolution path: ``@openclaw/fs-safe``
+#: is 0.26.0 in all three; ``@openclaw/ai`` is the installed 2026.10.9 rather than the build's own
+#: pin, which no harness module imported) and answered identically on every row too. The chain is now
+#: 9.5 = ... = 10.6 = 10.7 = 10.8 = 10.9, and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 10, 6)
+ORACLE_MAX = (2026, 10, 9)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
