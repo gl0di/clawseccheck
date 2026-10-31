@@ -6007,7 +6007,8 @@ def render_vet_dossier(profile, ascii_only: bool = False) -> str:
     top = _dossier_top_fix(profile)
     if top:
         lines += ["", f"  Fix (top): {_sanitize(top)}"]
-    n_find = len(profile.findings)
+    # C-738: a PASS row is the absence of a finding, not a finding.
+    n_find = sum(1 for f in profile.findings if f.status != PASS)
     n_axes = sum(1 for a in profile.axes if a.status != "N/A")
     sep = "*" if ascii_only else "·"
     lines += ["", f"  {n_find} finding{'' if n_find == 1 else 's'} across {n_axes} axes "
