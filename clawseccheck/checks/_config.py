@@ -64,7 +64,7 @@ from ._shared import (
     _c015_text_without_managed_github_ids,
     _vendor_secret_slot_paths,
     _canonical_ipv4,
-    _channel_has_implicit_default_account,
+    _live_channel_nodes,
     _channels,
     _config_env_block_entries,  # C-653
     _config_unreadable,
@@ -116,7 +116,6 @@ from ._shared import (
     _real_exec_enabled,
     _resolve_sandbox_scope,
     _retired_keys_present,
-    _resolved_channel_nodes,
     _resolved_default_input_channels,
     _sandbox_docker_binds,
     _SECRET_INPUT_STRING_REF_RE,  # C-653
@@ -2763,18 +2762,15 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     a channel-level credential (e.g. a `botToken`) does not stop running once `accounts`
     is added; OpenClaw synthesizes an extra IMPLICIT default account that keeps the base
     node's own (possibly still-open, no-gate) policy live alongside the explicit accounts.
-    So the base node is added back to the walk exactly when
-    `_channel_has_implicit_default_account` says it is genuinely still live -- never
-    unconditionally.
+    So the base node is added back to the walk exactly when `_live_channel_nodes` (its
+    `_base_node_runs_unmerged` gate) says it is genuinely still live as its own account --
+    never unconditionally, and not when a configured entry IS the default account (B-1002).
     """
     out: list[str] = []
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = _resolved_channel_nodes(c)
-        accounts = c.get("accounts")
-        if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
-            nodes = [*nodes, c]
+        nodes = _live_channel_nodes(name, c)
         for node in nodes:
             if not isinstance(node, dict):
                 continue
