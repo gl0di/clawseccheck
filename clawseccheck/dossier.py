@@ -37,6 +37,7 @@ from .catalog import (
     BY_ID, FAIL, FAIL_WEIGHT_STATUSES, PASS, UNKNOWN, WARN, ast_for,
 )
 
+from .scanbudget import ScanBudgetExceeded
 from .scoring import grade_for
 from .skillast import analyze_javascript, analyze_shell, capability_families
 
@@ -639,6 +640,14 @@ def _declared_file_bars_measurability(relpath: str, lang: str, source: str) -> b
         analyzer = analyze_shell if lang == "sh" else analyze_javascript
         try:
             result = analyzer(source, relpath)
+        except ScanBudgetExceeded as exc:
+            # B-1005 round 3: the JS credential-flow pass raises a COOPERATIVE budget
+            # stop (owner None) on a file past its work caps. This file was then not
+            # fully read, so it bars a PASS (an honest UNKNOWN), and the dossier still
+            # renders. A timer-owned deadline is someone else's and propagates.
+            if exc.owner is not None:
+                raise
+            return True
         except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             # B-983: `analyze_shell`/`analyze_javascript` are large recursive parsers with
             # no general depth bound (unlike the `py` branch's `ast.parse`, which this
@@ -837,7 +846,7 @@ def build_profile(engine_output, target: str, target_type: str) -> VetProfile:
     danger_only_code = [
         f for fx in pool for f in (getattr(fx, "analysed_loose_code", None) or [])
     ]
-    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s five lexical rules
+    # C-633: plugin JS/TS the sweep read with `analyze_javascript`'s eight lexical rules
     # only. Same "read for danger, invisible to Persistence/Connections" shape as
     # `danger_only_code`, so it joins it below: a JS-only plugin must not fall through to
     # "no executable code to analyze" (a false claim about the artifact, B-628).
@@ -1111,7 +1120,7 @@ def _clean_reason(axis: str, families: set) -> str:
 def _plugin_partial_read_danger_reason() -> str:
     """C-633: the danger axis's PASS on a plugin whose loose code was only partly read.
 
-    `vet_plugin` reads loose JS/TS with five lexical rules and has NO reader for shell
+    `vet_plugin` reads loose JS/TS with eight lexical rules and has NO reader for shell
     outside a declared skill (or for Python it could not open or parse), so
     `_clean_reason`'s "no malware signature or known-bad indicator" would state a
     completed scan over files nothing really looked at. The same bytes one directory
@@ -1121,8 +1130,8 @@ def _plugin_partial_read_danger_reason() -> str:
     return (
         "no signature matched in the code this scan could read; loose plugin code "
         "outside the declared skills was read by a few lexical rules only or not at "
-        "all (see the coverage notes), so pipe-to-shell strings, config or credential "
-        "reads and outbound POSTs in it were not checked"
+        "all (see the coverage notes), so pipe-to-shell strings, config reads, and "
+        "credential reads or outbound POSTs it could not trace were not checked"
     )
 
 

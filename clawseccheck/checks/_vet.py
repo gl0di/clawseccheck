@@ -5470,6 +5470,20 @@ _B13_WINNER_SUBSIGNAL = {
 # `tests/test_b743_js_warn_remediation.py` requires an entry for every warn-severity rule
 # `analyze_javascript` can emit - extracted from that function's own `add(...)` call sites -
 # so a fourth rule fails the build here instead of inheriting someone else's advice.
+# B-1005: appended to the B13 FAIL `fix` when JS_CRED_EXFIL_FLOW convicted.
+_JS_SIGNING_CLIENT_DISCLOSURE = (
+    " One or more of the crit findings above is a bundled .js/.ts file reading a "
+    "credential file (a private key, raw cloud credentials, or a process environment) "
+    "and passing a value from it to a network call. That signal has a known limit: a "
+    "signing client that reads a credential file and sends a derived signature is "
+    "shape-identical to exfiltration; this rule cannot separate them, nor a hash, "
+    "fingerprint or extracted field of the file from the secret itself, nor a process "
+    "manager sending a process environment to its own socket. If you authored this "
+    "skill or already trust its source, read the flagged call and confirm the value "
+    "sent is a signature, hash, fingerprint or extracted field sent to the service the "
+    "credential belongs to, never the credential itself."
+)
+
 _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
     "JS_CHILD_PROCESS_DYNAMIC": (
         "interpolated child_process command",
@@ -5484,6 +5498,24 @@ _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
         "A bundled .js/.ts file require()s a non-literal module path, so which module "
         "loads is decided at runtime. Read the flagged call and confirm the path cannot "
         "be influenced by input.",
+    ),
+    "JS_SECRET_FILE_FLOW": (
+        "credential file sent to the network",
+        "A bundled .js/.ts file reads a credential file and a value from it reaches a "
+        "network call: a token or config file (.npmrc, .netrc, a secrets mount, browser "
+        "cookies, ...), or a key or the process environment only as its length "
+        "or as a TLS key option. That is how a client "
+        "authenticates as you, and also how a secret is stolen; this lexical pass cannot "
+        "tell the two apart. Read the flagged call and confirm the destination is the "
+        "service that credential belongs to, and nowhere else.",
+    ),
+    "JS_ENV_EXFIL_FLOW": (
+        "whole process environment sent to the network",
+        "A bundled .js/.ts file serialises the entire process.env (JSON.stringify, "
+        "Object.entries/values or {...process.env}) into a network call, "
+        "so every secret held in an environment variable leaves the machine. Read the "
+        "flagged call and confirm the destination is the skill's own documented backend "
+        "and that sending the full environment, rather than named variables, is needed.",
     ),
     "JS_NATIVE_DLOPEN": (
         "native addon loaded past the JS analysis boundary",
@@ -6085,6 +6117,9 @@ def check_installed_skills(ctx: Context) -> Finding:
     # `_has_cred_exfil_outside_fence`, same-line -> crit, and `_has_cross`,
     # document-wide -> high): which skills convicted on each half.
     same_line_cred_exfil_skills: set = set()
+    # B-1005: skills convicted by the JS credential-flow rule, whose FAIL carries the
+    # signing-client disclosure in `fix` (accepted-residual candidate, see skillast.py).
+    js_cred_flow_skills: set = set()
     cross_skill_cred_exfil_skills: set = set()
     install_hosts_by_skill: dict = {}
     # B-618: the set of skills that contributed ANY evidence to `crit` /
@@ -7176,6 +7211,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                     if af.severity == "crit":
                         if _verified:
                             crit.append(msg)
+                            if af.rule == "JS_CRED_EXFIL_FLOW":
+                                js_cred_flow_skills.add(name)
                         else:
                             warns_declared_unverified.append(msg)
                     else:
@@ -7500,6 +7537,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 "input, table, or helper can be influenced by untrusted content "
                 "before installing."
             )
+        if js_cred_flow_skills:
+            # B-1005: the JS credential-flow rule cannot tell a signing client from an
+            # exfiltrator - a crypto-reducer exemption was retracted after five review
+            # rounds. Disclosed in the advice, never `detail` (fingerprint stability).
+            fix += _JS_SIGNING_CLIENT_DISCLOSURE
         if same_line_cred_exfil_skills:
             # Accepted §2.5 residual ("cred-path x exfil-token textual co-occurrence
             # without taint"), Dave ruling 2026-09-26 - same-line half. See the note
