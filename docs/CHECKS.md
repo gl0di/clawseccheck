@@ -2931,6 +2931,21 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Hardening checks
+
+### B398 - Skill ships a hash-unchecked compiled .pyc (PEP 552) that Python runs without checking the source
+
+- Severity: HIGH
+- Block: hardening
+- Framework: Hidden Code / Malicious Skill
+- Scored: yes
+- Confidence: HIGH
+- OWASP: LLM03 Supply Chain
+- What it checks: Skill ships a hash-unchecked compiled .pyc (PEP 552) that Python runs without checking the source
+- Remediation:
+  - command: `find <skill-dir> -type d -name __pycache__ -prune -exec rm -rf {} +`
+  - command: `find <skill-dir> -type f -iname '*.pyc' -delete`
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.

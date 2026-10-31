@@ -6,8 +6,8 @@ all (so they can't even surface as a finding). Updated 2026-10-24 for v4.4.4
 (B396 and B397 added - paired-node skills outside the skill content scan, and
 agent-opened portals reachable off-host outside gateway authentication).
 
-Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) - 233 catalogued,
-of which **229 run in a default audit**; the three T-series behavioral checks plus B191
+Current catalog: A1 plus the B-series, C-series, and T-series (behavioral) - 234 catalogued,
+of which **230 run in a default audit**; the three T-series behavioral checks plus B191
 (OpenClaw's own `audit_events` runtime trail) execute only under `--behavioral`
 total; see `docs/CHECKS.md` for the full generated list, plus the
 combinational risk engine `RISK-01..RISK-26`, the install-time vetters `--vet` (B13 plus

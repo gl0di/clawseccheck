@@ -145,6 +145,7 @@ from ._content import (
     check_deaddrop_resolver,
     check_dependency_confusion,
     check_dormant_capability,
+    check_unchecked_hash_pyc,
     check_dotfile_exfil_directive,
     check_dynamic_dispatch_obfuscation,
     check_event_hook_interceptor,
@@ -9196,6 +9197,19 @@ def _run_content_ring(
         )
     # B-526: side-channel, deliberately not a second return value - the FAIL/WARN-only
     # return contract above is depended on by several callers and tests.
+    # B398 (B-1001): a .pyc scan gap (symlinked/unreadable __pycache__, count cap) is an
+    # UNKNOWN the ring drops above, and `ctx.limit_hits` alone floors only the Danger axis.
+    # Emit the shared "part of this target was never inspected" verdict so the Persistence
+    # axis also stops claiming "no dormant or staged code detected" over a cache it never read.
+    pyc_gaps = [g for gl in (getattr(ctx, "skill_pyc_gaps", None) or {}).values() for g in gl]
+    if pyc_gaps:
+        out.append(coverage_gap_finding(
+            f"compiled-code (.pyc) coverage is incomplete: {len(pyc_gaps)} gap(s) - "
+            + "; ".join(pyc_gaps[:3]) + (", \u2026" if len(pyc_gaps) > 3 else ""),
+            "Compiled code that was not read is not cleared. Remove symlinked or unreadable "
+            "__pycache__ entries (or delete __pycache__), reduce the number of directories "
+            "or .pyc files if a count cap was hit, and re-run.",
+        ))
     ctx.ring_coverage_notes = ring_coverage
     return out
 
@@ -10737,6 +10751,7 @@ SKILL_CONTENT_RING = (
     check_symlink_escape,  # B87 - symlink escape to a sensitive host path (TAM-07)
     check_frontmatter_hygiene,  # B88 - frontmatter authoring hygiene (tag values / squat)
     check_dormant_capability,  # B89 - unreachable-yet-code-bearing skill (dormant capability)
+    check_unchecked_hash_pyc,  # B398 - hash-unchecked .pyc shipped in a skill (B-1001)
     check_cross_file_payload,  # B90 - cross-file split base64 payload reassembly (I-019)
     check_cross_file_boundary_payload,  # B102 - base64 split exactly at a file boundary (F-086)
     check_cross_file_plaintext_payload,  # B154 - cross-file split PLAINTEXT payload reassembly
