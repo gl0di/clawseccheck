@@ -19,6 +19,7 @@ Every sample here is inert text with `.invalid` hosts; nothing is executed. Offl
 """
 from __future__ import annotations
 
+import sys
 import json
 from pathlib import Path
 
@@ -234,7 +235,7 @@ def _kind(argv, variables=None):
     ["timeout", "-s", "KILL", "5", "node", "-e", "x"], ["nohup", "node", "-e", "x"], ["command", "node", "-e", "x"],
     ["xargs", "-0", "node", "-e", "x"], ["timeout", "--unknown-opt", "v", "node", "-e", "x"],
     # item 6: interpreters and glued switches
-    ["python3", "-c", "x"], ["python", "-Bc", "x"], ["python3.12", "-c", "x"], ["python3.13t", "-c", "x"],
+    ["python3", "-c", "x"], ["python", "-Bc", "x"], [f"python3.{sys.version_info.minor}", "-c", "x"], ["python3.13t", "-c", "x"],
     ["pypy3", "-c", "x"], ["python3", "-cimport os"], ["perl", "-ne", "x"], ["perl", "-eprint 1"],
     ["ruby", "-e", "x"], ["ruby", "-eputs 1"], ["php", "-r", "x"], ["lua", "-e", "x"], ["osascript", "-e", "x"],
     ["deno", "eval", "x"], ["bun", "-e", "x"],

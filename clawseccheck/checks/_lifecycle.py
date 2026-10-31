@@ -2818,7 +2818,7 @@ def check_human_approval(ctx: Context) -> Finding:
 # ---------- B42 leg (B-1004): node-gyp build steps in a skill's binding.gyp ----------
 # npm runs `node-gyp rebuild` for a package whose ROOT holds a `binding.gyp`, when it
 # declares no install/preinstall script and `gypfile` is not false (grounded in the npm
-# 11.11.0 installed here: @npmcli/run-script 10.0.3 `run-script-pkg.js` gates on
+# 11.11.0 installed here: @npmcli/run-script 10.0.3 `run-script-pkg.js` (as of 2026-10-31) gates on
 # `!scripts.install && !scripts.preinstall && gypfile !== false && isNodeGypPackage(path)`,
 # and @npmcli/node-gyp 5.0.0's `isNodeGypPackage` stats `${path}/binding.gyp`). node-gyp
 # then executes every `actions`/`rules`/`postbuilds` argv in that file and in the files it
@@ -2883,7 +2883,6 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
     itself, or one inside the skill dir) from the collector's per-member records, rooted
     at its shallowest package.json - npm's tarball layout nests it under `package/`.
     """
-    import json
     import posixpath
 
     from ..collector import collect_skill_files  # noqa: PLC0415 - cached, no re-walk
@@ -2897,8 +2896,14 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
     if pathprobe.is_dir(root):
         out.append(("", lambda rel, _r=root: _deptree.read_build_config(_r, rel),
                     _deptree._read_manifest(root / "package.json")))
+    # A root that is not on disk (the MCP surface sentinel home) has nothing to collect;
+    # walking it would record a phantom .pyc "could not be listed" gap (B398) and floor a
+    # clean vet verdict to UNKNOWN.
     try:
-        records = collect_skill_files(root, ctx)
+        records = (
+            collect_skill_files(root, ctx)
+            if pathprobe.is_dir(root) or pathprobe.is_file(root) else []
+        )
     except OSError:
         records = []
     archives: dict = {}
@@ -2936,7 +2941,7 @@ def _b42_gyp_sources(ctx: Context, name: str) -> list:
         mtext, _ = _read("package.json")
         if mtext:
             try:
-                manifest = json.loads(mtext)
+                manifest = _loads_bounded(mtext)
             except (ValueError, RecursionError):
                 manifest = None
         archive = prefix.split("::")[0]

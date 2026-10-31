@@ -35,10 +35,13 @@ import shlex
 import warnings
 from dataclasses import dataclass
 
+from .configloader import json_nesting_exceeds
+
 # Bounds on the walk over the parsed value and on what one file may contribute. The text
 # itself is bounded by the caller (deptree.MAX_GYP_BYTES). A hit is disclosed.
 MAX_GYP_ACTIONS = 40
 MAX_GYP_NODES = 50_000
+MAX_GYP_NESTING = 64
 MAX_ARGV_CANDIDATES = 32
 MAX_NESTED_COMMANDS = 3
 
@@ -167,14 +170,20 @@ def parse_gyp_build_config(text: str, *, capped=None) -> GypBuildConfig:
     all disclosed through *capped* (a list), never returned as "no build steps".
     """
     try:
-        with warnings.catch_warnings():
-            # An invalid escape ("\/") is a SyntaxWarning; it must not reach the terminal.
-            warnings.simplefilter("ignore")
-            value = ast.literal_eval(text)
+        if json_nesting_exceeds(text, MAX_GYP_NESTING):
+            # Same bracket-depth gate the JSON readers use: past it, literal_eval's own
+            # recursion decides the answer. Counting may over-estimate on a single-quoted
+            # string holding brackets, which only errs toward "not examined" (disclosed).
+            value = None
+        else:
+            with warnings.catch_warnings():
+                # An invalid escape ("\/") is a SyntaxWarning; it must not reach the terminal.
+                warnings.simplefilter("ignore")
+                value = ast.literal_eval(text)
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
         value = None
     if not isinstance(value, dict):
-        _note(capped, "is not a plain literal — its build steps were not examined")
+        _note(capped, "is not a plain literal - its build steps were not examined")
         return GypBuildConfig(variables={})
 
     steps: list = []
@@ -185,7 +194,7 @@ def parse_gyp_build_config(text: str, *, capped=None) -> GypBuildConfig:
     while stack:
         nodes += 1
         if nodes > MAX_GYP_NODES:
-            _note(capped, "is too large to walk — the rest of its build steps were not examined")
+            _note(capped, "is too large to walk - the rest of its build steps were not examined")
             break
         cur = stack.pop()
         if isinstance(cur, (list, tuple)):
@@ -231,7 +240,7 @@ def parse_gyp_build_config(text: str, *, capped=None) -> GypBuildConfig:
                     local = {**holder_vars, **_auto_vars(entry)}
                     for argv in argvs or ([()] if why else []):
                         if len(steps) >= MAX_GYP_ACTIONS:
-                            _note(capped, "has more build steps than are examined — the rest were not")
+                            _note(capped, "has more build steps than are examined - the rest were not")
                             break
                         steps.append(GypBuildStep(base, label, tuple(argv), why,
                                                   tuple(sorted(local.items()))))
