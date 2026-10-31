@@ -4254,12 +4254,6 @@ REMEDIATION = {
         ]
     },
     "C5": {"commands": ["chmod o-w,g-w <dir>"]},
-    "B398": {
-        "commands": [
-            "find <skill-dir> -type d -name __pycache__ -prune -exec rm -rf {} +",
-            "find <skill-dir> -type f -iname '*.pyc' -delete",
-        ]
-    },
 }
 
 

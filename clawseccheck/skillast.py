@@ -19207,7 +19207,14 @@ def _js_net_bindings(masked: str) -> "tuple[set, set, set]":
             seen_de.add(m.start())
             group = (m.group(1) or m.group(2) or "").strip()
             for entry in group.split(","):
-                parts = re.split(r":\s*|\s+as\s+", entry.strip())
+                # `key: alias` or `name as alias`, split without a regex: an alternation with a
+                # whitespace-run branch is quadratic on a long run of spaces (test_c730).
+                entry = entry.strip()
+                if ":" in entry:
+                    parts = list(entry.partition(":")[::2])
+                else:
+                    toks = entry.split()
+                    parts = [toks[0], toks[2]] if len(toks) == 3 and toks[1] == "as" else [entry]
                 if parts and parts[0].strip() in _JS_NET_METHODS and parts[-1].strip():
                     names.add(parts[-1].strip())
     return receivers, names, tls

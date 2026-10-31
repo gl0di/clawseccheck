@@ -325,6 +325,9 @@ def test_wrapper_whose_suffix_disagrees_with_its_bytes_is_checked(tmp_path, wrap
     assert _run_check(z).status == FAIL
 
 
-def test_remediation_is_published_for_the_docs_generator():
+def test_remediation_has_no_paste_ready_command():
+    """Deleting a skill's compiled files is a destructive command, and the remediation
+    guard (tests/test_remediation.py) allows only chmod/openclaw verbs, so the prose
+    `fix` leads for B398 and no command is published."""
     from clawseccheck.catalog import remediation_for
-    assert remediation_for("B398")["commands"]
+    assert remediation_for("B398")["commands"] == []
