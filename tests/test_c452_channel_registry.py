@@ -121,6 +121,12 @@ _CHANNELS = {
         "Persistence/Connections PASS and hedges Danger PASS",
         None,
     ),
+    "gyp_build_code": (
+        "vet",
+        "a B42 WARN that a binding.gyp build step runs code or could not be read; bars "
+        "Persistence/Connections PASS in the dossier",
+        None,
+    ),
     "bundled_contexts": ("vet", "each dispatched bundled skill's engine Context", None),
     "ctx": ("internal", "the vet engine's own Context, handed to the plugin dispatcher", None),
 }
