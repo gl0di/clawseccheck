@@ -6505,6 +6505,8 @@ def _main(argv=None) -> int:
         try:
             _hp_scan = _hostpersist_scan(os.path.expanduser("~"))
             _host_persist_snap = _hostpersist_to_snapshot(_hp_scan)
+            if _hp_scan.launchd_unread:  # C-756: disclosure only, never compared
+                _host_persist_snap["launchd_unread"] = list(_hp_scan.launchd_unread)
         except Exception:  # noqa: BLE001 - same containment
             _host_persist_snap = None
         # B-269: snapshot() needs the previous state so that a run which could not read
