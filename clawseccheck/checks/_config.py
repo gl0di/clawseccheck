@@ -64,7 +64,7 @@ from ._shared import (
     _c015_text_without_managed_github_ids,
     _vendor_secret_slot_paths,
     _canonical_ipv4,
-    _channel_has_implicit_default_account,
+    _live_channel_nodes,
     _channels,
     _config_env_block_entries,  # C-653
     _config_unreadable,
@@ -116,7 +116,6 @@ from ._shared import (
     _real_exec_enabled,
     _resolve_sandbox_scope,
     _retired_keys_present,
-    _resolved_channel_nodes,
     _resolved_default_input_channels,
     _sandbox_docker_binds,
     _SECRET_INPUT_STRING_REF_RE,  # C-653
@@ -194,13 +193,17 @@ CLOUD_PROVIDERS = (
 #
 # Deliberately EXCLUDED despite being real tool ids in the same two vendor deny lists
 # (DEFAULT_GATEWAY_HTTP_TOOL_DENY and GATEWAY_OWNER_ONLY_CORE_TOOLS,
-# dangerous-tools-fofvrQTg.mjs:8-30,45-58): "nodes" ("Nodes + devices" - device
-# pairing/control, tool-catalog-DfaCehx8.mjs:398 on 2026.10.5) and "openclaw" ("Delegate
+# dangerous-tools-fofvrQTg.mjs:8-30,45-58 on 2026.10.5; re-read 2026-10-30 on 2026.10.9 as
+# dangerous-tools-7P77gGzs.mjs:8-30,45-59 (byte-identical in the 2026.10.7, .8 and .9 trees; the
+# 2026.10.6 tree has no "intent" in it) - the name rotated and the owner-only list gained
+# "intent", a memory-core tool, so the list is longer by that one id and this check's set is
+# unchanged): "nodes" ("Nodes + devices" - device
+# pairing/control, tool-catalog-DfaCehx8.mjs:398 on 2026.10.5 and 2026.10.9) and "openclaw" ("Delegate
 # OpenClaw setup and repair", ibid:392). The vendor itself keeps both OUT of
 # GATEWAY_CONTROL_PLANE_TOOLS while putting them in the broader, differently-justified
 # GATEWAY_OWNER_ONLY_CORE_TOOLS (owner-identity requirement, not "control-plane
 # mutation" - that list also adds sessions/screen/terminal/portal/conversations_*/
-# computer/mobile_ui, none of which this check's "config mutation / cron scheduling /
+# computer/mobile_ui (and, since 2026.10.7, intent), none of which this check's "config mutation / cron scheduling /
 # cross-session spawn-send" framing covers either). Folding device control or
 # setup-delegation into a check specifically named "control-plane mutation" would
 # assert a vendor classification the vendor's own source does not make - filed as an
@@ -2759,18 +2762,15 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     a channel-level credential (e.g. a `botToken`) does not stop running once `accounts`
     is added; OpenClaw synthesizes an extra IMPLICIT default account that keeps the base
     node's own (possibly still-open, no-gate) policy live alongside the explicit accounts.
-    So the base node is added back to the walk exactly when
-    `_channel_has_implicit_default_account` says it is genuinely still live -- never
-    unconditionally.
+    So the base node is added back to the walk exactly when `_live_channel_nodes` (its
+    `_base_node_runs_unmerged` gate) says it is genuinely still live as its own account --
+    never unconditionally, and not when a configured entry IS the default account (B-1002).
     """
     out: list[str] = []
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = _resolved_channel_nodes(c)
-        accounts = c.get("accounts")
-        if isinstance(accounts, dict) and accounts and _channel_has_implicit_default_account(name, c):
-            nodes = [*nodes, c]
+        nodes = _live_channel_nodes(name, c)
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -5042,7 +5042,7 @@ def check_sandbox(ctx: Context) -> Finding:
 #     2026.8.1  2026.8.2  2026.9.1  2026.9.2   node:22-slim   ("Optional Node 22+ image ...")
 #     2026.9.3  2026.9.4  2026.9.5  2026.9.6   node:24.19.0-slim
 #     2026.9.7  2026.9.8  2026.9.9  2026.10.1  2026.10.2  2026.10.3  2026.10.4  2026.10.5   node:24.21.0-slim
-#     2026.10.6                                                  node:24.22.1-slim
+#     2026.10.6  2026.10.7  2026.10.8  2026.10.9                 node:24.22.1-slim
 #                          ("Optional Node 24.16+ or 26.1+ image ...")
 # (2026.9.8 was read out of the installed dist and 2026.9.9 out of its npm-cached release
 # tarball, on 2026-10-09; both declare the same constant and the same help text as 2026.9.7.
@@ -5081,7 +5081,14 @@ def check_sandbox(ctx: Context) -> Finding:
 #   release tarball, on 2026-10-23: dist/startup-state-readiness-B7uq1p70.mjs:4766 declares
 #   `const DEFAULT_NODE_WORKER_CONTAINER_IMAGE = "node:24.22.1-slim"` (the vendor's own changelog:
 #   Docker images ship Node 24.22.1, the patched runtime), the fallback is still taken only when no
-#   image is configured (:4981); the `isolation` enum and the `containerImage` schema are unchanged.)
+#   image is configured (:4981); the `isolation` enum and the `containerImage` schema are unchanged.
+# 2026.10.7, 2026.10.8 and 2026.10.9 keep `node:24.22.1-slim`, read on 2026-10-30: 2026.10.7 and
+#   2026.10.8 out of their registry tarballs (`npm pack openclaw@<ver>`, unpacked in a scratch
+#   directory, nothing installed) at startup-state-readiness-DBBJovD7.mjs:4766 and
+#   startup-state-readiness-CNiot4mX.mjs:4766; 2026.10.9 out of the installed dist at
+#   startup-state-readiness-cMqt5PKp.mjs:4766 (fallback :4981, taken only when no image is
+#   configured), with the help text at schema-CMLO0qbi.mjs:906 reading the same "Node 24.22.1+
+#   or 26.12.1+ ... default node:24.22.1-slim".)
 # The literal `node:24.19.0-slim` this check used to print unconditionally was therefore
 # already wrong on 2026.8.1-2026.9.2 and became wrong again on 2026.9.7; it will drift again
 # every few releases. So the image is looked up by the INSTALLED build, EXACT match only:
@@ -5109,6 +5116,9 @@ _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
     (2026, 10, 4): "node:24.21.0-slim",
     (2026, 10, 5): "node:24.21.0-slim",
     (2026, 10, 6): "node:24.22.1-slim",
+    (2026, 10, 7): "node:24.22.1-slim",
+    (2026, 10, 8): "node:24.22.1-slim",
+    (2026, 10, 9): "node:24.22.1-slim",
 }
 
 

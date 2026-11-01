@@ -3741,6 +3741,22 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="gateway",
     ),
+    # B398 (B-1001): a PEP 552 UNCHECKED_HASH .pyc inside a skill. `--vet` and the skill
+    # content scan prune __pycache__, and Python imports an unchecked-hash .pyc WITHOUT
+    # comparing it to the sibling source, so a skill with clean .py text could ship
+    # different compiled code. No ordinary build writes that flag (default py_compile and
+    # import write timestamp pycs), so a hit is a FAIL; an unreadable or symlinked cache is
+    # UNKNOWN. Scored: it is a deterministic FAIL-capable check.
+    CheckMeta(
+        "B398",
+        "Skill ships a hash-unchecked compiled .pyc (PEP 552) that Python runs without checking the source",
+        HIGH,
+        "hardening",
+        "Hidden Code / Malicious Skill",
+        scored=True,
+        confidence="HIGH",
+        surface="skills",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3930,6 +3946,7 @@ AST_MAP = {
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
     "B396": ("AST08",),  # node-published skill content never reaches the content scanners = Poor Scanning (cf. B16)
+    "B398": ("AST01",),  # hash-unchecked .pyc = compiled code the source scan never saw (cf. B89/B13)
     "B397": ("AST06",),  # second HTTP ingress outside gateway.auth = weak isolation (cf. B340/B358)
 }
 
@@ -4067,6 +4084,7 @@ OWASP_MAP = {
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
     "B396": ("LLM03",),  # paired-node skills outside the skill content scan = Supply Chain (cf. B386)
+    "B398": ("LLM03",),  # skill ships compiled code that bypasses source review = Supply Chain (cf. B13)
     "B397": ("LLM06",),  # an agent can publish any local port off-host behind a bearer URL = Excessive Agency (cf. B32)
 }
 

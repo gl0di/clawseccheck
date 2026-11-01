@@ -58,7 +58,7 @@ from .checks import (
     OUTBOUND_TOOL_HINTS,
     _reassembly,
     _resolve_sandbox_scope,
-    _resolved_channel_nodes,
+    _live_channel_nodes,
     _sandbox_browser_enabled,
     _sandbox_has_writable_bind,
     SENSITIVE_TOOL_HINTS,
@@ -265,7 +265,7 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
                 isinstance(node.get("groups"), dict)
                 and isinstance(node["groups"].get("*"), dict)
                 and node["groups"]["*"].get("requireMention") is True
-                for node in _resolved_channel_nodes(c)
+                for node in _live_channel_nodes(name, c)
             )
             suffix = ", any group, mention-gated" if mention else ", any group"
             reason = (
@@ -2168,8 +2168,10 @@ def _open_group_channels(cfg: dict) -> dict:
             continue
         if name in out:
             continue
-        for node in _resolved_channel_nodes(c):
-            if not isinstance(node, dict):
+        # B-1002: the live implicit default account too (`_live_channel_nodes`).
+        for node in _live_channel_nodes(name, c):
+            # a disabled account ingests nothing (the B-391 per-node skip its siblings carry)
+            if not isinstance(node, dict) or node.get("enabled") is False:
                 continue
             policy = node.get("groupPolicy")
             if policy == "open" or (name == "feishu" and policy == "allowall"):

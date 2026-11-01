@@ -128,7 +128,7 @@ before assuming a nested key is part of the contract; notably, the subject keys 
   "config_symlink_escapes_home": false,
   "config_parse_reason": null,
   "errors": [],
-  "grounding": { "grounded_max": "2026.10.6", "installed": "2026.10.6", "newer_than_grounded": false, "detail": null },
+  "grounding": { "grounded_max": "2026.10.9", "installed": "2026.10.9", "newer_than_grounded": false, "detail": null },
   "inventory": {
     "openclaw": { "status": "FAIL", "findings": ["B2"], "unassessed": 24, "not_applicable_count": 0 },
     "host": { "status": "WARN", "findings": ["B50"], "unassessed": 0, "not_applicable_count": 0 },
@@ -569,7 +569,7 @@ The seven **score-derived** keys (B-585; `capsFired` joined them in B-690) are *
 the `--vet` paths, where there is no `ScoreResult`: mode C produces no grade by construction, so `graded: false` there would
 imply a letter was withheld when none ever existed.
 
-`checksRun`/`checksTotal` count **checks**, not the analysis: 229 of 229 checks can run on
+`checksRun`/`checksTotal` count **checks**, not the analysis: 230 of 230 checks can run on
 a home whose config was never found. Read `layersRan`/`graded` for whether the analysis
 itself was complete. `score`/`grade` are deliberately never emitted here - they are `null`
 on an ungraded run, and a consumer reading a `0` where `null` was meant would rank a blind

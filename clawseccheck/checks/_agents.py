@@ -33,7 +33,10 @@ from ._shared import (
     _UNTRUSTED_INPUT_POLICIES,
     _agent_legs,
     _allow_bots_default,
+    _base_node_runs_unmerged,
     _channel_has_implicit_default_account,
+    _live_channel_nodes,
+    _resolved_account_nodes,
     _channels,
     _channels_with_context_visibility_all,
     _config_unreadable,
@@ -47,7 +50,6 @@ from ._shared import (
     _key_advice,
     _mention_gate_scopes,
     _norm_group_policy,
-    _resolved_channel_nodes,
     _surface_absent,
     _trifecta_legs,
     _unclassified_leg_verbs,
@@ -1468,7 +1470,9 @@ def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
     for name, c in _channels(cfg).items():
         if name == "defaults" or name not in reachable or not isinstance(c, dict):
             continue
-        for node in _resolved_channel_nodes(c):
+        # B-1002: the live implicit default account's own scopes too, not only the merged
+        # configured accounts (`_live_channel_nodes`).
+        for node in _live_channel_nodes(name, c):
             for label, scope in _mention_gate_scopes(node):
                 prefix = f"{name}.{label}" if label else name
                 rm = scope.get("requireMention")
@@ -1531,11 +1535,15 @@ def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
 _ALLOW_BOTS_SCHEMA_CHANNELS = ("clickclack", "discord", "feishu", "googlechat", "matrix", "slack")
 # What makes a stanza a RUNNING account, per channel, read from the same bundled metadata (the
 # credential properties, matching the ``channelEnvVars`` each plugin lists). Discord, GoogleChat
-# and Feishu are already in ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS`` / its Feishu branch and are read
-# through ``_channel_has_implicit_default_account``; the rest are listed here. A stanza with no
+# and Feishu are read through ``_channel_has_implicit_default_account`` (its key table and
+# predicate table); the rest are listed here. These keys answer "is this stanza a running
+# account", not "does the base node spawn an implicit default account" - for the latter, Slack
+# and Matrix have their own transport/auth rules in that helper. A stanza with no
 # credential (``{}``, ``{"enabled": true}``, an empty token) cannot be running, so the defaults
-# reading must not count it. The env-var route (``$SLACK_BOT_TOKEN``) is not visible from the
-# config file: the same documented false negative as the implicit default account's.
+# reading must not count it. The env-var route (``$SLACK_BOT_TOKEN``) is not read: a process
+# environment is not observable from here, and a value set in the config's own ``env`` block
+# (which OpenClaw applies to the process environment) is not consulted yet - the same
+# documented false negative as the implicit default account's.
 _ALLOW_BOTS_CREDENTIAL_KEYS = {
     "clickclack": ("token", "tokenFile"),
     "matrix": ("accessToken", "password"),
@@ -1564,28 +1572,18 @@ def _allow_bots_account_nodes(name: str, c: dict) -> list:
     """The account nodes B372 judges for channel *name*: the resolved (merged) accounts,
     plus the implicit default account when one is really running beside them.
 
-    A base node that carries a credential is a live implicit default account beside any
-    configured ``accounts`` (``_channel_has_implicit_default_account``). It is NOT a second
-    account when a configured account is itself named ``default``: the vendor's
-    ``listCombinedAccountIds`` collects the configured and implicit ids in a Set, so the two
-    are one account, whose config is the merged ``accounts.default`` node already in the
-    list (account-helpers-Bvg2s_8k.mjs, 2026.9.8). Only the EXACT id ``default`` is
-    treated as that account: whether a configured id is normalized first (``Default``, a
-    padded id) is a per-channel option that ships out of tree, and dropping the implicit
-    account on a wrong guess would turn a WARN into a PASS, so a variant keeps it. The same
-    caution keeps it when the configured ``default`` is disabled or not an object: that the
-    Set dedupe also takes the credential-carrying root down with a disabled ``default`` is
-    not confirmed, so those shapes read as they did before.
+    The add-back goes through the shared ``_base_node_runs_unmerged`` gate (B-1002), the
+    one the verdict consumers listed at ``_live_channel_nodes`` use. A configured entry that
+    IS the default account - matched per channel the way the vendor's account lookup finds it
+    (``_is_default_account_entry``: for discord/slack/feishu/googlechat ``Default`` and
+    `` default `` count, ``default!`` does not), and a disabled entry counts as well - is
+    one account with the implicit one (``listCombinedAccountIds`` builds a Set; its config
+    is the merged ``accounts.default`` node already in the list), so the root is not added
+    a second time. A non-object ``default`` entry leaves the base policy in force and keeps
+    the root. See the grounding comment above ``_base_node_runs_unmerged``.
     """
-    nodes = list(_resolved_channel_nodes(c))
-    accounts = c.get("accounts")
-    if not (isinstance(accounts, dict) and accounts):
-        return nodes
-    configured_default = accounts.get("default")
-    default_is_live_account = (
-        isinstance(configured_default, dict) and configured_default.get("enabled") is not False
-    )
-    if not default_is_live_account and _channel_has_implicit_default_account(name, c):
+    nodes = list(_resolved_account_nodes(name, c))
+    if _base_node_runs_unmerged(name, c):
         nodes.append({k: v for k, v in c.items() if k != "accounts"})
     return nodes
 
@@ -1780,7 +1778,9 @@ def check_channel_allow_bots(ctx: Context) -> Finding:
     OWN reachability (its merged dmPolicy/groupPolicy/wildcard groups, ``enabled: false``
     included): a closed account beside an open one adds nothing. A Discord base node that
     carries a ``token`` while ``accounts`` is configured is a live implicit default account
-    (``_channel_has_implicit_default_account``); Slack has no such account. Both the explicit
+    (``_channel_has_implicit_default_account``); so is a Slack base node whose transport's
+    credentials are complete (identity token plus appToken / signingSecret / relay trio, per
+    that helper's Slack rule - B-1002 corrected the earlier "Slack has none"). Both the explicit
     and the unset scan walk that SAME node list (``_allow_bots_account_nodes``), so a root
     ``allowBots: true`` beside an account that sets false reads like the same config with the
     root key omitted; and the implicit node is dropped when a configured, enabled account is
@@ -2530,9 +2530,9 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
        config the dist's own `mergeAccountConfig` produces - which is stricter than the
        `[c] + accounts` idiom this note originally proposed: a raw per-node read would
        have false-WARNed on a base-level `groups {"*"}` restricted by an account-level
-       `allowFrom` (and vice versa). One residual remains, in the missed-WARN direction:
+       `allowFrom` (and vice versa). B-1002 closed the residual this note used to carry:
        an implicit default account synthesised from channel-level credentials alongside
-       explicit `accounts` is not modelled (see `_resolved_channel_nodes`).
+       explicit `accounts` is now walked too (`_live_channel_nodes`).
     3. `groupPolicy: "disabled"` is not consulted, so a wildcard group entry on a
        channel with groups switched off can still draw a WARN.
 
@@ -2580,7 +2580,8 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
     affected: list[str] = []
     reasons: list[str] = []
     for provider, provider_cfg in providers.items():
-        for node in _resolved_channel_nodes(provider_cfg):
+        # B-1002: include the live implicit default account (`_live_channel_nodes`).
+        for node in _live_channel_nodes(provider, provider_cfg):
             gap = _wildcard_group_gap(node)
             if gap:
                 # evidence stays BARE provider names - it is consumed as an exact-

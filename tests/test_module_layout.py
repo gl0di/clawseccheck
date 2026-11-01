@@ -230,7 +230,7 @@ _EXEMPT = {
                           "own change with its own verification (byte-identical audit "
                           "output at every step, as I-022-R2 did); this entry's job is to "
                           "stop recording a non-reason as a decision.",
-    "checks/_vet.py": "~10,751 lines (restated 2026-10-13 after the empty-pool coverage note, ~16 lines; was ~10,236, restated 2026-09-26 on integration/4.3.0 after "
+    "checks/_vet.py": "~11,070 lines (restated 2026-10-30 after C-755's agent/IDE persistence binding leg, ~320 lines - its parser half went to the new writedest.py instead; was ~10,751, restated 2026-10-13 after the empty-pool coverage note, ~16 lines; was ~10,236, restated 2026-09-26 on integration/4.3.0 after "
                       "merging three fleet-FP fixes — was ~9,185: the vet-example-prohibition "
                       "round 2 scoping of the scanner-finding-line recognizer into a caller-"
                       "opt-in `scanner_finding_line_ok` parameter plus its WARN-not-PASS "
@@ -377,7 +377,16 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~7,499 lines (restated 2026-10-05, C-646 - was ~6,205, and dev was at "
+    "checks/_shared.py": "~8,260 lines (restated 2026-10-30, B-1002 - was ~7,934 on dev; the "
+                         "implicit-default-account registration for all 28 OpenClaw 2026.10.9 "
+                         "channel plugins (key table, predicate table incl. Slack's transport "
+                         "rule and Matrix's auth rule, single-account set), the per-channel "
+                         "default-account key matcher, and the gate the verdict consumers "
+                         "re-add the base node through (_base_node_runs_unmerged / "
+                         "_live_channel_nodes; ~326 net lines) are read at ten call sites in "
+                         "_shared/_config/_agents/risk, so they stay in this leaf) and before "
+                         "that "
+                         "(~7,499, restated 2026-10-05, C-646 - was ~6,205, and dev was at "
                          "~6,505 when it landed; the SecretRef / env-reference predicate block "
                          "(_credential_is_plaintext, _is_secret_ref_object, the env-block walk, "
                          "_has_env_template; ~290 net lines) is read by checks/_config.py (B1, B2) "
@@ -519,7 +528,16 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~19,024 lines (restated 2026-10-05 for C-630, +~1022: the plaintext "
+    "skillast.py": "~20,141 lines (restated 2026-10-30 for B-1005, +~1117: the JS "
+                   "credential-read-to-sink flow pass in `analyze_javascript` -- "
+                   "JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW / JS_ENV_EXFIL_FLOW, with its "
+                   "frame scanner and bounded LHS/RHS parsing. A new detector family, so the "
+                   "split was reconsidered: the pass needs only `_CRED_PATH_RE` and "
+                   "ScanBudgetExceeded from this file and could become a leaf module taking "
+                   "the regex as a parameter, but that is a module-map change (new module, "
+                   "the section 3 map, the public-API list) and is left as a follow-up rather "
+                   "than a rider on a FAIL-capable rule. Earlier restatement follows) "
+                   "~19,024 lines (restated 2026-10-05 for C-630, +~1022: the plaintext "
                    "reverse-shell detector. Two crit rules in the two analyzers this file "
                    "already owns -- SHELL_REVERSE_SHELL in `analyze_shell` (a scan with bounded "
                    "work per candidate token: quote mask, unquoted-delimiter and evidence "
@@ -836,9 +854,10 @@ _EXEMPT = {
                      "detectors from the renderer would separate each verdict from the text "
                      "that discloses its own limits, which is the pairing B-245 and B-559 "
                      "both exist to keep. A finer split is a later cycle.",
-    "dossier.py": "~1,233 lines - the vet-dossier renderer; over budget again after the "
-                  "C-633 partial-read Danger reason landed beside the C-636 own-source rework. "
-                  "Tracked debt, not a design statement.",
+    "dossier.py": "~1,251 lines - the vet-dossier renderer; over budget since the C-633 "
+                  "partial-read Danger reason and the C-636 own-source rework (~1,246), plus "
+                  "B-1004's five lines reading B42's binding.gyp marker. Tracked debt, not a "
+                  "design statement.",
     # CLAWSECCHECK-C-455: adjudication.py (2,478 lines; the _EXEMPT reason had been
     # restated three times since 2026-08-24 — ~1,247 -> ~1,570 -> ~1,920 -> ~2,433,
     # each restatement filing the split rather than doing it, and the file grew again

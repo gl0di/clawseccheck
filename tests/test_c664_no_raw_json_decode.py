@@ -308,6 +308,10 @@ _RAW_DECODE_ALLOWLIST: dict = {
     ("clawseccheck/cli.py", "_run_apply_ignore_proposals", "json.loads"):
         (1, "explicit CLI argument: the proposals file the user passed to --apply-ignore-proposals; "
             "ValueError-only handler"),
+    ("clawseccheck/gypbuild.py", "parse_gyp_build_config", "ast.literal_eval"):
+        (1, "binding.gyp is a Python-literal dict (single quotes, # comments), not JSON, so no "
+            "JSON reader applies; guarded by json_nesting_exceeds(text, MAX_GYP_NESTING) before "
+            "the call, and every failure is a disclosed 'not examined', never a clean verdict"),
     ("clawseccheck/native.py", "_parse", "json.loads"):
         (2, "vendor subprocess stdout: the OpenClaw CLI's own audit JSON, plain and last-{...} "
             "fallback; JSONDecodeError-only handler"),
@@ -528,9 +532,11 @@ def test_the_real_allowlist_is_small_and_only_names_json_loads():
     """Keep the accepted set small and named: a long allowlist is how a guard becomes a
     rubber stamp. Raising these numbers needs a reason written next to the new entry, and a
     conversion to loads_bounded / loads_shallow lowers them."""
-    assert len(_RAW_DECODE_ALLOWLIST) == 6
-    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 7
-    assert {spelling for (_rel, _fn, spelling) in _RAW_DECODE_ALLOWLIST} == {"json.loads"}
+    assert len(_RAW_DECODE_ALLOWLIST) == 7
+    assert sum(count for count, _ in _RAW_DECODE_ALLOWLIST.values()) == 8
+    assert {spelling for (_rel, _fn, spelling) in _RAW_DECODE_ALLOWLIST} == {
+        "json.loads", "ast.literal_eval",
+    }
 
 
 def test_the_real_allowlist_is_well_formed():

@@ -117,8 +117,14 @@ _CHANNELS = {
     ),
     "lexical_loose_code": (
         "vet",
-        "plugin JS/TS the Danger pass read with the five lexical rules only; bars "
+        "plugin JS/TS the Danger pass read with the eight lexical rules only; bars "
         "Persistence/Connections PASS and hedges Danger PASS",
+        None,
+    ),
+    "gyp_build_code": (
+        "vet",
+        "a B42 WARN that a binding.gyp build step runs code or could not be read; bars "
+        "Persistence/Connections PASS in the dossier",
         None,
     ),
     "bundled_contexts": ("vet", "each dispatched bundled skill's engine Context", None),

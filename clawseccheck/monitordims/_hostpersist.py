@@ -47,6 +47,21 @@ def _diff_host_persist(_hp_pair, alerts, curr, note, prev) -> None:
     Parameter names keep their original underscore-prefixed spelling for the same reason:
     a rename is an edit, and the contract for this move is that the body is unchanged.
     """
+    # C-756: macOS launchd directories exist on the audited home but are never read
+    # (hostpersist.py, C-749). The fact rides in the snapshot as a separate key that the
+    # comparison below never looks at, so drift is computed over exactly what it was.
+    # Read from the CURRENT side only and stated on every run, whatever the prior record
+    # looks like: silence on a Mac reads as "nothing to watch".
+    _cur_hp = curr.get("host_persist") if isinstance(curr, dict) else None
+    _launchd = []
+    if isinstance(_cur_hp, dict) and isinstance(_cur_hp.get("launchd_unread"), list):
+        _launchd = sorted(str(x) for x in _cur_hp["launchd_unread"])[:_DIMENSION_NAME_CAP]
+    if _launchd:
+        note(NOTE_UNDETERMINED,
+             "macOS launchd location(s) exist on this machine but this tool does not read "
+             "them, so this run cannot tell you whether any launch agent or daemon changed: "
+             "{0}. Check them yourself with 'ls -l' on those directories and "
+             "'launchctl list'.".format(", ".join(_launchd)))
     if _hp_pair is None:
         if "host_persist" in prev and "host_persist" not in curr:
             note(NOTE_UNDETERMINED,
@@ -161,8 +176,10 @@ def _diff_host_persist(_hp_pair, alerts, curr, note, prev) -> None:
                  "{0} startup/scheduling location(s) on this machine exist but could not "
                  "be read, so this run cannot tell you whether anything in them changed: "
                  "{1}. Reading a per-user crontab needs privileges this tool does not "
-                 "take; check it yourself with 'crontab -l'."
-                 .format(len(_unread), ", ".join(sorted(_unread)[:_DIMENSION_NAME_CAP])))
+                 "take; check it yourself with {2}."
+                 .format(len(_unread), ", ".join(sorted(_unread)[:_DIMENSION_NAME_CAP]),
+                         "'crontab -l'" if not _launchd else
+                         "'crontab -l' (cron) and 'launchctl list' (launchd)"))
         if _chp.get("capped"):
             note(NOTE_INSPECTION_CAPPED,
                  "There are more startup and scheduling files on this machine than can be "

@@ -43,6 +43,7 @@ _B62_HIGH_SURPRISE
 _B65_TRIGGER_RE
 _B65_WINDOW
 _B74_ROLE_BLOCK_RE
+_BASE_IS_THE_DEFAULT_ACCOUNT
 _CODEX_APPSERVER_RUNTIME_CAVEAT
 _CODEX_APPSERVER_RUNTIME_CAVEAT_STORE_READ
 _CODE_MODE_AUTO_DEFAULT_MIN
@@ -59,6 +60,8 @@ _ENV_SUBSTITUTION_REFERENCE_RE
 _EXFIL_RE
 _FS_GOVERNED_TOOL_IDS
 _FsScopeGrants
+_IMPLICIT_DEFAULT_ACCOUNT_KEYS
+_IMPLICIT_DEFAULT_ACCOUNT_PREDICATES
 _INSTALL_HEADING_RE
 _JSONL_SCAN_CAP
 _KNOWN_ADVISORIES
@@ -76,6 +79,7 @@ _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS
 _PORTALS_ABSENT_MEASURED_MIN
 _PORTALS_GROUNDED_MIN
 _SECRET_PATH_RE
+_SINGLE_ACCOUNT_CHANNELS
 _SKILL_CRIT
 _SKILL_HIGH
 _SKILL_TOOLS_LINE_RE
@@ -133,7 +137,9 @@ _b62_surprising_families
 _b63_scan
 _b737_provenance
 _b737_provenance_sentences
+_base_node_runs_unmerged
 _blank_fences
+_canonical_account_id
 _canonical_ipv4
 _channel_has_implicit_default_account
 _check_unicode_obfuscation
@@ -172,6 +178,7 @@ _in_fence
 _install_entry_findings
 _install_host_is_public_ip
 _is_code_example
+_is_default_account_entry
 _is_owner_wildcard_allow_from
 _is_posix
 _is_secret_ref_object
@@ -181,6 +188,7 @@ _layer_exec_policy
 _legacy_ssrf_alias_startup_blocked
 _levenshtein
 _literal_key_functional
+_live_channel_nodes
 _local_sink_exfil_hits
 _loopback_ip
 _mcp_fs_root_is_broad
@@ -216,6 +224,7 @@ _pos_in_skill_md_section
 _prose_binding
 _read_jsonl_tail
 _reassembly
+_resolved_account_nodes
 _resolved_channel_nodes
 _retired_key_note
 _runtime_fetch_matches

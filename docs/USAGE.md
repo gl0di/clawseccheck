@@ -2011,10 +2011,25 @@ python3 audit.py --log audit.log            # also write log to a local file
   `~/.openclaw/plugin-skills/`) and embedded MCP specs to the MCP engine. Python the plugin
   ships outside its declared skills gets the same AST/taint pass a bundled skill's does, so a
   remote code loader at the plugin root is convicted exactly as it is one directory lower;
-  runtime JS/TS gets five lexical rules only (obfuscated eval, remote fetch-then-eval, dynamic
-  `child_process` command, dynamic `require`, native `dlopen`) - not the signature scan a
-  bundled skill's files get, so a pipe-to-shell string, a config or credential read or an
-  outbound POST in loose plugin JS/TS is not checked. The report names those files in its
+  runtime JS/TS gets eight lexical rules only (obfuscated eval, remote fetch-then-eval, dynamic
+  `child_process` command, dynamic `require`, native `dlopen`, a value read from a private key,
+  raw credentials or `/proc/<pid>/environ` reaching a network call as read, a token/config
+  credential file or a derived secret reaching one, and `process.env` serialised whole by
+  `JSON.stringify`, `Object.entries`/`values` or `{...process.env}`) - not the signature scan a
+  bundled skill's files get, so a pipe-to-shell string, a config read, or a credential read or
+  outbound POST the lexical pass cannot trace in loose plugin JS/TS is not checked. The
+  credential-flow rules are lexical and bounded: they do not follow a path assembled segment
+  by segment (`join(homedir(), '.aws', 'credentials')`) or spliced (`'/pr' + 'oc/...'`), a
+  value returned from a function, an aliased `readFileSync`/`fetch`, a value stored in an
+  object field, `XMLHttpRequest`/`undici`/`got`/`axios.create` clients, a stream's
+  `.on('data')` handler, a shell command that reads the file itself
+  (`execSync('curl -d @/proc/1/environ ...')`), separate `process.env.<KEY>` reads, or
+  `.env`, `.git-credentials` and `.config/gh/hosts.yml`, which are not on the credential-path
+  list. A signing client that reads a credential file and sends a derived signature (an AWS
+  SigV4-style request), a hash, fingerprint or extracted field of such a file, and a process
+  manager sending a process environment to its own socket are shape-identical to
+  exfiltration and are reported as theft (a FAIL when a skill is vetted); the finding's
+  advice says so. The report names those files in its
   coverage notes whether or not `package.json` declares `openclaw.extensions`, shell files
   (`.sh`, `.bash`, `.zsh`) outside a declared skill are named as not read, and the Danger axis
   says so instead of claiming a clean malware scan. Any Python file that cannot be read, fails
@@ -2227,8 +2242,8 @@ python3 audit.py --log audit.log            # also write log to a local file
   when it, too, has to leave sinks out; it narrows that gap substantially rather than closing
   it outright.
 - **`--no-deptree`** skips the OpenClaw dependency-tree walk that feeds **B349** (a package in
-  `node_modules` whose install-time target - a lifecycle hook or a `binding.gyp`
-  command-expansion - carries a code-execution signal). The walk is on by default, read-only
+  `node_modules` whose install-time target - a lifecycle hook, or a `binding.gyp`
+  command-expansion or build step - carries a code-execution signal). The walk is on by default, read-only
   and offline, but it traverses the whole installed tree and reads outside your OpenClaw home
   (see "Full read scope" above), so this is the escape hatch on a very large tree or when you
   want the run confined. `--no-host` and `--no-sockets` skip host-monitor detection and the
@@ -2573,7 +2588,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested - so it is: 1,117 test files and 39,187
+A security tool should be heavily tested - so it is: 1,117 test files and 39,923
 tests, run in CI on **Linux (Python 3.12 and 3.14) and macOS (Python 3.12)** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

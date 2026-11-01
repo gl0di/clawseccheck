@@ -41,7 +41,7 @@ from .configloader import (
     loads_bounded as _loads_bounded,
     loads_shallow as _loads_shallow,
 )
-from .safeio import walk_dir_safely, is_safe_tar_member
+from .safeio import walk_dir_safely, is_safe_tar_member, pyc_header_flags, PYC_UNCHECKED_HASH_FLAGS, PYC_HEADER_LEN
 from .skilldiscovery import (
     config_extra_skill_dirs as _config_extra_skill_dirs,
     config_plugin_load_paths as _config_plugin_load_paths,
@@ -1227,6 +1227,11 @@ class Context:
     # the very skill whose payload directory the same report said it never read. Keyed by
     # skill name so a per-skill consumer can take exactly its own.
     skill_coverage_gaps: dict = field(default_factory=dict)
+    # B-1001 / B398: str(skill dir) -> sorted relpaths of PEP 552 UNCHECKED_HASH .pyc files, and
+    # str(skill dir) -> reasons the pyc scan could not be completed (symlink, unreadable, cap).
+    # The ordinary skill walk prunes __pycache__, so these are gathered by `_scan_skill_pycs`.
+    skill_unchecked_pycs: dict = field(default_factory=dict)
+    skill_pyc_gaps: dict = field(default_factory=dict)
     # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
     # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
     # found - this skill will not appear to the agent"), which is a false statement about a
@@ -1940,15 +1945,41 @@ def check_polyglot(filename: str, format_name: str | None, data: bytes) -> str |
     return None
 
 
+def _inner_raw_name(raw_member_name: str | None, file_relpath: str, ext: str) -> str:
+    """Real (uncapped) name of the single stream inside a .gz/.bz2/.xz wrapper.
+
+    Derived from the wrapper's REAL name when it is an archive member (its display name is
+    truncated past the cap); a wrapper without the expected suffix has no knowable inner
+    name, which yields one that never ends in .pyc.
+    """
+    raw = raw_member_name if raw_member_name is not None else file_relpath
+    # Any known compression suffix, not only the one this branch sniffed: a wrapper named
+    # x.pyc.gz whose bytes are really xz is still named x.pyc by its author.
+    for suffix in (".gzip", ".gz", ".bz2", ".xz"):
+        if raw.lower().endswith(suffix):
+            return raw[: -len(suffix)]
+    return raw + "::extracted"
+
+
 def decompress_and_classify(
     ctx: Context | None,
     skill_dir: Path,
     file_bytes: bytes,
     file_relpath: str,
     depth: int,
-    archive_stats: dict
+    archive_stats: dict,
+    raw_member_name: str | None = None,
 ) -> list[tuple[str, bytes, str, str | None]]:
-    """Recursively decompress and classify files from an archive."""
+    """Recursively decompress and classify files from an archive.
+
+    `raw_member_name` is the REAL (uncapped) name of an archive member; None for the
+    top-level file. B398 keys on it, before any content classification, so neither a
+    long name (the display name is truncated) nor a polyglot body can hide a .pyc.
+    """
+    if raw_member_name is not None:
+        _note_archive_member_pyc(
+            ctx, archive_stats.get("pyc_key") or str(skill_dir), file_relpath,
+            raw_member_name, file_bytes)
     try:
         classification, format_name = classify_bytes(file_bytes, len(file_bytes))
     except Exception as e:
@@ -2059,7 +2090,9 @@ def decompress_and_classify(
                             return [(file_relpath, file_bytes, classification, format_name)]
 
                     sub_rel = f"{file_relpath}::{member_disp}"
-                    sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+                    sub_results = decompress_and_classify(
+                        ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                        raw_member_name=member_name)
                     results.extend(sub_results)
 
                 if ctx is not None:
@@ -2161,7 +2194,9 @@ def decompress_and_classify(
                             return [(file_relpath, file_bytes, classification, format_name)]
                             
                     sub_rel = f"{file_relpath}::{member_disp}"
-                    sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+                    sub_results = decompress_and_classify(
+                        ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                        raw_member_name=member.name)
                     results.extend(sub_results)
                 if ctx is not None:
                     ctx.file_manifest[file_relpath] = "decoded"
@@ -2213,7 +2248,9 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".gz") else f"{file_relpath}::extracted"
-            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            sub_results = decompress_and_classify(
+                ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                raw_member_name=_inner_raw_name(raw_member_name, file_relpath, ".gz"))
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2265,7 +2302,9 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
             sub_rel = file_relpath[:-4] if file_relpath.lower().endswith(".bz2") else f"{file_relpath}::extracted"
-            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            sub_results = decompress_and_classify(
+                ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                raw_member_name=_inner_raw_name(raw_member_name, file_relpath, ".bz2"))
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2317,7 +2356,9 @@ def decompress_and_classify(
                     return [(file_relpath, file_bytes, classification, format_name)]
 
             sub_rel = file_relpath[:-3] if file_relpath.lower().endswith(".xz") else f"{file_relpath}::extracted"
-            sub_results = decompress_and_classify(ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats)
+            sub_results = decompress_and_classify(
+                ctx, skill_dir, member_bytes, sub_rel, depth + 1, archive_stats,
+                raw_member_name=_inner_raw_name(raw_member_name, file_relpath, ".xz"))
             results.extend(sub_results)
             if ctx is not None:
                 ctx.file_manifest[file_relpath] = "decoded"
@@ -2528,6 +2569,130 @@ def _media_is_well_terminated(fmt: str, data: bytes) -> bool:
     return end is not None and end == len(data)
 
 
+_PYC_SCAN_MAX_DIRS = 20000
+_PYC_SCAN_MAX_PYCS = 5000
+# Python needs a full 16-byte header (magic, flags, 8 bytes of mtime/size or source hash)
+# plus a code object to load a .pyc; a shorter file is inert and is not classified.
+_PYC_MIN_LOADABLE = 16
+
+
+def _note_pyc_gap(ctx, skill_dir: Path, msg: str) -> None:
+    """B398: record a .pyc the scan could not classify, on every channel a gap must reach.
+
+    `limit_hits` is what `dossier._danger_coverage_gap` folds into the verdict floor (so a
+    gap can never read INSTALL), `skill_pyc_gaps` feeds B398's own UNKNOWN, and
+    `_note_skill_gap` keeps the per-skill attribution the inventory reads.
+    """
+    key = str(skill_dir)
+    ctx.skill_pyc_gaps.setdefault(key, []).append(msg)
+    note_limit(ctx.limit_hits, LIMIT_DOMAIN_SKILL, f"B398: {msg}")
+    _note_skill_gap(ctx, skill_dir, f"B398: {msg}")
+
+
+def _classify_pyc_header(header: bytes, total_size: int) -> bool:
+    """True iff *header* (first bytes of a .pyc of *total_size* bytes) is unchecked-hash.
+
+    Files shorter than a loadable header are inert and never convict.
+    """
+    if total_size < _PYC_MIN_LOADABLE or len(header) < PYC_HEADER_LEN:
+        return False
+    return int.from_bytes(header[4:8], "little") == PYC_UNCHECKED_HASH_FLAGS
+
+
+def _note_archive_member_pyc(
+    ctx, key: str, member_rel: str, raw_name: str, data: bytes
+) -> None:
+    """B398: classify a .pyc archive member (header only; the bytes are never unmarshalled).
+
+    Called from `decompress_and_classify` for members already read through the bounded
+    archive reader, so its size / member / ratio caps (each of which records its own
+    `limit_hits` entry) apply unchanged.
+    """
+    if ctx is None or not raw_name.lower().endswith(".pyc"):
+        return
+    if _classify_pyc_header(data[:PYC_HEADER_LEN], len(data)):
+        lst = ctx.skill_unchecked_pycs.setdefault(key, [])
+        if member_rel not in lst:
+            lst.append(member_rel)
+            lst.sort()
+
+
+def _scan_skill_pycs(base_dir: Path, ctx) -> None:
+    """B-1001 / B398: find PEP 552 unchecked-hash ``.pyc`` files under a skill directory.
+
+    `walk_dir_safely(exclude_pycache=True)` never enters ``__pycache__``, so a skill could
+    ship clean sources plus a hash-unchecked ``.pyc`` that Python imports WITHOUT comparing
+    it to the source. This reads ONLY the 8-byte header of each ``.pyc`` (never the code
+    object, never unmarshalled/executed) and never follows a symlink: a symlinked
+    ``__pycache__`` or ``.pyc`` is recorded as a gap (unknown), not as clean. Listing is
+    bounded by a COUNT of directories and of .pyc files; hitting a cap or an OSError is a
+    gap too. Bare legacy ``.pyc`` files outside a ``__pycache__`` are importable as well,
+    so they are classified the same way, and the suffix match is case-insensitive.
+    """
+    found: list[str] = []
+
+    def _rel(p: str) -> str:
+        try:
+            return os.path.relpath(p, base_dir)
+        except ValueError:
+            return p
+
+    def _gap(msg: str) -> None:
+        _note_pyc_gap(ctx, base_dir, msg)
+
+    def _onerr(exc: OSError) -> None:
+        _gap(f"{_rel(getattr(exc, 'filename', None) or str(base_dir))}: could not be listed")
+
+    dirs_seen = 0
+    pycs_seen = 0
+    capped = None
+    for root, dirnames, filenames in os.walk(base_dir, followlinks=False, onerror=_onerr):
+        dirs_seen += 1
+        if dirs_seen > _PYC_SCAN_MAX_DIRS:
+            capped = f"directory count cap ({_PYC_SCAN_MAX_DIRS})"
+            break
+        keep = []
+        for d in dirnames:
+            full = os.path.join(root, d)
+            if os.path.islink(full):
+                if d == "__pycache__":
+                    _gap(f"{_rel(full)}: symlinked __pycache__ not followed")
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for fn in filenames:
+            if not fn.lower().endswith(".pyc"):
+                continue
+            full = os.path.join(root, fn)
+            pycs_seen += 1
+            if pycs_seen > _PYC_SCAN_MAX_PYCS:
+                capped = f".pyc file count cap ({_PYC_SCAN_MAX_PYCS})"
+                break
+            try:
+                st = os.lstat(full)
+            except OSError as exc:
+                _gap(f"{_rel(full)}: {exc.strerror or exc}")
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                _gap(f"{_rel(full)}: symlinked .pyc not followed")
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if st.st_size < _PYC_MIN_LOADABLE:
+                continue  # too short for Python to load at all: inert
+            flags = pyc_header_flags(Path(full))
+            if flags is None:
+                _gap(f"{_rel(full)}: .pyc header could not be read")
+            elif flags == PYC_UNCHECKED_HASH_FLAGS:
+                found.append(_rel(full).replace(os.sep, "/"))
+        if capped:
+            break
+    if capped:
+        _gap(f"pyc scan stopped at its {capped}; the rest of the skill was not looked at")
+    if found:
+        ctx.skill_unchecked_pycs[str(base_dir)] = sorted(found)
+
+
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
     """Collect (and archive-decompress/classify) the files that make up one skill.
 
@@ -2584,6 +2749,8 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             base_dir, exclude_pycache=True, exclude_vcs=True, max_files=_MAX_FILES_PER_SKILL,
             skips=_skips, capped=_capped, unreadable_dirs=_unreadable_dirs,
         )
+        if ctx is not None:
+            _scan_skill_pycs(base_dir, ctx)
         if ctx is not None and _capped:
             # The walk stopped at _MAX_FILES_PER_SKILL and the rest of the skill was never
             # looked at. `walk_dir_safely` has always offered this sentinel -- its own
@@ -2842,6 +3009,7 @@ def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dic
             "total_files_count": 0,
             "cumulative_decompressed_size": 0,
             "compressed_size": len(file_bytes),
+            "pyc_key": str(skill_dir),  # B398: attribute archive-member .pycs to the skill itself
         }
         
         # Recursively decompress and classify

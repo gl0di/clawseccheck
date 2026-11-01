@@ -432,7 +432,17 @@ def self_reported_version(config: "dict | None") -> str:
 # path (66 of 205 located, both controls run); one vendor state table was added
 # (node_worker_launch_boots), the state-DB drift gate is satisfied for all 16 readers; the repository
 # advisory endpoint lists the same 722 advisories.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 6)
+# Raised to 2026.10.9 on 2026-10-30 (C-760), a three-release hop (10.7, 10.8, 10.9) with no triage note
+# for 10.7 or 10.8 -- the line delta 10.6 -> 10.9 (1,745 / 4,520 lines) was read in full. The installed
+# tree is the release build; the config schema is identical (5,517 paths, +0/-0, every hop); the
+# 773-row harness battery moved no answer by label on 10.9 and, run out of the tarballs, on 10.7 and
+# 10.8; the retired-config finder bundle is byte-identical 10.6 = 10.9 and the 1,063-row battery did
+# not move; the dist-verified paths, state DDL (15 tables), vendor table set (133) and DM-policy
+# manifest differ by stamp and bundle name only; the resolved-default oracle located 66 of 205 paths
+# with 0 flipped (both controls run); the B391 default worker image is unchanged (node:24.22.1-slim,
+# rows added for 10.7-10.9); the state-DB drift gate is satisfied for all 16 readers; the
+# repository advisory endpoint lists nothing newer than 2026-09-11.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 9)
 
 
 def grounding_gap(installed_version: "str | None"):

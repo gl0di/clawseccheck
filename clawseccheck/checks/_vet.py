@@ -58,6 +58,15 @@ from ..skillast import _sh_loop_join_continuations as _sh_join_continuations
 from ..skillast import _sh_resolve_var_literal
 from ..skillast import simulate_effects as _simulate_effects
 from ..shippedexec import ShippedArtifact as _ShippedArtifact
+from ..writedest import (  # C-755: the parser half of the binding leg
+    mask_code as _c755_mask,
+    stmt_end as _c755_stmt_end,
+    sh_commands as _c755_sh_words,
+    dest_spans as _c755_dest_spans,
+    bracket_table as _c755_bracket_table,
+    unquote as _c755_unquote,
+    SPAN as _C755_SPAN,
+)
 from ..scanbudget import (
     DEFAULT_VET_TARGET_BUDGET_S,
     ScanBudgetExceeded,
@@ -145,6 +154,7 @@ from ._content import (
     check_deaddrop_resolver,
     check_dependency_confusion,
     check_dormant_capability,
+    check_unchecked_hash_pyc,
     check_dotfile_exfil_directive,
     check_dynamic_dispatch_obfuscation,
     check_event_hook_interceptor,
@@ -2218,6 +2228,411 @@ def _var_indirected_agent_file_hit(
                     fname,
                 )
     return None
+
+
+# C-755: the window detector above pairs a filename with a write verb by CHARACTER
+# DISTANCE (_PERSIST_WINDOW), so the same openclaw.json write that FAILed as a compact
+# dict literal PASSed once the literal was spaced out (pinned in
+# tests/test_c748_agent_config_persistence_measured.py). This leg BINDS a target path to
+# a write DESTINATION instead, in a skill's code files only (by extension; SKILL.md and
+# other prose files are never read here):
+#   * comments, Python docstrings and shell heredoc bodies are masked first, so a
+#     documented command ("# cp handler.js ~/.openclaw/hooks/...") is not a write;
+#   * a destination is the destination ARGUMENT of a write/copy/mkdir call by position,
+#     the receiver of a pathlib-style write method, or - in a shell file at command
+#     position, or inside the string / argv list handed to os.system, subprocess.*,
+#     child_process exec/spawn - a redirect target or the destination word of
+#     cp/mv/install/ln/rsync/tee/touch/mkdir/sed -i/dd of=. A command printed by
+#     echo/print/console.log is never parsed as one;
+#   * a destination may name the path through a variable: the LAST assignment of that
+#     variable before the write is followed (to depth 4), through whole-value uses only
+#     (`d`, `d / "x"`, `path.join(d, ...)`, `${d}`, `"$D/x"`) - never through an
+#     attribute (`d.name`, `d.length`; `.parent` stays inside the same tree and is kept).
+# The window leg above still runs unchanged (and still over-fires on a script that
+# reads one of its files and writes something else); this leg only adds hits.
+#
+# Targets, grounded on the installed OpenClaw dist (2026.10.9):
+#   * `<stateDir>/hooks/` - the MANAGED hook directory (docs/automation/hooks/
+#     configuration.md "Hook discovery"; code `path.join(CONFIG_DIR, "hooks")`). A hook
+#     there can replace a bundled or plugin hook of the same name; whether it LOADS
+#     depends on the hook selection config (named entries are an allowlist; open-ended
+#     discovery needs the master flag with no names, extraDirs or a tracked install), so
+#     the finding claims a planted persistence/override hook, never that it runs.
+#   * `<stateDir>/skills/` - the managed skills dir (`path.join(resolveConfigDir(),
+#     "skills")`). WARN only: an installer does the same; the skill's own directory
+#     (the scanned directory's basename - never the attacker-chosen frontmatter name)
+#     is exempt.
+#   * `~/.openclaw-<profile>/...` - `--profile <name>` uses `~/.openclaw-<name>` as its
+#     state dir (docs/gateway/config-gateway.md).
+#   * `.vscode/tasks.json` - FAIL only when VS Code's `runOn: folderOpen` trigger is in
+#     the CONTENT written (the data argument, the variable/literal it names, or the
+#     shipped file copied in); WARN when that content cannot be resolved but the trigger
+#     appears elsewhere in the skill's non-prose files; quiet otherwise.
+# Limits (pinned in tests/test_c755_agent_ide_persistence.py): a path built by string
+# concatenation that splits a segment, or decoded at runtime; a trigger value built at
+# runtime; a path from a state-dir override variable; a bare `run(...)` imported from
+# subprocess; a write through a file handle opened elsewhere than a `with ... as f`.
+_C755_CODE_EXTS = (".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx",
+                   ".sh", ".bash", ".zsh")
+_C755_SH_EXTS = (".sh", ".bash", ".zsh")
+_C755_GLUE = r"""(?:["'`]?\s*[/,+]\s*["'`]?)"""
+_C755_STATE = r"\.openclaw(?:-[A-Za-z0-9_][\w-]{0,40})?"
+_C755_TARGETS = (
+    ("agent_file", _AGENT_CONTEXT_FILES_RE),
+    ("agent_file", re.compile(rf"\.claude{_C755_GLUE}settings(?:\.local)?\.json\b", re.I)),
+    ("hook", re.compile(rf"{_C755_STATE}{_C755_GLUE}hooks(?![\w.-])")),
+    ("skills", re.compile(rf"{_C755_STATE}{_C755_GLUE}skills(?![\w.-])")),
+    ("tasks", re.compile(rf"\.vscode{_C755_GLUE}tasks\.json\b")),
+)
+_C755_FOLDER_OPEN_RE = re.compile(r"""\brunOn\b["'`]?\s*[:=]\s*["'`]folderOpen["'`]""")
+_C755_ASSIGN_RE = re.compile(
+    r"(?:^|;)[ \t]*(?:export\s+|const\s+|let\s+|var\s+|local\s+|readonly\s+|declare\s+)?"
+    r"(?P<var>[A-Za-z_]\w*)[ \t]*(?::[^=\n;]{0,60})?=(?![=>~])",
+    re.M,
+)
+# Shell: `VAR=value` with no spaces, tilde values allowed (`HOOKS=~/.openclaw/hooks`),
+# at the start of a command (after `;`, `&&`, `then`, `do`, ...).
+_C755_SH_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|]|\b(?:then|do|else)\s)[ \t]*(?:export\s+|local\s+|readonly\s+|"
+    r"declare\s+(?:-\w+\s+)?)?(?P<var>[A-Za-z_]\w*)=(?!=)",
+    re.M,
+)
+# A file worth parsing names one of these somewhere (a target may be split across a
+# variable and a literal tail, so the whole target need not appear in one place).
+_C755_PREFILTER_RE = re.compile(r"\.(?:openclaw|claude|vscode)\b")
+_C755_TEMP_RE = re.compile(
+    r"\b(?:tmp_path|tmpdir|mkdtemp|mktemp|TemporaryDirectory|gettempdir)\b|"
+    r"os\.tmpdir\s*\(|(?<![\w.])/(?:var/)?tmp/"
+)
+_C755_HOME_RE = re.compile(r"~|\bhome|\bHOME\b|USERPROFILE", re.I)
+_C755_IDENT_RE = re.compile(r"(?<![\w$.])([A-Za-z_]\w*)(?![\w$])")
+_C755_SHVAR_RE = re.compile(r"\$\{?([A-Za-z_]\w*)")
+# An identifier followed by attribute access (except `.parent`), a call or a subscript
+# is not the path value itself.
+_C755_NOT_WHOLE_RE = re.compile(r"\s*(?:\.(?!\s*parent\b)\s*[A-Za-z_]|\(|\[)")
+_C755_CONTENT_RE = re.compile(r"[{\[]")  # written data that is a JSON/object literal
+_C755_MAX_DEPTH = 4
+
+
+_C755_PATH_CALL = (r"(?:os\.path\.join|posixpath\.join|ntpath\.join|path\.join|path\.resolve|"
+                   r"pathlib\.Path|PurePosixPath|PurePath|Path)")
+# The variable IS the destination, or the head of a path inside it (C-135 round 2):
+# `V`, `V.parent`, `V / ...`, `V + '/...'`, `join(V, ...)`, `Path(V)...`, `V.joinpath(...)`.
+# A suffix glued on (`V + '.bak'`, `f'{V}.bak'`), an operator expansion (`${f#$V/}`) or V
+# as the argument of another call (basename/relpath) is a DIFFERENT path.
+_C755_HEAD_VAR_RE = re.compile(
+    rf"(?:{_C755_PATH_CALL}\s*\(\s*(?P<c>[A-Za-z_]\w*)\s*(?=[,)])"
+    r"|(?P<v>[A-Za-z_]\w*)(?:\s*\.\s*parent\b)?\s*(?:(?P<op>/|\+)|\.\s*joinpath\s*\(|$))"
+)
+_C755_SH_HEAD_RE = re.compile(r"""^["']?\$(?:\{(?P<b>[A-Za-z_]\w*)\}|(?P<v>[A-Za-z_]\w*))["']?(?=/|$)""")
+_C755_HOLE_HEAD_RE = re.compile(r"""^(?:\$\{|\{)(?P<v>[A-Za-z_]\w*)\}(?=/)""")
+_C755_STR_RE = re.compile(r"""[rRbBuUfF]{0,2}("|'|`)((?:\\.|(?!\1).)*)\1""", re.S)
+_C755_PY_DEF_RE = re.compile(r"(?m)^([ \t]*)(?:async\s+)?def\s+\w+\s*\(")
+_C755_PY_LAMBDA_RE = re.compile(r"\blambda\b([^:\n]*):")
+_C755_JS_FUNC_RE = re.compile(r"\bfunction\b\s*\*?\s*[\w$]*\s*\(")
+_C755_JS_ARROW_RE = re.compile(r"(?:\(([^()\n]*)\)|\b([A-Za-z_$][\w$]*))\s*=>")
+_C755_PARAM_NAME_RE = re.compile(r"^[\s*.]*([A-Za-z_$][\w$]*)")
+
+
+class _C755File:
+    """One code file: masked views, destinations, assignments, function scopes, and a
+    memoized resolution of each assignment's path value (resolved at most once)."""
+
+    def __init__(self, body: str, lang: str):
+        self.lang = lang
+        self.raw = body  # data spans (a heredoc body is masked) are read from here
+        self.masked, self.code, heredocs = _c755_mask(body, lang)
+        self.dests = _c755_dest_spans(self.masked, self.code, lang, heredocs)
+        self.assign: dict[str, list[tuple[int, int, int]]] = {}  # in source order
+        rx = _C755_SH_ASSIGN_RE if lang == "sh" else _C755_ASSIGN_RE
+        for am in rx.finditer(self.code if lang != "sh" else self.masked):
+            s = am.end()
+            e = _c755_stmt_end(self.masked, s) if lang != "sh" else self._sh_value_end(s)
+            self.assign.setdefault(am.group("var"), []).append((am.start("var"), s, e))
+        self._memo: dict[tuple[str, int], tuple[str, str]] = {}
+        self.scopes: dict[str, list[tuple[int, int]]] = {}  # param name -> bodies
+        for bs, be, params in (self._function_scopes() if lang != "sh" else []):
+            for p in params:
+                self.scopes.setdefault(p, []).append((bs, be))
+        # data-span references (any whole-value use), indexed once per file
+        self.reflist: list[tuple[int, str, int]] = []  # (pos, name, attribute position)
+        if lang == "sh":
+            for m in _C755_SHVAR_RE.finditer(self.masked):
+                if m.group(1) in self.assign:
+                    self.reflist.append((m.start(), m.group(1), len(body)))
+        else:
+            for m in _C755_IDENT_RE.finditer(self.code):
+                if m.group(1) not in self.assign:
+                    continue
+                nw = _C755_NOT_WHOLE_RE.match(self.code, m.end())
+                at = len(body) if nw is None else m.end() + len(nw.group(0)) - len(
+                    nw.group(0).lstrip())
+                self.reflist.append((m.start(), m.group(1), at))
+        self.refstarts = [r[0] for r in self.reflist]
+
+    # -- scopes ---------------------------------------------------------------------
+    def _params(self, s: int, e: int) -> set[str]:
+        out = set()
+        for p in self.code[s:e].split(","):
+            m = _C755_PARAM_NAME_RE.match(p)
+            if m:
+                out.add(m.group(1))
+        return out
+
+    def _function_scopes(self) -> list[tuple[int, int, set[str]]]:
+        """(body start, body end, parameter names) of each function / lambda / arrow.
+        A parameter shadows a same-named outer variable inside that body."""
+        code, n = self.code, len(self.code)
+        pairs = _c755_bracket_table(code)
+        scopes: list[tuple[int, int, set[str]]] = []
+        if self.lang == "py":
+            for m in _C755_PY_DEF_RE.finditer(code):
+                op = m.end() - 1
+                close = pairs.get(op, (n, []))[0]
+                indent = len(m.group(1).expandtabs())
+                ls = code.find("\n", close)
+                end = n
+                k = ls + 1 if ls != -1 else n
+                while k < n:
+                    le = code.find("\n", k)
+                    le = n if le == -1 else le
+                    line = code[k:le]
+                    if line.strip() and len(line.expandtabs()) - len(line.expandtabs().lstrip()) <= indent:
+                        end = k
+                        break
+                    k = le + 1
+                scopes.append((close, end, self._params(op + 1, close)))
+            for m in _C755_PY_LAMBDA_RE.finditer(code):
+                end = _c755_stmt_end(self.masked, m.end())
+                scopes.append((m.end(), end, self._params(m.start(1), m.end(1))))
+        else:
+            for m in _C755_JS_FUNC_RE.finditer(code):
+                op = m.end() - 1
+                close = pairs.get(op, (n, []))[0]
+                brace = code.find("{", close)
+                if brace != -1 and brace in pairs:
+                    scopes.append((brace, pairs[brace][0], self._params(op + 1, close)))
+            for m in _C755_JS_ARROW_RE.finditer(code):
+                params = self._params(m.start(1), m.end(1)) if m.group(1) is not None else {m.group(2)}
+                k = m.end()
+                while k < n and code[k] in " \t":
+                    k += 1
+                end = pairs[k][0] if k < n and code[k] == "{" and k in pairs else \
+                    _c755_stmt_end(self.masked, k)
+                scopes.append((k, end, params))
+        return scopes
+
+    def _last_assign(self, var: str, pos: int):
+        """The last assignment of *var* before *pos* in the scope that owns the name at
+        *pos*: inside a function that takes *var* as a parameter, only assignments in
+        that body count (the parameter itself is never resolved)."""
+        lst = self.assign.get(var)
+        if not lst:
+            return None
+        lo = -1
+        for s, e in self.scopes.get(var, ()):
+            if s <= pos < e:
+                lo = max(lo, s)
+        k = bisect.bisect_left(lst, (pos,)) - 1
+        if k < 0 or lst[k][0] < lo:
+            return None
+        return lst[k]
+
+    # -- path values ----------------------------------------------------------------
+    def _sh_value_end(self, s: int) -> int:
+        words = _c755_sh_words(self.masked, s, min(len(self.masked), s + _C755_SPAN))
+        if words and words[0][0]:
+            return words[0][0][0][1]
+        nl = self.masked.find("\n", s)
+        return len(self.masked) if nl == -1 else nl
+
+    def _value(self, var: str, pos: int, depth: int) -> tuple[str, str]:
+        """(normalised path, raw text chain) of *var*'s value at *pos*."""
+        a = self._last_assign(var, pos)
+        if a is None or depth >= _C755_MAX_DEPTH:
+            return "", ""
+        key = (var, a[0])
+        if key not in self._memo:
+            self._memo[key] = ("", "")  # cycle guard
+            self._memo[key] = self.path(a[1], a[2], depth + 1)
+        return self._memo[key]
+
+    def _norm_word(self, raw: str, pos: int, depth: int) -> tuple[str, str]:
+        """A shell word (or a word inside a string handed to a shell): quotes dropped; a
+        leading `$V` / `${V}` / f-string `{V}` followed by `/` (or ending the word) takes
+        V's value; any other expansion is dropped - `$V.bak`, `${f#$V/}` and
+        `$(basename "$V")` are different paths, not V."""
+        m = _C755_SH_HEAD_RE.match(raw) or _C755_HOLE_HEAD_RE.match(raw)
+        val, chain, rest = "", "", raw
+        if m:
+            val, chain = self._value(m.group("v") or m.groupdict().get("b"), pos, depth)
+            rest = raw[m.end():]
+        rest = re.sub(r"\$\([^)]*\)?|\$\{[^}]*\}?|\$\w+|\{\w+\}|[\"'`]", "", rest)
+        return val + rest, chain + raw
+
+    def _norm_code(self, s: int, e: int, depth: int) -> str:
+        """Python / JS expression: its string literals' contents joined with `/`; a
+        template / f-string hole at a literal's start followed by `/` takes the value
+        of the variable it names, any other hole is dropped."""
+        parts = []
+        for m in _C755_STR_RE.finditer(self.masked, s, e):
+            content = m.group(2)
+            hm = _C755_HOLE_HEAD_RE.match(content)
+            if hm:
+                content = self._value(hm.group("v"), m.start(), depth)[0] + content[hm.end():]
+            parts.append(re.sub(r"\$?\{[^{}]*\}", "", content))
+        return "/".join(parts)
+
+    def path(self, s: int, e: int, depth: int = 0, shell_word: bool = False) -> tuple[str, str]:
+        """(normalised path, raw text chain) that a destination / assignment span names."""
+        while s < e and self.masked[s] in " \t\n":
+            s += 1
+        while e > s and self.masked[e - 1] in " \t\n;":
+            e -= 1
+        raw = self.masked[s:e]
+        if self.lang == "sh" or shell_word:
+            return self._norm_word(raw, s, depth)
+        while s < e and self.masked[s] == "(":
+            s += 1
+        hm = _C755_HEAD_VAR_RE.match(self.code, s, e)
+        if hm:
+            var = hm.group("c") or hm.group("v")
+            ok = bool(hm.group("c")) or hm.group("op") == "/" or hm.end() == e or \
+                self.code[hm.end() - 1:hm.end()] == "("
+            if hm.group("op") == "+":
+                ok = bool(re.match(r"""\s*[fFrR]?["'`](?:/|\\|\$\{|\{)""", self.masked[hm.end():e]))
+            if ok:
+                val, chain = self._value(var, s, depth)
+                return val + "/" + self._norm_code(hm.end(), e, depth), chain + raw
+        return self._norm_code(s, e, depth), raw
+
+    def refs(self, s: int, e: int) -> set[tuple[str, int]]:
+        """Whole-value references in a DATA span (what is written, not where)."""
+        found: set[tuple[str, int]] = set()
+        k = bisect.bisect_left(self.refstarts, s)
+        while k < len(self.reflist) and self.reflist[k][0] < e:
+            pos, name, at = self.reflist[k]
+            if at >= e:
+                found.add((name, pos))
+            k += 1
+        return found
+
+    def text_with(self, spans, rx, depth: int = 0) -> bool:  # data spans only - few
+        """True when *rx* matches inside any span, or the last value of a whole-value
+        variable it names."""
+        for s, e in spans:
+            if rx.search(self.raw, s, e):
+                return True
+            if depth < _C755_MAX_DEPTH:
+                for var, pos in self.refs(s, e):
+                    a = self._last_assign(var, pos)
+                    if a and self.text_with([(a[1], a[2])], rx, depth + 1):
+                        return True
+        return False
+
+    def throwaway(self, chain: str) -> bool:
+        """The destination's text (through its variable chain) is rooted in a temp dir
+        and nothing in it anchors on the home directory."""
+        if _C755_HOME_RE.search(chain) or _PARENT_TRAVERSAL_RE.search(chain):
+            return False
+        if _C755_TEMP_RE.search(chain):
+            return True
+        for vm in re.finditer(r"\$\{?([A-Za-z_]\w*)\}?", chain):
+            var = vm.group(1)
+            if var.upper() in _CONVENTIONAL_TMP_VARS and var not in self.assign:
+                return True
+        return False
+
+
+def _c755_persistence_hits(name: str, blob: str) -> list[tuple[str, str, str]]:
+    """C-755: (kind, evidence, declared-target name), one per kind per skill. kind is
+    agent_file / hook / tasks (FAIL-capable, same severity rule as the window leg) or
+    skills / tasks_unresolved (WARN only)."""
+    headers = _manifest_header_matches(blob)
+    # Every shipped file by name: a copy source / template is read whatever its
+    # extension. Only real prose is left out of the skill-wide "trigger elsewhere" look.
+    shipped_files = {h.group("name").strip(): h.group("body") for h in headers}
+    folder_open_elsewhere = any(
+        _C755_FOLDER_OPEN_RE.search(b) for n, b in shipped_files.items()
+        if not (n.lower().endswith((".md", ".markdown", ".rst"))
+                or n.lower() in ("readme", "readme.txt"))
+    )
+    own_next = re.compile(rf"/+{re.escape(name)}(?![\w.-])") if name else None
+    found: dict[str, tuple[str, str, str]] = {}
+    for h in headers:
+        fname = h.group("name").strip()
+        low = fname.lower()
+        if not low.endswith(_C755_CODE_EXTS):
+            continue
+        body = h.group("body")
+        if not (_C755_PREFILTER_RE.search(body) or _AGENT_CONTEXT_FILES_RE.search(body)):
+            continue  # every bound path has one of these literals somewhere in the file
+        if _pos_in_test_fixture_file(blob, h.start("body"), headers):
+            continue
+        lang = "sh" if low.endswith(_C755_SH_EXTS) else "py" if low.endswith(".py") else "js"
+        f = _C755File(body, lang)
+        cover = {True: -1, False: -1}
+        for s, e, is_dir, data, shw in sorted(f.dests, key=lambda d: (d[0], -d[1])):
+            if e <= cover[is_dir]:
+                continue  # nested in a destination already resolved: a subset of it
+            cover[is_dir] = e
+            eff, chain = f.path(s, e, shell_word=shw)
+            if not eff or f.throwaway(chain):
+                continue
+            for kind, rx in _C755_TARGETS:
+                if kind in found or (is_dir and kind != "skills"):
+                    continue
+                for m in rx.finditer(eff):
+                    if re.match(r"\.\w", eff[m.end():m.end() + 2]):
+                        continue  # a different file: openclaw.json.bak, tasks.json.example
+                    ts = m.start()
+                    while ts > 0 and _PATH_TOKEN_CHARS_RE.match(eff[ts - 1]):
+                        ts -= 1
+                    token = eff[ts:m.end()]
+                    if kind == "agent_file" and _BACKUP_PATH_MARKER_RE.search(token) and not \
+                            _PARENT_TRAVERSAL_RE.search(token):
+                        continue  # a backup/template copy, not the live file
+                    if kind == "skills" and own_next is not None and own_next.match(eff, m.end()):
+                        continue  # the skill's own folder (the scanned directory's name)
+                    k = kind
+                    if kind == "tasks":
+                        shipped = [shipped_files.get(
+                            _c755_unquote(f.masked[d[0]:d[1]]).rsplit("/", 1)[-1]) for d in data]
+                        if data and f.text_with(data, _C755_FOLDER_OPEN_RE):
+                            pass  # the trigger is in the written content
+                        elif any(t is not None and _C755_FOLDER_OPEN_RE.search(t) for t in shipped):
+                            pass  # the shipped template file copied in carries it
+                        elif folder_open_elsewhere and not any(t is not None for t in shipped) \
+                                and not (data and f.text_with(data, _C755_CONTENT_RE)):
+                            k = "tasks_unresolved"  # content unknown, trigger elsewhere: WARN
+                            if k in found:
+                                break
+                        else:
+                            break  # the written content is known and carries no trigger
+                    found[k] = (k, *_c755_evidence(name, k, m.group(0)))
+                    break
+    if "tasks" in found:
+        found.pop("tasks_unresolved", None)
+    return list(found.values())
+
+
+def _c755_evidence(name: str, kind: str, path: str) -> tuple[str, str]:
+    if kind == "agent_file":
+        fname = re.sub(_C755_GLUE, "/", path) if "settings" in path.lower() else path
+        return f"{name}: agent-config persistence: writes to agent-context file '{fname}'", fname
+    if kind == "hook":
+        return (f"{name}: agent-config persistence: writes into OpenClaw's managed hook "
+                "directory (~/.openclaw/hooks/), where a planted hook can persist and "
+                "replace a bundled or plugin hook of the same name"), ".openclaw/hooks"
+    if kind == "tasks":
+        return (f"{name}: agent-config persistence: writes a VS Code task set to run on "
+                "folder open (.vscode/tasks.json, runOn: folderOpen)"), "tasks.json"
+    if kind == "tasks_unresolved":
+        return (f"{name}: writes .vscode/tasks.json; a runOn: folderOpen trigger appears "
+                "elsewhere in the skill but could not be tied to the written content"), \
+            "tasks.json"
+    return (f"{name}: writes into OpenClaw's managed skills directory (~/.openclaw/skills/) "
+            "outside its own skill folder - review what it installs there"), ".openclaw/skills"
 
 
 # C-204 (SkillTrustBench PE2 - T1098.004): a skill installs cross-session SSH access
@@ -5469,6 +5884,20 @@ _B13_WINNER_SUBSIGNAL = {
 # `tests/test_b743_js_warn_remediation.py` requires an entry for every warn-severity rule
 # `analyze_javascript` can emit - extracted from that function's own `add(...)` call sites -
 # so a fourth rule fails the build here instead of inheriting someone else's advice.
+# B-1005: appended to the B13 FAIL `fix` when JS_CRED_EXFIL_FLOW convicted.
+_JS_SIGNING_CLIENT_DISCLOSURE = (
+    " One or more of the crit findings above is a bundled .js/.ts file reading a "
+    "credential file (a private key, raw cloud credentials, or a process environment) "
+    "and passing a value from it to a network call. That signal has a known limit: a "
+    "signing client that reads a credential file and sends a derived signature is "
+    "shape-identical to exfiltration; this rule cannot separate them, nor a hash, "
+    "fingerprint or extracted field of the file from the secret itself, nor a process "
+    "manager sending a process environment to its own socket. If you authored this "
+    "skill or already trust its source, read the flagged call and confirm the value "
+    "sent is a signature, hash, fingerprint or extracted field sent to the service the "
+    "credential belongs to, never the credential itself."
+)
+
 _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
     "JS_CHILD_PROCESS_DYNAMIC": (
         "interpolated child_process command",
@@ -5483,6 +5912,24 @@ _JS_WARN_REMEDIATION: dict[str, tuple[str, str]] = {
         "A bundled .js/.ts file require()s a non-literal module path, so which module "
         "loads is decided at runtime. Read the flagged call and confirm the path cannot "
         "be influenced by input.",
+    ),
+    "JS_SECRET_FILE_FLOW": (
+        "credential file sent to the network",
+        "A bundled .js/.ts file reads a credential file and a value from it reaches a "
+        "network call: a token or config file (.npmrc, .netrc, a secrets mount, browser "
+        "cookies, ...), or a key or the process environment only as its length "
+        "or as a TLS key option. That is how a client "
+        "authenticates as you, and also how a secret is stolen; this lexical pass cannot "
+        "tell the two apart. Read the flagged call and confirm the destination is the "
+        "service that credential belongs to, and nowhere else.",
+    ),
+    "JS_ENV_EXFIL_FLOW": (
+        "whole process environment sent to the network",
+        "A bundled .js/.ts file serialises the entire process.env (JSON.stringify, "
+        "Object.entries/values or {...process.env}) into a network call, "
+        "so every secret held in an environment variable leaves the machine. Read the "
+        "flagged call and confirm the destination is the skill's own documented backend "
+        "and that sending the full environment, rather than named variables, is needed.",
     ),
     "JS_NATIVE_DLOPEN": (
         "native addon loaded past the JS analysis boundary",
@@ -6084,6 +6531,9 @@ def check_installed_skills(ctx: Context) -> Finding:
     # `_has_cred_exfil_outside_fence`, same-line -> crit, and `_has_cross`,
     # document-wide -> high): which skills convicted on each half.
     same_line_cred_exfil_skills: set = set()
+    # B-1005: skills convicted by the JS credential-flow rule, whose FAIL carries the
+    # signing-client disclosure in `fix` (accepted-residual candidate, see skillast.py).
+    js_cred_flow_skills: set = set()
     cross_skill_cred_exfil_skills: set = set()
     install_hosts_by_skill: dict = {}
     # B-618: the set of skills that contributed ANY evidence to `crit` /
@@ -6757,6 +7207,15 @@ def check_installed_skills(ctx: Context) -> Finding:
             # has already flagged this skill crit/high - a declared config-writer that also
             # trips any other signal still FAILs (case_01826 mitigation, architect design).
             _acw_hits, _acw_fenced = _agent_config_write_hits(name, blob, _fr)
+            # C-755: the binding leg - formatting-insensitive agent-file writes (only
+            # when the window leg found none, so its evidence line is unchanged), plus
+            # the managed-hook / folderOpen-task targets; a new managed skill is WARN.
+            for _kind, _ev, _tgt in _c755_persistence_hits(name, blob):
+                if _kind in ("skills", "tasks_unresolved"):
+                    _persist_warn.append(_ev)
+                    _persistence_axis_reasons.append([WARN, _ev])
+                elif _kind != "agent_file" or not _acw_hits:
+                    _acw_hits.append((_ev, _tgt))
             for _f in _acw_fenced:
                 warns_content.append(
                     f"{name}: write to an agent-context file ({_f}) inside a fence with no"
@@ -7175,6 +7634,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                     if af.severity == "crit":
                         if _verified:
                             crit.append(msg)
+                            if af.rule == "JS_CRED_EXFIL_FLOW":
+                                js_cred_flow_skills.add(name)
                         else:
                             warns_declared_unverified.append(msg)
                     else:
@@ -7499,6 +7960,11 @@ def check_installed_skills(ctx: Context) -> Finding:
                 "input, table, or helper can be influenced by untrusted content "
                 "before installing."
             )
+        if js_cred_flow_skills:
+            # B-1005: the JS credential-flow rule cannot tell a signing client from an
+            # exfiltrator - a crypto-reducer exemption was retracted after five review
+            # rounds. Disclosed in the advice, never `detail` (fingerprint stability).
+            fix += _JS_SIGNING_CLIENT_DISCLOSURE
         if same_line_cred_exfil_skills:
             # Accepted §2.5 residual ("cred-path x exfil-token textual co-occurrence
             # without taint"), Dave ruling 2026-09-26 - same-line half. See the note
@@ -7556,6 +8022,14 @@ def check_installed_skills(ctx: Context) -> Finding:
                 "detection limit: a skill that merely reads or backs up that path convicts "
                 "identically to one that installs into it. If you authored this skill or "
                 "already trust its source, confirm the flagged line is a read, not a write."
+            )
+        if any("writes a VS Code task set to run on folder open" in e for e in high):
+            # C-755: the folderOpen task is real persistence, but VS Code gates it itself.
+            fix += (
+                " VS Code runs a folderOpen task only when automatic tasks are allowed "
+                "(the task.allowAutomaticTasks setting; by default it asks first) and never "
+                "in an untrusted, Restricted Mode workspace - so check that setting and "
+                "which folders you have marked as trusted, and delete the planted task."
             )
         if cross_skill_cred_exfil_skills:
             # Accepted §2.5 residual ("cred-path x exfil-token textual co-occurrence
@@ -9196,6 +9670,19 @@ def _run_content_ring(
         )
     # B-526: side-channel, deliberately not a second return value - the FAIL/WARN-only
     # return contract above is depended on by several callers and tests.
+    # B398 (B-1001): a .pyc scan gap (symlinked/unreadable __pycache__, count cap) is an
+    # UNKNOWN the ring drops above, and `ctx.limit_hits` alone floors only the Danger axis.
+    # Emit the shared "part of this target was never inspected" verdict so the Persistence
+    # axis also stops claiming "no dormant or staged code detected" over a cache it never read.
+    pyc_gaps = [g for gl in (getattr(ctx, "skill_pyc_gaps", None) or {}).values() for g in gl]
+    if pyc_gaps:
+        out.append(coverage_gap_finding(
+            f"compiled-code (.pyc) coverage is incomplete: {len(pyc_gaps)} gap(s) - "
+            + "; ".join(pyc_gaps[:3]) + (", \u2026" if len(pyc_gaps) > 3 else ""),
+            "Compiled code that was not read is not cleared. Remove symlinked or unreadable "
+            "__pycache__ entries (or delete __pycache__), reduce the number of directories "
+            "or .pyc files if a count cap was hit, and re-run.",
+        ))
     ctx.ring_coverage_notes = ring_coverage
     return out
 
@@ -10737,6 +11224,7 @@ SKILL_CONTENT_RING = (
     check_symlink_escape,  # B87 - symlink escape to a sensitive host path (TAM-07)
     check_frontmatter_hygiene,  # B88 - frontmatter authoring hygiene (tag values / squat)
     check_dormant_capability,  # B89 - unreachable-yet-code-bearing skill (dormant capability)
+    check_unchecked_hash_pyc,  # B398 - hash-unchecked .pyc shipped in a skill (B-1001)
     check_cross_file_payload,  # B90 - cross-file split base64 payload reassembly (I-019)
     check_cross_file_boundary_payload,  # B102 - base64 split exactly at a file boundary (F-086)
     check_cross_file_plaintext_payload,  # B154 - cross-file split PLAINTEXT payload reassembly

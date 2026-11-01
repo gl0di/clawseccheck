@@ -63,6 +63,15 @@ inline expression, no file) resolves to nothing and is never assessed, exactly a
 ``node-gyp-build`` is not. What is NOT followed, and is stated rather than implied: GYP's
 own ``includes`` directive can pull in a ``.gypi`` carrying further expansions. Following
 it is its own change with its own adversarial pass.
+
+GYP'S BUILD-STEP KEYS ARE READ TOO (B-1004). ``<!(...)`` is not the only way a
+``binding.gyp`` runs a command: a target's ``actions`` / ``rules`` / ``postbuilds`` carry an
+``action`` argv node-gyp executes during ``node-gyp rebuild``, again with no lifecycle
+script (MAL-2026-18377 ``spectral-core``: a ``type: none`` target with an inline ``node -e``
+action). ``gypbuild`` reads them - see its docstring for the grounding - and this module
+feeds a step's script FILE to the same resolver as an expansion. A build config that
+cannot be read as a plain literal, or a step whose command cannot be assembled from the
+file, is a note the consumer turns into UNKNOWN.
 """
 from __future__ import annotations
 
@@ -74,6 +83,14 @@ from pathlib import Path
 
 from . import pathprobe
 from .configloader import loads_shallow
+from .gypbuild import (  # noqa: F401 - re-exported: B-1004 build steps
+    GYP_EXEC_KEYS,
+    GypBuildConfig,
+    GypBuildStep,
+    classify_build_step,
+    parse_gyp_build_config,
+    runs_inline_code,
+)
 from .safeio import walk_dir_safely
 
 # Bounds. OpenClaw's real tree measured 380 packages and ClawHub's 39 (2026-08-04; 398 for
@@ -98,6 +115,7 @@ MAX_GYP_EXPANSIONS = 40
 # 4 KB is far above any real command (the longest measured on this box is 47 bytes).
 MAX_GYP_COMMAND_BYTES = 4096
 MAX_GYP_MARKERS = 2000
+
 
 # node-gyp's default build config, at the package root. See the module docstring for why
 # only this path is read and no nested or `gypfile`-redirected one is.
@@ -152,6 +170,9 @@ class BuildDirective:
     relpath: str
     command: str
     targets: tuple = ()
+    # B-1004: which gyp construct this came from - "expansion" for `<!(...)`, else the
+    # build-step key (`actions` / `rules` / `postbuilds`). Evidence only.
+    kind: str = "expansion"
 
 
 @dataclass
@@ -527,6 +548,37 @@ def _is_commented_out(text: str, marker: int) -> bool:
     return False
 
 
+def read_build_config(pkg_dir: Path, relpath: str = GYP_FILENAME) -> "tuple[str | None, list]":
+    """Read one gyp build file under *pkg_dir*, bounded. Returns `(text, notes)`.
+
+    `text` is None when there is nothing to read OR it could not be read; `notes` says
+    which (an empty list means the file is simply absent). A symlinked, oversized,
+    non-UTF-8 or unreadable file, and a *relpath* that escapes *pkg_dir*, each yield a
+    note - every early return here is a place a hostile package could hide behind, so
+    none of them may read as "no build config".
+    """
+    gyp = pkg_dir / relpath
+    try:
+        if any(part == ".." for part in Path(relpath).parts) or Path(relpath).is_absolute():
+            return None, ["build config path leaves the package and was not followed"]
+        if pathprobe.is_symlink(gyp):  # before exists(): a broken link must not read as absent
+            return None, ["build config is a symlink and was not followed"]
+        if not pathprobe.is_file(gyp):
+            return None, []
+        if gyp.stat().st_size > MAX_GYP_BYTES:
+            return None, ["build config is too large to examine"]
+        raw = gyp.read_bytes()
+        # A NUL byte means this is not UTF-8 text -- in practice UTF-16/UTF-32, which
+        # node-gyp reads fine and which `errors="replace"` turns into `<\x00!\x00(`, so
+        # every expansion vanishes and the package reads as clean. That silent PASS is
+        # exactly what GR#4 forbids, so it is disclosed instead of decoded hopefully.
+        if b"\x00" in raw:
+            return None, ["build config is not UTF-8 text and was not examined"]
+        return raw.decode("utf-8", errors="replace"), []
+    except OSError:
+        return None, ["build config could not be read"]
+
+
 def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
     """Command-expansions in *pkg_dir*'s root `binding.gyp`, and any reason we fell short.
 
@@ -541,26 +593,11 @@ def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
     turns into UNKNOWN. Silently returning nothing would let a 257 KB `binding.gyp` buy a
     clean PASS.
     """
-    gyp = pkg_dir / GYP_FILENAME
-    notes: list = []
-    try:
-        if pathprobe.is_symlink(gyp):  # before exists(): a broken link must not read as absent
-            return [], ["build config is a symlink and was not followed"]
-        if not pathprobe.is_file(gyp):
-            return [], notes
-        if gyp.stat().st_size > MAX_GYP_BYTES:
-            return [], ["build config is too large to examine"]
-        raw = gyp.read_bytes()
-        # A NUL byte means this is not UTF-8 text -- in practice UTF-16/UTF-32, which
-        # node-gyp reads fine and which `errors="replace"` turns into `<\x00!\x00(`, so
-        # every expansion vanishes and the package reads as clean. That silent PASS is
-        # exactly what GR#4 forbids, so it is disclosed instead of decoded hopefully.
-        if b"\x00" in raw:
-            return [], ["build config is not UTF-8 text and was not examined"]
-        text = raw.decode("utf-8", errors="replace")
-    except OSError:
-        return [], ["build config could not be read"]
+    text, notes = read_build_config(pkg_dir)
+    if text is None:
+        return [], notes
     commands = extract_gyp_commands(text, capped=notes)
+    build_notes: list = []
     directives = [
         BuildDirective(
             package=name,
@@ -570,6 +607,27 @@ def _gyp_directives(pkg_dir: Path, name: str, relpath: str) -> tuple:
         )
         for command in commands
     ]
+    # B-1004: a build step's argv is a command too, resolved by the SAME narrow resolver -
+    # so `["node", "./extract.js"]` has its file read and judged exactly like a
+    # `<!(node x.js)` expansion, and an inline `node -e` step (nothing on disk to read)
+    # yields no target, exactly as an inline expansion does.
+    config = parse_gyp_build_config(text, capped=build_notes)
+    notes.extend(f"build config {reason}" for reason in build_notes)
+    for step in config.steps:
+        if step.unexamined:
+            notes.append(f"a build step was not examined: {step.unexamined}")
+        if not step.argv:
+            continue
+        command = shlex.join(step.argv)
+        directives.append(
+            BuildDirective(
+                package=name,
+                relpath=relpath,
+                command=command[:200],
+                targets=resolve_hook_targets(command, pkg_dir),
+                kind=step.key,
+            )
+        )
     return directives, notes
 
 
