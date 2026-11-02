@@ -3,6 +3,53 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.4.5] - 2026-11-02
+
+**This release closes several ways a skill could slip past `--vet`, corrects which channel
+accounts the config checks judge, and re-grounds the audit on OpenClaw 2026.10.9.** No check is
+added. Findings can change status on the shapes listed below; a config that does not match one
+of them reads exactly as before.
+
+### Security
+- **`--vet` convicts JavaScript that reads a secret and sends it out.** A bundled or
+  install-time script that read `/proc/<pid>/environ` (or a private key, raw AWS credentials, a
+  wallet or the keychain) and posted it to a network sink used to vet INSTALL while the Python
+  equivalent failed. A bounded flow pass now follows the value through assignments, callbacks
+  and `.then` to a module-resolved network sink. A value that is hashed, signed or otherwise
+  reduced first is not convicted, and a JS signing client that uses a secret on purpose can
+  still read as credential theft; the finding's advice says so.
+- **`--vet` reads compiled bytecode.** The vet walk skipped `__pycache__`, so clean sources
+  beside a hash-unchecked `.pyc` (imported without source validation) vetted INSTALL. B398 now
+  reads the 8-byte header only, never follows symlinks, scans archive members, and reports
+  UNKNOWN when it cannot finish. A coverage gap lowers the vet verdict instead of passing.
+- **`--vet` reads `binding.gyp` build steps and bare `scripts.install`.** B42 now warns when a
+  native build step runs code, or when the manifest or build file cannot be read (treated as
+  built, not as absent). npm runs `scripts.install` between preinstall and postinstall, and B42
+  used to match only the other two.
+- **The agent/IDE persistence rule ties a write to its destination.** It paired a file name with
+  a write call by character distance, so the same `openclaw.json` edit failed with a compact
+  literal and passed once the literal was spaced out. It now binds the destination argument,
+  redirect or copy target, adds the managed hook directory and `.vscode/tasks.json` with a
+  `runOn: folderOpen` trigger, and reads code rather than documentation.
+
+### Fixed
+- **Default channel accounts.** A live implicit default account is no longer dropped from the
+  verdict once a channel has named accounts (the registration table missed x, whatsapp, slack
+  and most other channels), the vendor's own default-account pick is used instead of
+  over-approximating ambiguous keys, and WhatsApp/Google Chat default-entry inheritance is
+  modelled. This can turn a B2 PASS into a finding on a config that has an open base account
+  beside a restrictive named one, and can move B372.
+- The vet dossier footer no longer counts PASS rows as findings.
+- `--monitor` says when macOS launchd persistence was not read.
+- The default worker image is named correctly on OpenClaw 2026.10.7 to 2026.10.9.
+- A compressed wrapper's inner name is derived from its real member name.
+
+### Changed
+- Grounded against OpenClaw 2026.10.9: the harness and retired-format windows and the schema
+  snapshots are regenerated. Scanner linear-time and fixture dependency pins were tightened in
+  tests only.
+- CI tools lockfile forces patched transitive versions and the ruff rule set is pinned.
+
 ## [4.4.4] - 2026-10-24
 
 **Two security fixes in the tool's own advice and printed commands, OpenClaw 2026.10.6, and a
