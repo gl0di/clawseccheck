@@ -217,7 +217,7 @@ from .collector import agent_roster
 #: pin, which no harness module imported) and answered identically on every row too. The chain is now
 #: 9.5 = ... = 10.6 = 10.7 = 10.8 = 10.9, and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 10, 9)
+ORACLE_MAX = (2026, 10, 10)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
@@ -232,7 +232,7 @@ _DEFAULT_RUNTIMES = (None, "auto", "default")
 #: ``openai-codex/gpt-5.5`` is rewritten to ``openai/gpt-5.5`` on Codex, and the vendor's
 #: ``modelRefUsesCodexRuntime`` answers true for it. TWO vendor tables feed this set, and it
 #: is their union restricted to runtime ``codex``: ``LEGACY_CODEX_PROVIDER_IDS``
-#: (``commands/doctor/shared/codex-route-model-ref``: ``codex``, ``openai-codex``) and
+#: (``legacy-codex-provider``, moved out of ``codex-route-model-ref`` in 2026.10.10: ``codex``, ``openai-codex``) and
 #: ``LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES`` (``legacy-runtime-model-providers``: ``codex``,
 #: ``codex-cli``). The runtime-collector oracle this port is graded against never sees the
 #: migration, so it calls such a config Codex-free -- which is exactly why a ``no`` may not be

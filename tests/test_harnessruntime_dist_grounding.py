@@ -119,12 +119,12 @@ def test_the_legacy_codex_provider_set_equals_the_vendors():
     and ``codex-cli/*`` refs, which the vendor migrates onto the Codex harness (and which the
     runtime collector the battery is graded against never sees). TWO vendor tables feed it, so
     ground the set against BOTH, executed, over spellings on both sides of each boundary:
-    ``isLegacyCodexProviderId`` (codex-route-model-ref) and
+    ``isLegacyCodexProviderId`` (legacy-codex-provider) and
     ``resolveLegacyRuntimeModelProviderAlias`` (legacy-runtime-model-providers) restricted to
     the aliases whose runtime is ``codex``."""
     require_dist()
     from _distgrounding import dist_file
-    a = dist_file("codex-route-model-ref-*.mjs", symbol="isLegacyCodexProviderId",
+    a = dist_file("legacy-codex-provider-*.mjs", symbol="isLegacyCodexProviderId",
                   contains="const LEGACY_CODEX_PROVIDER_IDS")
     b = dist_file("legacy-*.mjs", symbol="resolveLegacyRuntimeModelProviderAlias",
                   contains="const LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES")
@@ -161,7 +161,7 @@ def test_the_legacy_codex_provider_set_is_every_codex_entry_in_the_vendors_table
     import re
     require_dist()
     from _distgrounding import dist_file
-    a = dist_file("codex-route-model-ref-*.mjs", symbol="LEGACY_CODEX_PROVIDER_IDS",
+    a = dist_file("legacy-codex-provider-*.mjs", symbol="LEGACY_CODEX_PROVIDER_IDS",
                   contains="const LEGACY_CODEX_PROVIDER_IDS")
     b = dist_file("legacy-*.mjs", symbol="LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES",
                   contains="const LEGACY_RUNTIME_MODEL_PROVIDER_ALIASES")

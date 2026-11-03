@@ -1,5 +1,5 @@
 {
- "build": "2026.10.9",
+ "build": "2026.10.10",
  "rows": [
   {
    "label": "empty",
@@ -3545,7 +3545,15 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "openai/gpt-5"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -9297,7 +9305,16 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "openai/codex-mini",
+     "openai:w/gpt-5.6-sol"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -9446,7 +9463,19 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "anthropic/o3",
+     "azure/m:work",
+     "x/gpt-image-1",
+     "openai/o3",
+     "x/codex-mini"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -10004,7 +10033,17 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "openai/*",
+     "x/gpt-5.6-sol",
+     "openai:w/codex-mini"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -11188,7 +11227,20 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "x/*",
+     "google/gpt-5",
+     "x/m:work",
+     "anthropic/*",
+     "openai /m",
+     "azure/m:work"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -15675,7 +15727,9 @@
      "OpenAI/*",
      "openai /gpt-image-1"
     ],
-    "error": "Cannot convert undefined or null to object"
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -15727,7 +15781,21 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "openai/gpt-5.6-sol",
+     "azure/*",
+     "openai/gpt-image-1",
+     "OpenAI/gpt-5.6-sol",
+     "azure/gpt-5",
+     "openai:w/o3",
+     "x/"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -16925,7 +16993,17 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "OpenAI/gpt-5.6-sol",
+     "OpenAI/gpt-5.6-sol",
+     "openai/*"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -18245,7 +18323,22 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "OpenAI/m:work",
+     "openai-codex/o3",
+     "openai/*",
+     "x/*",
+     "openai-codex/gpt-5.6-sol",
+     "openai:w/o3",
+     "openai:w/*",
+     "x/codex-mini"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -20676,7 +20769,21 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "anthropic/gpt-5",
+     "openai /m:work",
+     "openai/m:work",
+     "openai/*",
+     "openai-codex/gpt-5",
+     "openai/gpt-5",
+     "/x"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {
@@ -22444,7 +22551,18 @@
    },
    "env": {},
    "oracle": {
-    "error": "Cannot convert undefined or null to object"
+    "collect": [
+     "codex"
+    ],
+    "refs": [
+     "openai/gpt-5",
+     "OpenAI/o3",
+     "anthropic/*",
+     "x/*"
+    ],
+    "runtimes": [
+     "codex"
+    ]
    }
   },
   {

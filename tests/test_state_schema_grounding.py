@@ -2375,6 +2375,12 @@ _STATE_EXCLUDED_CONSTANTS = {
         "AGENT_V14_CORE_SCHEMA_SQL",
     ), _NOT_STATE_DB + "the per-agent database (agents/<id>/agent/openclaw-agent.sqlite)"),
     "WORKBOARD_SCHEMA_SQL": _NOT_STATE_DB + "the workboard extension's own sqlite store",
+    "WORKBOARD_POSTGRES_SCHEMA_SQL": (
+        _NOT_STATE_DB + "the workboard store's Postgres variant (2026.10.10, "
+        "sqlite-store-schema-*.mjs): passed only as `schema.postgres` beside "
+        "`schema.sqlite: WORKBOARD_SCHEMA_SQL` in one `openEngineStore({ schema: { id: "
+        "\"workboard\", ... } })` call, so it declares the same workboard store for a Postgres "
+        "engine, never the state SQLite database"),
     "DEBUG_PROXY_CAPTURE_LEGACY_SCHEMA_SQL": (
         _NOT_STATE_DB + "a legacy debug-proxy sidecar; its capture_* tables are listed by the "
         "main constant in their current shape (the B-710 trap)"),
