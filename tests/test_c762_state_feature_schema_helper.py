@@ -465,3 +465,42 @@ def test_the_shipped_baseline_lists_user_background_images_and_the_feature_only_
                     "user_background_images")
     assert {"user_background_images", "user_profiles", "user_profile_emails",
             "worker_environment_session_attachments"} <= set(names)
+
+
+# ---- C-762 review: statements the reader used to be blind to --------------------------------
+# The "statements vs names" comparison was blind to the same statement on both sides, so a
+# table created in a form the name regex did not read could vanish from the set without a
+# raise. Each hidden shape is asserted to STOP the generator; its twin (the plain statement of
+# the same table) is asserted to be read, so the stop is the guard's doing.
+
+_C = "CREATE"  # keeps a plain `CREATE ... TABLE` literal out of this file (see the module docstring)
+
+
+def _with_extra(extra: str):
+    entries = _entries(user_profiles=_tpl(_UP_BODY_PLAIN + "\n" + extra),
+                       a_main=_tpl(_RE_BODY))
+    return _const_bundle(entries)
+
+
+@pytest.mark.parametrize("hidden", [
+    f"{_C} VIRTUAL TABLE IF NOT EXISTS fts_x USING fts5(a);",
+    f"{_C} TEMP TABLE IF NOT EXISTS tmp_x (a TEXT);",
+    f"{_C} TEMPORARY TABLE IF NOT EXISTS tmp_y (a TEXT);",
+    f"{_C} TABLE IF NOT EXISTS main.qualified_x (a TEXT) STRICT;",
+])
+def test_a_table_the_name_reader_cannot_name_stops_the_generator(tmp_path, hidden):
+    plain = _tables(_one(tmp_path / "plain", _with_extra(
+        f"{_C} TABLE IF NOT EXISTS plain_x (a TEXT) STRICT;")))
+    assert "plain_x" in plain["tables"]          # the twin: the plain form IS read
+    with pytest.raises(AssertionError, match="CREATE TABLE"):
+        _tables(_one(tmp_path / "hidden", _with_extra(hidden)))
+
+
+@pytest.mark.parametrize("comment", [
+    f"-- {_C} TABLE IF NOT EXISTS ghost_line (x);",
+    f"/* {_C} TABLE IF NOT EXISTS ghost_block (x); */",
+])
+def test_create_table_text_in_a_sql_comment_is_not_a_table(tmp_path, comment):
+    got = _tables(_one(tmp_path, _with_extra(comment)))
+    assert got["tables"] == ["a_main", "user_profile_emails", "user_profiles"]
+    assert not any(t.startswith("ghost") for t in got["tables"])

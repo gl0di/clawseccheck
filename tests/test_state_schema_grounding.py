@@ -2457,11 +2457,28 @@ _STATE_EXCLUDED_CONSTANTS = {
 _ENSURER_PREFIX = r"(?:createSqliteSchemaEnsurer\(\s*\(\)\s*=>\s*)?"
 
 _SCHEMA_SQL_NAME_RE = re.compile(r"\b[A-Z][A-Z0-9_]*_SCHEMA_SQL\b")
-_CREATE_TABLE_RE = re.compile(r"\bCREATE\s+TABLE\b", re.IGNORECASE)
+# Every statement that creates a table, in ANY spelling the SQL grammar allows: a VIRTUAL or
+# TEMP/TEMPORARY table is a table too. Counting only the plain form made both sides of the
+# "statements vs names" comparison blind to the same statement (C-762 review).
+_CREATE_TABLE_RE = re.compile(
+    r"\bCREATE\s+(?:(?:VIRTUAL|TEMP|TEMPORARY)\s+)?TABLE\b", re.IGNORECASE)
 # The negative lookahead stops `CREATE TABLE IF NOT EXISTS ${name}` from reading "IF" as a
-# table name once the optional group backtracks.
+# table name once the optional group backtracks. The trailing `(?![\w.])` refuses a
+# schema-qualified name (`main.t`): `\w+` alone read the schema as the table, lost the real
+# one, and invented another. Only the plain `CREATE TABLE` form is named, so a VIRTUAL/TEMP
+# statement is counted by _CREATE_TABLE_RE but never named, and the comparison stops it.
 _CREATE_TABLE_NAMED_RE = re.compile(
-    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?!IF\s+NOT\s+EXISTS\b)(\w+)", re.IGNORECASE)
+    r"\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?!IF\s+NOT\s+EXISTS\b)(\w+)(?![\w.])",
+    re.IGNORECASE)
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+
+
+def _create_table_statements_and_names(sql: str) -> "tuple[int, list[str]]":
+    """(number of table-creating statements, the bare table names read from them), comments
+    masked first: a `CREATE TABLE` mentioned in a SQL comment is not a table, and counting it
+    would grow the baseline by a table that does not exist."""
+    code = _SQL_COMMENT_RE.sub(" ", sql)
+    return len(_CREATE_TABLE_RE.findall(code)), _CREATE_TABLE_NAMED_RE.findall(code)
 # The one interpolation shape an allowlisted constant may carry: a table spliced from the
 # MAIN constant. Anything else is unmodelled composition and stops the generator.
 _STATE_TABLE_SPLICE_RE = re.compile(
@@ -2845,10 +2862,10 @@ def _feature_helper_tables(dist_dir: Path, main_tables, adds=None, redeclares=No
             "_FEATURE_LOCAL_ADDS (a table the main constant lacks) or _FEATURE_LOCAL_REDECLARES.")
     named_by_key: "dict[str, list[str]]" = {}
     for key, (sql, spliced) in sorted(parsed.items()):
-        named = _CREATE_TABLE_NAMED_RE.findall(sql)
-        if not named or len(named) != len(_CREATE_TABLE_RE.findall(sql)):
+        statements, named = _create_table_statements_and_names(sql)
+        if not named or len(named) != statements:
             raise AssertionError(
-                f"featureLocalSql[{key!r}]: {len(_CREATE_TABLE_RE.findall(sql))} CREATE TABLE "
+                f"featureLocalSql[{key!r}]: {statements} CREATE TABLE "
                 f"statement(s) but {len(named)} table name(s) read -- a quoted or computed name is "
                 "not a bare identifier, so this extractor cannot name that table. Re-ground it.")
         if key not in named:
@@ -2953,10 +2970,10 @@ def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) 
             f"{name} is defined with DIFFERENT schemas ({listing}); decide which one the "
             "runtime applies before trusting a table set taken from either.")
     _, sql, spliced = defs[0]
-    named = _CREATE_TABLE_NAMED_RE.findall(sql)
-    if not named or len(named) != len(_CREATE_TABLE_RE.findall(sql)):
+    statements, named = _create_table_statements_and_names(sql)
+    if not named or len(named) != statements:
         raise AssertionError(
-            f"{name}: {len(_CREATE_TABLE_RE.findall(sql))} CREATE TABLE statement(s) but "
+            f"{name}: {statements} CREATE TABLE statement(s) but "
             f"{len(named)} table name(s) read -- a quoted or computed name is not a bare "
             "identifier, so this extractor cannot name that table. Re-ground it.")
     absent = sorted(set(spliced) - set(main_tables))
