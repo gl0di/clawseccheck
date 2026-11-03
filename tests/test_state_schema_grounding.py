@@ -2225,8 +2225,9 @@ def test_a_wrong_state_schema_stamp_is_reported_and_a_right_one_is_not(tmp_path)
 # not here" is not evidence the feature is unused.
 #
 # C-679: the set is NOT only `OPENCLAW_STATE_SCHEMA_SQL`. Three live tables (user_profiles,
-# user_profile_emails, worker_environment_session_attachments) are created by satellite
-# constants applied to the same database; the section below reads the allowlisted ones.
+# user_profile_emails, worker_environment_session_attachments) are created outside it, applied
+# to the same database; the section below reads the allowlisted satellite constants and (C-762)
+# the tables in featureLocalSql of getOpenClawStateFeatureSchemaSql.
 # ========================================================================================
 
 VENDOR_TABLES_FILE = Path(__file__).resolve().parent / "vendor_state_tables.txt"
@@ -2301,11 +2302,12 @@ _SQLITE_BUILTIN_CATALOG_TABLES = {"sqlite_master"}
 # --------------------------------------------------------------------------------------
 # C-679: the state database is declared by MORE than one constant.
 #
-# `OPENCLAW_STATE_SCHEMA_SQL` is the bulk, but on 2026.9.9 three live tables
-# (user_profiles, user_profile_emails, worker_environment_session_attachments) come from
-# SATELLITE constants that the vendor applies to the same state database at first use. A
-# generator that read only the main constant would never name a table a future release
-# adds the same way -- the exact blindness B-721 was written to remove.
+# `OPENCLAW_STATE_SCHEMA_SQL` is the bulk, but three live tables (user_profiles,
+# user_profile_emails, worker_environment_session_attachments) come from outside it. On 2026.9.9
+# they were SATELLITE constants; since 2026.10.10 they sit in `featureLocalSql`, the object behind
+# `getOpenClawStateFeatureSchemaSql`, which the table set now includes (C-762, pinned key set and
+# helper body). A generator that read only the main constant would never name a table a future
+# release adds the same way -- the exact blindness B-721 was written to remove.
 #
 # A blanket `*_SCHEMA_SQL` pattern over-collects (per-agent DB, workboard, memory index,
 # retired shapes), so classification is by EXPLICIT NAME, in two lists. A `*_SCHEMA_SQL`
@@ -2316,20 +2318,12 @@ _SQLITE_BUILTIN_CATALOG_TABLES = {"sqlite_master"}
 
 _PRIMARY_STATE_SCHEMA_CONSTANT = "OPENCLAW_STATE_SCHEMA_SQL"
 
-# name -> evidence: the write path that applies the DDL to the STATE database (grounded
-# against the installed 2026.9.9 dist; function names, not rotating bundle hashes).
-_STATE_SATELLITE_CONSTANTS = {
-    "ensureUserProfileTables": (
-        "user-profiles-internal-*.mjs (2026.10.5): `ensureUserProfileTables = "
-        "createSqliteSchemaEnsurer(() => ...)`, applied to the state database by the user-profile "
-        "write path (runUserProfileWriteTransaction -> runOpenClawStateWriteTransaction); before "
-        "2026.10.5 the same DDL was the constant USER_PROFILES_SCHEMA_SQL"
-    ),
-    "WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL": (
-        "openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema -> "
-        "runOpenClawStateWriteTransaction, `db.exec(SSH_FALLBACK_PORTS + SESSION_ATTACHMENTS)`"
-    ),
-}
+# name -> evidence: the write path that applies the DDL to the STATE database. EMPTY on
+# 2026.10.10: the two satellites 2026.10.9 still had (ensureUserProfileTables,
+# WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL) are now served by the feature-schema helper
+# (see _STATE_FEATURE_HELPER_CONSTANTS / _FEATURE_LOCAL_ADDS below). The machinery stays: a literal
+# `*_SCHEMA_SQL` satellite can come back, and test_c679 drives it with synthetic dists.
+_STATE_SATELLITE_CONSTANTS: "dict[str, str]" = {}
 
 _NOT_STATE_DB = "NOT the state database: "
 _ALREADY_IN_MAIN = (
@@ -2341,30 +2335,90 @@ _ALREADY_IN_MAIN = (
 # its own. They are parsed with the same extractor as the satellites and every table they
 # declare must already be in the main constant: a table that is not stops the generator, so
 # promoting the constant to _STATE_SATELLITE_CONSTANTS is a deliberate act, not a miss.
-_STATE_REDECLARING_CONSTANTS = {
-    "WORKER_ENVIRONMENT_SSH_FALLBACK_PORTS_SCHEMA_SQL":
-        _ALREADY_IN_MAIN + "worker_environment_ssh_fallback_ports "
-        "(openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema)",
-    "STANDING_GRANT_SCHEMA_SQL":
-        _ALREADY_IN_MAIN + "operator_approval_standing_grants, "
-        "operator_approval_standing_grant_generations "
-        "(operator-approval-standing-grants-*.mjs: ensureStandingGrantSchema)",
-    "OPERATOR_APPROVAL_EXECUTION_IDENTITY_SCHEMA_SQL":
-        _ALREADY_IN_MAIN + "operator_approval_execution_identities "
-        "(operator-approval-store.operations-*.mjs: database.db.exec)",
-}
+# EMPTY on 2026.10.10: WORKER_ENVIRONMENT_SSH_FALLBACK_PORTS_SCHEMA_SQL, STANDING_GRANT_SCHEMA_SQL
+# and OPERATOR_APPROVAL_EXECUTION_IDENTITY_SCHEMA_SQL are now `getOpenClawStateFeatureSchemaSql(...)`
+# calls (_STATE_FEATURE_HELPER_CONSTANTS) and their DDL lives in featureLocalSql
+# (_FEATURE_LOCAL_REDECLARES), where the same "adds nothing beyond main" rule is enforced.
+_STATE_REDECLARING_CONSTANTS: "dict[str, str]" = {}
 
 # name -> evidence. C-683 (2026.10.1): applied to the state database, and defined NOT as a literal
 # but as `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>)`, so it declares a
 # table the main constant already lists BY CONSTRUCTION. A distinct classification from the
 # literal re-declarers above: the definition shape is parsed (`_DERIVED_DEFINITION_RE`), the
 # named table must be in the main set, and any other shape of definition stops the generator.
-_STATE_DERIVED_CONSTANTS = {
-    "CRON_RUNTIME_AUTHORITY_SCHEMA_SQL":
-        "applied to the state database (runtime-authority-store-*.mjs: "
-        "replaceCronRuntimeAuthorityRows, same db as cron_jobs); 2026.10.1 derives it from the "
-        "main constant for CRON_RUNTIME_AUTHORITY_TABLE = \"cron_job_runtime_authorities\"",
+# EMPTY on 2026.10.10: CRON_RUNTIME_AUTHORITY_SCHEMA_SQL was retired; its table
+# (cron_job_runtime_authorities) is now reached through the feature-schema helper with
+# CRON_RUNTIME_AUTHORITY_TABLE, a call site (_feature_helper_call_sites), not a constant.
+_STATE_DERIVED_CONSTANTS: "dict[str, str]" = {}
+
+# name -> evidence. 2026.10.10: `NAME = getOpenClawStateFeatureSchemaSql(<table>);` -- the DDL is
+# served by the helper from featureLocalSql (or extracted from the main constant), and applied to
+# the STATE database. Each definition is parsed (`_FEATURE_DEFINITION_RE`): exactly one argument,
+# a string literal or an identifier bound once in the same file to one, and that table must be in
+# the main set or declared by featureLocalSql; any other shape stops the generator.
+_STATE_FEATURE_HELPER_CONSTANTS = {
+    "OPERATOR_APPROVAL_EXECUTION_IDENTITY_SCHEMA_SQL": (
+        "operator-approval-store.operations-*.mjs: "
+        "`getOpenClawStateFeatureSchemaSql(\"operator_approval_execution_identities\")`, "
+        "exec'd on the state database (database.db.exec)"),
+    "STANDING_GRANT_SCHEMA_SQL": (
+        "operator-approval-standing-grants-*.mjs (2 definitions): "
+        "`getOpenClawStateFeatureSchemaSql(STANDING_GRANT_TABLE)` with STANDING_GRANT_TABLE = "
+        "\"operator_approval_standing_grants\"; applied by ensureStandingGrantSchema"),
+    "WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL": (
+        "openclaw-state-worker-runtime-*.mjs: "
+        "`getOpenClawStateFeatureSchemaSql(\"worker_environment_session_attachments\")`; "
+        "ensureWorkerEnvironmentStoreSchema -> runOpenClawStateWriteTransaction"),
+    "WORKER_ENVIRONMENT_SSH_FALLBACK_PORTS_SCHEMA_SQL": (
+        "openclaw-state-worker-runtime-*.mjs: "
+        "`getOpenClawStateFeatureSchemaSql(\"worker_environment_ssh_fallback_ports\")`; "
+        "ensureWorkerEnvironmentStoreSchema -> runOpenClawStateWriteTransaction"),
 }
+
+# featureLocalSql key -> evidence. Keys whose value declares a table OPENCLAW_STATE_SCHEMA_SQL
+# does NOT list: they are the reason the helper's object is read at all. Pinned by name, so a
+# new or removed key stops the generator until someone reads what it declares.
+_FEATURE_LOCAL_ADDS = {
+    "user_profiles": (
+        "declares user_profiles AND user_profile_emails (the helper serves the latter from this "
+        "value) and splices user_profile_identities from the main constant; applied by "
+        "ensureUserProfileTables = createSqliteSchemaEnsurer(() => "
+        "getOpenClawStateFeatureSchemaSql(\"user_profiles\")) on the state database "
+        "(user-profiles-internal-*.mjs)"),
+    "worker_environment_session_attachments": (
+        "openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema -> "
+        "runOpenClawStateWriteTransaction"),
+}
+
+# featureLocalSql key -> what it re-declares: a copy of tables the main constant already lists
+# (measured 2026.10.10). Each value is PARSED on every run to keep that true: a table outside the
+# main set stops the generator, so promoting the key to _FEATURE_LOCAL_ADDS is deliberate.
+_FEATURE_LOCAL_REDECLARES = {
+    "operator_approval_standing_grants": (
+        _ALREADY_IN_MAIN + "operator_approval_standing_grants, "
+        "operator_approval_standing_grant_generations "
+        "(operator-approval-standing-grants-*.mjs: ensureStandingGrantSchema)"),
+    "operator_approval_execution_identities": (
+        _ALREADY_IN_MAIN + "operator_approval_execution_identities "
+        "(operator-approval-store.operations-*.mjs: database.db.exec)"),
+    "worker_environment_ssh_fallback_ports": (
+        _ALREADY_IN_MAIN + "worker_environment_ssh_fallback_ports "
+        "(openclaw-state-worker-runtime-*.mjs: ensureWorkerEnvironmentStoreSchema)"),
+}
+
+_FEATURE_HELPER_NAME = "getOpenClawStateFeatureSchemaSql"
+_FEATURE_PROVENANCE_KEY = "featureLocalSql (getOpenClawStateFeatureSchemaSql)"
+
+# The helper's body, whitespace collapsed to single spaces, read from the 2026.10.10 dist (all 7
+# bundles that define it agree). Pinned because the table set rests on what the helper DOES with
+# featureLocalSql: this is the whole of it (featureLocalSql[table] when options is undefined; a
+# skill-library special case read from the main constant; otherwise extractSqliteTableSchema over
+# featureLocalSql.user_profiles for user_profile_emails, over the main constant for the rest). A
+# changed body means new routing nothing here has read; the generator stops.
+_FEATURE_HELPER_BODY = (
+    "if (options === void 0 && featureLocalSql[table]) return featureLocalSql[table]; "
+    'if (table === "skill_library_entries" && options === void 0) return extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, table, { endMarker: "-- End profile-owned skill library.", includeEndMarker: false, errorMessage: "Canonical skill library schema missing." }); '
+    'return extractSqliteTableSchema(table === "user_profile_emails" ? featureLocalSql.user_profiles : OPENCLAW_STATE_SCHEMA_SQL, table, options);')
 
 # name -> why it is not read.
 _STATE_EXCLUDED_CONSTANTS = {
@@ -2525,14 +2579,33 @@ _DERIVED_DEFINITION_RE = re.compile(
     r"extractSqliteTableSchema\(\s*OPENCLAW_STATE_SCHEMA_SQL\s*,\s*"
     r"(?:\"([^\"\\\n]*)\"|([A-Za-z_$][\w$]*))\s*\)\s*;")
 
+# 2026.10.10: `NAME = getOpenClawStateFeatureSchemaSql(<table>);`. EXACTLY one argument: an options
+# argument makes the helper skip featureLocalSql (`options === void 0` guards that branch), so
+# that call is a different shape and must stop, not match.
+_FEATURE_DEFINITION_RE = re.compile(
+    r"getOpenClawStateFeatureSchemaSql\(\s*(?:\"([^\"\\\n]*)\"|([A-Za-z_$][\w$]*))\s*\)\s*;")
 
-def _survey_derived_state_constants(dist_dir: Path, derived) -> "dict[str, list]":
-    """name -> [(path, table)] for every definition of a *derived* constant. A definition is
-    understood only as `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>);`
-    where <table> is a string literal or an identifier bound once, in the same file, to one.
-    Any other right-hand side (a literal, a different source constant, an options argument, a
-    computed table) raises: the constant composes its DDL in a way nothing here has read."""
-    found: dict = {name: [] for name in derived}
+
+def _bound_string_literal(text: str, ident: str, name: str, path: Path) -> str:
+    """The string literal *ident* is bound to in *text*: exactly one
+    `const|let|var ident = "lit"` followed by `;` or `,`. None or several raises."""
+    bound = set(re.findall(
+        rf"\b(?:const|let|var)\s+{re.escape(ident)}\s*=\s*\"([^\"\\\n]*)\"\s*[;,]", text))
+    if len(bound) != 1:
+        raise AssertionError(
+            f"{name}: the table argument `{ident}` is not bound to exactly "
+            f"one string literal in {path} ({sorted(bound)}); re-ground.")
+    return next(iter(bound))
+
+
+def _survey_call_defined_constants(dist_dir: Path, names, definition_re, shape) -> "dict[str, list]":
+    """name -> [(path, table)] for every definition of a constant defined by a CALL. A
+    definition is understood only as what *definition_re* matches right after `NAME =`, where
+    the table is a string literal or an identifier bound once, in the same file, to one. Any
+    other right-hand side raises: the constant composes its DDL in a way nothing here has read.
+    *shape* is (how the constant is classified, the one shape modelled), for the message."""
+    classified, modelled = shape
+    found: dict = {name: [] for name in names}
     for ext in _JS_EXTS:
         for path in sorted(dist_dir.rglob("*" + ext)):
             if not path.is_file():
@@ -2541,46 +2614,325 @@ def _survey_derived_state_constants(dist_dir: Path, derived) -> "dict[str, list]
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
                 raise AssertionError(
-                    f"cannot read {path} while classifying derived *_SCHEMA_SQL constants: "
+                    f"cannot read {path} while classifying {classified} *_SCHEMA_SQL constants: "
                     f"{exc}. An unreadable bundle could define one.") from exc
-            for name in derived:
+            for name in names:
                 if name not in text:
                     continue
                 for m in re.finditer(rf"\b{name}\s*=(?!=)\s*", text):
-                    d = _DERIVED_DEFINITION_RE.match(text, m.end())
+                    d = definition_re.match(text, m.end())
                     if d is None:
                         raise AssertionError(
-                            f"{name} is classified as derived from OPENCLAW_STATE_SCHEMA_SQL but "
+                            f"{name} is classified as {classified} but "
                             f"{path} defines it as `{text[m.end():m.end() + 100].strip()}...` -- "
-                            "not the one shape this guard models (`extractSqliteTableSchema("
-                            "OPENCLAW_STATE_SCHEMA_SQL, <table>);`). Re-ground the classification.")
+                            f"not the one shape this guard models (`{modelled}`). "
+                            "Re-ground the classification.")
                     table = d.group(1)
                     if table is None:
-                        bound = set(re.findall(
-                            rf"\b(?:const|let|var)\s+{re.escape(d.group(2))}\s*=\s*\"([^\"\\\n]*)\"\s*[;,]",
-                            text))
-                        if len(bound) != 1:
-                            raise AssertionError(
-                                f"{name}: the table argument `{d.group(2)}` is not bound to exactly "
-                                f"one string literal in {path} ({sorted(bound)}); re-ground.")
-                        table = next(iter(bound))
+                        table = _bound_string_literal(text, d.group(2), name, path)
                     found[name].append((path, table))
     return found
 
 
-def _check_derived_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> None:
+def _survey_derived_state_constants(dist_dir: Path, derived) -> "dict[str, list]":
+    """name -> [(path, table)] for every definition of a *derived* constant: understood only as
+    `NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>);`. Thin wrapper over
+    `_survey_call_defined_constants`."""
+    return _survey_call_defined_constants(
+        dist_dir, derived, _DERIVED_DEFINITION_RE,
+        ("derived from OPENCLAW_STATE_SCHEMA_SQL",
+         "extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>);"))
+
+
+def _check_derived_state_constant(name: str, defs: list, dist_dir: Path, main_tables,
+                                  universe=None,
+                                  label: str = "derived from OPENCLAW_STATE_SCHEMA_SQL") -> None:
+    """Every definition of *name* must resolve to ONE table, and that table must be in
+    *universe* (default: the main constant's tables)."""
+    universe = set(main_tables) if universe is None else set(universe)
     if not defs:
         raise AssertionError(
-            f"{name} is classified as derived from OPENCLAW_STATE_SCHEMA_SQL but no bundle under "
+            f"{name} is classified as {label} but no bundle under "
             f"{dist_dir} defines it -- the vendor renamed, moved or rewrote it; re-ground.")
     tables = sorted({t for _, t in defs})
     if len(tables) != 1:
-        raise AssertionError(f"{name} is derived for DIFFERENT tables ({tables}); decide which "
+        raise AssertionError(f"{name} is defined for DIFFERENT tables ({tables}); decide which "
                              "one the runtime applies before trusting either.")
-    if tables[0] not in set(main_tables):
+    if tables[0] not in universe:
         raise AssertionError(
-            f"{name} is derived from OPENCLAW_STATE_SCHEMA_SQL for {tables[0]!r}, which the main "
-            "constant does not declare -- the derivation would fail at runtime; re-ground.")
+            f"{name} ({label}) names {tables[0]!r}, which the tables this guard knows "
+            "(the main constant"
+            + (", plus featureLocalSql" if universe != set(main_tables) else "")
+            + ") do not declare -- the call would fail at runtime; re-ground.")
+
+
+# --------------------------------------------------------------------------------------
+# C-762 (2026.10.10): the helper `getOpenClawStateFeatureSchemaSql(table, options)` serves DDL from
+# an object, `featureLocalSql`, that holds tables the main constant does NOT list
+# (user_profiles, user_profile_emails, worker_environment_session_attachments). Completeness
+# comes from READING that object (its key set pinned) and the helper (its body pinned), not from
+# resolving the ~46 call sites: a call-site regex can only under-approximate, and an
+# under-approximation is exactly a silent drop. The call sites are a sanity check on the model
+# (`_feature_helper_call_sites`), never the source of the set.
+# --------------------------------------------------------------------------------------
+
+_FEATURE_LOCAL_OBJECT_RE = re.compile(r"\bfeatureLocalSql\s*=(?!=)\s*\{")
+_FEATURE_HELPER_DEF_RE = re.compile(
+    r"\bfunction getOpenClawStateFeatureSchemaSql\s*\(\s*table\s*,\s*options\s*\)\s*\{")
+_FEATURE_HELPER_ANY_DEF_RE = re.compile(
+    r"\bfunction\s+getOpenClawStateFeatureSchemaSql\b|"
+    r"\b(?:const|let|var)\s+getOpenClawStateFeatureSchemaSql\b")
+_JS_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _literal_value_end(js_text: str, start: int, delim: str) -> int:
+    """Index of the closing delimiter of the string or template literal whose body starts at
+    *start* (just past its opening *delim*)."""
+    if delim == "`":
+        return _scan_js_template(js_text, start)[2]
+    i, n = start, len(js_text)
+    while i < n and js_text[i] != delim:
+        i += 2 if js_text[i] == "\\" else 1
+    if i >= n:
+        raise AssertionError("unterminated string literal in the dist")
+    return i
+
+
+def _parse_feature_local_sql(js_text: str, start: int) -> "dict[str, tuple[str, list]]":
+    """key -> (canonical SQL, tables spliced from the main constant) for the `featureLocalSql`
+    object whose body starts at *start* (just past its `{`). The object's end is found by
+    walking its entries, never by searching for `\\n};` (the lazy copy is indented). Understood:
+    `key: <template | "string" | 'string'>` with a bare-identifier or quoted key, separated by
+    commas. Everything else -- a computed `[k]` key, a spread, a shorthand or method, a comment,
+    an identifier or call as a value, a duplicate key -- raises."""
+    out: dict = {}
+    i, n = start, len(js_text)
+    while True:
+        while i < n and js_text[i].isspace():
+            i += 1
+        if i >= n:
+            raise AssertionError("unterminated featureLocalSql object in the dist")
+        if js_text[i] == "}":
+            return out
+        if js_text[i] in "\"'":
+            end = _literal_value_end(js_text, i + 1, js_text[i])
+            key, i = _unescape_js_double_quoted(js_text[i + 1:end]), end + 1
+        else:
+            m = _JS_IDENT_RE.match(js_text, i)
+            if m is None:
+                raise AssertionError(
+                    f"featureLocalSql entry starts with `{js_text[i:i + 40].strip()}...` -- not a "
+                    "bare or quoted key (a computed key, spread, comment or method is not "
+                    "modelled); re-ground the parser against the dist.")
+            key, i = m.group(), m.end()
+        while i < n and js_text[i].isspace():
+            i += 1
+        if js_text[i:i + 1] != ":":
+            raise AssertionError(
+                f"featureLocalSql key {key!r} is not followed by `:` ({js_text[i:i + 40].strip()!r}) "
+                "-- a shorthand or method entry is not modelled; re-ground the parser.")
+        i += 1
+        while i < n and js_text[i].isspace():
+            i += 1
+        delim = js_text[i:i + 1]
+        if delim not in ("`", '"', "'"):
+            raise AssertionError(
+                f"featureLocalSql[{key!r}] is `{js_text[i:i + 40].strip()}...` -- not a template or "
+                "string literal (an identifier, call or concatenation composes DDL nothing here "
+                "has read); re-ground.")
+        if key in out:
+            raise AssertionError(f"featureLocalSql declares the key {key!r} twice.")
+        out[key] = _extract_satellite_schema_sql(js_text, i + 1, delim, f"featureLocalSql[{key!r}]")
+        i = _literal_value_end(js_text, i + 1, delim) + 1
+        while i < n and js_text[i].isspace():
+            i += 1
+        if js_text[i:i + 1] == ",":
+            i += 1
+        elif js_text[i:i + 1] != "}":
+            raise AssertionError(
+                f"featureLocalSql[{key!r}] is followed by `{js_text[i:i + 40].strip()}...`, not `,` "
+                "or `}` (e.g. a concatenation); re-ground the parser.")
+
+
+def _survey_feature_schema_helper(dist_dir: Path) -> "list[tuple[Path, dict, str]]":
+    """(path, parsed featureLocalSql, whitespace-normalised helper body) for every bundle that
+    defines `function getOpenClawStateFeatureSchemaSql(table, options)`. Raises on: an
+    unreadable bundle; a bundle with the helper but not exactly one definition and one
+    featureLocalSql object; a featureLocalSql object with no helper beside it (an unmodelled
+    copy); a definition spelled any way but the modelled function declaration."""
+    found = []
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while looking for {_FEATURE_HELPER_NAME}: {exc}. An "
+                    "unreadable bundle could define it.") from exc
+            if "featureLocalSql" not in text and _FEATURE_HELPER_NAME not in text:
+                continue
+            defs = list(_FEATURE_HELPER_DEF_RE.finditer(text))
+            objs = list(_FEATURE_LOCAL_OBJECT_RE.finditer(text))
+            if not defs:
+                if _FEATURE_HELPER_ANY_DEF_RE.search(text):
+                    raise AssertionError(
+                        f"{path} defines {_FEATURE_HELPER_NAME} in a shape other than "
+                        "`function getOpenClawStateFeatureSchemaSql(table, options) {` -- the "
+                        "helper was rewritten; re-ground this reader.")
+                if objs:
+                    raise AssertionError(
+                        f"{path} declares a featureLocalSql object but no "
+                        f"{_FEATURE_HELPER_NAME} definition -- an unmodelled copy of the "
+                        "feature-schema table; re-ground.")
+                continue
+            if len(defs) != 1 or len(objs) != 1:
+                raise AssertionError(
+                    f"{path} has {len(defs)} {_FEATURE_HELPER_NAME} definition(s) and {len(objs)} "
+                    "featureLocalSql object(s); exactly one of each is modelled -- re-ground.")
+            parsed = _parse_feature_local_sql(text, objs[0].end())
+            body_end = _skip_js_expression(text, defs[0].end())
+            found.append((path, parsed, " ".join(text[defs[0].end():body_end].split())))
+    return found
+
+
+def _feature_helper_tables(dist_dir: Path, main_tables, adds=None, redeclares=None) -> dict:
+    """{"tables", "adds", "bundle", "copies"} for the featureLocalSql object read through the
+    helper. *tables* is every table any value declares; *adds* those the main constant lacks.
+
+    Raises on: no bundle defining the helper; copies that differ (keys, SQL per key, or body); a
+    body that is not `_FEATURE_HELPER_BODY`; a key set that is not exactly *adds* | *redeclares*
+    (new and missing keys are named); a key in both pins; a value with a CREATE TABLE whose name
+    is not a bare identifier, or that does not declare its own key's table; user_profiles
+    missing or not declaring user_profile_emails; skill_library_entries absent from the main
+    constant; a splice the main constant does not declare; a REDECLARING key declaring a table
+    outside the main set; an ADDING key that adds nothing."""
+    adds = _FEATURE_LOCAL_ADDS if adds is None else adds
+    redeclares = _FEATURE_LOCAL_REDECLARES if redeclares is None else redeclares
+    main = set(main_tables)
+    copies = _survey_feature_schema_helper(dist_dir)
+    if not copies:
+        raise AssertionError(
+            f"no bundle under {dist_dir} defines {_FEATURE_HELPER_NAME} -- the vendor renamed, "
+            "moved or rewrote the feature-schema helper; re-ground this reader.")
+    first_path, parsed, body = copies[0]
+    for path, other, other_body in copies[1:]:
+        if other != parsed:
+            diff = sorted(k for k in set(parsed) | set(other) if parsed.get(k) != other.get(k))
+            raise AssertionError(
+                f"featureLocalSql differs between {first_path} and {path} (keys {diff}); decide "
+                "which copy the runtime reaches before trusting a table set taken from either.")
+        if other_body != body:
+            raise AssertionError(
+                f"{_FEATURE_HELPER_NAME} has a different body in {first_path} and {path}; decide "
+                "which one the runtime reaches.")
+    if body != _FEATURE_HELPER_BODY:
+        raise AssertionError(
+            f"{_FEATURE_HELPER_NAME} in {first_path} is not the body this guard pinned. Its "
+            f"routing of featureLocalSql is what the table set rests on; now it reads: {body!r}. "
+            "Read what changed, then update _FEATURE_HELPER_BODY deliberately.")
+    both = sorted(set(adds) & set(redeclares))
+    if both:
+        raise AssertionError(f"featureLocalSql key(s) {both} are pinned as BOTH adding and "
+                             "re-declaring; they are one or the other.")
+    classified = set(adds) | set(redeclares)
+    new, gone = sorted(set(parsed) - classified), sorted(classified - set(parsed))
+    if new or gone:
+        raise AssertionError(
+            f"featureLocalSql keys changed: new, unclassified {new}; classified but missing {gone}. "
+            "Read what each declares and where it is applied, then classify it in "
+            "_FEATURE_LOCAL_ADDS (a table the main constant lacks) or _FEATURE_LOCAL_REDECLARES.")
+    named_by_key: "dict[str, list[str]]" = {}
+    for key, (sql, spliced) in sorted(parsed.items()):
+        named = _CREATE_TABLE_NAMED_RE.findall(sql)
+        if not named or len(named) != len(_CREATE_TABLE_RE.findall(sql)):
+            raise AssertionError(
+                f"featureLocalSql[{key!r}]: {len(_CREATE_TABLE_RE.findall(sql))} CREATE TABLE "
+                f"statement(s) but {len(named)} table name(s) read -- a quoted or computed name is "
+                "not a bare identifier, so this extractor cannot name that table. Re-ground it.")
+        if key not in named:
+            raise AssertionError(
+                f"featureLocalSql[{key!r}] declares {sorted(set(named))}, not {key!r} -- the "
+                "helper hands this value out for that table; re-ground.")
+        absent = sorted(set(spliced) - main)
+        if absent:
+            raise AssertionError(
+                f"featureLocalSql[{key!r}] splices {absent} from OPENCLAW_STATE_SCHEMA_SQL, which "
+                "declares no such table -- the splice would fail at runtime; re-ground.")
+        named_by_key[key] = sorted(set(named))
+    if "user_profiles" not in parsed:
+        raise AssertionError(
+            "featureLocalSql has no 'user_profiles' key, but the helper serves user_profile_emails "
+            "from featureLocalSql.user_profiles; re-ground.")
+    if "user_profile_emails" not in named_by_key["user_profiles"]:
+        raise AssertionError(
+            "featureLocalSql['user_profiles'] does not declare user_profile_emails, which the "
+            f"helper extracts from it (it declares {named_by_key['user_profiles']}); re-ground.")
+    if "skill_library_entries" not in main:
+        raise AssertionError(
+            "the helper extracts 'skill_library_entries' from OPENCLAW_STATE_SCHEMA_SQL, which "
+            "does not declare that table; re-ground.")
+    for key in sorted(redeclares):
+        extra = sorted(set(named_by_key[key]) - main)
+        if extra:
+            raise AssertionError(
+                f"featureLocalSql[{key!r}] is pinned as re-declaring only tables "
+                f"OPENCLAW_STATE_SCHEMA_SQL already has, but it declares {extra}, which the main "
+                "constant does not. Read where it is applied and promote it to "
+                "_FEATURE_LOCAL_ADDS deliberately.")
+    for key in sorted(adds):
+        if not set(named_by_key[key]) - main:
+            raise AssertionError(
+                f"featureLocalSql[{key!r}] is pinned as ADDING tables, but everything it declares "
+                f"({named_by_key[key]}) is already in the main constant; move it to "
+                "_FEATURE_LOCAL_REDECLARES.")
+    tables = sorted({t for names in named_by_key.values() for t in names})
+    paths = [p for p, _, _ in copies]
+    bundle = min(paths, key=lambda p: (len(p.relative_to(dist_dir).parts), p.stat().st_size, str(p)))
+    return {
+        "tables": tables,
+        "adds": sorted(set(tables) - main),
+        "bundle": bundle.name,
+        "copies": len(paths),
+    }
+
+
+_FEATURE_CALL_RE = re.compile(
+    r"\bgetOpenClawStateFeatureSchemaSql\(\s*(?:\"([^\"\\\n]*)\"|([A-Za-z_$][\w$.]*))")
+
+
+def _feature_helper_call_sites(dist_dir: Path) -> "tuple[dict[str, list[Path]], int]":
+    """(table -> bundles, number of unresolved call sites) for every call of the helper. A
+    literal argument resolves directly; an UPPER_SNAKE identifier by the same-file binding rule
+    (0 or several bindings raises); a lowercase identifier or member expression (`table`,
+    `params.table`) is counted UNRESOLVED -- it is a runtime value. This is a check on the
+    model of the helper, not a source of tables."""
+    resolved: "dict[str, list[Path]]" = {}
+    unresolved = 0
+    for ext in _JS_EXTS:
+        for path in sorted(dist_dir.rglob("*" + ext)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                raise AssertionError(
+                    f"cannot read {path} while listing {_FEATURE_HELPER_NAME} call sites: {exc}."
+                ) from exc
+            if _FEATURE_HELPER_NAME not in text:
+                continue
+            for m in _FEATURE_CALL_RE.finditer(text):
+                if text[max(0, m.start() - 9):m.start()] == "function ":
+                    continue  # the definition, not a call
+                table, ident = m.group(1), m.group(2)
+                if table is None:
+                    if not re.fullmatch(r"[A-Z][A-Z0-9_]*", ident):
+                        unresolved += 1
+                        continue
+                    table = _bound_string_literal(text, ident, _FEATURE_HELPER_NAME, path)
+                resolved.setdefault(table, []).append(path)
+    return resolved, unresolved
 
 
 def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) -> dict:
@@ -2624,7 +2976,8 @@ def _resolve_state_constant(name: str, defs: list, dist_dir: Path, main_tables) 
 
 
 def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, excluded=None,
-                            redeclaring=None, derived=None) -> "dict[str, dict]":
+                            redeclaring=None, derived=None, feature_constants=None,
+                            feature_tables=frozenset()) -> "dict[str, dict]":
     """name -> {"tables", "adds", "bundle", "copies"} for every allowlisted satellite.
 
     Raises on: a `*_SCHEMA_SQL` name in no list; an allowlisted constant with no literal
@@ -2636,20 +2989,26 @@ def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, exclud
     deliberately). Redeclaring constants add no name, so they are checked, not returned. A
     DERIVED constant (`NAME = extractSqliteTableSchema(OPENCLAW_STATE_SCHEMA_SQL, <table>)`)
     is checked the same way: its definition shape must be that one, its table must be in the
-    main set, and anything else raises."""
+    main set, and anything else raises. A FEATURE-HELPER constant (`NAME =
+    getOpenClawStateFeatureSchemaSql(<table>);`, C-762) is checked the same way against the main
+    set plus *feature_tables* (what featureLocalSql declares); it is classified, not returned."""
     satellites = _STATE_SATELLITE_CONSTANTS if satellites is None else satellites
     excluded = _STATE_EXCLUDED_CONSTANTS if excluded is None else excluded
     redeclaring = _STATE_REDECLARING_CONSTANTS if redeclaring is None else redeclaring
     derived = _STATE_DERIVED_CONSTANTS if derived is None else derived
+    feature_constants = (_STATE_FEATURE_HELPER_CONSTANTS if feature_constants is None
+                         else feature_constants)
     seen, found = _survey_schema_sql_constants(dist_dir, set(satellites) | set(redeclaring))
     unclassified = sorted(seen - {_PRIMARY_STATE_SCHEMA_CONSTANT} - set(satellites)
-                          - set(redeclaring) - set(derived) - set(excluded))
+                          - set(redeclaring) - set(derived) - set(feature_constants)
+                          - set(excluded))
     if unclassified:
         raise AssertionError(
             f"unclassified *_SCHEMA_SQL constant(s) in {dist_dir}: {unclassified}. Read where "
             "each is applied. If the DDL reaches the STATE database "
             "(runOpenClawStateWriteTransaction / openOpenClawStateDatabase), add it to "
-            "_STATE_SATELLITE_CONSTANTS (or _STATE_REDECLARING_CONSTANTS if it adds no table) "
+            "_STATE_SATELLITE_CONSTANTS (or _STATE_REDECLARING_CONSTANTS if it adds no table, or "
+            "_STATE_FEATURE_HELPER_CONSTANTS if it is `getOpenClawStateFeatureSchemaSql(<table>)`) "
             "with that evidence; otherwise add it to _STATE_EXCLUDED_CONSTANTS with the "
             "reason. Guessing here is how a vendor table goes unnamed.")
     for name in sorted(redeclaring):
@@ -2662,19 +3021,56 @@ def _satellite_state_tables(dist_dir: Path, main_tables, satellites=None, exclud
     derived_defs = _survey_derived_state_constants(dist_dir, set(derived)) if derived else {}
     for name in sorted(derived):
         _check_derived_state_constant(name, derived_defs[name], dist_dir, main_tables)
+    if feature_constants:
+        feature_defs = _survey_call_defined_constants(
+            dist_dir, set(feature_constants), _FEATURE_DEFINITION_RE,
+            ("served by the feature-schema helper",
+             "getOpenClawStateFeatureSchemaSql(<table>);"))
+        universe = set(main_tables) | set(feature_tables)
+        for name in sorted(feature_constants):
+            _check_derived_state_constant(name, feature_defs[name], dist_dir, main_tables,
+                                          universe, "served by the feature-schema helper")
     return {name: _resolve_state_constant(name, found[name], dist_dir, main_tables)
             for name in sorted(satellites)}
 
 
 def _vendor_state_table_surface(dist_dir: Path, satellites=None, excluded=None,
-                                redeclaring=None, derived=None) -> "tuple[set, dict, Path]":
+                                redeclaring=None, derived=None, feature_constants=None,
+                                feature_adds=None, feature_redeclares=None
+                                ) -> "tuple[set, dict, Path]":
     """(every state-database table name the dist declares, per-satellite provenance, the
     bundle the main constant was read from). The one function the generator AND the
-    dist-comparison test call, so they cannot disagree about what the file covers."""
+    dist-comparison test call, so they cannot disagree about what the file covers. The set is
+    the main constant, plus the allowlisted satellites, plus every table declared in
+    featureLocalSql (read through the pinned helper, `_feature_helper_tables`).
+
+    The helper's call sites are listed as a sanity check on that model: every resolvable
+    literal or UPPER_SNAKE table must be in the set (else the model of the helper is wrong),
+    and at least one must resolve (a positive control: else the regex is blind). The count it
+    could not resolve is recorded in the provenance as a disclosure, never as a pass."""
     js_path = _find_state_schema_defining_js(dist_dir)
     main = set(_dist_table_ddl_texts(_extract_vendor_schema_sql(js_path.read_text(encoding="utf-8"))))
-    provenance = _satellite_state_tables(dist_dir, main, satellites, excluded, redeclaring, derived)
-    return main | {t for p in provenance.values() for t in p["tables"]}, provenance, js_path
+    feat = _feature_helper_tables(dist_dir, main, feature_adds, feature_redeclares)
+    provenance = _satellite_state_tables(dist_dir, main, satellites, excluded, redeclaring, derived,
+                                         feature_constants, feature_tables=set(feat["tables"]))
+    universe = main | set(feat["tables"]) | {t for p in provenance.values() for t in p["tables"]}
+    sites, unresolved = _feature_helper_call_sites(dist_dir)
+    if not sites:
+        raise AssertionError(
+            f"no resolvable {_FEATURE_HELPER_NAME} call site under {dist_dir} ({unresolved} "
+            "unresolved) -- the call-site reader is blind, so it proves nothing about the model "
+            "of the helper; re-ground it.")
+    ghosts = sorted(set(sites) - universe)
+    if ghosts:
+        raise AssertionError(
+            f"{_FEATURE_HELPER_NAME} is called for {ghosts} "
+            f"({[str(p.relative_to(dist_dir)) for t in ghosts for p in sites[t]]}), which neither "
+            "the main constant nor featureLocalSql declares -- the model of the helper is wrong "
+            "(or the vendor builds the table another way); re-ground.")
+    feat = {**feat, "call_sites_resolved": sum(len(v) for v in sites.values()),
+            "call_sites_unresolved": unresolved}
+    provenance = {**provenance, _FEATURE_PROVENANCE_KEY: feat}
+    return universe, provenance, js_path
 
 
 def _satellite_header_block(provenance: "dict[str, dict]") -> str:
@@ -2705,9 +3101,10 @@ _VENDOR_TABLES_HEADER = """\
 # ------------
 # Every table name the installed OpenClaw declares for its STATE SQLite database
 # (state/openclaw.sqlite) -- the vendor's whole state-SQLite surface, NOT the part this tree
-# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the allowlisted
-# satellite constants below, each applied to the same database through the state-database
-# write path (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
+# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the tables in
+# `featureLocalSql` of `getOpenClawStateFeatureSchemaSql` (the helper serves them to the
+# state-database write path) PLUS any allowlisted satellite constants below, each applied to the
+# same database (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
 # state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
 # tables we read.
 #
@@ -2716,7 +3113,8 @@ _VENDOR_TABLES_HEADER = """\
 # tests/test_state_schema_grounding.py). A name here means the vendor DECLARES a table, not
 # that a given database has it yet: many are created on first use.
 #
-# Satellite constants read (bundle it came from, tables it adds beyond the main constant):
+# Satellite sources read (bundle it came from, tables it adds beyond the main constant; the
+# featureLocalSql entry lists the tables every value in that object declares):
 {satellite_block}
 #
 # Why it exists
