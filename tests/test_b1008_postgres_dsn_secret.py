@@ -177,3 +177,71 @@ def test_undecidable_shapes_never_invent_a_secret(tmp_path):
         assert _secret_paths(_cfg(value)) == [], value
     b1, c015 = _status(_home(tmp_path, _cfg({"source": "store", "id": "pg"}), 0o644))
     assert b1.status == PASS and c015.status == PASS
+
+
+# --------------------------------------------- differential against node-pg (local-only)
+
+def _node_pg_parser() -> Path:
+    from _distgrounding import require_dist
+
+    root = require_dist().parent / "node_modules" / "pg-connection-string"
+    if not root.is_dir() or not shutil.which("node"):
+        pytest.skip("node-pg's connection-string parser or node is not installed")
+    return root
+
+
+def _differential_cases(pw: str) -> list:
+    import itertools
+
+    schemes = ["postgres://", "postgresql://", "POSTGRES://", "pg+x://", "socket://", "//", ""]
+    users = ["u", "", "${U}"]
+    pws = [None, pw, "${PW}", "${PW:-}", "${PW:-" + pw + "}", "%24%7BPW%7D", "${A}" + pw]
+    hosts = ["h", "h:5432", "[::1]", "/var/run", ""]
+    queries = ["", "?sslmode=require", "?password=" + pw, "?pass%77ord=" + pw,
+               "?password=${PW}", "?sslpassword=" + pw, "?password=", "?PASSWORD=" + pw,
+               "#password=" + pw, "?x=1&password=" + pw + "#f", "?password=${PW:-" + pw + "}"]
+    out = set()
+    for sc, u, p, h, q in itertools.product(schemes, users, pws, hosts, queries):
+        ui = (u + (":" + p if p is not None else "") + "@") if (u or p is not None) else ""
+        out.add(sc + ui + h + "/db" + q)
+    return sorted(out)
+
+
+def test_every_password_node_pg_would_send_is_reported_and_nothing_without_one(tmp_path):
+    """The vendor sees the value AFTER OpenClaw's env substitution; modelled with every
+    variable unset (`${X}` -> "", `${X:-fb}` -> fb), so a password node-pg receives is exactly
+    a literal that sits in the file."""
+    import re
+    import subprocess
+
+    parser = _node_pg_parser()
+    pw = _pw()[:6]
+    cases = _differential_cases(pw)
+
+    def subst(text):
+        text = re.sub(r"\$\{[A-Z_][A-Z0-9_]*:-([^${}]*)\}", r"\1", text)
+        return re.sub(r"\$\{[A-Z_][A-Z0-9_]*\}", "", text)
+
+    script = (
+        "const {parse}=require(" + json.dumps(str(parser)) + ");"
+        "const xs=JSON.parse(require('fs').readFileSync(0,'utf8'));"
+        "console.log(JSON.stringify(xs.map(s=>{try{const r=parse(s);"
+        "return Boolean(r.password||r.sslpassword)}catch(e){return null}})));"
+    )
+    proc = subprocess.run(
+        [shutil.which("node"), "-e", script], input=json.dumps([subst(c) for c in cases]),
+        capture_output=True, text=True, timeout=120,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}, cwd=str(tmp_path),
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    vendor = json.loads(proc.stdout)
+    missed = [c for c, v in zip(cases, vendor) if v and _dsn_inline_password(c) is None]
+    assert not missed, f"{len(missed)} DSN(s) node-pg would send a password for: {missed[:5]}"
+    # Over-reporting is allowed only where literal password text is in the file.
+    invented = [
+        c for c, v in zip(cases, vendor)
+        if not v and _dsn_inline_password(c) is not None
+        and pw not in c and "%24%7BPW%7D" not in c
+    ]
+    assert not invented, f"reported with no literal password in the file: {invented[:5]}"
+    assert len(cases) > 5000

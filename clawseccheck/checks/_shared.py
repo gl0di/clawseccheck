@@ -4294,8 +4294,8 @@ _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
 # client-key passphrase) the same two ways - plus the libpq keyword form `password=...`, which
 # that parser ignores but which still puts the credential in the file.
 _VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
-_DSN_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
-_DSN_USERINFO_PASSWORD_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^/?#@:]*:([^/?#@]+)@", re.I)
+# The authority of a DSN read as a URL: optional scheme, then `//`, up to the path/query/fragment.
+_DSN_AUTHORITY_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?//([^/?#]*)", re.I)
 # One libpq `key=value` pair; a quoted value is consumed whole, so a `password=` INSIDE a
 # quoted `options` / `application_name` value is not a pair of its own.
 _DSN_KEYWORD_PAIR_RE = re.compile(r"(?:^|(?<=\s))(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
@@ -4341,49 +4341,56 @@ def _url_inline_password(value) -> "str | None":
 
 def _dsn_inline_password(value) -> "str | None":
     """The password a PostgreSQL DSN carries in the string itself, or None (see
-    ``_VENDOR_SECRET_DSN_PATH_RE``). A password that is only an env reference is not one."""
+    ``_VENDOR_SECRET_DSN_PATH_RE``). A password that is only an env reference is not one.
+
+    A UNION of three readings, not one parser, so a shape one reading misses cannot hide a
+    credential from the others: the authority's userinfo password (any scheme, or a bare
+    ``//``), every ``password`` / ``sslpassword`` query key (decoded, as node-pg decodes keys;
+    the query is read with or without a scheme, as node-pg reads it), and the libpq keyword
+    pairs. node-pg (pg-connection-string 2.14.1) reads the first two from a WHATWG URL resolved
+    against ``postgres://base``; it treats a value that starts with ``/`` - ``//`` included - as
+    a socket path with no password, and it ignores the keyword form. The union deliberately
+    reports those shapes anyway when they hold literal password text: the credential is in the
+    file whether or not node-pg would send it. A single leading ``/`` (``/var/run/postgresql
+    db``) is node-pg's socket form and is not read further.
+    Differentially pinned against the executed parser in
+    ``tests/test_b1008_postgres_dsn_secret.py``: every DSN node-pg would send a literal password
+    for is reported, and nothing is reported that holds no literal password text.
+    """
     if not isinstance(value, str):
         return None
-    text = value.strip()
+    # WHATWG URL parsing drops ASCII tab and newline anywhere in the input
+    text = value.strip().replace("\t", "").replace("\n", "").replace("\r", "")
+    if text.startswith("/") and not text.startswith("//"):
+        return None
 
     def literal(password: str) -> "str | None":
         left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
-        return password if left else None
+        return password if left and password else None
 
-    def query_password(query: str) -> "str | None":
-        # Raw (undecoded) VALUES: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env
-        # substitution runs on the config text before it), not a reference.
+    found = []
+    authority = _DSN_AUTHORITY_RE.match(text)
+    if authority and "@" in authority.group(1):
+        userinfo = authority.group(1).rsplit("@", 1)[0]
+        if ":" in userinfo:
+            found.append(userinfo.split(":", 1)[1])
+    if "?" in text:  # node-pg reads the query of any non-socket value, scheme or not
+        # Raw VALUES: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env substitution
+        # runs on the config text before it), not a reference. KEYS are decoded, as node-pg does
+        # (`pass%77ord` is `password`).
+        query = text.split("?", 1)[1].split("#", 1)[0]
         for pair in query.split("&"):
             key, _, val = pair.partition("=")
-            # node-pg decodes the KEY (`pass%77ord` is `password`); the value stays raw
-            if unquote_plus(key) in _DSN_PASSWORD_KEYS and val and literal(val) is not None:
-                return val
-        return None
-
-    # The URL branch only for a value that STARTS with a scheme: a keyword DSN can carry `://`
-    # inside a value (`options='... x://y'`) and must still get the keyword scan below.
-    if _DSN_SCHEME_RE.match(text):
-        try:
-            query = urlsplit(text).query
-        except ValueError:
-            # Unparseable (`postgres://u:pw@[::1`): node-pg rejects it too, so it never
-            # connects - but a password in the userinfo or query is still in the file.
-            m = _DSN_USERINFO_PASSWORD_RE.match(text)
-            if m and literal(m.group(1)) is not None:
-                return m.group(1)
-            q = text.split("?", 1)[1].split("#", 1)[0] if "?" in text else ""
-            return query_password(q)
-        found = _url_inline_password(text)
-        if found is not None:
-            return found
-        return query_password(query)
+            if unquote_plus(key) in _DSN_PASSWORD_KEYS:
+                found.append(val)
     for match in _DSN_KEYWORD_PAIR_RE.finditer(text):
-        if match.group(1).lower() not in _DSN_PASSWORD_KEYS:
-            continue
-        password = match.group(2)
-        if password.startswith("'") and password.endswith("'") and len(password) >= 2:
-            password = password[1:-1]
-        if password and literal(password) is not None:
+        if match.group(1).lower() in _DSN_PASSWORD_KEYS:
+            password = match.group(2)
+            if password.startswith("'") and password.endswith("'") and len(password) >= 2:
+                password = password[1:-1]
+            found.append(password)
+    for password in found:
+        if literal(password) is not None:
             return password
     return None
 
