@@ -44,7 +44,7 @@ import ipaddress
 import re
 from datetime import date
 
-REVISION = "2026-11-03"  # dataset point-in-time snapshot date -- bump on every content refresh
+REVISION = "2026-11-04"  # dataset point-in-time snapshot date -- bump on every content refresh
 
 # Past this many days since REVISION, freshness_notice() surfaces an explicit
 # staleness advisory instead of staying silent. See the module docstring for why
@@ -205,6 +205,26 @@ SOURCES: tuple = (
         "https://github.com/advisories/GHSA-f826-46h5-5rcq",
         "GitHub Advisory Database (GHSA-f826-46h5-5rcq; analysis amazon-inspector)",
         "IMDS credential exfil; advisory lists 1.0.0, 1.0.2",
+    ),
+    # pypi: the kam193 / OpenSSF campaign "2026-10-is-it-ai" (GHSA type=malware, both
+    # published 2026-10-31). The advisory text: "All package versions were uploaded with
+    # malicious intention; the ones without malicious references are clearly intendent
+    # only to hide a cover for the rest" -- so name-level is correct (no legitimate
+    # release to FAIL, unlike C-750). Both names returned 404 on PyPI on 2026-11-04.
+    # `skills-analyzer` is aimed squarely at people who work with agent skills.
+    _rec(
+        "skills-analyzer", "pypi", "2026-10-31",
+        "https://github.com/advisories/GHSA-r92r-m9r8-78vj",
+        "GitHub Advisory Database (GHSA-r92r-m9r8-78vj; analysis kam193 via OpenSSF)",
+        "pins a malicious is-it-ai release; fingerprints the host, then downloads and "
+        "runs a URL the server returns; advisory lists 0.1.0, 0.1.1, 0.1.2",
+    ),
+    _rec(
+        "is-it-ai", "pypi", "2026-10-31",
+        "https://github.com/advisories/GHSA-76h8-w3px-47hx",
+        "GitHub Advisory Database (GHSA-76h8-w3px-47hx; analysis kam193 via OpenSSF)",
+        "carries the 2026-10-is-it-ai payload: fingerprints the host, then downloads "
+        "and runs a URL the server returns; advisory lists 0.1.0, 0.1.1, 0.1.3",
     ),
 )
 

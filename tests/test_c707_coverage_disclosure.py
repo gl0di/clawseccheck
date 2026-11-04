@@ -169,16 +169,27 @@ class TestBundledTierIsDisclosed:
 _EMPTY_POOL = "no identity signal for this ecosystem (the dataset holds no {eco} entries)"
 
 
+def _without(eco: str) -> dict:
+    """The shipped catalog with one ecosystem's pool emptied."""
+    return {**iocdb.known_bad_sources(), eco: frozenset()}
+
+
 def _coverage_notes(finding) -> list:
     return [e for e in finding.evidence if e.startswith("coverage: ")]
 
 
 class TestVetSourceSaysWhenThePoolIsEmpty:
+    # pypi was the shipped empty pool until C-764 gave it records; the case now injects a
+    # catalog with pypi emptied, so it keeps testing the empty-pool path, not the data.
     @pytest.mark.parametrize("target,eco", [("pypi:requests", "pypi")])
     def test_an_empty_ecosystem_pool_is_named(self, target, eco):
-        f = vet_source(target)
+        f = vet_source(target, known_bad=_without(eco))
         notes = _coverage_notes(f)
         assert notes == ["coverage: " + _EMPTY_POOL.format(eco=eco)], f.evidence
+
+    def test_the_shipped_pypi_pool_is_populated_and_says_nothing(self):
+        assert iocdb.known_bad_sources()["pypi"]
+        assert not _coverage_notes(vet_source("pypi:requests"))
 
     def test_detail_of_the_existing_unknown_finding_is_unchanged(self):
         f = vet_source("pypi:requests")
@@ -217,7 +228,7 @@ class TestVetSourceSaysWhenThePoolIsEmpty:
         assert not _coverage_notes(f)
 
     def test_the_human_dossier_prints_it_as_a_non_verdict_note(self):
-        f = vet_source("pypi:requests")
+        f = vet_source("pypi:requests", known_bad=_without("pypi"))
         text = render_vet_dossier(build_profile(f, "pypi:requests", "source"))
         assert _EMPTY_POOL.format(eco="pypi") in text
         assert "does not affect the verdict" in text

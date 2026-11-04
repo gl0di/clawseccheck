@@ -222,7 +222,9 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
     # name to be checked against every ecosystem, so "any" must stay empty exactly
     # like the former literal — never widen to equal "url" again.
     assert pools["any"] == frozenset()
-    assert pools["pypi"] == pools["git"] == frozenset()
+    assert pools["git"] == frozenset()
+    # C-764: the 2026-10-is-it-ai campaign, the first pypi records.
+    assert pools["pypi"] == frozenset({"skills-analyzer", "is-it-ai"})
     # C-750: npm holds only packages whose GitHub Advisory Database malware advisory
     # names the package itself (bare-name match is version-blind, so a single
     # compromised release of a legitimate package, e.g. tensorlake, must NOT be here).
