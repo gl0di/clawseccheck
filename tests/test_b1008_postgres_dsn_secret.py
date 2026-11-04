@@ -66,6 +66,7 @@ def _bad_dsns() -> list:
         " \tpostgres://openclaw:" + pw + "@db/openclaw",  # leading whitespace
         "\x01postgres://openclaw:" + pw + "@db/openclaw",  # leading C0 control
         "http:\\\\openclaw:" + pw + "@db/openclaw",  # special scheme, backslashes
+        "postgres://openclaw:" + pw[:4] + "\\" + pw[4:] + "@db/openclaw",  # `\` inside it
     ]
 
 
@@ -100,7 +101,7 @@ def test_the_vendor_path_is_covered_by_a_path_rule():
 
 # ------------------------------------------------------------------------- helper level
 
-@pytest.mark.parametrize("index", range(18))
+@pytest.mark.parametrize("index", range(19))
 def test_a_dsn_with_a_literal_password_is_reported(index):
     dsn = _bad_dsns()[index]
     assert _dsn_inline_password(dsn) is not None, dsn

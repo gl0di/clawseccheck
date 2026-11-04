@@ -4295,8 +4295,12 @@ _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
 # that parser ignores but which still puts the credential in the file.
 _VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
 # The authority of a DSN read as a URL: optional scheme, then `//`, up to the path/query/fragment.
-# `\\` counts as `//` too: WHATWG reads a backslash as a slash for the special schemes.
-_DSN_AUTHORITY_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}([^/\\?#]*)", re.I)
+# Two readings of the authority, both kept in the union: the plain one (a `\\` is an ordinary
+# character, as for `postgres://`), and the WHATWG special-scheme one, where `\\` is a slash.
+_DSN_AUTHORITY_RES = (
+    re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?//([^/?#]*)", re.I),
+    re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}([^/\\?#]*)", re.I),
+)
 # One libpq `key=value` pair; a quoted value is consumed whole, so a `password=` INSIDE a
 # quoted `options` / `application_name` value is not a pair of its own.
 _DSN_KEYWORD_PAIR_RE = re.compile(r"(?:^|(?<=\s))(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
@@ -4373,11 +4377,12 @@ def _dsn_inline_password(value) -> "str | None":
         return password if left and password else None
 
     found = []
-    authority = _DSN_AUTHORITY_RE.match(text)
-    if authority and "@" in authority.group(1):
-        userinfo = authority.group(1).rsplit("@", 1)[0]
-        if ":" in userinfo:
-            found.append(userinfo.split(":", 1)[1])
+    for authority_re in _DSN_AUTHORITY_RES:
+        authority = authority_re.match(text)
+        if authority and "@" in authority.group(1):
+            userinfo = authority.group(1).rsplit("@", 1)[0]
+            if ":" in userinfo:
+                found.append(userinfo.split(":", 1)[1])
     if "?" in text:  # node-pg reads the query of any non-socket value, scheme or not
         # Raw VALUES: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env substitution
         # runs on the config text before it), not a reference. KEYS are decoded, as node-pg does
