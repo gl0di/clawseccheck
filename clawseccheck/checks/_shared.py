@@ -4295,7 +4295,8 @@ _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
 # that parser ignores but which still puts the credential in the file.
 _VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
 # The authority of a DSN read as a URL: optional scheme, then `//`, up to the path/query/fragment.
-_DSN_AUTHORITY_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?//([^/?#]*)", re.I)
+# `\\` counts as `//` too: WHATWG reads a backslash as a slash for the special schemes.
+_DSN_AUTHORITY_RE = re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}([^/\\?#]*)", re.I)
 # One libpq `key=value` pair; a quoted value is consumed whole, so a `password=` INSIDE a
 # quoted `options` / `application_name` value is not a pair of its own.
 _DSN_KEYWORD_PAIR_RE = re.compile(r"(?:^|(?<=\s))(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
@@ -4361,7 +4362,11 @@ def _dsn_inline_password(value) -> "str | None":
     if not isinstance(value, str):
         return None
     # WHATWG URL parsing drops ASCII tab and newline anywhere in the input
-    text = value.strip().replace("\t", "").replace("\n", "").replace("\r", "")
+    # WHATWG URL parsing strips C0 controls and spaces at both ends, and drops tab / CR / LF
+    # anywhere in the input
+    text = value.strip("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
+                       "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20")
+    text = text.strip().replace("\t", "").replace("\n", "").replace("\r", "")
 
     def literal(password: str) -> "str | None":
         left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
