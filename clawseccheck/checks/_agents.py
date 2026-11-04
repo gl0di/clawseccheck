@@ -1472,7 +1472,7 @@ def check_channel_mention_gate_bypass(ctx: Context) -> Finding:
             continue
         # B-1002: the live implicit default account's own scopes too, not only the merged
         # configured accounts (`_live_channel_nodes`).
-        for node in _live_channel_nodes(name, c):
+        for node in _live_channel_nodes(name, c, cfg):
             for label, scope in _mention_gate_scopes(node):
                 prefix = f"{name}.{label}" if label else name
                 rm = scope.get("requireMention")
@@ -2581,7 +2581,7 @@ def check_wildcard_group_ingress(ctx: Context) -> Finding:
     reasons: list[str] = []
     for provider, provider_cfg in providers.items():
         # B-1002: include the live implicit default account (`_live_channel_nodes`).
-        for node in _live_channel_nodes(provider, provider_cfg):
+        for node in _live_channel_nodes(provider, provider_cfg, ctx.config):
             gap = _wildcard_group_gap(node)
             if gap:
                 # evidence stays BARE provider names - it is consumed as an exact-

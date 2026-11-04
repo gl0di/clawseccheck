@@ -265,7 +265,7 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
                 isinstance(node.get("groups"), dict)
                 and isinstance(node["groups"].get("*"), dict)
                 and node["groups"]["*"].get("requireMention") is True
-                for node in _live_channel_nodes(name, c)
+                for node in _live_channel_nodes(name, c, cfg)
             )
             suffix = ", any group, mention-gated" if mention else ", any group"
             reason = (
@@ -2169,7 +2169,7 @@ def _open_group_channels(cfg: dict) -> dict:
         if name in out:
             continue
         # B-1002: the live implicit default account too (`_live_channel_nodes`).
-        for node in _live_channel_nodes(name, c):
+        for node in _live_channel_nodes(name, c, cfg):
             # a disabled account ingests nothing (the B-391 per-node skip its siblings carry)
             if not isinstance(node, dict) or node.get("enabled") is False:
                 continue

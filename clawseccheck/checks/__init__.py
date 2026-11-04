@@ -120,6 +120,7 @@ from ._shared import (
     _live_channel_nodes,
     _resolved_account_nodes,
     _SINGLE_ACCOUNT_CHANNELS,
+    _MSTEAMS_IDENTITY_KEYS,
     _slack_implicit_default,
     _matrix_implicit_default,
     INPUT_TOOL_HINTS,
