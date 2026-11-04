@@ -57,6 +57,7 @@ from .trajectory import (
     read_proven_tools,
 )
 from .trajectorystore import corroborate as corroborate_trajectory_containers
+from .trajectorystore import sqlite_session_census
 
 # C-170 adversarial pass found the naive "reuse A1's three hint tuples verbatim"
 # design (still used for `INPUT_TOOL_HINTS` below) has two real bugs when applied
@@ -1099,10 +1100,31 @@ def analyze(ctx, *, explicit_path: str | None = None) -> dict:
         "unclassified_verb_event_count": verb_unclassified,
         "unclassified_verb_names": unclassified_names,
     }
+    # B-1013: a session whose trajectory moved to the per-agent SQLite store (the default
+    # sink since 9.x) is not divergent - the JSONL `events` above simply never see it.
+    # Subtract the sessions the SQLite census found (session_id/seq only, §8); when that
+    # census is incomplete (an unreadable/anchored/capped database), the rest cannot be
+    # called divergent either - they go to B191 as "not compared", never as divergence.
+    # A home with no SQLite store at all is a complete, empty census, so trajectory
+    # genuinely switched off still reads as divergence (F-134). Accepted limit: a planted
+    # agent database listing every session silences this sub-signal - but anyone who can
+    # write under agents/ can plant JSONL sidecars today, and bare divergence never caps
+    # the grade (`_B191_STRONG_SUB_SIGNALS`); blocked/evasive are untouched.
+    divergent = audit_trail_divergence(ctx, events)
+    in_sqlite: frozenset = frozenset()
+    uncompared: frozenset = frozenset()
+    if divergent and isinstance(home, Path):
+        sqlite_ids, sqlite_complete = sqlite_session_census(home)
+        in_sqlite = divergent & sqlite_ids
+        divergent = divergent - sqlite_ids
+        if divergent and not sqlite_complete:
+            uncompared, divergent = divergent, frozenset()
     b191 = check_audit_trail_signals(
         ctx,
-        divergent_sessions=audit_trail_divergence(ctx, events),
+        divergent_sessions=divergent,
         trajectory_compared=True,
+        sessions_in_sqlite=len(in_sqlite),
+        uncompared_sessions=uncompared,
     )
     if not meta["present"]:
         # F-187: "zero sidecars found" is the same observation whether this agent never

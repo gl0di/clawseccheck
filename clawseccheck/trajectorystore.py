@@ -933,15 +933,35 @@ def sqlite_session_ids(home) -> "frozenset[str]":
     same way :func:`corroborate` is; returns ``frozenset()`` for a non-``Path`` *home*,
     never raises.
     """
+    return sqlite_session_census(home)[0]
+
+
+def sqlite_session_census(home) -> "tuple[frozenset[str], bool]":
+    """``(session_ids, complete)`` across every per-agent trajectory database under *home*.
+
+    The same read as :func:`sqlite_session_ids` (``session_id``/``seq`` only, through
+    :func:`_read_sqlite_db`), plus whether that set is the WHOLE answer. ``complete`` is
+    False when any database was unreadable (including a PostgreSQL engine anchor, B-1010),
+    hit a row/byte/length cap or failed mid-read, or when the database roster itself was
+    capped or partly unlistable -- in each case a session absent from ``session_ids`` may
+    still have a trajectory this read did not see. No database at all is complete (there
+    is nothing unread). B-1013: B191 subtracts these sessions before calling an
+    ``audit_events`` session divergent, and must not call the rest divergent when the
+    census is incomplete. Returns ``(frozenset(), True)`` for a non-``Path`` *home*.
+    """
     if not isinstance(home, Path):
-        return frozenset()
+        return frozenset(), True
+    stats: dict = {}
     ids: set = set()
-    for db_path in _sqlite_dbs(home):
-        pairs, _capped, unreadable = _read_sqlite_db(db_path)
-        if unreadable:
-            continue
+    complete = True
+    for db_path in _sqlite_dbs(home, stats=stats):
+        pairs, capped, unreadable = _read_sqlite_db(db_path)
+        if unreadable or capped:
+            complete = False
         ids.update(sid for sid, _seq in pairs)
-    return frozenset(ids)
+    if stats.get("dbs_capped") or stats.get("dbs_unlistable"):
+        complete = False
+    return frozenset(ids), complete
 
 
 def _open_and_verify_table(
