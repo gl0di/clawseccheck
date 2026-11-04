@@ -11060,7 +11060,10 @@ def vet_source(
         real = str(info["npm_real"]).lower()
         cands |= {real, real.lstrip("@").rsplit("/", 1)[-1]}
     cands.discard("")
-    proj = info.get("project") or (_pypi_project(name) if eco == "registry" else None)
+    # A bare registry name is not normalized: OpenClaw resolves it through npm, which
+    # does not fold separators, so `skills_analyzer` bare is a different package from a
+    # pypi record `skills-analyzer` (its exact spelling still matches every pool, as before).
+    proj = info.get("project")
     for k in eco_keys:
         pool = bad.get(k) or frozenset()
         hit = any(c in pool for c in cands)

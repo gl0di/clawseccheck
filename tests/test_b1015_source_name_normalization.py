@@ -82,10 +82,14 @@ def test_pypi_normalization_is_scoped_to_python_pools():
     assert vet_source("npm:is_it_ai", known_bad=_BAD).status == UNKNOWN
 
 
-def test_bare_registry_name_matches_the_pypi_pool_normalized():
-    assert vet_source("skills_analyzer", known_bad=_BAD).status == FAIL
-    assert vet_source("Is.It.Ai", known_bad=_BAD).status == FAIL
-    assert vet_source("skills-analyzers", known_bad=_BAD).status == UNKNOWN
+def test_bare_registry_name_is_not_pypi_normalized():
+    # OpenClaw resolves a bare name through npm, which does not fold separators.
+    # The exact spelling still matches every pool, as before B-1015.
+    assert vet_source("skills-analyzer", known_bad=_BAD).status == FAIL
+    assert vet_source("is_it_ai", known_bad=_BAD).status == FAIL
+    for bare in ("skills_analyzer", "Skills.Analyzer", "is-it-ai", "is_it_ai[x]",
+                 "skills-analyzer @ http://x", "skills-analyzers"):
+        assert vet_source(bare, known_bad=_BAD).status == UNKNOWN, bare
 
 
 def test_parser_keeps_name_and_version_and_adds_the_project():
