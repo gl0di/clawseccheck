@@ -4351,8 +4351,9 @@ def _dsn_inline_password(value) -> "str | None":
     against ``postgres://base``; it treats a value that starts with ``/`` - ``//`` included - as
     a socket path with no password, and it ignores the keyword form. The union deliberately
     reports those shapes anyway when they hold literal password text: the credential is in the
-    file whether or not node-pg would send it. A single leading ``/`` (``/var/run/postgresql
-    db``) is node-pg's socket form and is not read further.
+    file whether or not node-pg would send it - including a socket-form value
+    (``/var/run/postgresql db``), which none of the three readings matches unless it carries
+    password text.
     Differentially pinned against the executed parser in
     ``tests/test_b1008_postgres_dsn_secret.py``: every DSN node-pg would send a literal password
     for is reported, and nothing is reported that holds no literal password text.
@@ -4361,8 +4362,6 @@ def _dsn_inline_password(value) -> "str | None":
         return None
     # WHATWG URL parsing drops ASCII tab and newline anywhere in the input
     text = value.strip().replace("\t", "").replace("\n", "").replace("\r", "")
-    if text.startswith("/") and not text.startswith("//"):
-        return None
 
     def literal(password: str) -> "str | None":
         left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
