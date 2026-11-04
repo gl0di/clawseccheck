@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from clawseccheck.catalog import FAIL, UNKNOWN
+from clawseccheck.catalog import FAIL, UNKNOWN, WARN
 from clawseccheck.checks import _parse_source_target, vet_source
 from clawseccheck.report import render_vet_plan
 
@@ -82,14 +82,22 @@ def test_pypi_normalization_is_scoped_to_python_pools():
     assert vet_source("npm:is_it_ai", known_bad=_BAD).status == UNKNOWN
 
 
-def test_bare_registry_name_is_not_pypi_normalized():
-    # OpenClaw resolves a bare name through npm, which does not fold separators.
-    # The exact spelling still matches every pool, as before B-1015.
-    assert vet_source("skills-analyzer", known_bad=_BAD).status == FAIL
+def test_bare_registry_name_normalized_pypi_hit_is_warn_not_fail():
+    # OpenClaw resolves a bare name through npm, which does not fold separators, so a
+    # normalized-only pypi match must not FAIL. pip would still install the known-bad
+    # project from it, so it must not read UNKNOWN either.
+    assert vet_source("skills-analyzer", known_bad=_BAD).status == FAIL  # exact, as before
     assert vet_source("is_it_ai", known_bad=_BAD).status == FAIL
     for bare in ("skills_analyzer", "Skills.Analyzer", "is-it-ai", "is_it_ai[x]",
-                 "skills-analyzer @ http://x", "skills-analyzers"):
+                 "skills-analyzer @ http://x"):
+        f = vet_source(bare, known_bad=_BAD)
+        assert f.status == WARN, bare
+        assert "pip would install it" in f.detail
+    for bare in ("skills-analyzers", "isitai", "is-it-ai."):
         assert vet_source(bare, known_bad=_BAD).status == UNKNOWN, bare
+    # an npm-only record is not reached through pypi normalization
+    npm_only = dict(_BAD, pypi=_E)
+    assert vet_source("persona_ai_sdk", known_bad=npm_only).status == UNKNOWN
 
 
 def test_parser_keeps_name_and_version_and_adds_the_project():

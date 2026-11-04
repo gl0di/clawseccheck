@@ -11060,9 +11060,11 @@ def vet_source(
         real = str(info["npm_real"]).lower()
         cands |= {real, real.lstrip("@").rsplit("/", 1)[-1]}
     cands.discard("")
-    # A bare registry name is not normalized: OpenClaw resolves it through npm, which
-    # does not fold separators, so `skills_analyzer` bare is a different package from a
-    # pypi record `skills-analyzer` (its exact spelling still matches every pool, as before).
+    # A bare registry name is not convicted by normalization: OpenClaw resolves it through
+    # npm, which does not fold separators, so a bare `skills_analyzer` is a different npm
+    # package from a pypi record `skills-analyzer` (its exact spelling still matches every
+    # pool, as before). But a bare name may also be handed to pip ("your package manager's
+    # normal lookup"), where it IS that project - so a normalized-only pypi hit is a WARN.
     proj = info.get("project")
     for k in eco_keys:
         pool = bad.get(k) or frozenset()
@@ -11074,6 +11076,11 @@ def vet_source(
                 f"'{name}' is a known-compromised source (exact IOC match, catalog: {k})"
             )
             break
+    bare_pypi_alias = None
+    if eco == "registry" and not reasons_bad:
+        bare_proj = _pypi_project(name)
+        if bare_proj and bare_proj in {_pep503(e) for e in (bad.get("pypi") or ())}:
+            bare_pypi_alias = bare_proj
 
     # 1b. Known-bad HOST - a URL/git source whose host is, or is a subdomain of, a
     #     known-bad domain/IP. The name check above matches slugs/packages; this
@@ -11158,6 +11165,13 @@ def vet_source(
         reasons_susp.append(
             "git source without a pinned @ref (tag/sha) \u2014 content "
             "can change between this check and the fetch"
+        )
+    if bare_pypi_alias:
+        reasons_susp.insert(
+            0,
+            f"'{name}' is not a known-bad npm package, but pip would install it as the "
+            f"known-compromised Python project '{bare_pypi_alias}'; name the ecosystem "
+            "(npm:... or pypi:...) and do not install it with pip",
         )
     if info.get("option_shaped"):
         # insert(0): this becomes the headline in `detail`, ahead of any typosquat reason
