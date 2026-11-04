@@ -5170,6 +5170,138 @@ def _b58_pattern_hit_count(pat: re.Pattern, s: str) -> int:
     return sum(1 for _ in pat.finditer(s))
 
 
+def _b58_comment_spans(text: str) -> list:
+    """B-1019: (start, end) of every HTML comment, in one linear pass - the same comments
+    `_B58_HTML_COMMENT_RE` (`<!--(.*?)-->`) finds, plus an unterminated `<!--` running to
+    the end of the text. Not the regex itself: on many unterminated `<!--` it rescans to
+    the end from each one (quadratic)."""
+    spans = []
+    pos = text.find("<!--")
+    while pos != -1:
+        end = text.find("-->", pos + 4)
+        if end == -1:
+            spans.append((pos, len(text)))
+            break
+        spans.append((pos, end + 3))
+        pos = text.find("<!--", end + 3)
+    return spans
+
+
+def _b58_visible_text(text: str) -> str:
+    """B-1019: `text` with every hidden region blanked - each HTML comment (an
+    unterminated `<!--` runs to the end, as a renderer hides it) and each hidden-styled
+    tag `_b58_hidden_segments` reads. Used to tell whether an injection hit on a
+    whole-document variant actually sits INSIDE a hidden region, rather than in plain text
+    while an unrelated comment elsewhere supplies the html-comment signal.
+
+    A blanked region starts with a `|` sentinel, not a space: INJECTION_PATTERNS join
+    words with a literal space and normalization collapses whitespace, so all-space
+    blanking would glue `ignore <!--x--> previous instructions` into a NEW visible match
+    and hide a real hidden hit behind an equal count. Newlines are kept, so the result
+    has the same length and line structure as `text`."""
+    chars = list(text)
+
+    def _blank(a: int, b: int) -> None:
+        for i in range(a, b):
+            if chars[i] != "\n":
+                chars[i] = " "
+        if a < b and chars[a] != "\n":
+            chars[a] = "|"
+
+    for a, b in _b58_comment_spans(text):
+        _blank(a, b)
+    if _B58_HIDDEN_STYLE_RE.search(text):
+        for m in _b58_hidden_tags(text):
+            if _B58_HIDDEN_STYLE_RE.search(m.group("attrs") or ""):
+                _blank(*m.span())
+    return "".join(chars)
+
+
+# B-1019: every element name in the WHATWG HTML standard (plus obsolete ones browsers
+# still honour, and the svg/math roots that open foreign content). A closed list: a bare
+# `<name>` whose name is NOT here is an unknown element, which renders its content inline
+# and visible and can only be hidden by CSS - and CSS needs a `<style>` or `<link>`
+# element, which IS here.
+_B58_HTML_ELEMENTS = frozenset("""
+a abbr acronym address applet area article aside audio b base basefont bdi bdo bgsound
+big blink blockquote body br button canvas caption center cite code col colgroup data
+datalist dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure
+font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe
+image img input ins isindex kbd keygen label legend li link listing main map mark
+marquee math menu menuitem meta meter multicol nav nextid nobr noembed noframes
+noscript object ol optgroup option output p param picture plaintext portal pre progress
+q rb rp rt rtc ruby s samp script search section select slot small source spacer span
+strike strong style sub summary sup svg table tbody td template textarea tfoot th thead
+time title tr track tt u ul var video wbr xmp
+""".split())
+_B58_TAG_NAME_RE = re.compile(r"/?([A-Za-z][A-Za-z0-9:_-]*)")
+# B-1019: the Markdown constructs whose text a renderer does not display, besides HTML
+# (CommonMark's complete set): a link reference definition (any destination - unused, it
+# renders nothing), an image (its description is alt text), and a link/image title
+# (a tooltip). Any of them in a file keeps the pre-B-1019 rule there.
+# Matched ANYWHERE, with no Markdown parsing: `]:` (a link reference definition, which
+# may sit in a block quote or list item or carry an escaped or multi-line label), `![`
+# (an image) and `](` (an inline link, which may carry a title). Parsing link
+# destinations and titles to tell the harmless ones apart went through several bypass
+# rounds (balanced/escaped parens, titles on the next line, container prefixes), so any
+# occurrence keeps the old rule. Over-approximates on purpose.
+_B58_MD_HIDDEN_TEXT_RE = re.compile(r"\]:|!\[|\]\(")
+
+
+
+def _b58_section_needs_old_rule(section: str) -> bool:
+    """B-1019 fail-closed, judged per file: True unless the file's only markup is HTML
+    comments and bare unknown-name placeholders (`<slug>`, `<key>: <value>`). The location
+    rule's visible-text model knows comments and inline hidden-styled tags, but HTML can
+    hide text in many more ways, so rather than list those, ANY real HTML element name,
+    any tag with attributes, any unterminated tag, any `<!`/`<?` markup outside a comment
+    and any Markdown text a renderer does not display (`_B58_MD_HIDDEN_TEXT_RE`: link
+    reference definitions, images, link titles) keeps the pre-B-1019 rule for that file.
+    No Markdown parsing (code spans, fences) is involved: a tag inside one still counts."""
+    chars = list(section)
+    for a, b in _b58_comment_spans(section):
+        for i in range(a, b):
+            if chars[i] != "\n":
+                chars[i] = " "
+    rest = "".join(chars)
+    if _B58_MD_HIDDEN_TEXT_RE.search(rest):
+        return True
+    pos = rest.find("<")
+    while pos != -1:
+        nxt = rest[pos + 1:pos + 2]
+        if nxt in ("!", "?"):
+            return True
+        m = _B58_TAG_NAME_RE.match(rest, pos + 1)
+        if m:
+            if m.group(1).lower() in _B58_HTML_ELEMENTS:
+                return True
+            close = rest.find(">", m.end())
+            other = rest.find("<", m.end())
+            if close == -1 or (other != -1 and other < close):
+                return True  # unterminated: fail closed
+            if rest[m.end():close].strip(" \t/"):
+                return True  # attributes on an unknown element
+        pos = rest.find("<", pos + 1)
+    return False
+
+
+_B58_FILE_HEADER_LINE_RE = re.compile(r"^# file:", re.MULTILINE)
+
+
+def _b58_unresolved_hit(pat: re.Pattern, variant: str) -> bool:
+    """B-1019 fail-closed, per file: True when some "# file:" section of `variant` both
+    contains a `pat` hit and is not plain text/Markdown (`_b58_section_needs_old_rule`). The section headers are the collector's own,
+    un-forgeable ones (a file's own header-shaped line is escaped before concatenation);
+    a bootstrap file has none and is one section."""
+    starts = [m.start() for m in _B58_FILE_HEADER_LINE_RE.finditer(variant)]
+    bounds = [0, *starts, len(variant)]
+    for a, b in zip(bounds, bounds[1:]):
+        section = variant[a:b]
+        if section and pat.search(section) and _b58_section_needs_old_rule(section):
+            return True
+    return False
+
+
 def _b58_extract_actionable(seg_norm: str) -> bool:
     """True when a decoded/hidden B58 segment carries an ACTIONABLE payload - an action verb
     (_B63_ACTION_RE), an exfil transport (_EXFIL_RE), a bare URL/email sink, or an
@@ -6515,6 +6647,14 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 "from byte-level pattern matching \u2014 cannot be verified safe"
             )
             hidden = True
+        _visible: list = []
+
+        def visible_hits(p: re.Pattern) -> int:
+            # Hits of `p` in the visible part of the raw text (hidden regions blanked).
+            if not _visible:
+                _visible.append(normalize_for_scan(_b58_visible_text(text)))
+            return _b58_pattern_hit_count(p, _visible[0])
+
         for variant, signals, is_extract in ([] if hidden else variants):
             if not signals:
                 continue
@@ -6547,6 +6687,25 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                         and (
                             (not base_defensive and not catalogue_defensive)
                             or _b58_extract_actionable(variant)
+                        )
+                        # B-1019: on a whole-document variant the hidden-channel label
+                        # comes from ANY comment/hidden tag in the text, so it convicts
+                        # only when a hit of this pattern sits inside a hidden region:
+                        # more hits in the whole text than in its visible part. A
+                        # plaintext quote beside an unrelated comment no longer FAILs; a
+                        # hidden payload plus a plaintext decoy copy still does (count).
+                        # Judged on `norm` for every whole-document variant: a decode
+                        # that REVEALED a new hit is already convicted by the first
+                        # disjunct, so any other decode's hits are norm's own - and only
+                        # norm's "# file:" headers are un-forgeable (a decode could mint
+                        # one). A file that is not plain text/Markdown keeps the old rule
+                        # (`_b58_unresolved_hit`). Segment extracts and base64 decodes
+                        # keep the old rule.
+                        and (
+                            is_extract
+                            or "base64:" in signals
+                            or _b58_unresolved_hit(pat, norm)
+                            or _b58_pattern_hit_count(pat, norm) > visible_hits(pat)
                         )
                     )
                 ):
