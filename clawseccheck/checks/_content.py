@@ -14390,10 +14390,15 @@ def _b339_query_seed(norm: str, match_start: int) -> "str | None":
     return best.group(1) if best is not None else None
 
 
-# A call between the seed's binding and the URL means the name receives what the call
-# RETURNS (`creds = requests.get("<url>")`, `R=$(curl "<url>")`); no call means it
-# holds the URL string itself (`NODES = ["<url>", ...]`, `LIST = "<url>"`).
-_B339_CALL_BETWEEN_RE = re.compile(r"[A-Za-z0-9_\]]\s*\(|\$\(|`")
+# Fail-closed: the seed holds the metadata URL itself only when everything between
+# its binding and the URL is a pure literal -- an optional opening bracket, earlier
+# string elements, separators and the URL's own opening quote/scheme
+# (`NODES = ["<a>", "<b>"`, `LIST = "<url>"`, `urls.push("<url>"`, a bash array).
+# Anything else (a call in any spelling: `get(`, `)(`, `?.(`, `$(`, a backtick) keeps
+# the seed a fetched response, so an unusual call shape can never downgrade it.
+_B339_PURE_LITERAL_PREFIX_RE = re.compile(
+    r"\s*[\[(]?\s*(?:(?P<q>[\"'])[^\"'`\n]*(?P=q)\s*,?\s*)*[\"']?(?:https?://)?\Z"
+)
 
 
 def _b339_seed_holds_url(norm: str, match_start: int, seed: str) -> bool:
@@ -14406,7 +14411,7 @@ def _b339_seed_holds_url(norm: str, match_start: int, seed: str) -> bool:
         bind = m
     if bind is None:
         return False
-    return not _B339_CALL_BETWEEN_RE.search(lookback, bind.end())
+    return _B339_PURE_LITERAL_PREFIX_RE.match(lookback, bind.end()) is not None
 
 
 def _b339_offhost_url(norm: str, pos: int, url_text: str, own_host) -> "str | None":
@@ -14448,38 +14453,75 @@ def _b339_params_arg(seg: str, start: int) -> str:
     early. When the end is never found (truncated segment, unbalanced text), the rest
     of the segment is returned -- reading too much here can only cost a WARN->FAIL on
     a real tainted name, never hide one."""
+    return seg[start : _b339_arg_end(seg, start, stop_at_comma=True)]
+
+
+def _b339_arg_end(text: str, start: int, stop_at_comma: bool) -> int:
+    """Index where the argument (or, with *stop_at_comma* False, the whole argument
+    list) that begins at *start* ends: the first unmatched closing bracket, or a
+    depth-0 comma. String literals -- `"`, `'`, backtick and Python triple quotes --
+    are skipped, so brackets and commas inside them never count. Returns `len(text)`
+    when no end is found."""
     depth = 0
     quote = ""
     k = start
-    while k < len(seg):
-        ch = seg[k]
+    n = len(text)
+    while k < n:
+        ch = text[k]
         if quote:
             if ch == "\\":
                 k += 2
                 continue
-            if ch == quote:
+            if text.startswith(quote, k):
+                k += len(quote)
                 quote = ""
+                continue
         elif ch in "\"'`":
-            quote = ch
+            quote = ch * 3 if ch != "`" and text.startswith(ch * 3, k) else ch
+            k += len(quote)
+            continue
         elif ch in "{([":
             depth += 1
         elif ch in "})]":
             if depth == 0:
-                return seg[start:k]
+                return k
             depth -= 1
-        elif ch == "," and depth == 0:
-            return seg[start:k]
+        elif ch == "," and depth == 0 and stop_at_comma:
+            return k
         k += 1
-    return seg[start:]
+    return n
+
+
+def _b339_in_network_call(text: str, names: "set[str]") -> bool:
+    """True when one of *names* sits anywhere inside the arguments of an outbound call
+    in *text* -- positional, keyword (`url=u`), interpolated (`` `${u}` ``, `f"{u}"`),
+    or after a command form (`curl $u`, `Invoke-RestMethod -Uri $u`)."""
+    if not names:
+        return False
+    names_re = _b339_names_re(names)
+    for call_m in _B339_URL_CALL_RE.finditer(text):
+        if call_m.group(0).endswith("("):
+            args = text[call_m.end() : _b339_arg_end(text, call_m.end(), stop_at_comma=False)]
+        else:
+            nl = text.find("\n", call_m.end())
+            args = text[call_m.end() : nl if nl != -1 else len(text)]
+        if names_re.search(args):
+            return True
+    return False
 
 
 def _b339_fetches(text: str, url_names: "set[str]") -> bool:
-    """True when *text* passes a URL-holding name to a call or a `curl`/`wget`
-    command -- the step that turns a metadata URL into a metadata response."""
+    """True when *text* passes a URL-holding name to a call or a command -- the step
+    that turns a metadata URL into a metadata response. Fail-closed: a known outbound
+    call with the name ANYWHERE in its arguments, or any call (a custom wrapper such as
+    `httpGet(u)`) with the name as its first argument."""
+    if not url_names:
+        return False
     alt = "|".join(re.escape(n) for n in sorted(url_names))
     return bool(
-        re.search(rf"[A-Za-z0-9_\]]\s*\(\s*(?:await\s+)?(?:{alt})\b", text)
-        or re.search(rf"\b(?:curl|wget)\b[^\n;]*\$\{{?(?:{alt})\b", text)
+        _b339_in_network_call(text, url_names)
+        or re.search(rf"[A-Za-z0-9_\])]\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text)
+        or re.search(rf"\b(?:curl|wget|iwr|irm)\b[^\n;]*\$\{{?(?:{alt})\b", text)
     )
 
 
@@ -14548,10 +14590,14 @@ def _b339_credential_in_url(
                 url_names.add(cm.group(1))
         if not tainted and not url_names:
             return None
-        if not tainted:
-            continue
-        names_re = _b339_names_re(tainted)
-        shapes = _b339_url_shapes(tainted)
+        names_re = _b339_names_re(tainted) if tainted else None
+        shapes = _b339_url_shapes(tainted) if tainted else ()
+        # A URL name fetched INLINE inside the URL being built
+        # (`get("http://x/?d=" + enc(await (await fetch(u)).text()))`) never passes
+        # through an assignment, so it is checked here: the URL shape must reach the
+        # name through a nested outbound call (`_b339_in_network_call`), never by the
+        # bare name -- that bare case is the URL itself, the round-1 FP.
+        url_shapes = _b339_url_shapes(url_names) if url_names else ()
         for call_m in _B339_URL_CALL_RE.finditer(stmt):
             seg = stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
             for shape in shapes:
@@ -14560,9 +14606,16 @@ def _b339_credential_in_url(
                     dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
                     if dest is not None:
                         return dest
+            for shape in url_shapes:
+                for um in shape.finditer(seg):
+                    if _b339_in_network_call(seg[um.end(2) :], url_names):
+                        dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                        if dest is not None:
+                            return dest
+            params_args = [_b339_params_arg(seg, pm.end()) for pm in _B339_PARAMS_KW_RE.finditer(seg)]
             if any(
-                names_re.search(_b339_params_arg(seg, pm.end()))
-                for pm in _B339_PARAMS_KW_RE.finditer(seg)
+                (names_re is not None and names_re.search(a)) or _b339_in_network_call(a, url_names)
+                for a in params_args
             ):
                 url_m = _EXFIL_URL_RE.search(seg)
                 if url_m is not None:

