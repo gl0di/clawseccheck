@@ -214,7 +214,8 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "ai-tradingview-assistant-for-macos", "tradingview-ai-indicator-assistant",
     })
     assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun",
-                                      "iseekaigogo.com"})  # C-750: tensorlake exfil host
+                                      "iseekaigogo.com",  # C-750: tensorlake exfil host
+                                      "121.199.24.94"})  # B-1012: @ifasn IMDS exfil sink
     # CLAWSECCHECK-F-157 (C-135 regression): pre-commit, the hardcoded "any" pool was
     # an explicit, always-empty frozenset() — NOT the same set as "url". HOSTS values
     # are a host IOC (matched via vet_source's url/registry-host path), not a bare
@@ -229,6 +230,8 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "items-validator", "item-validator", "data-pipeline-testmetest",
         "event-emitter-testmetest", "test-brotli-testmetest", "pixel-map-testmetest",
         "net-codec-testmetest", "log-rotate-testmetest",
+        # B-1012: the @ifasn "*-doc-mcp" family (four malware advisories, one account)
+        "@ifasn/md-doc-mcp", "@ifasn/mmdd-doc-mcp", "@ifasn/mdd-doc-mcp", "@ifasn/mmd-doc-mcp",
     })
     assert "tensorlake" not in pools["npm"]
     for rec in iocdb.SOURCES:

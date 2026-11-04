@@ -26,11 +26,19 @@ today (a test pins these counts to the shipped data, so a row cannot go stale):
 | Table / ecosystem | Entries | What a source in it gets |
 | --- | --- | --- |
 | clawhub | 5 | exact-match check by slug |
-| npm | 8 | exact-match check by package name (version-blind) |
+| npm | 12 | exact-match check by package name (version-blind) |
 | pypi | 0 | no identity signal |
 | git | 0 | no name check; its host is still checked against `HOSTS` |
-| hosts | 4 | exact-match check by host (this is what a URL source is judged on) |
+| hosts | 5 | exact-match check by host (this is what a URL source is judged on) |
 | publishers | 0 | no identity signal |
+
+An IP host record also matches the same address spelled inside a wildcard-DNS name, the
+way nip.io and sslip.io resolve one: `203.0.113.7.nip.io`, `app-203-0-113-7.sslip.io`, or
+the eight-hex-digit form `cb007107.nip.io`. The grammar is the resolver's own, not a list of
+service names, so a self-hosted zone running the same software is covered too. A number that
+merely contains the IP's digits (`1203.0.113.7`), or a name where the IP is the tail of a
+longer run of numeric labels (`1.203.0.113.7.nip.io`, which resolves to a different
+address), does not match.
 
 For an ecosystem with no entries, `--vet-source` says so on its result
 (`no identity signal for this ecosystem (the dataset holds no npm entries)`), in the same

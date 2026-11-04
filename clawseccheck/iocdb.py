@@ -40,9 +40,11 @@ applies; today (dataset only weeks old) it contributes zero lines.
 """
 from __future__ import annotations
 
+import ipaddress
+import re
 from datetime import date
 
-REVISION = "2026-10-24"  # dataset point-in-time snapshot date -- bump on every content refresh
+REVISION = "2026-11-03"  # dataset point-in-time snapshot date -- bump on every content refresh
 
 # Past this many days since REVISION, freshness_notice() surfaces an explicit
 # staleness advisory instead of staying silent. See the module docstring for why
@@ -172,6 +174,38 @@ SOURCES: tuple = (
         "GitHub Advisory Database (GHSA-c6r9-8976-74gm)",
         "testmetest npm worm cluster (SafeDep, 2026-10-22); advisory lists 1.0.1",
     ),
+    # @ifasn "markdown toolkit MCP server" family, all four advisories published
+    # 2026-11-02 (type=malware, analysis amazon-inspector). Name-level on purpose,
+    # unlike a single-release compromise (C-750): every version of every name came from
+    # the one publisher account the advisories cover and none has a legitimate history.
+    # Registry state 2026-11-03: md-/mdd-/mmd-doc-mcp return 404; mmdd-doc-mcp had every
+    # listed version removed and then gained a 0.0.0-stage placeholder and a new 2.1.1
+    # from the same account after the advisory. A name record covers those too.
+    _rec(
+        "@ifasn/md-doc-mcp", "npm", "2026-11-02",
+        "https://github.com/advisories/GHSA-rvw8-22w3-342v",
+        "GitHub Advisory Database (GHSA-rvw8-22w3-342v; analysis amazon-inspector)",
+        "IMDS credential exfil to 121.199.24.94; advisory lists 1.0.3, 1.0.4, 1.0.5",
+    ),
+    _rec(
+        "@ifasn/mmdd-doc-mcp", "npm", "2026-11-02",
+        "https://github.com/advisories/GHSA-4h5p-w547-9qmv",
+        "GitHub Advisory Database (GHSA-4h5p-w547-9qmv; analysis amazon-inspector)",
+        "IMDS credential exfil; advisory lists 17 versions 1.0.1-2.0.4, the same "
+        "account published 2.1.1 after it",
+    ),
+    _rec(
+        "@ifasn/mdd-doc-mcp", "npm", "2026-11-02",
+        "https://github.com/advisories/GHSA-4q9j-4rv8-jp32",
+        "GitHub Advisory Database (GHSA-4q9j-4rv8-jp32; analysis amazon-inspector)",
+        "IMDS credential exfil; advisory lists 1.0.7, 1.0.8, 2.0.6",
+    ),
+    _rec(
+        "@ifasn/mmd-doc-mcp", "npm", "2026-11-02",
+        "https://github.com/advisories/GHSA-f826-46h5-5rcq",
+        "GitHub Advisory Database (GHSA-f826-46h5-5rcq; analysis amazon-inspector)",
+        "IMDS credential exfil; advisory lists 1.0.0, 1.0.2",
+    ),
 )
 
 # ---------------------------------------------------------------------------------
@@ -212,6 +246,14 @@ HOSTS: tuple = (
         "https://www.stepsecurity.io/blog/tensorlake-npm-compromised-hostage-token-worm",
         "StepSecurity",
         "exfiltration host of the tensorlake@0.5.144 Shai-Hulud variant",
+    ),
+    # One `ip` record covers both forms the campaign uses: the bare IP and the
+    # wildcard-DNS alias 121.199.24.94.nip.io (see ip_record_pattern()).
+    _rec(
+        "121.199.24.94", "ip", "2026-11-02",
+        "https://github.com/advisories/GHSA-rvw8-22w3-342v",
+        "GitHub Advisory Database (GHSA-rvw8-22w3-342v; analysis amazon-inspector)",
+        "IMDS credential exfil sink for @ifasn/*-doc-mcp; also used as 121.199.24.94.nip.io",
     ),
 )
 
@@ -323,7 +365,69 @@ def _build_known_bad_host_records() -> tuple:
     return tuple((rec["value"].lower(), str(rec.get("type") or "").strip().lower()) for rec in HOSTS)
 
 
+# B-1012: wildcard-DNS services (nip.io, sslip.io, and any name delegated to the same
+# server software) resolve a name that CARRIES an IPv4 address in its labels to that
+# address, so `91.92.242.30.nip.io` reaches the same server as `91.92.242.30`. An `ip`
+# record that matched the bare literal only was bypassed by that one suffix.
+#
+# Grounded on the resolver itself, not on a list of service names: sslip.io (which
+# nip.io now runs on; https://sslip.io/ redirects to https://nip.io/) parses a name with
+# the regexes in github.com/cunnie/sslip.io xip/xip.go (read at 25c162d8):
+#   - dotted  `(^|[.-])(OCT\.OCT\.OCT\.OCT)($|[.-])`
+#   - dashed  `(^|[.-])(OCT-OCT-OCT-OCT)($|[.-])`
+#   - hex     `(^|[.-])([[:xdigit:]]{8})($|[.-])`
+# where OCT is a canonical decimal octet (0-255, no leading zero), tried dashes, then
+# dots, then hex, taking the LEFTMOST match. nip.io's own page documents the same three
+# forms (`www.192.168.0.1.nip.io`, `www-78-46-204-247.nip.io`, `40B01609.nip.io`).
+#
+# The pattern below matches the record's IP in any of those forms, with two deliberate
+# limits:
+#   * leftmost is honoured only against the label directly to the left: when that label
+#     is itself a canonical octet joined by the same separator, the IP is the tail of a
+#     longer numeric run and the resolver reads a different address (`1.91.92.242.30`
+#     resolves to 1.91.92.242). That is the B-384 case and it stays a non-match. A
+#     wholly separate earlier window (`1.2.3.4.x.91.92.242.30.nip.io`) is not modelled;
+#     matching it over-reports a name that literally spells the C2, which is the safe
+#     direction.
+#   * an embedded form (anything but the bare IP itself) must be followed by a further
+#     label (`[.-]` and a host character): the wildcard service's own domain. Without
+#     one the name resolves through no wildcard service -- `sub.91.92.242.30` stays a
+#     non-match (B-436 pins it) -- and a bare eight-hex-digit token in prose (a short
+#     commit hash) is not read as a host.
+# Anything the left or right boundary rejects -- a digit or letter touching the IP
+# (`191.92.242.30`, `x91.92.242.30`, `91.92.242.300`), a leading-zero octet the resolver
+# does not parse -- is not a match.
+_OCT_BEFORE = (r"\d", r"[1-9]\d", r"(?:1\d\d|2[0-4]\d|25[0-5])")
+
+
+def ip_record_pattern(ip: str) -> str:
+    """Regex source matching an `ip` record's IPv4 *ip* as a host, bare or embedded in a
+    wildcard-DNS name (dotted, dashed or hex), with the boundaries described above.
+
+    The single definition both `is_known_bad_host()` and checks/_shared.py's
+    `_KNOWN_EXFIL_HOST_RE` use, so the two cannot drift (B-384/B-436). Case-insensitive
+    callers are expected (`re.I`); the hex form is emitted in lowercase. A value that is
+    not an IPv4 address falls back to the exact-only literal (the pre-B-1012 form).
+    """
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return rf"(?<![a-z0-9.-]){re.escape(ip)}(?![a-z0-9.-])"
+    octets = str(addr).split(".")
+    more = r"(?=[.-][a-z0-9])"  # a further label follows: the name goes on to a domain
+    forms = [rf"(?<![a-z0-9.-]){re.escape(str(addr))}(?![a-z0-9.-])"]  # the bare IP
+    for sep in (".", "-"):
+        esc = re.escape(sep)
+        not_tail = "".join(rf"(?<!(?<![a-z0-9]){o}{esc})" for o in _OCT_BEFORE)
+        forms.append(rf"(?<![a-z0-9]){not_tail}{esc.join(octets)}{more}")
+    forms.append(rf"(?<![a-z0-9]){addr.packed.hex()}{more}")
+    return "(?:" + "|".join(forms) + ")"
+
+
 _KNOWN_BAD_HOST_RECORDS: tuple = _build_known_bad_host_records()
+_KNOWN_BAD_IP_RES: tuple = tuple(
+    re.compile(ip_record_pattern(v), re.I) for v, t in _KNOWN_BAD_HOST_RECORDS if t != "domain"
+)
 _KNOWN_BAD_HOSTS: frozenset = frozenset(v for v, _t in _KNOWN_BAD_HOST_RECORDS)
 
 
@@ -358,7 +462,8 @@ def known_bad_publishers() -> frozenset:
 def is_known_bad_host(host) -> bool:
     """True when *host* IS, or is a subdomain of, a known-bad host in the dataset.
 
-    Exact match ONLY for "ip"-type records; exact-or-subdomain match for "domain"-type
+    Exact match ONLY for "ip"-type records -- where "the IP" includes the same address
+    spelled inside a wildcard-DNS name (B-1012, see ip_record_pattern()); exact-or-subdomain match for "domain"-type
     records (mirrors vet_source's existing host_l == h or host_l.endswith("." + h)
     check) -- this now actually HONORS the record's own `type` (B-384)
     instead of discarding it and applying the domain subdomain rule to every record
@@ -385,7 +490,10 @@ def is_known_bad_host(host) -> bool:
             return True
         if typ == "domain" and h.endswith("." + bad):
             return True
-    return False
+    # B-1012: an `ip` record also matches the same IP carried inside a wildcard-DNS
+    # name (`<ip>.nip.io`, `app-<a>-<b>-<c>-<d>.sslip.io`, `<hex>.nip.io`); see
+    # ip_record_pattern() for the grounded grammar and its boundaries.
+    return any(rx.search(h) for rx in _KNOWN_BAD_IP_RES)
 
 
 def revision_date() -> date:
