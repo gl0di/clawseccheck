@@ -14440,19 +14440,37 @@ def _b339_params_arg(seg: str, start: int) -> str:
     """The text of the single `params=` argument beginning at *start*: a balanced
     bracket literal, else a bare expression up to the next `,`/`)`. Bounded so a later
     `headers=...` argument in the same call is never read as part of it (C-135 round 1
-    on B-1011: `params={"page": 1}, headers={"A": token}` used to FAIL)."""
-    if start < len(seg) and seg[start] in "{([":
-        depth = 0
-        for k in range(start, len(seg)):
-            if seg[k] in "{([":
-                depth += 1
-            elif seg[k] in "})]":
-                depth -= 1
-                if depth == 0:
-                    return seg[start : k + 1]
-        return seg[start:]
-    m = re.match(r"[^,)\n;]*", seg[start:])
-    return m.group(0) if m else ""
+    on B-1011: `params={"page": 1}, headers={"A": token}` used to FAIL).
+
+    Ends at the first `,`/`)` at bracket depth 0, so a bare call such as
+    `params=dict(a=1, t=tok)` keeps its own commas. Quoted strings are skipped while
+    counting, so a bracket or comma inside a string literal cannot end the argument
+    early. When the end is never found (truncated segment, unbalanced text), the rest
+    of the segment is returned -- reading too much here can only cost a WARN->FAIL on
+    a real tainted name, never hide one."""
+    depth = 0
+    quote = ""
+    k = start
+    while k < len(seg):
+        ch = seg[k]
+        if quote:
+            if ch == "\\":
+                k += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'`":
+            quote = ch
+        elif ch in "{([":
+            depth += 1
+        elif ch in "})]":
+            if depth == 0:
+                return seg[start:k]
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return seg[start:k]
+        k += 1
+    return seg[start:]
 
 
 def _b339_fetches(text: str, url_names: "set[str]") -> bool:
@@ -14542,8 +14560,10 @@ def _b339_credential_in_url(
                     dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
                     if dest is not None:
                         return dest
-            pm = _B339_PARAMS_KW_RE.search(seg)
-            if pm is not None and names_re.search(_b339_params_arg(seg, pm.end())):
+            if any(
+                names_re.search(_b339_params_arg(seg, pm.end()))
+                for pm in _B339_PARAMS_KW_RE.finditer(seg)
+            ):
                 url_m = _EXFIL_URL_RE.search(seg)
                 if url_m is not None:
                     dest = _b339_offhost_url(norm, stmt_pos, url_m.group(0), own_host)
