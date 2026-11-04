@@ -234,6 +234,7 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "net-codec-testmetest", "log-rotate-testmetest",
         # B-1012: the @ifasn "*-doc-mcp" family (four malware advisories, one account)
         "@ifasn/md-doc-mcp", "@ifasn/mmdd-doc-mcp", "@ifasn/mdd-doc-mcp", "@ifasn/mmd-doc-mcp",
+        "persona-ai-sdk",  # C-765: GHSA-2v69-q2gc-qm5j, a name with no legitimate release
     })
     assert "tensorlake" not in pools["npm"]
     for rec in iocdb.SOURCES:

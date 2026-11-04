@@ -206,6 +206,17 @@ SOURCES: tuple = (
         "GitHub Advisory Database (GHSA-f826-46h5-5rcq; analysis amazon-inspector)",
         "IMDS credential exfil; advisory lists 1.0.0, 1.0.2",
     ),
+    # Name-level because the name has no legitimate history: on 2026-11-04 the registry
+    # held only a 0.0.0-stage placeholder from the same account that created the name
+    # (2026-10-31) and published the flagged 1.0.0. Neither the GHSA nor OSV
+    # MAL-2026-18463 publishes any behaviour, host or campaign, and no primary source ties
+    # it to agents; the agent-relevance bar was waived on the owner's request.
+    _rec(
+        "persona-ai-sdk", "npm", "2026-11-02",
+        "https://github.com/advisories/GHSA-2v69-q2gc-qm5j",
+        "GitHub Advisory Database (GHSA-2v69-q2gc-qm5j)",
+        "npm malware advisory; no behaviour published; advisory lists 1.0.0",
+    ),
     # pypi: the kam193 / OpenSSF campaign "2026-10-is-it-ai" (GHSA type=malware, both
     # published 2026-10-31). The advisory text: "All package versions were uploaded with
     # malicious intention; the ones without malicious references are clearly intendent

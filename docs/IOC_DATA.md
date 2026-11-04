@@ -26,7 +26,7 @@ today (a test pins these counts to the shipped data, so a row cannot go stale):
 | Table / ecosystem | Entries | What a source in it gets |
 | --- | --- | --- |
 | clawhub | 5 | exact-match check by slug |
-| npm | 12 | exact-match check by package name (version-blind) |
+| npm | 13 | exact-match check by package name (version-blind) |
 | pypi | 2 | exact-match check by package name (version-blind) |
 | git | 0 | no name check; its host is still checked against `HOSTS` |
 | hosts | 5 | exact-match check by host (this is what a URL source is judged on) |
