@@ -173,6 +173,24 @@ def test_python_header_auth_is_not_fail():
     assert _b339(blob).status == WARN
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        'params={"page": 1}, headers={"A": creds["Token"]}',
+        'headers={"A": creds["Token"]}, params={"page": 1}',
+        'params=page_args, headers={"A": creds["Token"]}',
+    ],
+)
+def test_params_kwarg_is_bounded_to_its_own_argument(args):
+    # C-135 round 1: the params= match used to run on into a later headers= argument.
+    blob = (
+        "# file: auth.py\n"
+        f'creds = requests.get("{_AWS}AppRole", timeout=2).json()\n'
+        f'requests.get("https://api.example.com/v1", {args})\n'
+    )
+    assert _b339(blob).status == WARN
+
+
 def test_shell_header_auth_is_not_fail():
     blob = (
         "# file: auth.sh\n"

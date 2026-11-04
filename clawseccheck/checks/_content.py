@@ -14414,6 +14414,28 @@ def _b339_names_re(names: "set[str]") -> "re.Pattern":
     return re.compile(rf"\b(?:{'|'.join(re.escape(n) for n in sorted(names))})\b")
 
 
+_B339_PARAMS_KW_RE = re.compile(r"\bparams\s*=\s*")
+
+
+def _b339_params_arg(seg: str, start: int) -> str:
+    """The text of the single `params=` argument beginning at *start*: a balanced
+    bracket literal, else a bare expression up to the next `,`/`)`. Bounded so a later
+    `headers=...` argument in the same call is never read as part of it (C-135 round 1
+    on B-1011: `params={"page": 1}, headers={"A": token}` used to FAIL)."""
+    if start < len(seg) and seg[start] in "{([":
+        depth = 0
+        for k in range(start, len(seg)):
+            if seg[k] in "{([":
+                depth += 1
+            elif seg[k] in "})]":
+                depth -= 1
+                if depth == 0:
+                    return seg[start : k + 1]
+        return seg[start:]
+    m = re.match(r"[^,)\n;]*", seg[start:])
+    return m.group(0) if m else ""
+
+
 def _b339_credential_in_url(norm: str, match_end: int, seed: str, own_host) -> "str | None":
     """The off-host destination when the metadata response named *seed* (or a name
     tainted from it) reaches an outbound call's URL within `_B339_QUERY_WINDOW`; None
@@ -14463,7 +14485,8 @@ def _b339_credential_in_url(norm: str, match_end: int, seed: str, own_host) -> "
                     dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
                     if dest is not None:
                         return dest
-            if re.search(r"\bparams\s*=\s*[^;\n]{0,120}?" + names_re.pattern, seg):
+            pm = _B339_PARAMS_KW_RE.search(seg)
+            if pm is not None and names_re.search(_b339_params_arg(seg, pm.end())):
                 url_m = _EXFIL_URL_RE.search(seg)
                 if url_m is not None:
                     dest = _b339_offhost_url(norm, stmt_pos, url_m.group(0), own_host)
