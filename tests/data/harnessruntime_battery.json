@@ -24423,6 +24423,18 @@
    }
   },
   {
+   "label": "fixture:bad_b2_msteams_account_open",
+   "cfg": {
+    "channels": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
    "label": "fixture:bad_b323_env_path_override",
    "cfg": {
     "models": {
@@ -24979,18 +24991,6 @@
       "groupPolicy": "open"
      }
     }
-   },
-   "env": {},
-   "oracle": {
-    "collect": [],
-    "refs": [],
-    "runtimes": []
-   }
-  },
-  {
-   "label": "fixture:bad_f184_retired_key_config_invalid",
-   "cfg": {
-    "channels": {}
    },
    "env": {},
    "oracle": {
