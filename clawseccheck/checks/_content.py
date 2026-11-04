@@ -5217,42 +5217,42 @@ def _b58_visible_text(text: str) -> str:
     return "".join(chars)
 
 
-_B58_UNMODELLED_HIDING_RE = re.compile(
-    r"<\s*style\b|<\s*link\b[^<>]*?\bstylesheet\b|"
-    r"<[^<>]*?\s(?:hidden|aria-hidden\s*=\s*[\"']?true)\b",
-    re.IGNORECASE,
-)
+_B58_TAG_START_RE = re.compile(r"<\s*[A-Za-z/!?]")
+_B58_MD_COMMENT_RE = re.compile(r"^[ \t]{0,3}\[[^\]\n]*\]:[ \t]*(?:#|<>)", re.MULTILINE)
+_B58_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+_B58_FENCE_LINE_RE = re.compile(r"[ \t]{0,3}(`{3,}|~{3,})")
 
 
-def _b58_hiding_unresolved(text: str) -> bool:
-    """B-1019 fail-closed: True when `text` carries a way of hiding content that
-    `_b58_visible_text` does not map to a span - a `<style>` block or a linked stylesheet
-    (class-based hiding), a `hidden` / `aria-hidden="true"` attribute, or a hidden-style
-    token outside every region it blanked (a nested or oversize tag the hidden-tag reader
-    did not resolve). Judged per FILE by `_b58_unresolved_hit`: CSS can hide text only in
-    its own document, so a stylesheet in one file of a skill says nothing about a phrase
-    in another."""
-    if _B58_UNMODELLED_HIDING_RE.search(text):
-        return True
-    if not _B58_HIDDEN_STYLE_RE.search(text):
-        return False
-    spans = _b58_comment_spans(text)
-    spans += [m.span() for m in _b58_hidden_tags(text)
-              if _B58_HIDDEN_STYLE_RE.search(m.group("attrs") or "")]
-    # Merge the spans once, then one bisect per hidden-style token (linear-ish, never
-    # spans x tokens).
-    merged: list[list[int]] = []
-    for a, b in sorted(spans):
-        if merged and a <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], b)
-        else:
-            merged.append([a, b])
-    starts = [a for a, _ in merged]
-    for m in _B58_HIDDEN_STYLE_RE.finditer(text):
-        i = bisect.bisect_right(starts, m.start()) - 1
-        if i < 0 or m.start() >= merged[i][1]:
-            return True
-    return False
+def _b58_section_needs_old_rule(section: str) -> bool:
+    """B-1019 fail-closed, judged per file: True unless the file is plain text/Markdown
+    whose only HTML is comments. The location rule's visible-text model knows comments
+    and inline hidden-styled tags, but HTML can hide text in many more ways (nested or
+    oversize tags, `hidden`, `<details>`, `<template>`, stylesheets, ...), so rather than
+    list them, ANY tag outside a comment, an inline code span or a fenced block - and any
+    Markdown comment (`[//]: # (...)`) - keeps the pre-B-1019 rule for that file. Code
+    spans and fences are skipped because Markdown renders a `<slug>` placeholder there as
+    text, never as a tag."""
+    chars = list(section)
+    for a, b in _b58_comment_spans(section):
+        for i in range(a, b):
+            if chars[i] != "\n":
+                chars[i] = " "
+    out: list = []
+    fence = None
+    for line in "".join(chars).split("\n"):
+        m = _B58_FENCE_LINE_RE.match(line)
+        if fence is None and m:
+            fence = m.group(1)[0] * len(m.group(1))
+            out.append("")
+            continue
+        if fence is not None:
+            if m and m.group(1).startswith(fence) and not line.strip(" \t`~"):
+                fence = None
+            out.append("")
+            continue
+        out.append(_B58_CODE_SPAN_RE.sub(" ", line))
+    rest = "\n".join(out)
+    return bool(_B58_TAG_START_RE.search(rest) or _B58_MD_COMMENT_RE.search(rest))
 
 
 _B58_FILE_HEADER_LINE_RE = re.compile(r"^# file:", re.MULTILINE)
@@ -5260,15 +5260,14 @@ _B58_FILE_HEADER_LINE_RE = re.compile(r"^# file:", re.MULTILINE)
 
 def _b58_unresolved_hit(pat: re.Pattern, variant: str) -> bool:
     """B-1019 fail-closed, per file: True when some "# file:" section of `variant` both
-    contains a `pat` hit and hides content in a way `_b58_visible_text` cannot place
-    (`_b58_hiding_unresolved`). The section headers are the collector's own,
+    contains a `pat` hit and is not plain text/Markdown (`_b58_section_needs_old_rule`). The section headers are the collector's own,
     un-forgeable ones (a file's own header-shaped line is escaped before concatenation);
     a bootstrap file has none and is one section."""
     starts = [m.start() for m in _B58_FILE_HEADER_LINE_RE.finditer(variant)]
     bounds = [0, *starts, len(variant)]
     for a, b in zip(bounds, bounds[1:]):
         section = variant[a:b]
-        if section and pat.search(section) and _b58_hiding_unresolved(section):
+        if section and pat.search(section) and _b58_section_needs_old_rule(section):
             return True
     return False
 
@@ -6618,16 +6617,13 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 "from byte-level pattern matching \u2014 cannot be verified safe"
             )
             hidden = True
-        _visible_cache: dict = {}
+        _visible: list = []
 
-        def visible_variant(v: str) -> str:
-            # The visible counterpart of a whole-document variant: `norm` maps to the
-            # normalized visible raw text; a whole-document decode maps to its own decode
-            # of the visible text, blanked the same way after decoding.
-            if v not in _visible_cache:
-                _visible_cache[v] = normalize_for_scan(
-                    _b58_visible_text(text if v == norm else v))
-            return _visible_cache[v]
+        def visible_hits(p: re.Pattern) -> int:
+            # Hits of `p` in the visible part of the raw text (hidden regions blanked).
+            if not _visible:
+                _visible.append(normalize_for_scan(_b58_visible_text(text)))
+            return _b58_pattern_hit_count(p, _visible[0])
 
         for variant, signals, is_extract in ([] if hidden else variants):
             if not signals:
@@ -6664,17 +6660,22 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                         )
                         # B-1019: on a whole-document variant the hidden-channel label
                         # comes from ANY comment/hidden tag in the text, so it convicts
-                        # only when this pattern has more hits in the whole text than in
-                        # its visible part - i.e. a hit sits inside a hidden region. A
+                        # only when a hit of this pattern sits inside a hidden region:
+                        # more hits in the whole text than in its visible part. A
                         # plaintext quote beside an unrelated comment no longer FAILs; a
                         # hidden payload plus a plaintext decoy copy still does (count).
-                        # Segment extracts and base64 decodes keep the old rule.
+                        # Judged on `norm` for every whole-document variant: a decode
+                        # that REVEALED a new hit is already convicted by the first
+                        # disjunct, so any other decode's hits are norm's own - and only
+                        # norm's "# file:" headers are un-forgeable (a decode could mint
+                        # one). A file that is not plain text/Markdown keeps the old rule
+                        # (`_b58_unresolved_hit`). Segment extracts and base64 decodes
+                        # keep the old rule.
                         and (
                             is_extract
                             or "base64:" in signals
-                            or _b58_unresolved_hit(pat, variant)
-                            or _b58_pattern_hit_count(pat, variant)
-                            > _b58_pattern_hit_count(pat, visible_variant(variant))
+                            or _b58_unresolved_hit(pat, norm)
+                            or _b58_pattern_hit_count(pat, norm) > visible_hits(pat)
                         )
                     )
                 ):

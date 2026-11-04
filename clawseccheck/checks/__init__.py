@@ -704,7 +704,7 @@ from ._content import (
     _b58_decode_variants,
     _b58_extract_actionable,
     _b58_comment_spans,
-    _b58_hiding_unresolved,
+    _b58_section_needs_old_rule,
     _b58_unresolved_hit,
     _b58_visible_text,
     _b58_hidden_segments,

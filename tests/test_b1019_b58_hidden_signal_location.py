@@ -18,7 +18,7 @@ import pytest
 from clawseccheck.catalog import FAIL
 from clawseccheck.checks import (
     _b58_comment_spans,
-    _b58_hiding_unresolved,
+    _b58_section_needs_old_rule,
     _b58_visible_text,
     vet_skill,
 )
@@ -43,7 +43,6 @@ def _b58(tmp_path: Path, files: dict) -> str:
 @pytest.mark.parametrize("files", [
     {"SKILL.md": _DEFENSIVE, "b/README.md": "x <!-- build note: regenerate the table --> y\n"},
     {"SKILL.md": _DEFENSIVE + "\n<!-- toc -->\n"},
-    {"SKILL.md": _DEFENSIVE + '\n<span style="display:none">tracking pixel</span>\n'},
     # a stylesheet in ANOTHER file cannot hide the phrase: the real repro (an HTML
     # viewer asset with a <style> block beside a defensive SKILL.md)
     {"SKILL.md": _DEFENSIVE,
@@ -73,8 +72,23 @@ def test_plaintext_quote_beside_an_unrelated_hidden_region_is_not_b58_fail(tmp_p
     {"SKILL.md": _DEFENSIVE,
      "page.html": '<link rel="stylesheet" href="s.css">'
      + f'<p class="h">{_P}</p><!-- c -->\n', "s.css": ".h{display:none}\n"},
+    # hiding mechanisms the visible-text model does not know; any tag keeps the old rule
+    {"SKILL.md": _DEFENSIVE + f"<details><summary>more</summary>{_P}</details>\n<!-- c -->\n"},
+    {"SKILL.md": _DEFENSIVE + f'<span style="display:none"><b>x</b> {_P}</span>\n<!-- c -->\n'},
+    {"SKILL.md": _DEFENSIVE + f"[//]: # ({_P})\n<!-- c -->\n"},
+    # a decode variant must not forge a "# file:" boundary that moves the hit into a
+    # plain section: percent-encoded header line before a hidden-tag payload
+    {"SKILL.md": _DEFENSIVE + "%0A%23%20file%3A%20x.md%0A\n"
+     + f"<div hidden>{_P}</div>\n<!-- c -->\n"},
 ])
 def test_hidden_payload_still_fails_with_or_without_a_plaintext_decoy(tmp_path, files):
+    assert _b58(tmp_path, files) == FAIL
+
+
+def test_documented_limit_any_html_tag_in_the_same_file_keeps_the_old_rule(tmp_path):
+    # Fail-closed by design: the location rule only covers a file whose only HTML is
+    # comments. A plaintext quote beside ANY tag in the same file still FAILs as before.
+    files = {"SKILL.md": _DEFENSIVE + '\n<span style="display:none">tracking pixel</span>\n'}
     assert _b58(tmp_path, files) == FAIL
 
 
@@ -91,12 +105,14 @@ def test_visible_text_starts_each_blanked_region_with_a_sentinel():
     assert "ignore | " in " ".join(_b58_visible_text("ignore <!--x--> previous").split())
 
 
-def test_hiding_the_model_cannot_place_is_unresolved():
-    assert _b58_hiding_unresolved("<style>.x{display:none}</style>")
-    assert _b58_hiding_unresolved("<div hidden>x</div>")
-    assert _b58_hiding_unresolved('<p aria-hidden="true">x</p>')
-    assert not _b58_hiding_unresolved("plain <!-- toc --> text")
-    assert not _b58_hiding_unresolved('<span style="display:none">x</span>')
+def test_only_a_plain_markdown_file_gets_the_location_rule():
+    plain = _DEFENSIVE + "<!-- toc -->\nUse `<slug>` and `<key>: <value>`.\n```\n<div>x</div>\n```\n"
+    assert not _b58_section_needs_old_rule(plain)
+    for other in ("<style>.x{display:none}</style>", "<div hidden>x</div>",
+                  "<details><summary>a</summary>x</details>", "<template>x</template>",
+                  '<span style="display:none"><b>x</b></span>', "[//]: # (x)",
+                  "[note]: <> (x)", "a <br> b"):
+        assert _b58_section_needs_old_rule(plain + other + "\n"), other
 
 
 def test_comment_spans_match_the_comment_regex_and_add_an_unterminated_tail():
@@ -109,5 +125,5 @@ def test_comment_spans_are_linear_on_many_unterminated_openers():
     import time
     t0 = time.monotonic()
     _b58_visible_text("<!--" * 200_000)
-    _b58_hiding_unresolved("<!---->display:none" * 50_000)
+    _b58_section_needs_old_rule("<!---->`a`\n```\n" * 50_000)
     assert time.monotonic() - t0 < 5
