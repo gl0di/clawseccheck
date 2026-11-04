@@ -99,7 +99,8 @@ def _probe(tmp_path: Path, name: str, sql: str) -> Path:
     ("anchor_beside_data", _ANCHOR_DDL + ";CREATE TABLE cron_jobs(x);", True),
     ("plain", "CREATE TABLE cron_jobs(x);", False),
     ("view", "CREATE TABLE cron_jobs(x); CREATE VIEW openclaw_engine_anchor AS SELECT 1 AS a;", False),
-    ("upper_case", "CREATE TABLE OPENCLAW_ENGINE_ANCHOR (a TEXT); CREATE TABLE cron_jobs(x);", False),
+    ("upper_case", "CREATE TABLE OPENCLAW_ENGINE_ANCHOR (a TEXT);" + " CREATE TABLE cron_jobs(x);",
+     False),
     ("trigger", "CREATE TABLE cron_jobs(x); CREATE TRIGGER openclaw_engine_anchor AFTER INSERT "
                 "ON cron_jobs BEGIN SELECT 1; END;", False),
 ])
