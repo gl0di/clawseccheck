@@ -124,7 +124,8 @@ def test_only_a_plain_markdown_file_gets_the_location_rule():
                   "<foo class=x>", "<foo", "<!DOCTYPE html>", "<?xml-stylesheet href=s?>",
                   "<SPAN>x</SPAN>", "[a]: http://x (t)", '[a](http://x "t")', "![t](x.png)",
                   "[a](http://x\n't')", "> [a]: http://x (t)", "- [a]: http://x (t)",
-                  "[a\\]b]: http://x (t)", "[ok](x) [b](http://x\n't')"):
+                  "[a\\]b]: http://x (t)", "[ok](x) [b](http://x\n't')",
+                  "[a](x)) [b](http://x\n't')", "[a](x)\n  'title on its own line'"):
         assert _b58_section_needs_old_rule(plain + other + "\n"), other
 
 

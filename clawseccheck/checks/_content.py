@@ -5246,18 +5246,23 @@ _B58_MD_TITLE_RE = re.compile(r"\s[\"'(]")
 
 
 def _b58_md_link_title(text: str) -> bool:
-    """True when a line holds an inline link that may carry a title: after its first
-    `](`, whitespace followed by a quote or paren, or fewer `)` than `](` (a link that
-    continues on another line). Over-approximates on purpose (fail closed) and stays linear: one
-    search per line."""
+    """True when a line holds an inline link that may carry a title (fail closed, one
+    pass): whitespace then a quote or paren anywhere after the line's first `](`; the
+    line's LAST `](` with no `)` after it (a link continuing onto the next line); or a
+    line right after a `](` line that starts with a quote or paren (a title placed on its
+    own line). No parenthesis counting - destinations may hold balanced or escaped
+    parens, which a count gets wrong."""
+    prev_link = False
     for line in text.split("\n"):
+        if prev_link and line.lstrip()[:1] in ("\"", "'", "("):
+            return True
         i = line.find("](")
-        if i == -1:
+        prev_link = i != -1
+        if not prev_link:
             continue
-        tail = line[i + 2:]
-        # every `](` on the line needs its own `)`; the title test covers the whole tail,
-        # so a title on any later link of the line is seen too.
-        if tail.count(")") < tail.count("](") + 1 or _B58_MD_TITLE_RE.search(tail):
+        if _B58_MD_TITLE_RE.search(line, i + 2):
+            return True
+        if ")" not in line[line.rfind("](") + 2:]:
             return True
     return False
 
