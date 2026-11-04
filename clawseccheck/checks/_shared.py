@@ -42,6 +42,7 @@ from ..collector import (  # noqa: F401
     _is_own_source,
     _own_source_symlinks,
 )
+from ..iocdb import ip_record_pattern as _iocdb_ip_record_pattern
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
 from .. import toolpolicy as _toolpolicy
@@ -1330,9 +1331,12 @@ def _iocdb_host_fragment(value: str, type_: str) -> str:
     (the left boundary additionally allows a "." so a real subdomain like
     "cdn.<host>" still matches, but a hyphen/letter/digit directly before it --
     "evil-<host>" -- does not)."""
+    if type_ != "domain":
+        # B-1012: the ip leg (bare, or carried inside a wildcard-DNS name) comes from the
+        # one definition iocdb.is_known_bad_host() also uses, so the two cannot drift.
+        return _iocdb_ip_record_pattern(value)
     esc = re.escape(value)
-    left = _HOST_CHARS if type_ == "ip" else _DOMAIN_LEFT_CHARS
-    return rf"(?<![{left}]){esc}(?![{_HOST_CHARS}])"
+    return rf"(?<![{_DOMAIN_LEFT_CHARS}]){esc}(?![{_HOST_CHARS}])"
 
 
 def _build_known_exfil_host_re() -> re.Pattern:

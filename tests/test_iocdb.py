@@ -214,14 +214,17 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "ai-tradingview-assistant-for-macos", "tradingview-ai-indicator-assistant",
     })
     assert pools["url"] == frozenset({"91.92.242.30", "laosji.net", "letssendit.fun",
-                                      "iseekaigogo.com"})  # C-750: tensorlake exfil host
+                                      "iseekaigogo.com",  # C-750: tensorlake exfil host
+                                      "121.199.24.94"})  # B-1012: @ifasn IMDS exfil sink
     # CLAWSECCHECK-F-157 (C-135 regression): pre-commit, the hardcoded "any" pool was
     # an explicit, always-empty frozenset() — NOT the same set as "url". HOSTS values
     # are a host IOC (matched via vet_source's url/registry-host path), not a bare
     # name to be checked against every ecosystem, so "any" must stay empty exactly
     # like the former literal — never widen to equal "url" again.
     assert pools["any"] == frozenset()
-    assert pools["pypi"] == pools["git"] == frozenset()
+    assert pools["git"] == frozenset()
+    # C-764: the 2026-10-is-it-ai campaign, the first pypi records.
+    assert pools["pypi"] == frozenset({"skills-analyzer", "is-it-ai"})
     # C-750: npm holds only packages whose GitHub Advisory Database malware advisory
     # names the package itself (bare-name match is version-blind, so a single
     # compromised release of a legitimate package, e.g. tensorlake, must NOT be here).
@@ -229,6 +232,9 @@ def test_known_bad_sources_round_trips_the_former_hardcoded_values():
         "items-validator", "item-validator", "data-pipeline-testmetest",
         "event-emitter-testmetest", "test-brotli-testmetest", "pixel-map-testmetest",
         "net-codec-testmetest", "log-rotate-testmetest",
+        # B-1012: the @ifasn "*-doc-mcp" family (four malware advisories, one account)
+        "@ifasn/md-doc-mcp", "@ifasn/mmdd-doc-mcp", "@ifasn/mdd-doc-mcp", "@ifasn/mmd-doc-mcp",
+        "persona-ai-sdk",  # C-765: GHSA-2v69-q2gc-qm5j, a name with no legitimate release
     })
     assert "tensorlake" not in pools["npm"]
     for rec in iocdb.SOURCES:
