@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import parse_qsl, urlparse, urlsplit
+from urllib.parse import urlparse, urlsplit
 from .. import pathprobe
 from ..catalog import (
     BY_ID,
@@ -4290,11 +4290,17 @@ _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
 # `new Client({ connectionString })`). A DSN with no password is ordinary (peer / trust auth, a
 # pgpass file, PGPASSWORD), so only a password IN the string counts: the forms node-pg's own
 # parser (pg-connection-string 2.14.1, executed) reads - URL userinfo and a `?password=` query
-# parameter, for `postgres://`, `postgresql://` and `socket://` alike - plus the libpq keyword
-# form `password=...`, which that parser ignores but which still puts the credential in the file.
+# parameter, for `postgres://`, `postgresql://` and `socket://` alike, and `sslpassword` (the
+# client-key passphrase) the same two ways - plus the libpq keyword form `password=...`, which
+# that parser ignores but which still puts the credential in the file.
 _VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
+_DSN_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
 _DSN_USERINFO_PASSWORD_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^/?#@:]*:([^/?#@]+)@", re.I)
-_DSN_KEYWORD_PASSWORD_RE = re.compile(r"(?:^|\s)password\s*=\s*('(?:[^'\\]|\\.)*'|\S*)", re.I)
+# One libpq `key=value` pair; a quoted value is consumed whole, so a `password=` INSIDE a
+# quoted `options` / `application_name` value is not a pair of its own.
+_DSN_KEYWORD_PAIR_RE = re.compile(r"(?:^|(?<=\s))(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
+# `sslpassword` is the passphrase of the client key node-pg also reads from the DSN.
+_DSN_PASSWORD_KEYS = frozenset({"password", "sslpassword"})
 # Vendor-sensitive paths that are deliberately NOT secrets (path regex -> reason). The drift
 # test requires each vendor path to be covered above or to match one of these.
 _VENDOR_NOT_SECRET_PATHS = (
@@ -4344,23 +4350,36 @@ def _dsn_inline_password(value) -> "str | None":
         left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
         return password if left else None
 
-    if "://" in text:
+    def query_password(query: str) -> "str | None":
+        # Raw (undecoded) values: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env
+        # substitution runs on the config text before it), not a reference.
+        for pair in query.split("&"):
+            key, _, val = pair.partition("=")
+            if key in _DSN_PASSWORD_KEYS and val and literal(val) is not None:
+                return val
+        return None
+
+    # The URL branch only for a value that STARTS with a scheme: a keyword DSN can carry `://`
+    # inside a value (`options='... x://y'`) and must still get the keyword scan below.
+    if _DSN_SCHEME_RE.match(text):
         try:
             query = urlsplit(text).query
         except ValueError:
             # Unparseable (`postgres://u:pw@[::1`): node-pg rejects it too, so it never
-            # connects - but a password in the userinfo is still a credential in the file.
+            # connects - but a password in the userinfo or query is still in the file.
             m = _DSN_USERINFO_PASSWORD_RE.match(text)
-            return literal(m.group(1)) if m else None
+            if m and literal(m.group(1)) is not None:
+                return m.group(1)
+            q = text.split("?", 1)[1].split("#", 1)[0] if "?" in text else ""
+            return query_password(q)
         found = _url_inline_password(text)
         if found is not None:
             return found
-        for key, val in parse_qsl(query, keep_blank_values=True):
-            if key == "password" and val and literal(val) is not None:
-                return val
-        return None
-    for match in _DSN_KEYWORD_PASSWORD_RE.finditer(text):
-        password = match.group(1)
+        return query_password(query)
+    for match in _DSN_KEYWORD_PAIR_RE.finditer(text):
+        if match.group(1).lower() not in _DSN_PASSWORD_KEYS:
+            continue
+        password = match.group(2)
         if password.startswith("'") and password.endswith("'") and len(password) >= 2:
             password = password[1:-1]
         if password and literal(password) is not None:

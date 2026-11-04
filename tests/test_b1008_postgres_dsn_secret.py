@@ -8,7 +8,7 @@ Only a password IN the string counts - a DSN without one (peer / trust auth, pgp
 PGPASSWORD) is ordinary configuration. The forms are the ones node-pg's own parser
 (pg-connection-string 2.14.1, executed against the installed dist on 2026-11-04) reads: URL
 userinfo and the ``?password=`` query parameter, for ``postgres://``, ``postgresql://`` and
-``socket://``. The libpq keyword form (``password=...``) is not parsed by node-pg, but it still
+``socket://``, plus ``sslpassword`` (the client-key passphrase) the same two ways. The libpq keyword form (``password=...``) is not parsed by node-pg, but it still
 puts the credential in the file, so it counts too. So does an unparseable URL with a password in
 its userinfo.
 
@@ -55,6 +55,11 @@ def _bad_dsns() -> list:
         "host=db.internal.example password='" + pw + " x'",
         "postgres://openclaw:" + pw + "@[::1",  # unparseable: still a password in the file
         "postgres://openclaw:${PG_PASS:-" + pw + "}@db/openclaw",  # literal fallback
+        "postgres://openclaw@db/openclaw?sslmode=verify-full&sslpassword=" + pw,
+        "host=db sslkey=/etc/oc/client.key sslpassword=" + pw,
+        "postgres://openclaw@db/openclaw?password=%24%7B" + pw + "%7D",  # literal to node-pg
+        "host=db password=" + pw + " options='-c search_path=x://y'",  # `://` in a value
+        "postgres://openclaw@[::1/openclaw?password=" + pw,  # unparseable, query password
     ]
 
 
@@ -71,6 +76,10 @@ _CLEAN_DSNS = [
     "host=db passfile=/etc/openclaw/pgpass",
     "password=${OPENCLAW_PG_PASSWORD}",
     "secretref-env:OPENCLAW_PG_DSN",
+    "host=db options='-c password=x' dbname=openclaw",  # inside a quoted value, not a pair
+    "host=db application_name='a password=b'",
+    "postgres://openclaw@db/openclaw?sslpassword=${OPENCLAW_PG_KEY_PASS}",
+    "postgres://openclaw@db/openclaw?PASSWORD=x",  # node-pg reads the lowercase key only
 ]
 _REF = {"source": "env", "provider": "default", "id": "OPENCLAW_PG_DSN"}
 
@@ -85,7 +94,7 @@ def test_the_vendor_path_is_covered_by_a_path_rule():
 
 # ------------------------------------------------------------------------- helper level
 
-@pytest.mark.parametrize("index", range(7))
+@pytest.mark.parametrize("index", range(12))
 def test_a_dsn_with_a_literal_password_is_reported(index):
     dsn = _bad_dsns()[index]
     assert _dsn_inline_password(dsn) is not None, dsn
