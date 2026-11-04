@@ -14570,6 +14570,12 @@ def _b339_fetches(text: str, url_names: "set[str]") -> bool:
 # A quote that does not (a shell apostrophe, a regex literal) leaves the span as is.
 _B339_LITERAL_OPENERS = frozenset(["", "(", "[", "{", ",", "=", ":", "+", "%", "?"])
 _B339_LITERAL_CLOSERS = frozenset(["", ")", "]", "}", ",", ":", "+", "%", ";", "."])
+# ...and only when its body is inert text: no quote of any kind, bracket, operator,
+# separator, escape or interpolation marker. The delimiter test alone is attacker-
+# steerable (`x.replace(/[']/g, "") + role + y.replace(/[']/g, "")` pairs two regex
+# quotes across live code), but such a mis-paired span always contains code tokens;
+# a real word literal (`"role"`, `"role/list"`, `"admin"`) never needs them.
+_B339_INERT_BODY_RE = re.compile(r"[^\"'`()\[\]{}+;,$\\]*")
 
 
 def _b339_blank_plain_strings(text: str) -> str:
@@ -14599,7 +14605,7 @@ def _b339_blank_plain_strings(text: str) -> str:
         before = text[:k].rstrip()[-1:]
         after = text[j + len(quote) :].lstrip()[:1]
         delimited = before in _B339_LITERAL_OPENERS and after in _B339_LITERAL_CLOSERS
-        if ch != "`" and not prefixed and delimited and "$" not in body and "{" not in body:
+        if ch != "`" and not prefixed and delimited and _B339_INERT_BODY_RE.fullmatch(body):
             for m in range(k + len(quote), j):
                 if out[m] != "\n":
                     out[m] = " "
