@@ -5170,6 +5170,31 @@ def _b58_pattern_hit_count(pat: re.Pattern, s: str) -> int:
     return sum(1 for _ in pat.finditer(s))
 
 
+def _b58_visible_text(text: str) -> str:
+    """B-1019: `text` with every hidden region blanked to spaces - each HTML comment (an
+    unterminated `<!--` runs to the end, as a renderer hides it) and each hidden-styled
+    tag `_b58_hidden_segments` reads. Used to tell whether an injection hit on a
+    whole-document variant actually sits INSIDE a hidden region, rather than in plain text
+    while an unrelated comment elsewhere supplies the html-comment signal."""
+    chars = list(text)
+
+    def _blank(a: int, b: int) -> None:
+        for i in range(a, b):
+            if chars[i] not in "\n":
+                chars[i] = " "
+
+    for m in _B58_HTML_COMMENT_RE.finditer(text):
+        _blank(*m.span())
+    tail = text.rfind("<!--")
+    if tail != -1 and "-->" not in text[tail:]:
+        _blank(tail, len(text))
+    if _B58_HIDDEN_STYLE_RE.search(text):
+        for m in _b58_hidden_tags(text):
+            if _B58_HIDDEN_STYLE_RE.search(m.group("attrs") or ""):
+                _blank(*m.span())
+    return "".join(chars)
+
+
 def _b58_extract_actionable(seg_norm: str) -> bool:
     """True when a decoded/hidden B58 segment carries an ACTIONABLE payload - an action verb
     (_B63_ACTION_RE), an exfil transport (_EXFIL_RE), a bare URL/email sink, or an
@@ -6515,6 +6540,17 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 "from byte-level pattern matching \u2014 cannot be verified safe"
             )
             hidden = True
+        _visible_cache: dict = {}
+
+        def visible_variant(v: str) -> str:
+            # The visible counterpart of a whole-document variant: `norm` maps to the
+            # normalized visible raw text; a whole-document decode maps to its own decode
+            # of the visible text, blanked the same way after decoding.
+            if v not in _visible_cache:
+                _visible_cache[v] = normalize_for_scan(
+                    _b58_visible_text(text if v == norm else v))
+            return _visible_cache[v]
+
         for variant, signals, is_extract in ([] if hidden else variants):
             if not signals:
                 continue
@@ -6547,6 +6583,19 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                         and (
                             (not base_defensive and not catalogue_defensive)
                             or _b58_extract_actionable(variant)
+                        )
+                        # B-1019: on a whole-document variant the hidden-channel label
+                        # comes from ANY comment/hidden tag in the text, so it convicts
+                        # only when this pattern has more hits in the whole text than in
+                        # its visible part - i.e. a hit sits inside a hidden region. A
+                        # plaintext quote beside an unrelated comment no longer FAILs; a
+                        # hidden payload plus a plaintext decoy copy still does (count).
+                        # Segment extracts and base64 decodes keep the old rule.
+                        and (
+                            is_extract
+                            or "base64:" in signals
+                            or _b58_pattern_hit_count(pat, variant)
+                            > _b58_pattern_hit_count(pat, visible_variant(variant))
                         )
                     )
                 ):
