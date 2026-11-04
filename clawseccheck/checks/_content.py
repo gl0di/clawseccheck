@@ -14557,6 +14557,28 @@ def _b339_fetches(text: str, url_names: "set[str]") -> bool:
 # data-flow (and, for curl, `curlargv.py`), not another heuristic.
 
 
+# A plain string literal -- quoted, no prefix letter, nothing that could interpolate
+# (`$`, `{`) -- carries no variable's VALUE, so a tainted name spelled inside one
+# (`params={"role": "admin"}`, `"/" + "data/list"`) is not the name being sent
+# (C-135 round 4 on B-1011). Strings that could interpolate (shell "...$X...", JS
+# templates, f/r/b-prefixed Python strings) are left intact: fail-closed.
+_B339_PLAIN_STRING_RE = re.compile(r"(?<![A-Za-z0-9_])([\"'])((?:\\.|(?!\1)[^\\\n])*)\1")
+
+
+def _b339_blank_plain_strings(text: str) -> str:
+    def _blank(m: "re.Match") -> str:
+        body = m.group(2)
+        if "$" in body or "{" in body:
+            return m.group(0)
+        return m.group(1) + " " * len(body) + m.group(1)
+
+    return _B339_PLAIN_STRING_RE.sub(_blank, text)
+
+
+# A statement that is only a line comment (`# ...`, `// ...`) is not code.
+_B339_LINE_COMMENT_RE = re.compile(r"\s*(?:#|//)")
+
+
 def _b339_credential_in_url(
     norm: str,
     match_end: int,
@@ -14577,6 +14599,7 @@ def _b339_credential_in_url(
     url_vars: "dict[str, str]" = {}
 
     def classify(text: str) -> "str | None":
+        text = _b339_blank_plain_strings(text)
         if tainted and _b339_names_re(tainted).search(text):
             return "resp"
         if url_names and _b339_fetches(text, url_names):
@@ -14589,7 +14612,7 @@ def _b339_credential_in_url(
     for stmt in _B339_STMT_SPLIT_RE.split(window):
         stmt_pos = match_end + offset
         offset += len(stmt) + 1
-        if not stmt.strip():
+        if not stmt.strip() or _B339_LINE_COMMENT_RE.match(stmt):
             continue
         lm = _B339_LOOP_VAR_RE.search(stmt)
         if lm is not None:
@@ -14598,6 +14621,10 @@ def _b339_credential_in_url(
                 tainted.add(lm.group(1))
             elif kind == "url":
                 url_names.add(lm.group(1))
+            else:
+                # The loop rebinds the name to something untainted (`for role in [..]`).
+                tainted.discard(lm.group(1))
+                url_names.discard(lm.group(1))
         am = _B339_STMT_ASSIGN_RE.match(stmt)
         if am is not None:
             target, rhs = am.group(1), stmt[am.end() :]
@@ -14639,12 +14666,22 @@ def _b339_credential_in_url(
         sink_stmt = stmt
         for call_m in _B339_URL_CALL_RE.finditer(sink_stmt):
             seg = sink_stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
-            for shape in shapes:
-                um = shape.search(seg)
-                if um is not None:
+            for idx, shape in enumerate(shapes):
+                for um in shape.finditer(seg):
+                    # Concat / `%` / `.format` shapes: the name must sit OUTSIDE a plain
+                    # string literal (template/f-string/shell shapes interpolate it).
+                    # The whole argument expression is checked (to its depth-0 `,`/`)`),
+                    # so a decoy literal before the real name cannot end the match early.
+                    tail_lo = um.end(2) + 1
+                    tail = seg[tail_lo : _b339_arg_end(seg, tail_lo, stop_at_comma=True)]
+                    if idx < 2 and names_re is not None and not names_re.search(
+                        _b339_blank_plain_strings(tail)
+                    ):
+                        continue
                     dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
                     if dest is not None:
                         return dest
+                    break
             for shape in url_shapes:
                 for um in shape.finditer(seg):
                     if _b339_in_network_call(seg[um.end(2) :], url_names):
@@ -14653,7 +14690,7 @@ def _b339_credential_in_url(
                             return dest
             params_args = [_b339_params_arg(seg, pm.end()) for pm in _B339_PARAMS_KW_RE.finditer(seg)]
             if any(
-                (names_re is not None and names_re.search(a)) or _b339_in_network_call(a, url_names)
+                (names_re is not None and names_re.search(_b339_blank_plain_strings(a))) or _b339_in_network_call(a, url_names)
                 for a in params_args
             ):
                 url_m = _EXFIL_URL_RE.search(seg)

