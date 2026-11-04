@@ -5169,6 +5169,23 @@ _SKILL_LOCAL_CHAIN_RE = re.compile(
 _IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b")
 
 
+def _b13_ip_url_label(ip: str) -> str:
+    """B-1011: what to CALL a bare-IP URL `_is_public_ip` let through. That
+    helper treats the 100.64.0.0/10 shared address space (RFC 6598) as routable, so
+    Alibaba Cloud's instance-metadata address `100.100.100.200` used to be reported as a
+    "public-IP URL" -- wrong text for the one address in that range a skill most often
+    names. Wording only: the WARN itself is unchanged."""
+    if ip == "100.100.100.200":
+        return "cloud instance-metadata URL"
+    try:
+        a, b = (int(x) for x in ip.split(".")[:2])
+    except ValueError:
+        return "public-IP URL"
+    if a == 100 and 64 <= b <= 127:
+        return "shared-address-space (RFC 6598, not public) IP URL"
+    return "public-IP URL"
+
+
 # `curl URL | sh` is how uv/rustup/brew/deno legitimately install - only suspicious when the
 # host is NOT a well-known installer domain.
 _REPUTABLE_INSTALL_HOSTS = (
@@ -7125,8 +7142,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                     blob, m.start(), _fr, fence_needs_negation=True
                 ):
                     warns_content.append(
-                        f"{name}: hardcoded public-IP URL ({m.group(0)}) \u2014 "
-                        "unusual for a legitimate skill"
+                        f"{name}: hardcoded {_b13_ip_url_label(m.group(1))} ({m.group(0)}) "
+                        "\u2014 unusual for a legitimate skill"
                     )
                     break
             # F-059: skill-manifest least-privilege - allowed-tools grant vs declared purpose.
@@ -10829,6 +10846,39 @@ _SOURCE_GIT_RE = re.compile(r"^git:(?P<host>[^/\s]+)/(?P<path>[^@\s]+?)(?:@(?P<r
 _SOURCE_IP_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 
 
+# B-1015: the project name at the head of a PEP 508 requirement, and what may follow it.
+# pip resolves a requirement by its PEP 503-normalized name, so `skills_analyzer`,
+# `Skills.Analyzer` and `is-it-ai[cli]>=0.1` all install the project a record names as
+# `skills-analyzer` / `is-it-ai`. The name ends at whitespace, an extras bracket, a version
+# operator, a marker `;`, a direct-reference `@` or a clause comma. Anything else right
+# after the name (`is-it-ai.`, `is-it-ai/x`) is not a requirement pip would accept, so no
+# project name is taken from it and only the raw-string match applies, as before.
+_PEP508_NAME_RE = re.compile(
+    r"\s*(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?=\s|[\[<>=!~;@,(]|\Z)")
+_PEP503_SEP_RE = re.compile(r"[-_.]+")
+
+
+def _pep503(name: str) -> str:
+    """PEP 503 normalized form of a Python project name."""
+    return _PEP503_SEP_RE.sub("-", str(name)).lower()
+
+
+def _pypi_project(spec: str):
+    """B-1015: the PEP 503-normalized project name of a pip requirement, or None."""
+    m = _PEP508_NAME_RE.match(spec)
+    return _pep503(m.group("name")) if m else None
+
+
+def _npm_split(spec: str):
+    """(name, version) of an npm spec `[@scope/]name[@version]`, whitespace-trimmed."""
+    spec = spec.strip()
+    if spec.startswith("@"):
+        scope_name, _, ver = spec[1:].partition("@")
+        return "@" + scope_name.strip(), ver.strip() or None
+    name, _, ver = spec.partition("@")
+    return name.strip(), ver.strip() or None
+
+
 def _parse_source_target(target: str) -> dict:
     """Parse a --vet-source target into identity facts (never raises).
 
@@ -10849,6 +10899,11 @@ def _parse_source_target(target: str) -> dict:
         "scheme": None,
         "owner": None,
         "option_shaped": False,
+        # B-1015: names the package manager would actually resolve, for the known-bad
+        # match only (never rendered, never fed to a command). pypi: the PEP 503 project
+        # name. npm: the real package behind an `alias@npm:real` spec.
+        "project": None,
+        "npm_real": None,
     }
     if low.startswith(("http://", "https://")):
         parsed = urlparse(t)
@@ -10890,9 +10945,18 @@ def _parse_source_target(target: str) -> dict:
             else:
                 name, _, ver = spec.partition("@")
                 out.update(ecosystem="npm", name=name, version=ver or None)
+            # B-1015: `alias@npm:real[@ver]` installs `real` under the name `alias`, so the
+            # known-bad match must also see `real`. Followed a bounded number of times.
+            real, rver = None, out["version"]
+            for _ in range(4):
+                if not (rver and rver.strip().lower().startswith("npm:")):
+                    break
+                real, rver = _npm_split(rver.strip()[4:])
+            out["npm_real"] = real
         elif low.startswith("pypi:"):
             name, _, ver = t[5:].partition("==")
-            out.update(ecosystem="pypi", name=name, version=ver or None)
+            out.update(ecosystem="pypi", name=name, version=ver or None,
+                       project=_pypi_project(t[5:]))
         elif low.startswith("clawhub:"):
             out.update(ecosystem="clawhub", name=t[8:])
     # C-628: an npm/pypi spec whose name or version starts with '-' is argv text, not a
@@ -10986,13 +11050,37 @@ def vet_source(
     eco_keys = [eco, "any"] if eco != "registry" else list(bad.keys())
     if eco == "url":
         eco_keys = [k for k in eco_keys if k != "url"]
+    # B-1015: also match the names the package manager would resolve. A pip requirement
+    # is matched by its PEP 503 project name against PEP 503-normalized pypi entries
+    # (normalized here, at compare time, so a record stored as `is_it_ai` still matches);
+    # an npm alias is matched by the real package it installs. Whitespace around the
+    # spec is not part of the name.
+    cands = {name.lower(), plain, name.strip().lower(), plain.strip()}
+    if info.get("npm_real"):
+        real = str(info["npm_real"]).lower()
+        cands |= {real, real.lstrip("@").rsplit("/", 1)[-1]}
+    cands.discard("")
+    # A bare registry name is not convicted by normalization: OpenClaw resolves it through
+    # npm, which does not fold separators, so a bare `skills_analyzer` is a different npm
+    # package from a pypi record `skills-analyzer` (its exact spelling still matches every
+    # pool, as before). But a bare name may also be handed to pip ("your package manager's
+    # normal lookup"), where it IS that project - so a normalized-only pypi hit is a WARN.
+    proj = info.get("project")
     for k in eco_keys:
         pool = bad.get(k) or frozenset()
-        if name.lower() in pool or plain in pool:
+        hit = any(c in pool for c in cands)
+        if not hit and proj and (k == "pypi" or (k == "any" and eco == "pypi")):
+            hit = proj in {_pep503(e) for e in pool}
+        if hit:
             reasons_bad.append(
                 f"'{name}' is a known-compromised source (exact IOC match, catalog: {k})"
             )
             break
+    bare_pypi_alias = None
+    if eco == "registry" and not reasons_bad:
+        bare_proj = _pypi_project(name)
+        if bare_proj and bare_proj in {_pep503(e) for e in (bad.get("pypi") or ())}:
+            bare_pypi_alias = bare_proj
 
     # 1b. Known-bad HOST - a URL/git source whose host is, or is a subdomain of, a
     #     known-bad domain/IP. The name check above matches slugs/packages; this
@@ -11077,6 +11165,13 @@ def vet_source(
         reasons_susp.append(
             "git source without a pinned @ref (tag/sha) \u2014 content "
             "can change between this check and the fetch"
+        )
+    if bare_pypi_alias:
+        reasons_susp.insert(
+            0,
+            f"'{name}' is not a known-bad npm package, but pip would install it as the "
+            f"known-compromised Python project '{bare_pypi_alias}'; name the ecosystem "
+            "(npm:... or pypi:...) and do not install it with pip",
         )
     if info.get("option_shaped"):
         # insert(0): this becomes the headline in `detail`, ahead of any typosquat reason
