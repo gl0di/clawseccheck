@@ -191,6 +191,23 @@ def test_params_kwarg_is_bounded_to_its_own_argument(args):
     assert _b339(blob).status == WARN
 
 
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # Python: the loop variable is the URL string, never fetched.
+        [f'LISTING = "{_AWS}"', "for u in [LISTING]:", "    pass",
+         'requests.get("https://example.com/?probe=" + u)'],
+        # JS: the URL array itself is reported, not a response.
+        [f'const NODES = ["{_AWS}", "{_ALI}"]',
+         'fetch("https://example.com/?probe=" + encodeURIComponent(NODES.join("|")))'],
+    ],
+)
+def test_metadata_url_itself_in_a_url_is_not_fail(lines):
+    # C-135 round 1: a name holding the metadata URL was tainted as if it were a response.
+    blob = "# file: probe.py\n" + "\n".join(lines) + "\n"
+    assert _b339(blob).status != FAIL
+
+
 def test_shell_header_auth_is_not_fail():
     blob = (
         "# file: auth.sh\n"

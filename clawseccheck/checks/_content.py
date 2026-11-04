@@ -14390,6 +14390,25 @@ def _b339_query_seed(norm: str, match_start: int) -> "str | None":
     return best.group(1) if best is not None else None
 
 
+# A call between the seed's binding and the URL means the name receives what the call
+# RETURNS (`creds = requests.get("<url>")`, `R=$(curl "<url>")`); no call means it
+# holds the URL string itself (`NODES = ["<url>", ...]`, `LIST = "<url>"`).
+_B339_CALL_BETWEEN_RE = re.compile(r"[A-Za-z0-9_\]]\s*\(|\$\(|`")
+
+
+def _b339_seed_holds_url(norm: str, match_start: int, seed: str) -> bool:
+    """True when *seed* is bound to the metadata URL itself, not to a fetch result.
+    C-135 round 1 on B-1011: `for u in [LISTING]: get("https://x/?probe=" + u)` sends
+    the URL, not a metadata response, and used to FAIL."""
+    lookback = norm[max(0, match_start - _B339_BRACKET_LOOKBACK) : match_start]
+    bind = None
+    for m in re.finditer(rf"\b{re.escape(seed)}\s*(?:=(?!=)|\.(?:push|append|extend|add)\s*\()", lookback):
+        bind = m
+    if bind is None:
+        return False
+    return not _B339_CALL_BETWEEN_RE.search(lookback, bind.end())
+
+
 def _b339_offhost_url(norm: str, pos: int, url_text: str, own_host) -> "str | None":
     """*url_text* (a literal `http(s)://...` prefix or a `$HOST...` shell prefix) as a
     URL when it points off-host -- not a metadata/loopback address and not the skill's
@@ -14436,45 +14455,83 @@ def _b339_params_arg(seg: str, start: int) -> str:
     return m.group(0) if m else ""
 
 
-def _b339_credential_in_url(norm: str, match_end: int, seed: str, own_host) -> "str | None":
+def _b339_fetches(text: str, url_names: "set[str]") -> bool:
+    """True when *text* passes a URL-holding name to a call or a `curl`/`wget`
+    command -- the step that turns a metadata URL into a metadata response."""
+    alt = "|".join(re.escape(n) for n in sorted(url_names))
+    return bool(
+        re.search(rf"[A-Za-z0-9_\]]\s*\(\s*(?:await\s+)?(?:{alt})\b", text)
+        or re.search(rf"\b(?:curl|wget)\b[^\n;]*\$\{{?(?:{alt})\b", text)
+    )
+
+
+def _b339_credential_in_url(
+    norm: str, match_end: int, seed: str, own_host, seed_holds_url: bool = False
+) -> "str | None":
     """The off-host destination when the metadata response named *seed* (or a name
     tainted from it) reaches an outbound call's URL within `_B339_QUERY_WINDOW`; None
-    otherwise. See the block comment above for the propagation rules."""
+    otherwise. See the block comment above for the propagation rules.
+
+    Two name sets are kept apart: `url_names` hold the metadata URL itself, `tainted`
+    hold what was fetched with it. A URL name becomes a response only when it is passed
+    to a call (`_b339_fetches`); only `tainted` names are ever checked at a sink."""
     window = norm[match_end : match_end + _B339_QUERY_WINDOW]
-    tainted = {seed}
+    tainted: "set[str]" = set() if seed_holds_url else {seed}
+    url_names: "set[str]" = {seed} if seed_holds_url else set()
     url_vars: "dict[str, str]" = {}
+
+    def classify(text: str) -> "str | None":
+        if tainted and _b339_names_re(tainted).search(text):
+            return "resp"
+        if url_names and _b339_fetches(text, url_names):
+            return "resp"
+        if url_names and _b339_names_re(url_names).search(text):
+            return "url"
+        return None
+
     offset = 0
     for stmt in _B339_STMT_SPLIT_RE.split(window):
         stmt_pos = match_end + offset
         offset += len(stmt) + 1
         if not stmt.strip():
             continue
-        names_re = _b339_names_re(tainted)
         lm = _B339_LOOP_VAR_RE.search(stmt)
-        if lm is not None and names_re.search(stmt, lm.end()):
-            tainted.add(lm.group(1))
-            names_re = _b339_names_re(tainted)
+        if lm is not None:
+            kind = classify(stmt[lm.end() :])
+            if kind == "resp":
+                tainted.add(lm.group(1))
+            elif kind == "url":
+                url_names.add(lm.group(1))
         am = _B339_STMT_ASSIGN_RE.match(stmt)
         if am is not None:
-            rhs = stmt[am.end() :]
-            if names_re.search(rhs):
-                tainted.add(am.group(1))
-                for shape in _b339_url_shapes(tainted - {am.group(1)}):
+            target, rhs = am.group(1), stmt[am.end() :]
+            kind = classify(rhs)
+            if kind == "resp":
+                sources = tainted - {target}
+                tainted.add(target)
+                for shape in _b339_url_shapes(sources):
                     um = shape.search(rhs)
                     if um is not None:
                         dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
                         if dest is not None:
-                            url_vars[am.group(1)] = dest
+                            url_vars[target] = dest
                         break
-            elif am.group(1) in tainted and not stmt[am.end() - 2 : am.end()] == "+=":
-                tainted.discard(am.group(1))
-                url_vars.pop(am.group(1), None)
-        if not tainted:
-            return None
-        names_re = _b339_names_re(tainted)
+            elif kind == "url":
+                url_names.add(target)
+            elif not stmt[am.end() - 2 : am.end()] == "+=":
+                tainted.discard(target)
+                url_names.discard(target)
+                url_vars.pop(target, None)
         for cm in _B339_COLLECT_RE.finditer(stmt):
-            if names_re.search(stmt, cm.end()):
+            kind = classify(stmt[cm.end() :])
+            if kind == "resp":
                 tainted.add(cm.group(1))
+            elif kind == "url":
+                url_names.add(cm.group(1))
+        if not tainted and not url_names:
+            return None
+        if not tainted:
+            continue
         names_re = _b339_names_re(tainted)
         shapes = _b339_url_shapes(tainted)
         for call_m in _B339_URL_CALL_RE.finditer(stmt):
@@ -14578,7 +14635,9 @@ def _b339_corroborated(
     # push, open bracket literal), because the advisory shape keeps its URLs in an array.
     seed = _b339_query_seed(norm, match_start)
     if seed is not None:
-        dest = _b339_credential_in_url(norm, match_end, seed, own_host)
+        dest = _b339_credential_in_url(
+            norm, match_end, seed, own_host, _b339_seed_holds_url(norm, match_start, seed)
+        )
         if dest is not None:
             host_m = _URL_HOST_RE.match(dest)
             host = host_m.group(1) if host_m is not None else dest
