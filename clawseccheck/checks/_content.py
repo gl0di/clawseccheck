@@ -14560,19 +14560,41 @@ def _b339_fetches(text: str, url_names: "set[str]") -> bool:
 # A plain string literal -- quoted, no prefix letter, nothing that could interpolate
 # (`$`, `{`) -- carries no variable's VALUE, so a tainted name spelled inside one
 # (`params={"role": "admin"}`, `"/" + "data/list"`) is not the name being sent
-# (C-135 round 4 on B-1011). Strings that could interpolate (shell "...$X...", JS
-# templates, f/r/b-prefixed Python strings) are left intact: fail-closed.
-_B339_PLAIN_STRING_RE = re.compile(r"(?<![A-Za-z0-9_])([\"'])((?:\\.|(?!\1)[^\\\n])*)\1")
-
-
+# (C-135 round 4 on B-1011). A scanner, not a regex: every literal -- prefixed
+# (`f"..."`, `rb'...'`), triple-quoted or backtick -- is consumed as one unit, so its
+# closing quote can never pair with the next literal's opening one and blank the code
+# between them. Only unprefixed, non-interpolating literals are blanked; an
+# unbalanced quote leaves the text untouched (fail-closed).
 def _b339_blank_plain_strings(text: str) -> str:
-    def _blank(m: "re.Match") -> str:
-        body = m.group(2)
-        if "$" in body or "{" in body:
-            return m.group(0)
-        return m.group(1) + " " * len(body) + m.group(1)
-
-    return _B339_PLAIN_STRING_RE.sub(_blank, text)
+    out = list(text)
+    n = len(text)
+    k = 0
+    while k < n:
+        ch = text[k]
+        if ch not in "\"'`":
+            k += 1
+            continue
+        prefixed = k > 0 and (text[k - 1].isalnum() or text[k - 1] == "_")
+        quote = ch * 3 if ch != "`" and text.startswith(ch * 3, k) else ch
+        j = k + len(quote)
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text.startswith(quote, j):
+                break
+            if text[j] == "\n" and len(quote) == 1 and ch != "`":
+                return text
+            j += 1
+        else:
+            return text
+        body = text[k + len(quote) : j]
+        if ch != "`" and not prefixed and "$" not in body and "{" not in body:
+            for m in range(k + len(quote), j):
+                if out[m] != "\n":
+                    out[m] = " "
+        k = j + len(quote)
+    return "".join(out)
 
 
 # A statement that is only a line comment (`# ...`, `// ...`) is not code.
@@ -14621,10 +14643,8 @@ def _b339_credential_in_url(
                 tainted.add(lm.group(1))
             elif kind == "url":
                 url_names.add(lm.group(1))
-            else:
-                # The loop rebinds the name to something untainted (`for role in [..]`).
-                tainted.discard(lm.group(1))
-                url_names.discard(lm.group(1))
+            # No discard when the loop rebinds a tainted name to untainted values: a
+            # loop may run zero times, so the old binding can survive it (fail-closed).
         am = _B339_STMT_ASSIGN_RE.match(stmt)
         if am is not None:
             target, rhs = am.group(1), stmt[am.end() :]

