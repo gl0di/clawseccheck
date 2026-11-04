@@ -414,13 +414,20 @@ def ip_record_pattern(ip: str) -> str:
     except ValueError:
         return rf"(?<![a-z0-9.-]){re.escape(ip)}(?![a-z0-9.-])"
     octets = str(addr).split(".")
-    more = r"(?=[.-][a-z0-9])"  # a further label follows: the name goes on to a domain
+    # A further label follows: the name goes on to the wildcard service's domain. It is
+    # CONSUMED, not looked ahead at, so a text-regex match is the whole remaining host
+    # (`91-92-242-30.nip.io`, never a bare `91-92-242-30`): callers such as
+    # checks/_vet.py re-check `m.group(0)` with is_known_bad_host(), which must agree.
+    more = r"(?:[.-][a-z0-9_][a-z0-9_-]*)+"
     forms = [rf"(?<![a-z0-9.-]){re.escape(str(addr))}(?![a-z0-9.-])"]  # the bare IP
+    # `_` is a label character here: the resolver starts a window only after `.`, `-` or
+    # the start of the name, so neither the IP nor the octet to its left begins a window
+    # when it is glued to `_` (`_1.91.92.242.30.nip.io` resolves to 91.92.242.30).
     for sep in (".", "-"):
         esc = re.escape(sep)
-        not_tail = "".join(rf"(?<!(?<![a-z0-9]){o}{esc})" for o in _OCT_BEFORE)
-        forms.append(rf"(?<![a-z0-9]){not_tail}{esc.join(octets)}{more}")
-    forms.append(rf"(?<![a-z0-9]){addr.packed.hex()}{more}")
+        not_tail = "".join(rf"(?<!(?<![a-z0-9_]){o}{esc})" for o in _OCT_BEFORE)
+        forms.append(rf"(?<![a-z0-9_]){not_tail}{esc.join(octets)}{more}")
+    forms.append(rf"(?<![a-z0-9_]){addr.packed.hex()}{more}")
     return "(?:" + "|".join(forms) + ")"
 
 
