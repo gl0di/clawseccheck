@@ -88,7 +88,8 @@ def test_on_10_9_a_glob_for_the_old_name_does_not_reach_dispatch_action():
 
 # ------------------------------------------------- unknown build: newest grounded semantics
 
-@pytest.mark.parametrize("version", [None, (), (2026,), "2026.10.9", [2026, 10, 9]])
+@pytest.mark.parametrize("version", [None, (), (2026,), "2026.10.9", [2026, 10, 9],
+                                     (2026, "10", 9), (2026, 10, None), (True, 10, 9)])
 def test_an_unknown_or_malformed_build_answers_with_the_newest_rules(version):
     """Same default as retiredformats.find_retired: an unreadable build is judged as the
     newest grounded one, never as an older build picked at random."""

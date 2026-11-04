@@ -240,7 +240,10 @@ def _dispatcher_rules_apply(version) -> bool:
     malformed value) means the newest grounded build, where both rules exist."""
     if not isinstance(version, tuple) or len(version) < 3:
         return True
-    return tuple(version)[:3] >= _TOOL_CALL_ALIAS_SINCE
+    head = version[:3]
+    if not all(isinstance(part, int) and not isinstance(part, bool) for part in head):
+        return True
+    return head >= _TOOL_CALL_ALIAS_SINCE
 
 # CORE_TOOL_GROUPS - the object the vendor's ``expandToolGroups`` actually consults
 # (``TOOL_GROUPS = { ...CORE_TOOL_GROUPS }`` in tool-policy-shared, built by
