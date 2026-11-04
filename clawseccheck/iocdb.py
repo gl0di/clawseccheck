@@ -392,8 +392,11 @@ def _build_known_bad_host_records() -> tuple:
 #   * an embedded form (anything but the bare IP itself) must be followed by a further
 #     label (`[.-]` and a host character): the wildcard service's own domain. Without
 #     one the name resolves through no wildcard service -- `sub.91.92.242.30` stays a
-#     non-match (B-436 pins it) -- and a bare eight-hex-digit token in prose (a short
-#     commit hash) is not read as a host.
+#     non-match (B-436 pins it) -- and a free-standing eight-hex-digit token in prose (a
+#     short commit hash) is not read as a host. The suffix itself is not checked to be a
+#     wildcard domain, so the record's exact hex inside a filename or dashed slug
+#     (`file-5b5cf21e.json`) does match; that needs those exact 32 bits, and a document
+#     that spells a C2's address is no less suspect for it.
 # Anything the left or right boundary rejects -- a digit or letter touching the IP
 # (`191.92.242.30`, `x91.92.242.30`, `91.92.242.300`), a leading-zero octet the resolver
 # does not parse -- is not a match.
