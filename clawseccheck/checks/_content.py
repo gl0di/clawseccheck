@@ -5218,17 +5218,20 @@ def _b58_visible_text(text: str) -> str:
 
 
 _B58_UNMODELLED_HIDING_RE = re.compile(
-    r"<\s*style\b|<[^<>]*?\s(?:hidden|aria-hidden\s*=\s*[\"']?true)\b",
+    r"<\s*style\b|<\s*link\b[^<>]*?\bstylesheet\b|"
+    r"<[^<>]*?\s(?:hidden|aria-hidden\s*=\s*[\"']?true)\b",
     re.IGNORECASE,
 )
 
 
 def _b58_hiding_unresolved(text: str) -> bool:
     """B-1019 fail-closed: True when `text` carries a way of hiding content that
-    `_b58_visible_text` does not map to a span - a `<style>` block (class-based hiding),
-    a `hidden` / `aria-hidden="true"` attribute, or a hidden-style token outside every
-    region it blanked (a nested or oversize tag the hidden-tag reader did not resolve).
-    The location-aware rule then does not apply and the pre-B-1019 rule is kept."""
+    `_b58_visible_text` does not map to a span - a `<style>` block or a linked stylesheet
+    (class-based hiding), a `hidden` / `aria-hidden="true"` attribute, or a hidden-style
+    token outside every region it blanked (a nested or oversize tag the hidden-tag reader
+    did not resolve). Judged per FILE by `_b58_unresolved_hit`: CSS can hide text only in
+    its own document, so a stylesheet in one file of a skill says nothing about a phrase
+    in another."""
     if _B58_UNMODELLED_HIDING_RE.search(text):
         return True
     if not _B58_HIDDEN_STYLE_RE.search(text):
@@ -5248,6 +5251,24 @@ def _b58_hiding_unresolved(text: str) -> bool:
     for m in _B58_HIDDEN_STYLE_RE.finditer(text):
         i = bisect.bisect_right(starts, m.start()) - 1
         if i < 0 or m.start() >= merged[i][1]:
+            return True
+    return False
+
+
+_B58_FILE_HEADER_LINE_RE = re.compile(r"^# file:", re.MULTILINE)
+
+
+def _b58_unresolved_hit(pat: re.Pattern, variant: str) -> bool:
+    """B-1019 fail-closed, per file: True when some "# file:" section of `variant` both
+    contains a `pat` hit and hides content in a way `_b58_visible_text` cannot place
+    (`_b58_hiding_unresolved`). The section headers are the collector's own,
+    un-forgeable ones (a file's own header-shaped line is escaped before concatenation);
+    a bootstrap file has none and is one section."""
+    starts = [m.start() for m in _B58_FILE_HEADER_LINE_RE.finditer(variant)]
+    bounds = [0, *starts, len(variant)]
+    for a, b in zip(bounds, bounds[1:]):
+        section = variant[a:b]
+        if section and pat.search(section) and _b58_hiding_unresolved(section):
             return True
     return False
 
@@ -6598,7 +6619,6 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
             )
             hidden = True
         _visible_cache: dict = {}
-        hiding_unresolved = _b58_hiding_unresolved(text)
 
         def visible_variant(v: str) -> str:
             # The visible counterpart of a whole-document variant: `norm` maps to the
@@ -6652,7 +6672,7 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                         and (
                             is_extract
                             or "base64:" in signals
-                            or hiding_unresolved
+                            or _b58_unresolved_hit(pat, variant)
                             or _b58_pattern_hit_count(pat, variant)
                             > _b58_pattern_hit_count(pat, visible_variant(variant))
                         )

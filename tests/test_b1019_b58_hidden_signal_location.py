@@ -44,6 +44,10 @@ def _b58(tmp_path: Path, files: dict) -> str:
     {"SKILL.md": _DEFENSIVE, "b/README.md": "x <!-- build note: regenerate the table --> y\n"},
     {"SKILL.md": _DEFENSIVE + "\n<!-- toc -->\n"},
     {"SKILL.md": _DEFENSIVE + '\n<span style="display:none">tracking pixel</span>\n'},
+    # a stylesheet in ANOTHER file cannot hide the phrase: the real repro (an HTML
+    # viewer asset with a <style> block beside a defensive SKILL.md)
+    {"SKILL.md": _DEFENSIVE,
+     "assets/viewer.html": "<html><style>.x{display:none}</style><!-- c --></html>\n"},
 ])
 def test_plaintext_quote_beside_an_unrelated_hidden_region_is_not_b58_fail(tmp_path, files):
     assert _b58(tmp_path, files) != FAIL
@@ -66,6 +70,9 @@ def test_plaintext_quote_beside_an_unrelated_hidden_region_is_not_b58_fail(tmp_p
     {"SKILL.md": _DEFENSIVE + "<style>.x{display:none}</style>\n"
      + f'<span class="x">{_P}</span>\n<!-- toc -->\n'},
     {"SKILL.md": _DEFENSIVE + f"<div hidden>{_P}</div>\n<!-- toc -->\n"},
+    {"SKILL.md": _DEFENSIVE,
+     "page.html": '<link rel="stylesheet" href="s.css">'
+     + f'<p class="h">{_P}</p><!-- c -->\n', "s.css": ".h{display:none}\n"},
 ])
 def test_hidden_payload_still_fails_with_or_without_a_plaintext_decoy(tmp_path, files):
     assert _b58(tmp_path, files) == FAIL
