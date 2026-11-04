@@ -505,7 +505,7 @@ def test_comment_skip_does_not_hide_real_commands(line):
     assert _b339(blob).status == FAIL
 
 
-@pytest.mark.parametrize("rx", ["/'/", "/[']/", "/(')/"])
+@pytest.mark.parametrize("rx", ["/'/", "/[']/", "/(')/", "/=?'/", "/a|'/"])
 def test_regex_literal_quotes_cannot_hide_the_real_name(rx):
     # C-135 round 5 + review: regex-literal quotes used to pair up and blank `role`.
     blob = (
