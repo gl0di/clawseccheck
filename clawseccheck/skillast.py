@@ -3748,10 +3748,52 @@ def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
         return False
     basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    if basename in _PYTHON_INTERPRETERS and _python_option_list_closed(elts):
+        return False  # B-1018: a later append can only reach the module/script's argv
     return basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
 
 
-def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tuple]:
+# B-1018: the Python interpreters in `_SHELL_EVAL_FLAG_INTERPRETERS`.
+_PYTHON_INTERPRETERS = frozenset({"python", "python2", "python3"})
+
+
+def _python_option_list_closed(elts: list) -> bool:
+    """B-1018: has the recorded literal already ENDED the Python interpreter's own option
+    list, so nothing appended later can be read as an interpreter flag (`-c`)?
+
+    CPython stops parsing its own options at `-m <module>` and at the first script
+    path; everything after either goes to the module/script as `sys.argv`, never to the
+    interpreter. Only the exact shapes `[py, "-m", "<module>", ...]` and
+    `[py, "<script>", ...]` count, with every one of those elements a string literal and
+    the module/script not starting with "-" (so not `-`, stdin, nor another option).
+    Anything else -- an option before `-m`, a glued `-mpytest`, a non-literal module --
+    is not closed and keeps B-953's disqualification.
+
+    Whether the MODULE itself then evaluates its arguments (`-m timeit "<code>"`) is the
+    same question as for any ordinary program in argv[0] and is not decided here: an
+    un-appended `[py, "-m", "timeit", tainted]` already reads as argument injection, and
+    this only makes the appended form agree with it."""
+    if len(elts) < 2:
+        return False
+    first = elts[1]
+    if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+        return False
+    if first.value == "-m":
+        if len(elts) < 3:
+            return False
+        mod = elts[2]
+        return (
+            isinstance(mod, ast.Constant)
+            and isinstance(mod.value, str)
+            and bool(mod.value)
+            and not mod.value.startswith("-")
+        )
+    return bool(first.value) and not first.value.startswith("-")
+
+
+def _single_list_bindings_local(
+    scope: ast.AST, conditional_out: "dict | None" = None
+) -> dict[str, ast.List | ast.Tuple]:
     """Names bound EXACTLY ONCE, UNCONDITIONALLY, to a list/tuple literal within
     `scope`'s own body, with no later mutation this function cannot prove leaves the
     recorded literal still accurate (`cmd[0] = ...` / `cmd.insert(...)` / a shell-
@@ -3803,6 +3845,12 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
     `tests/test_b863_tt5_wrapper_position_grammar.py`'s
     `test_call_site_merges_conditional_append_branches_sharing_one_a0` and
     `test_call_site_merges_many_independent_conditional_branches`.
+
+    B-1018: when `conditional_out` is a dict, every name rejected ONLY by the B-952
+    "conditionally reached" rule (bound once, to a literal, nothing else disqualifying)
+    is recorded there as `name -> Assign`. It is NOT a scope-wide binding; the caller
+    may apply it only to a sink that the assignment dominates -- see
+    `_assign_dominates`.
     """
     if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
         stack = [b for b in scope.body if not isinstance(b, _NESTED_SCOPE_NODES)]
@@ -3830,6 +3878,7 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
     # textual/execution order), so the decision is deferred to a second pass below,
     # once `bindings` is complete.
     trailing_mutated: set[str] = set()
+    conditional: dict = {}  # B-1018: name -> its one conditionally-reached literal Assign
     for n in _scope_own_nodes(scope):
         if isinstance(n, ast.Assign):
             for t in n.targets:
@@ -3837,6 +3886,10 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
                     assign_count[t.id] = assign_count.get(t.id, 0) + 1
                     if n not in unconditional_assigns:
                         unsafe.add(t.id)  # B-952: only conditionally reached
+                        if len(n.targets) == 1 and isinstance(n.value, (ast.List, ast.Tuple)):
+                            conditional[t.id] = n
+                        else:
+                            conditional[t.id] = None  # not a single literal binding
                     elif isinstance(n.value, (ast.List, ast.Tuple)):
                         bindings[t.id] = n.value
                     else:
@@ -3858,9 +3911,117 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
             trailing_mutated.add(n.target.id)  # cmd += [...] mutates like .extend()
     for name in trailing_mutated:
         lit = bindings.get(name)
+        if lit is None and conditional.get(name) is not None:
+            lit = conditional[name].value
         if lit is not None and _prog_name_could_become_shell_indirect(lit.elts):
             unsafe.add(name)
+            conditional[name] = None
+    if conditional_out is not None:
+        # Rejected only by B-952: bound exactly once, to a literal, with no
+        # disqualifying mutation (every other rule above put the name in `unsafe`
+        # through a path that also cleared or never set its `conditional` entry, or
+        # that is re-checked here).
+        for name, a in conditional.items():
+            if a is None or assign_count.get(name, 0) != 1:
+                continue
+            # Only a literal string program: the resolver's argv[0] taint test reads
+            # names and env reads, not every source (an inline `sys.argv[1]` argv[0]
+            # reads as untainted -- a pre-existing gap this must not widen).
+            head = a.value.elts[0] if a.value.elts else None
+            if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
+                continue
+            if _b1018_other_unsafe(scope, name, a):
+                continue
+            conditional_out[name] = a
     return {k: v for k, v in bindings.items() if assign_count.get(k, 0) == 1 and k not in unsafe}
+
+
+def _b1018_other_unsafe(scope: ast.AST, name: str, assign: ast.Assign) -> bool:
+    """B-1018: may anything OTHER than `assign` rebind, unbind or reach into `name`?
+
+    Re-derived here rather than read from `unsafe`, which B-952 already set for this
+    name, so the B-952 reason cannot mask a second, real one. Deliberately broad: ANY
+    store or delete of the name except `assign`'s own target and a `+=` (a trailing
+    mutation, judged by B-953 like `.extend()`) -- that covers tuple/list unpacking,
+    `for`/`with`/walrus/`except ... as` targets and `del` in one rule -- plus any
+    `global`/`nonlocal` declaration of it anywhere under `scope`, nested functions
+    included (a function that declares it global can rebind it between the assignment
+    and the sink; C-135 round 1), plus index assignment and the argv[0]-invalidating
+    mutators."""
+    own_target = assign.targets[0]
+    for n in ast.walk(scope):
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            return True
+    for n in _scope_own_nodes(scope):
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+            if n is own_target:
+                continue
+            return True  # anything else that binds or unbinds the name
+        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) \
+                and n.target.id == name and not isinstance(n.op, ast.Add):
+            return True
+        if isinstance(n, ast.ExceptHandler) and n.name == name:
+            return True
+        # `match` capture patterns bind through a plain string attribute, not an
+        # ast.Name (class names, so this stays importable on Python 3.9).
+        cls = n.__class__.__name__
+        if cls in ("MatchAs", "MatchStar") and getattr(n, "name", None) == name:
+            return True
+        if cls == "MatchMapping" and getattr(n, "rest", None) == name:
+            return True
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and any(
+            (a.asname or a.name.split(".")[0]) == name for a in n.names
+        ):
+            return True
+        if (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            return True
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (
+                isinstance(f, ast.Attribute)
+                and isinstance(f.value, ast.Name)
+                and f.value.id == name
+                and f.attr in _ARGV0_INVALIDATING_MUTATORS
+            ):
+                return True
+    return False
+
+
+def _assign_dominates(assign: ast.Assign, call: ast.Call, parents: dict) -> bool:
+    """B-1018: is `assign` guaranteed to have run whenever `call` runs?
+
+    True only when `assign` and an ancestor statement of `call` sit in the SAME
+    statement list (a `try:` body, an `if` branch, a loop body, ...) with the ancestor
+    strictly AFTER `assign`. Python has no jump INTO the middle of a block, so control
+    reaching that later statement passed through `assign` first, in the same
+    execution of the block. An except handler, `finally`, `else`, or code after the
+    whole compound statement is a different list and never qualifies -- the B-952
+    case (assigned in a branch, used outside it) stays unresolved."""
+    a_parent = parents.get(assign)
+    if a_parent is None:
+        return False
+    for field in ("body", "orelse", "finalbody", "handlers"):
+        block = getattr(a_parent, field, None)
+        if isinstance(block, list) and any(x is assign for x in block):
+            break
+    else:
+        return False
+    a_idx = next(i for i, x in enumerate(block) if x is assign)
+    node = call
+    while node is not None:
+        par = parents.get(node)
+        if par is a_parent:
+            for i, x in enumerate(block):
+                if x is node:
+                    return i > a_idx
+            return False  # an ancestor in another field of the same compound statement
+        node = par
+    return False
 
 
 def _list_bindings_by_call(tree: ast.AST) -> dict[ast.Call, dict[str, ast.List | ast.Tuple]]:
@@ -3872,10 +4033,20 @@ def _list_bindings_by_call(tree: ast.AST) -> dict[ast.Call, dict[str, ast.List |
         n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
     for scope in scopes:
-        binds = _single_list_bindings_local(scope)
+        conditional: dict = {}
+        binds = _single_list_bindings_local(scope, conditional)
+        parents: dict = {}
+        if conditional:
+            for n in _scope_own_nodes(scope):
+                for child in ast.iter_child_nodes(n):
+                    parents[child] = n
         for n in _scope_own_nodes(scope):
             if isinstance(n, ast.Call):
-                out[n] = binds
+                extra = {
+                    name: a.value for name, a in conditional.items()
+                    if _assign_dominates(a, n, parents)
+                }
+                out[n] = {**binds, **extra} if extra else binds
     return out
 
 
@@ -5709,6 +5880,22 @@ def _subprocess_taint_is_command_injection(
         first = first.args[0]
     if isinstance(first, ast.Name) and list_bindings:
         first = list_bindings.get(first.id, first)  # resolve a var-bound command list
+    # B-1018: `run(["soffice"] + args)` -- a literal list concatenated with anything.
+    # `+` on a list never changes index 0, so argv[0] is the left literal's first
+    # element. Only a plain string constant there is trusted, and never one that could
+    # become a shell/interpreter/re-exec wrapper (`["bash"] + args` can carry `-c` in
+    # `args`, exactly B-953's `.extend()` case): those keep the crit default. The right
+    # operand is kept as one more argv element so the rest of this branch still sees it.
+    if (
+        isinstance(first, ast.BinOp)
+        and isinstance(first.op, ast.Add)
+        and isinstance(first.left, (ast.List, ast.Tuple))
+        and first.left.elts
+        and isinstance(first.left.elts[0], ast.Constant)
+        and isinstance(first.left.elts[0].value, str)
+        and not _prog_name_could_become_shell_indirect(first.left.elts)
+    ):
+        first = ast.List(elts=[*first.left.elts, first.right], ctx=ast.Load())
     if isinstance(first, (ast.List, ast.Tuple)):
         prog = first.elts[0] if first.elts else None
         # B-956: `prog` can be `ast.Starred(value=ast.Name(...))` --

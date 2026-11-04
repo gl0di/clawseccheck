@@ -824,7 +824,7 @@ def test_wrapper_unrelated_if_does_not_taint_sibling_call_site_binding():
     assert "TT5_ARG_INJECTION" in r
 
 
-def test_module_guard_conditional_argv_binding_stays_crit_accepted_tradeoff():
+def test_module_guard_argv_binding_dominating_its_sink_is_resolved_b1018():
     """C-135 (adversarial review of the B-952 commit): the module-scope
     counterpart of `test_wrapper_conditionally_bound_call_site_list_stays_crit`
     -style binding, in the single most common real shape that puts an
@@ -861,9 +861,13 @@ def test_module_guard_conditional_argv_binding_stays_crit_accepted_tradeoff():
         "    workdir = os.environ.get('WORKDIR')\n"
         "    subprocess.run(args, cwd=workdir)\n"
     )
+    # B-1018 resolved this tradeoff soundly instead of accepting it: the binding and
+    # the sink sit in the SAME `if` body, assignment first, so whenever the sink runs
+    # the assignment has run -- whether or not the guard's body runs at all. The
+    # binding now applies to that sink only (never to code after the `if`).
     r = _rules(src)
-    assert "TT5_CMD_INJECTION" in r
-    assert r["TT5_CMD_INJECTION"].severity == "crit"
+    assert "TT5_CMD_INJECTION" not in r
+    assert r["TT5_ARG_INJECTION"].severity == "info"
 
 
 def test_module_guard_conditional_argv_binding_with_no_other_taint_is_silent():
