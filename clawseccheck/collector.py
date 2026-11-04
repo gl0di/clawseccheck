@@ -884,6 +884,11 @@ class Context:
     # themselves. See `_collect_auth_profile_store_presence`.
     auth_profile_store_read: bool = False
     auth_profile_store_length: int | None = None
+    # B-1014: True when a state DB was FOUND but the presence read failed -- a corrupt
+    # file, a PostgreSQL engine anchor (B-1010), a non-table `config_machine_state`, a
+    # capped walk. `_read` alone cannot tell this apart from "no DB" / "DB predates the
+    # table", and A1 read both as a clean leg. Set only beside a `ctx.errors` entry.
+    auth_profile_store_unreadable: bool = False
     # B-845: the SAME presence-only signal, for the PER-AGENT database
     # (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
     # grounded against the installed dist (2026.9.5: sqlite-Cp6HSWY4.mjs) to be a
@@ -900,6 +905,9 @@ class Context:
     # to know which agent. See `_collect_agent_auth_profile_store_presence`.
     agent_auth_profile_store_read: bool = False
     agent_auth_profile_store_length: int | None = None
+    # B-1014: True when at least one per-agent database existed but could not be read
+    # (same meaning as `auth_profile_store_unreadable`, for the per-agent sweep).
+    agent_auth_profile_store_unreadable: bool = False
     # B-845 (follow-up, 2026-09-23): True when more per-agent trajectory
     # databases exist under `agents/*/agent/openclaw-agent.sqlite` than
     # `trajectorystore._MAX_SQLITE_DBS` allows -- i.e. `sqlite_db_paths` returned a
@@ -5806,7 +5814,12 @@ def _connect_state_db(db_path: Path):
     if os.path.islink(db_path):
         raise sqlite3.OperationalError(
             "the state database path is a symbolic link; this audit does not follow links")
-    return sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    # B-1010: a PostgreSQL engine anchor is not the store's data -- refuse it with the same
+    # error type (see `trajectorystore.refuse_engine_anchor`), so every caller reports its
+    # own "could not read" outcome instead of reading an empty file as "nothing there".
+    _trajectorystore.refuse_engine_anchor(conn)
+    return conn
 
 
 def _walk_named(directory: Path, name: str, max_files: int, capped: "list | None" = None) -> "list[Path]":
@@ -6171,6 +6184,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         # Same disclosure discipline as `_collect_config_machine_state`: a capped walk
         # that never reached the DB is not the same fact as "no state store" (GR#4).
         if capped:
+            ctx.auth_profile_store_unreadable = True
             ctx.errors.append(
                 f"stopped listing '{state_dir}' after 100 entries without finding "
                 "openclaw.sqlite; the auth-profile store presence was not read"
@@ -6198,6 +6212,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
                 # docstring for the demonstrated shapes). Refuse to query it. Disclosed,
                 # never silently trusted: NOT the same outcome as "absent" above, and
                 # NOT read as if it were a genuine row.
+                ctx.auth_profile_store_unreadable = True
                 ctx.errors.append(
                     f"'config_machine_state' in {db_path} did not resolve to a real "
                     "table (found a view, virtual table, or other schema object "
@@ -6229,6 +6244,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         # A state DB predating the table is not a corrupt store -- same honest
         # UNDETERMINED as every sibling reader here.
         if "no such table" not in str(exc).lower():
+            ctx.auth_profile_store_unreadable = True
             ctx.errors.append(
                 f"could not read auth-profile store presence from {db_path}: {exc}"
             )
@@ -6562,7 +6578,21 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
     below is a bounded sample, not an exhaustive one.
     """
     ctx.agent_auth_profile_store_capped = _trajectorystore.sqlite_db_paths_capped(home)
-    for db_path in _trajectorystore.sqlite_db_paths(home):
+    # B-1014: an `agents/` tree that could not be listed returns no paths at all -- the
+    # same empty list as "no agents" -- so a store behind it read as a clean leg in A1.
+    # The stat is the walk's own disclosure; surface it instead of dropping it.
+    walk_stats: dict = {}
+    db_paths = (
+        _trajectorystore._sqlite_dbs(home, stats=walk_stats)
+        if isinstance(home, Path) else []
+    )
+    if walk_stats.get("dbs_unlistable"):
+        ctx.agent_auth_profile_store_unreadable = True
+        ctx.errors.append(
+            f"could not list every per-agent directory under '{home / 'agents'}'; "
+            "the agent auth-profile store presence was not fully read"
+        )
+    for db_path in db_paths:
         conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
             db_path, table_name="auth_profile_store"
         )
@@ -6578,6 +6608,7 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
             # false for a plain open failure or a lock timeout). Either way this db is
             # skipped, other agents' own databases are still tried below.
             if unreadable:
+                ctx.agent_auth_profile_store_unreadable = True
                 ctx.errors.append(
                     f"could not read agent auth-profile store presence from {db_path}: "
                     "the database could not be read"
@@ -6590,6 +6621,7 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
                 (_AGENT_AUTH_PROFILE_STORE_ROW_KEY,),
             ).fetchone()
         except sqlite3.Error as exc:
+            ctx.agent_auth_profile_store_unreadable = True
             ctx.errors.append(
                 f"could not read agent auth-profile store presence from {db_path}: {exc}"
             )

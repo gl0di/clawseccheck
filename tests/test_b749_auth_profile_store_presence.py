@@ -649,7 +649,7 @@ class TestPerAgentReaderRefusesNonTableSchema:
     ``auth_profile_store`` executes, so the reader must verify the name resolves to an
     ordinary TABLE before any row is fetched. A refused store reads as "could not look"
     (read False, length None), never as a spoofed length, and A1 must not hedge on a
-    signal that was refused rather than read."""
+    signal that was refused rather than read -- B-1014: it hedges on the refusal instead."""
 
     @staticmethod
     def _bare_home(tmp_path: Path) -> Path:
@@ -686,9 +686,13 @@ class TestPerAgentReaderRefusesNonTableSchema:
         assert ctx.agent_auth_profile_store_read is False
         assert ctx.agent_auth_profile_store_length is None
         assert any("could not be read" in e for e in ctx.errors), ctx.errors
-        # No credentials dir and no other signal: a refused read must not hedge.
+        # B-1014 reversed the old "a refused read must not hedge": a store that exists
+        # but was refused is "could not look", never a clean leg (GR#4). It hedges --
+        # from the refusal itself, never from the spoofed length.
         finding = check_trifecta(ctx)
-        assert finding.status == PASS, finding.detail
+        assert finding.status == WARN, finding.detail
+        assert "exists but could not be read" in finding.detail
+        assert "5000" not in finding.detail
 
     def test_a_real_table_with_a_generated_column_is_also_refused(self, tmp_path):
         """An honestly-declared TABLE (``type='table'``, ordinary CREATE TABLE) can still
@@ -717,7 +721,8 @@ class TestPerAgentReaderRefusesNonTableSchema:
         assert ctx.agent_auth_profile_store_length is None
         assert any("could not be read" in e for e in ctx.errors), ctx.errors
         finding = check_trifecta(ctx)
-        assert finding.status == PASS, finding.detail
+        assert finding.status == WARN, finding.detail  # B-1014: refused, so hedged
+        assert "exists but could not be read" in finding.detail
 
 
 # ------------------------------------------------------------------- cap disclosure
@@ -1073,9 +1078,12 @@ class TestB889ViewMasqueradeHardening:
             "config_machine_state" in e and "did not resolve to a real table" in e
             for e in ctx.errors
         ), ctx.errors
-        # The downstream hedge must never fire off a signal that was never really read.
+        # The hedge must never fire off the SPOOFED length -- but since B-1014 it does
+        # fire off the refusal itself: a refused store is "could not look", not "none".
         finding = check_trifecta(ctx)
-        assert finding.status == PASS, finding.detail
+        assert finding.status == WARN, finding.detail
+        assert "exists but could not be read" in finding.detail
+        assert "bytes in config_machine_state" not in finding.detail
 
     def test_a_genuine_table_still_reads_correctly_after_the_hardening(self, tmp_path):
         """Clean-fixture control: an ordinary, honest `config_machine_state` TABLE (the

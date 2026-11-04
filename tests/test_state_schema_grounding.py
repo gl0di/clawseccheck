@@ -1034,12 +1034,34 @@ _B176_VIEW_MASQUERADE_DECOY = (
     "before any row is read), so both sites share this entry despite differing column "
     "counts. Never a real OpenClaw table name itself."
 )
+_B1010_ENGINE_ANCHOR = (
+    "openclaw_engine_anchor is the marker OpenClaw 2026.10.10 writes into a SQLite file "
+    "whose store it keeps in PostgreSQL (dist doctor-database-port / openEngineStore); it "
+    "is not part of the state schema, so LEGACY_TABLE. B-1010/B-1013/B-1014 plant it to "
+    "prove the readers refuse such a file and report UNKNOWN / not-compared / a hedge."
+)
+_B1010_ANCHOR_PROBE_CRON_JOBS = (
+    "a one-column `cron_jobs(x)` placeholder in test_b1010's anchor-detection "
+    "parametrization: it only gives the probe file a second, ordinary table so "
+    "`has_engine_anchor` is tested beside data and against VIEW/TRIGGER/upper-case decoys. "
+    "No reader ever queries it; the column is deliberately not the vendor's."
+)
 _REGISTRY: "dict[str, _Entry]" = {
     # ---- fixtures/clean_b188_state_db/state/openclaw.sqlite -- the binary fixture no
     # source scanner sees. Pinned by a full fingerprint row at
     # tests/finding_fingerprint_manifest.txt:395.
     "fixtures/clean_b188_state_db/state/openclaw.sqlite:cron_jobs": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
     "fixtures/clean_b188_state_db/state/openclaw.sqlite:cron_run_logs": _Entry(LEGACY_TABLE, _CRON_RUN_LOGS_RETIRED),
+
+    # ---- B-1010 / B-1013 / B-1014: PostgreSQL engine anchor ----
+    "tests/test_b1010_state_engine_anchor.py:42": _Entry(LEGACY_TABLE, _B1010_ENGINE_ANCHOR),
+    "tests/test_b1013_b191_sqlite_trajectory.py:28": _Entry(LEGACY_TABLE, _B1010_ENGINE_ANCHOR),
+    "tests/test_b1014_a1_unread_auth_store.py:33": _Entry(LEGACY_TABLE, _B1010_ENGINE_ANCHOR),
+    "tests/test_b1010_state_engine_anchor.py:99": _Entry(LEGACY_COLS, _B1010_ANCHOR_PROBE_CRON_JOBS),
+    "tests/test_b1010_state_engine_anchor.py:100": _Entry(LEGACY_COLS, _B1010_ANCHOR_PROBE_CRON_JOBS),
+    "tests/test_b1010_state_engine_anchor.py:101": _Entry(LEGACY_COLS, _B1010_ANCHOR_PROBE_CRON_JOBS),
+    "tests/test_b1010_state_engine_anchor.py:102": _Entry(LEGACY_COLS, _B1010_ANCHOR_PROBE_CRON_JOBS),
+    "tests/test_b1010_state_engine_anchor.py:104": _Entry(LEGACY_COLS, _B1010_ANCHOR_PROBE_CRON_JOBS),
 
     # ---- cron_jobs (legacy flat shapes) ----
     "tests/test_b168_cron_job_content.py:279": _Entry(LEGACY_COLS, _CRON_JOBS_LEGACY),
@@ -1113,11 +1135,11 @@ _REGISTRY: "dict[str, _Entry]" = {
     # `CREATE TABLE`), so only this one site needs registering. (Line renumbered from
     # :342 to :925 by the merge that placed the B-845 per-agent test class earlier in
     # this file, ahead of B-889's own class.)
-    "tests/test_b749_auth_profile_store_presence.py:1050": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
+    "tests/test_b749_auth_profile_store_presence.py:1055": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
     # B-889 round 2: the embedded-NUL-byte regression fixture -- same loose (no NOT
     # NULL) 3-column shape as tests/test_b177_installed_index_shapes.py:55, same DDL
     # text verbatim, same classification. (Renumbered from :409 to :992, same reason.)
-    "tests/test_b749_auth_profile_store_presence.py:1117": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
+    "tests/test_b749_auth_profile_store_presence.py:1125": _Entry(LEGACY_COLS, _CONFIG_MACHINE_STATE_LOOSE_LEGACY),
     # B-977: the decoy table a `CREATE VIEW config_machine_state AS SELECT ... FROM
     # decoy_state` view-masquerade fixture projects from -- never a real OpenClaw
     # table, same shape/reason as B-889's own decoy_secrets entry above. The extractor
@@ -1200,22 +1222,22 @@ _REGISTRY: "dict[str, _Entry]" = {
     # reasoning as every other entry in this section. Re-verified 2026-09-23: both had
     # drifted (470->486, 796->812). Re-verified 2026-09-24: both had drifted again by
     # a uniform +14 (486->500, 812->826).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:500": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:826": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:507": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:833": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 round 3/4 (2026-09-15): `_plant_generated_column_bypass`'s own standalone
     # fixture -- the GENERATED ALWAYS AS bypass the round-3 review found (a real table,
     # not a VIEW/virtual table, so a different attack shape but the same per-agent-DB
     # isolation reasoning as every other entry in this section). Re-verified
     # 2026-09-23: had drifted (514->530). Re-verified 2026-09-24: had drifted again by
     # the same uniform +14 (530->544).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:544": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:551": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 round 4 (2026-09-15): `test_compiled_tool_reader_refuses_a_rootpage_
     # aliased_table`'s own standalone fixture -- round 2's rootpage-uniqueness check,
     # given real `PRAGMA writable_schema` behavioural coverage for the first time
     # (round 4's own adversarial review found it had none). Re-verified 2026-09-23:
     # had drifted (619->635). Re-verified 2026-09-24: had drifted again by the same
     # uniform +14 (635->649).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:649": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:656": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # B-811 round 3/4 (2026-09-15): the same generated-column bypass fixture, built
     # standalone (not via _plant_generated_column_bypass, which lives in the sibling
     # test file) for the CHECK-level end-to-end test. Re-verified 2026-09-23: had
@@ -1240,7 +1262,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     # widened VIEW-fixture docstring, the C-135-status comment, the new stat-guard
     # commentary) -- same DDL, key renamed to match; the FIFO-guard tests added in the
     # same change reuse this same helper rather than any new literal DDL.
-    "tests/test_b749_auth_profile_store_presence.py:731": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:736": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     # 4.4.0 schema-refusal pins (2026-10-05): the same file gained two more DDL sites and
     # every key above and below moved (357->386, 462->508, 606->731, 925->1050,
     # 992->1117); same DDL text at each moved site, keys renamed to match.
@@ -1249,7 +1271,7 @@ _REGISTRY: "dict[str, _Entry]" = {
     #   different-DB reason applies (the snapshot covers the shared state DB only).
     #   :671 is `unrelated_table`, the decoy a VIEW named auth_profile_store projects
     #   from -- never a real OpenClaw table.
-    "tests/test_b749_auth_profile_store_presence.py:702": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
+    "tests/test_b749_auth_profile_store_presence.py:706": _Entry(LEGACY_TABLE, _AUTH_PROFILE_TABLES_DIFFERENT_DB),
     "tests/test_b749_auth_profile_store_presence.py:671": _Entry(LEGACY_TABLE, _UNRELATED_DECOY),
 
     # ---- trajectory_runtime_events (F-187, per-agent DB, different file) ----
@@ -1265,8 +1287,8 @@ _REGISTRY: "dict[str, _Entry]" = {
     # _add_agent_db) in the DoS-bound regression tests -- same DDL, same reasoning.
     # Re-verified 2026-09-23: both had drifted (920->936, 970->986). Re-verified
     # 2026-09-24: both had drifted again by a uniform +14 (936->950, 986->1000).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:950": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1000": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:957": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1007": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     # B-852 round 11 cleanup (2026-09-23): four more standalone
     # `trajectory_runtime_events` fixtures this registry had never covered (a
     # pre-existing gap, not introduced by round 11's trajectorystore.py changes) -- the
@@ -1277,10 +1299,10 @@ _REGISTRY: "dict[str, _Entry]" = {
     # test_excluded_count_query_still_runs_when_not_already_capped) -- same per-agent-DB
     # reasoning as every other entry in this section. Re-verified 2026-09-24: all four
     # had drifted by a uniform +14 (1170->1184, 1228->1242, 1354->1368, 1399->1413).
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1184": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1242": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1368": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
-    "tests/test_f187_trajectory_sqlite_corroborator.py:1413": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1191": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1249": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1375": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
+    "tests/test_f187_trajectory_sqlite_corroborator.py:1420": _Entry(LEGACY_TABLE, _TRAJECTORY_RUNTIME_EVENTS_DIFFERENT_DB),
     # CLAWSECCHECK test-suite-drift sweep (2026-09-24): B-909's own standalone
     # trajectory_runtime_events fixture (test_open_readonly_creates_shm_and_wal_
     # sidecars_from_nothing) -- never previously registered. Per-agent-DB table like
@@ -1360,7 +1382,9 @@ _REGISTRY: "dict[str, _Entry]" = {
 # 81, was 79: the two test_b749 sites registered above (:702 and :671).
 # 82, was 81: the one test_c654 site registered above (:605).
 # 83, was 82: the one test_c680c_elided_disclosure site registered above (:168).
-assert len(_REGISTRY) == 83, f"registry has {len(_REGISTRY)} entries, expected 83"
+# 91, was 83: B-1010/B-1013/B-1014 -- three openclaw_engine_anchor sites and five
+# cron_jobs(x) anchor-probe placeholders, registered above.
+assert len(_REGISTRY) == 91, f"registry has {len(_REGISTRY)} entries, expected 91"
 
 
 # ========================================================================================

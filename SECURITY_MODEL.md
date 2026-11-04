@@ -664,6 +664,14 @@ have to find it by reading the conversational manifest separately.
   grade**, on the reasoning that a check which could not look cannot rule out a CRITICAL.
   So a run that failed to read things does not score like a run that read them and found
   nothing.
+- **It does not read state kept in PostgreSQL.** OpenClaw can move a store to PostgreSQL
+  (`database.engine: postgres`); the store's SQLite file is then replaced by an engine
+  anchor (a file holding only the `openclaw_engine_anchor` table). ClawSecCheck never
+  connects to a database server, so when the state database, or an agent's database, is
+  such an anchor, every check that reads it reports `UNKNOWN` with that reason instead of
+  reading the file as if it were the live data. As of OpenClaw 2026.10.10 the main state
+  database and the per-agent databases stay on SQLite under that setting (only the
+  Workboard plugin's store moves), so the setting by itself changes no verdict.
 - **A capped grade and no grade are different outcomes.** The cap above applies *within* a
   run that earned a letter: individual checks were degraded, so the letter cannot go above
   a ceiling. Separately, and at a coarser level, a letter is issued **only when all five
