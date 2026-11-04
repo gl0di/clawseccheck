@@ -1,0 +1,25 @@
+{
+  "session": {
+    "dmScope": "per-peer"
+  },
+  "channels": {
+    "msteams": {
+      "tenantId": "00000000-0000-0000-0000-000000000000",
+      "dmPolicy": "pairing",
+      "accounts": {
+        "work": {
+          "appId": "11111111-1111-1111-1111-111111111111",
+          "appPassword": {
+            "source": "env",
+            "provider": "default",
+            "id": "MSTEAMS_WORK_APP_PASSWORD"
+          },
+          "dmPolicy": "open",
+          "allowFrom": [
+            "*"
+          ]
+        }
+      }
+    }
+  }
+}

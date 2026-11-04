@@ -162,7 +162,7 @@ def test_vestigial_base_does_not():
 
 
 def test_single_account_channels_always_keep_the_base():
-    """a2a / reef / msteams list exactly one account whatever `accounts` holds."""
+    """a2a / reef / nostr list exactly one account whatever `accounts` holds."""
     assert _misses(sorted(_SINGLE_ACCOUNT_CHANNELS),
                    lambda n: _channel_has_implicit_default_account(n, {}) is True) == []
 
@@ -274,7 +274,7 @@ def test_reverting_the_table_reopens_the_false_pass(monkeypatch):
         "imessage": ("cliPath", "dbPath"), "raft": ("profile",),
     }
 
-    def reverted(name, raw_node):
+    def reverted(name, raw_node, cfg=None):
         if not isinstance(raw_node, dict):
             return False
         return any(raw_node.get(k) is not None for k in old.get(name, ()))
@@ -302,7 +302,7 @@ EVERY = {
     "irc": {"host": "h", "nick": "n"}, "mattermost": {"baseUrl": V, "botToken": V},
     "clickclack": {"baseUrl": V, "token": V, "workspace": "w"},
     "line": {"channelAccessToken": V}, "tlon": {"ship": "~zod"}, "twitch": {"username": "u"},
-    "sms": {"accountSid": V}, "nostr": {"privateKey": V}, "a2a": {}, "reef": {}, "msteams": {},
+    "sms": {"accountSid": V}, "nostr": {"privateKey": V}, "a2a": {}, "reef": {}, "msteams": {"appId": V},
     "acme-chat": {"token": V},
 }
 # a configured account that closes every surface it inherits from the base
@@ -323,11 +323,11 @@ VENDOR_CLASS = {
     # normalizeAccountId passed: every key above canonicalizes to "default"
     **{n: "canonical" for n in (
         "clickclack", "irc", "raft", "qa-channel", "telegram", "matrix", "nextcloud-talk",
-        "twitch")},
+        "twitch", "msteams")},
     "buzz": "exact",      # root.accounts?.[accountId]
     "signal": "signal",   # manifest policy: lowercase direct, canonical only with own `account`
     # the raw base is what the default (or only) account reads
-    **{n: "base" for n in ("tlon", "a2a", "reef", "msteams", "nostr")},
+    **{n: "base" for n in ("tlon", "a2a", "reef", "nostr")},
 }
 _MATCHES = {
     "trim-lower": _TRIM_LOWER_MATCH,
@@ -544,7 +544,7 @@ def test_ignoring_the_default_account_reopens_the_blocker(monkeypatch):
     """Without the default-account guard in the gate, the blocker repro FAILs again."""
     from clawseccheck.checks import _shared
 
-    def no_guard(name, c):
+    def no_guard(name, c, cfg=None):
         accounts = c.get("accounts") if isinstance(c, dict) else None
         return bool(isinstance(accounts, dict) and accounts
                     and _shared._channel_has_implicit_default_account(name, c))

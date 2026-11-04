@@ -77,8 +77,12 @@ TOOL_FAMILY = ("read", "write", "edit", "apply_patch", "exec", "automations")
 #: ~500 gateway cells and 15 each for plugins and ls while the family above stayed at zero;
 #: ``ls`` had drifted a release earlier; ``openclaw`` and ``pdf`` are catalog entries the port
 #: had never seen at all.
+#: ``dispatch_action`` and ``tool_call`` (CLAWSECCHECK-B-1007): openclaw@2026.10.10 renamed the
+#: Tool Search call-through tool to ``dispatch_action`` and kept ``tool_call`` as an alias plus a
+#: matcher rule (``legacyDispatcher``); no fixture names either, so before these were queried
+#: ``--check`` reported 0 differences with the port missing both rules.
 #: These are checked one test per tool (``test_toolgrant_battery.py``), not one per cell.
-EXTENDED_TOOLS = ("gateway", "plugins", "ls", "openclaw", "pdf")
+EXTENDED_TOOLS = ("gateway", "plugins", "ls", "openclaw", "pdf", "dispatch_action", "tool_call")
 BATTERY_TOOLS = TOOL_FAMILY + EXTENDED_TOOLS
 
 _NODE_TIMEOUT_S = 120
@@ -381,11 +385,26 @@ def synthetic_configs(tables: dict) -> list:
         add(f"group/{g}/minimal-also", {"tools": {"profile": "minimal", "alsoAllow": [g]}})
     spellings = ["gateway", "plugins", "ls", "openclaw", "pdf", "bash", "cron", "apply-patch",
                  "CRON", " GATEWAY ", "canvas", "show_widget", "update_plan", "progress_card",
-                 "*", "g*", "*s", "read", "write"]
+                 "*", "g*", "*s", "read", "write",
+                 "tool_call", "dispatch_action", " TOOL_CALL ", "tool_*", "dispatch_*", "*_call"]
     for name in spellings:
         add(f"name/{name.strip()}/allow", {"tools": {"allow": [name]}})
-    for name in ("gateway", "plugins", "ls", "openclaw", "pdf", "bash", "cron", "write"):
+    for name in ("gateway", "plugins", "ls", "openclaw", "pdf", "bash", "cron", "write",
+                 "tool_call", "dispatch_action", "tool_*", "dispatch_*", "*_call"):
         add(f"name/{name}/deny", {"tools": {"profile": "full", "deny": [name]}})
+    # B-1007: the two spellings on opposite sides of one policy, and in separate AND-ed layers.
+    add("name/allow-tool_call+deny-dispatch_action",
+        {"tools": {"allow": ["tool_call"], "deny": ["dispatch_action"]}})
+    add("name/allow-dispatch_action+deny-tool_call",
+        {"tools": {"allow": ["dispatch_action"], "deny": ["tool_call"]}})
+    add("name/profile-coding+also-tool_call", {"tools": {"profile": "coding", "alsoAllow": ["tool_call"]}})
+    add("roster/dispatcher", {
+        "tools": {"allow": ["tool_*", "read"]},
+        "agents": {"entries": {
+            "a": {"tools": {"deny": ["dispatch_action"]}},
+            "b": {"tools": {"allow": ["dispatch_action"]}},
+        }},
+    })
     add("roster/list", {
         "tools": {"profile": "minimal"},
         "agents": {"list": [

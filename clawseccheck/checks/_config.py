@@ -2770,7 +2770,7 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = _live_channel_nodes(name, c)
+        nodes = _live_channel_nodes(name, c, cfg)
         for node in nodes:
             if not isinstance(node, dict):
                 continue

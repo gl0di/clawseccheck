@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import unquote_plus, urlparse, urlsplit
 from .. import pathprobe
 from ..catalog import (
     BY_ID,
@@ -3414,11 +3414,22 @@ def _norm_dm_policy(channel_name, value):
 # Predicate form - see `_IMPLICIT_DEFAULT_ACCOUNT_PREDICATES` below for each rule.
 # Single-account channels (the vendor never reads an account's own config from `accounts`,
 # so the base node IS what every running account reads, whatever `accounts` holds): a2a
-# ([tag] a2a/src/accounts.ts:6), reef ([tag] reef/src/channel.ts:126), msteams
-# ([tag] msteams/src/channel-config.ts:49, createTopLevelChannelConfigAdapter with no
-# listAccountIds -> ["default"], dist channel-config-helpers-gcrILd6l.mjs:219-220), nostr
+# ([tag] a2a/src/accounts.ts:6), reef ([tag] reef/src/channel.ts:126), nostr
 # ([tag] nostr/src/accounts.ts:27-42: resolveNostrAccountBase builds every account from the
 # channel node alone; its config schema is additionalProperties:false with no `accounts`).
+#
+# msteams left this list with @openclaw/msteams 2026.10.10 (read and executed from the npm
+# package; it ships outside the core dist). Up to 2026.10.9 it was single-account
+# (createTopLevelChannelConfigAdapter, no listAccountIds -> ["default"]) and its zod schema
+# was `.strict()` with no `accounts` / `defaultAccount`: executed, `{accounts: {...}}` fails
+# with "Unrecognized key". So a config that HAS `channels.msteams.accounts` can only load on
+# 2026.10.10+, and a base-only node reads the same on every build (`_resolved_channel_nodes`
+# returns it alone) - no build gate is needed. From 2026.10.10 the plugin lists accounts
+# with createAccountListHelpers("msteams", {normalizeAccountId, hasImplicitDefaultAccount:
+# hasConfiguredMSTeamsCredentials(channels.msteams)}) and resolves each with
+# resolveMergedAccountConfig (base + account, `defaultAccount` omitted), which is the merge
+# `_resolved_channel_nodes` models; inbound handling runs on that merged node
+# (withAccountScopedMSTeamsConfig). Its predicate is below.
 #
 # Any channel NOT in these three tables (a third-party channel plugin, or a channel
 # added after 2026.10.9) is UNGROUNDED, and its base node is KEPT: dropping it is the
@@ -3446,7 +3457,7 @@ _IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
 }
 
 # Channels whose vendor account list never names an account from `accounts`.
-_SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "msteams", "nostr"})
+_SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "nostr"})
 
 # Top-level `channels.*` keys that are config blocks, not channels (dist
 # evaluation-C7wBry__.mjs:820 RESERVED_CHANNEL_CONFIG_KEYS).
@@ -3530,6 +3541,19 @@ def _matrix_implicit_default(node: dict) -> bool:
     return _text(node.get("userId")) and _has_configured_secret_input(node.get("password"))
 
 
+_MSTEAMS_IDENTITY_KEYS = (
+    "appId", "tenantId", "appPassword", "authType", "certificatePath",
+    "certificateThumbprint", "useManagedIdentity", "managedIdentityClientId",
+)
+# The env fallbacks of those keys (@openclaw/msteams 2026.10.10 token-config:
+# resolveAuthType / resolveMSTeamsAppId / resolveMSTeamsTenantId / inspectMSTeamsCredentials),
+# read for the implicit default account only (allowEnvFallback is true for `default`).
+_MSTEAMS_IDENTITY_ENV = (
+    "MSTEAMS_APP_ID", "MSTEAMS_TENANT_ID", "MSTEAMS_APP_PASSWORD", "MSTEAMS_AUTH_TYPE",
+    "MSTEAMS_CERTIFICATE_PATH", "MSTEAMS_CERTIFICATE_THUMBPRINT",
+    "MSTEAMS_USE_MANAGED_IDENTITY", "MSTEAMS_MANAGED_IDENTITY_CLIENT_ID",
+)
+
 _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES = {
     "slack": _slack_implicit_default,
     "matrix": _matrix_implicit_default,
@@ -3571,11 +3595,24 @@ _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES = {
         )
         or _has_configured_secret_input(n.get("authToken"))
     ),
+    # @openclaw/msteams 2026.10.10 hasConfiguredMSTeamsCredentials (token-config): appId AND
+    # tenantId, then appPassword (secret auth) or certificatePath / useManagedIdentity
+    # (federated) - but EVERY one of those falls back to an MSTEAMS_* env var
+    # (allowEnvFallback defaults to true for this call). A base that sets only part of the
+    # identity is therefore commonly completed by the environment (appId in the file, the
+    # password in MSTEAMS_APP_PASSWORD), so ANY configured identity key keeps the base live.
+    # A base with no identity key at all is dropped only when the config's own `env` block
+    # sets no MSTEAMS_* identity variable either (see `_channel_has_implicit_default_account`,
+    # which reads that block for msteams); the host's real environment stays the env-only
+    # residual every channel here has.
+    "msteams": lambda n: any(
+        _has_configured_account_value(n.get(key)) for key in _MSTEAMS_IDENTITY_KEYS
+    ),
     # nostr is a single-account channel (`_SINGLE_ACCOUNT_CHANNELS`), not a predicate.
 }
 
 
-def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
+def _channel_has_implicit_default_account(name: str, raw_node: dict, cfg=None) -> bool:
     """True when *raw_node* (the UNMERGED base channel node) still runs as an account
     alongside any explicitly configured ``accounts`` - see the grounding above
     ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS``. Also True for a channel whose registration is not
@@ -3593,6 +3630,10 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
     by ``_config_env_block_entries``), so e.g. ``env.vars.SLACK_APP_TOKEN`` beside a base
     ``botToken`` makes the base account live. Consulting it needs each channel's env-var
     names and is a separate change; until then it is the same false-negative direction.
+
+    msteams is the exception: its whole identity can come from MSTEAMS_* variables, so its
+    base is also live when *cfg* (the whole config) has an ``env`` block setting one of
+    ``_MSTEAMS_IDENTITY_ENV``. Without *cfg* that block is unknown and the base is kept.
     """
     if not isinstance(raw_node, dict) or name in _RESERVED_CHANNEL_CONFIG_KEYS:
         return False
@@ -3600,7 +3641,14 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
         return True
     predicate = _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES.get(name)
     if predicate is not None:
-        return bool(predicate(raw_node))
+        if predicate(raw_node):
+            return True
+        if name == "msteams":
+            if cfg is None:
+                return True
+            entries = _config_env_block_entries(cfg)
+            return any(_canonical_env_name(env) in entries for env in _MSTEAMS_IDENTITY_ENV)
+        return False
     keys = _IMPLICIT_DEFAULT_ACCOUNT_KEYS.get(name)
     if keys is None:
         return True
@@ -3647,7 +3695,9 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 # Channels where the raw base is the default account whatever `accounts` holds:
 #   tlon      the default account's config is the RAW channel node, never merged with
 #             `accounts.default` (resolveMergedTlonAccountConfig, tlon/src/types.ts:54-60).
-#   a2a / reef / msteams / nostr  single-account channels (see above).
+#   a2a / reef / nostr  single-account channels (see above).
+# msteams (2026.10.10+) finds the default entry with resolveMSTeamsAccountEntryKey: the
+# first key whose normalizeAccountId equals the id - the canonical class below.
 # twitch is NOT special-cased: with no default entry the raw base is added, and with one it is
 # not. The vendor's default account there is `accounts.default` overlaid with a fixed subset
 # of base fields (getAccountConfig, twitch/src/config.ts:36-90) - in neither case the raw base
@@ -3655,6 +3705,7 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 _BASE_IS_THE_DEFAULT_ACCOUNT = frozenset({"tlon"}) | _SINGLE_ACCOUNT_CHANNELS
 _DEFAULT_KEY_CANONICAL_CHANNELS = frozenset({
     "clickclack", "irc", "raft", "qa-channel", "telegram", "matrix", "nextcloud-talk", "twitch",
+    "msteams",
 })
 _DEFAULT_KEY_EXACT_CHANNELS = frozenset({"buzz"})
 _DEFAULT_KEY_OWN_FIELD = {"signal": "account"}
@@ -3713,7 +3764,7 @@ def _is_default_account_entry(name: str, key, entry) -> bool:
     return lowered_match
 
 
-def _base_node_runs_unmerged(name: str, c: dict) -> bool:
+def _base_node_runs_unmerged(name: str, c: dict, cfg=None) -> bool:
     """True when channel *c*'s RAW base node runs as an account of its own beside its
     configured ``accounts``: a non-empty ``accounts`` block, a base node that spawns the
     implicit default account (``_channel_has_implicit_default_account``), and no
@@ -3725,7 +3776,7 @@ def _base_node_runs_unmerged(name: str, c: dict) -> bool:
     accounts = c.get("accounts")
     if not (isinstance(accounts, dict) and accounts):
         return False
-    if not _channel_has_implicit_default_account(name, c):
+    if not _channel_has_implicit_default_account(name, c, cfg):
         return False
     if name in _BASE_IS_THE_DEFAULT_ACCOUNT:
         return True
@@ -3794,7 +3845,7 @@ def _resolved_account_nodes(name: str, c: dict) -> list:
     return out or [c]
 
 
-def _live_channel_nodes(name: str, c: dict) -> list:
+def _live_channel_nodes(name: str, c: dict, cfg=None) -> list:
     """``_resolved_channel_nodes(c)`` plus the raw base node when it runs unmerged
     (``_base_node_runs_unmerged``) - every node a running account of channel *name* reads.
 
@@ -3804,6 +3855,9 @@ def _live_channel_nodes(name: str, c: dict) -> list:
     ``_allow_bots_account_nodes`` (the gate directly), B140, B371,
     ``risk._open_group_channels``, ``risk._open_channel_entries``' mention reading and A1's
     ``_unpolicied_open_wildcard_group_channels``.
+
+    *cfg* is the whole config; pass it whenever it is at hand (only msteams reads it, for
+    its ``env`` block). ``None`` keeps an msteams base with no identity of its own.
 
     NOT every walk does. Known remaining raw ``[c] + accounts.values()`` walks, which count
     the base node always (the false-positive direction; pre-existing, none produces a FAIL):
@@ -3815,7 +3869,7 @@ def _live_channel_nodes(name: str, c: dict) -> list:
     ``_config.check_dangerous_overrides`` and ``_agents.check_sender_identity``.
     """
     nodes = list(_resolved_account_nodes(name, c))
-    if _base_node_runs_unmerged(name, c):
+    if _base_node_runs_unmerged(name, c, cfg):
         nodes.append(c)
     return nodes
 
@@ -3847,7 +3901,7 @@ def _open_channels(cfg: dict) -> list[str]:
         # entry IS the default account, B-1002); unconditionally adding it back would
         # reintroduce the exact bug this fix exists to close (a vestigial base policy with
         # no live account behind it at all).
-        nodes = _live_channel_nodes(name, c)
+        nodes = _live_channel_nodes(name, c, cfg)
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -4095,7 +4149,7 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
         # invisible even though the implicit default account still ingests - a false
         # NEGATIVE, and this helper feeds the behavioral arming and the RISK chains.
         # Same gate (`_live_channel_nodes`) `_open_channels` and `_b171_open_channels` use.
-        nodes = _live_channel_nodes(name, c)
+        nodes = _live_channel_nodes(name, c, cfg)
         for node in nodes:
             if not isinstance(node, dict) or node.get("enabled") is False:
                 continue
@@ -4289,6 +4343,27 @@ _CREDENTIAL_HEADER_NAMES = frozenset({
 # A vendor-sensitive path that holds a URL which MAY carry credentials: only a password in
 # the userinfo of the AUTHORITY is a plaintext secret.
 _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
+# OpenClaw 2026.10.10's PostgreSQL DSN: a vendor `SecretInput` (`SecretInputSchema`, registered
+# `sensitive`, resolved by `resolveCanonicalConfiguredSecretInputString` and handed to node-pg as
+# `new Client({ connectionString })`). A DSN with no password is ordinary (peer / trust auth, a
+# pgpass file, PGPASSWORD), so only a password IN the string counts: the forms node-pg's own
+# parser (pg-connection-string 2.14.1, executed) reads - URL userinfo and a `?password=` query
+# parameter, for `postgres://`, `postgresql://` and `socket://` alike, and `sslpassword` (the
+# client-key passphrase) the same two ways - plus the libpq keyword form `password=...`, which
+# that parser ignores but which still puts the credential in the file.
+_VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
+# The authority of a DSN read as a URL: optional scheme, then `//`, up to the path/query/fragment.
+# Two readings of the authority, both kept in the union: the plain one (a `\\` is an ordinary
+# character, as for `postgres://`), and the WHATWG special-scheme one, where `\\` is a slash.
+_DSN_AUTHORITY_RES = (
+    re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?//([^/?#]*)", re.I),
+    re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}([^/\\?#]*)", re.I),
+)
+# One libpq `key=value` pair; a quoted value is consumed whole, so a `password=` INSIDE a
+# quoted `options` / `application_name` value is not a pair of its own.
+_DSN_KEYWORD_PAIR_RE = re.compile(r"(?:^|(?<=\s))(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
+# `sslpassword` is the passphrase of the client key node-pg also reads from the DSN.
+_DSN_PASSWORD_KEYS = frozenset({"password", "sslpassword"})
 # Vendor-sensitive paths that are deliberately NOT secrets (path regex -> reason). The drift
 # test requires each vendor path to be covered above or to match one of these.
 _VENDOR_NOT_SECRET_PATHS = (
@@ -4325,6 +4400,66 @@ def _url_inline_password(value) -> "str | None":
         return None
     left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
     return password if left else None
+
+
+def _dsn_inline_password(value) -> "str | None":
+    """The password a PostgreSQL DSN carries in the string itself, or None (see
+    ``_VENDOR_SECRET_DSN_PATH_RE``). A password that is only an env reference is not one.
+
+    A UNION of three readings, not one parser, so a shape one reading misses cannot hide a
+    credential from the others: the authority's userinfo password (any scheme, or a bare
+    ``//``), every ``password`` / ``sslpassword`` query key (decoded, as node-pg decodes keys;
+    the query is read with or without a scheme, as node-pg reads it), and the libpq keyword
+    pairs. node-pg (pg-connection-string 2.14.1) reads the first two from a WHATWG URL resolved
+    against ``postgres://base``; it treats a value that starts with ``/`` - ``//`` included - as
+    a socket path with no password, and it ignores the keyword form. The union deliberately
+    reports those shapes anyway when they hold literal password text: the credential is in the
+    file whether or not node-pg would send it - including a socket-form value
+    (``/var/run/postgresql db``), which none of the three readings matches unless it carries
+    password text.
+    Differentially pinned against the executed parser in
+    ``tests/test_b1008_postgres_dsn_secret.py``: every DSN node-pg would send a literal password
+    for is reported, and nothing is reported that holds no literal password text.
+    """
+    if not isinstance(value, str):
+        return None
+    # WHATWG URL parsing drops ASCII tab and newline anywhere in the input
+    # WHATWG URL parsing strips C0 controls and spaces at both ends, and drops tab / CR / LF
+    # anywhere in the input
+    text = value.strip("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
+                       "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20")
+    text = text.strip().replace("\t", "").replace("\n", "").replace("\r", "")
+
+    def literal(password: str) -> "str | None":
+        left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
+        return password if left and password else None
+
+    found = []
+    for authority_re in _DSN_AUTHORITY_RES:
+        authority = authority_re.match(text)
+        if authority and "@" in authority.group(1):
+            userinfo = authority.group(1).rsplit("@", 1)[0]
+            if ":" in userinfo:
+                found.append(userinfo.split(":", 1)[1])
+    if "?" in text:  # node-pg reads the query of any non-socket value, scheme or not
+        # Raw VALUES: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env substitution
+        # runs on the config text before it), not a reference. KEYS are decoded, as node-pg does
+        # (`pass%77ord` is `password`).
+        query = text.split("?", 1)[1].split("#", 1)[0]
+        for pair in query.split("&"):
+            key, _, val = pair.partition("=")
+            if unquote_plus(key) in _DSN_PASSWORD_KEYS:
+                found.append(val)
+    for match in _DSN_KEYWORD_PAIR_RE.finditer(text):
+        if match.group(1).lower() in _DSN_PASSWORD_KEYS:
+            password = match.group(2)
+            if password.startswith("'") and password.endswith("'") and len(password) >= 2:
+                password = password[1:-1]
+            found.append(password)
+    for password in found:
+        if literal(password) is not None:
+            return password
+    return None
 
 
 def _concrete_secret_literal(value: str) -> bool:
@@ -4373,6 +4508,10 @@ def _vendor_slot_hit(path: str, value, min_len: int) -> bool:
         # a URL password is a credential at any length: `socks5://u:p@h` is 14 characters
         if _url_inline_password(rest) is not None:
             return True
+    if _VENDOR_SECRET_DSN_PATH_RE.search(norm):
+        # the raw value, not `rest`: an embedded `${PG_PASSWORD}` must stay in place for
+        # `_dsn_inline_password` to see that the password is a reference
+        return _dsn_inline_password(value) is not None
     if len(rest) < min_len:
         return False
     if any(rx.search(norm) for rx in _VENDOR_SECRET_VALUE_PATHS):
@@ -4398,7 +4537,11 @@ def _vendor_slot_covers(path: str) -> "str | None":
     leaf = norm.rsplit(".", 1)[-1]
     if SECRET_KEY_RE.search(leaf) or _CONFIG_SECRET_LEAF_RE.fullmatch(leaf):
         return "name"
-    for group in (_VENDOR_SECRET_VALUE_PATHS, _VENDOR_SECRET_MAP_PATHS, (_VENDOR_SECRET_URL_PATH_RE,)):
+    for group in (
+        _VENDOR_SECRET_VALUE_PATHS,
+        _VENDOR_SECRET_MAP_PATHS,
+        (_VENDOR_SECRET_URL_PATH_RE, _VENDOR_SECRET_DSN_PATH_RE),
+    ):
         if any(rx.search(norm) for rx in group):
             return "path"
     return None
@@ -5162,7 +5305,7 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
                     continue
                 own = _declared_dm_policy(name, a)
                 live_declared.append(own if own is not None else channel_declared)
-            if _base_node_runs_unmerged(name, c):
+            if _base_node_runs_unmerged(name, c, cfg):
                 live_declared.append(channel_declared)
         else:
             live_declared.append(channel_declared)
@@ -6147,7 +6290,7 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
         if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
             continue
         # B-1002: the live implicit default account too (`_live_channel_nodes`).
-        for node in _live_channel_nodes(name, c):
+        for node in _live_channel_nodes(name, c, cfg):
             # B-438 (C-135 adversarial review): mirror the per-resolved-node
             # `enabled: false` skip `_open_wildcard_group_channels` already carries - a
             # retired/disabled account left with its old open wildcard-group policy still
