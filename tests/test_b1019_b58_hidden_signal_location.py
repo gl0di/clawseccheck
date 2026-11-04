@@ -114,7 +114,7 @@ def test_visible_text_starts_each_blanked_region_with_a_sentinel():
 def test_only_a_plain_markdown_file_gets_the_location_rule():
     plain = (_DEFENSIVE + "<!-- toc <div hidden>x</div> -->\n"
              + "Use `<slug>` and <key>: <value>; x < y; see </slug> and <slug/>.\n"
-             + "See [docs](http://x) and [b](y).\n")
+             + "See the docs at http://x.\n")
     assert not _b58_section_needs_old_rule(plain)
     for other in ("<style>.x{display:none}</style>", "<div hidden>x</div>",
                   "<details><summary>a</summary>x</details>", "<template>x</template>",
@@ -125,7 +125,8 @@ def test_only_a_plain_markdown_file_gets_the_location_rule():
                   "<SPAN>x</SPAN>", "[a]: http://x (t)", '[a](http://x "t")', "![t](x.png)",
                   "[a](http://x\n't')", "> [a]: http://x (t)", "- [a]: http://x (t)",
                   "[a\\]b]: http://x (t)", "[ok](x) [b](http://x\n't')",
-                  "[a](x)) [b](http://x\n't')", "[a](x)\n  'title on its own line'"):
+                  "[a](x)) [b](http://x\n't')", "[a](x)\n  'title on its own line'",
+                  "> [a](x/(y)\n> \"t\")", "> [a](<x](y)>\n> 't')", "see [docs](http://x)"):
         assert _b58_section_needs_old_rule(plain + other + "\n"), other
 
 

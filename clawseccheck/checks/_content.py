@@ -5239,32 +5239,14 @@ _B58_TAG_NAME_RE = re.compile(r"/?([A-Za-z][A-Za-z0-9:_-]*)")
 # (CommonMark's complete set): a link reference definition (any destination - unused, it
 # renders nothing), an image (its description is alt text), and a link/image title
 # (a tooltip). Any of them in a file keeps the pre-B-1019 rule there.
-# `]:` ANYWHERE, not only at a line start: a definition may sit in a block quote or list
-# item, and its label may hold escapes or span lines. Over-approximates on purpose.
-_B58_MD_HIDDEN_TEXT_RE = re.compile(r"\]:|!\[")
-_B58_MD_TITLE_RE = re.compile(r"\s[\"'(]")
+# Matched ANYWHERE, with no Markdown parsing: `]:` (a link reference definition, which
+# may sit in a block quote or list item or carry an escaped or multi-line label), `![`
+# (an image) and `](` (an inline link, which may carry a title). Parsing link
+# destinations and titles to tell the harmless ones apart went through several bypass
+# rounds (balanced/escaped parens, titles on the next line, container prefixes), so any
+# occurrence keeps the old rule. Over-approximates on purpose.
+_B58_MD_HIDDEN_TEXT_RE = re.compile(r"\]:|!\[|\]\(")
 
-
-def _b58_md_link_title(text: str) -> bool:
-    """True when a line holds an inline link that may carry a title (fail closed, one
-    pass): whitespace then a quote or paren anywhere after the line's first `](`; the
-    line's LAST `](` with no `)` after it (a link continuing onto the next line); or a
-    line right after a `](` line that starts with a quote or paren (a title placed on its
-    own line). No parenthesis counting - destinations may hold balanced or escaped
-    parens, which a count gets wrong."""
-    prev_link = False
-    for line in text.split("\n"):
-        if prev_link and line.lstrip()[:1] in ("\"", "'", "("):
-            return True
-        i = line.find("](")
-        prev_link = i != -1
-        if not prev_link:
-            continue
-        if _B58_MD_TITLE_RE.search(line, i + 2):
-            return True
-        if ")" not in line[line.rfind("](") + 2:]:
-            return True
-    return False
 
 
 def _b58_section_needs_old_rule(section: str) -> bool:
@@ -5282,7 +5264,7 @@ def _b58_section_needs_old_rule(section: str) -> bool:
             if chars[i] != "\n":
                 chars[i] = " "
     rest = "".join(chars)
-    if _B58_MD_HIDDEN_TEXT_RE.search(rest) or _b58_md_link_title(rest):
+    if _B58_MD_HIDDEN_TEXT_RE.search(rest):
         return True
     pos = rest.find("<")
     while pos != -1:
