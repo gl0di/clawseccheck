@@ -5217,42 +5217,81 @@ def _b58_visible_text(text: str) -> str:
     return "".join(chars)
 
 
-_B58_TAG_START_RE = re.compile(r"<\s*[A-Za-z/!?]")
-_B58_MD_COMMENT_RE = re.compile(r"^[ \t]{0,3}\[[^\]\n]*\]:[ \t]*(?:#|<>)", re.MULTILINE)
-_B58_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
-_B58_FENCE_LINE_RE = re.compile(r"[ \t]{0,3}(`{3,}|~{3,})")
+# B-1019: every element name in the WHATWG HTML standard (plus obsolete ones browsers
+# still honour, and the svg/math roots that open foreign content). A closed list: a bare
+# `<name>` whose name is NOT here is an unknown element, which renders its content inline
+# and visible and can only be hidden by CSS - and CSS needs a `<style>` or `<link>`
+# element, which IS here.
+_B58_HTML_ELEMENTS = frozenset("""
+a abbr acronym address applet area article aside audio b base basefont bdi bdo bgsound
+big blink blockquote body br button canvas caption center cite code col colgroup data
+datalist dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure
+font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe
+image img input ins isindex kbd keygen label legend li link listing main map mark
+marquee math menu menuitem meta meter multicol nav nextid nobr noembed noframes
+noscript object ol optgroup option output p param picture plaintext portal pre progress
+q rb rp rt rtc ruby s samp script search section select slot small source spacer span
+strike strong style sub summary sup svg table tbody td template textarea tfoot th thead
+time title tr track tt u ul var video wbr xmp
+""".split())
+_B58_TAG_NAME_RE = re.compile(r"/?([A-Za-z][A-Za-z0-9:_-]*)")
+# B-1019: the Markdown constructs whose text a renderer does not display, besides HTML
+# (CommonMark's complete set): a link reference definition (any destination - unused, it
+# renders nothing), an image (its description is alt text), and a link/image title
+# (a tooltip). Any of them in a file keeps the pre-B-1019 rule there.
+_B58_MD_HIDDEN_TEXT_RE = re.compile(r"^[ \t]*\[[^\]\n]*\]:|!\[", re.MULTILINE)
+_B58_MD_TITLE_RE = re.compile(r"\s[\"'(]")
+
+
+def _b58_md_link_title(text: str) -> bool:
+    """True when a line holds an inline link that may carry a title: after its first
+    `](`, whitespace followed by a quote or paren, or no `)` at all (the link continues on
+    another line). Over-approximates on purpose (fail closed) and stays linear: one
+    search per line."""
+    for line in text.split("\n"):
+        i = line.find("](")
+        if i == -1:
+            continue
+        tail = line[i + 2:]
+        if ")" not in tail or _B58_MD_TITLE_RE.search(tail):
+            return True
+    return False
 
 
 def _b58_section_needs_old_rule(section: str) -> bool:
-    """B-1019 fail-closed, judged per file: True unless the file is plain text/Markdown
-    whose only HTML is comments. The location rule's visible-text model knows comments
-    and inline hidden-styled tags, but HTML can hide text in many more ways (nested or
-    oversize tags, `hidden`, `<details>`, `<template>`, stylesheets, ...), so rather than
-    list them, ANY tag outside a comment, an inline code span or a fenced block - and any
-    Markdown comment (`[//]: # (...)`) - keeps the pre-B-1019 rule for that file. Code
-    spans and fences are skipped because Markdown renders a `<slug>` placeholder there as
-    text, never as a tag."""
+    """B-1019 fail-closed, judged per file: True unless the file's only markup is HTML
+    comments and bare unknown-name placeholders (`<slug>`, `<key>: <value>`). The location
+    rule's visible-text model knows comments and inline hidden-styled tags, but HTML can
+    hide text in many more ways, so rather than list those, ANY real HTML element name,
+    any tag with attributes, any unterminated tag, any `<!`/`<?` markup outside a comment
+    and any Markdown text a renderer does not display (`_B58_MD_HIDDEN_TEXT_RE`: link
+    reference definitions, images, link titles) keeps the pre-B-1019 rule for that file.
+    No Markdown parsing (code spans, fences) is involved: a tag inside one still counts."""
     chars = list(section)
     for a, b in _b58_comment_spans(section):
         for i in range(a, b):
             if chars[i] != "\n":
                 chars[i] = " "
-    out: list = []
-    fence = None
-    for line in "".join(chars).split("\n"):
-        m = _B58_FENCE_LINE_RE.match(line)
-        if fence is None and m:
-            fence = m.group(1)[0] * len(m.group(1))
-            out.append("")
-            continue
-        if fence is not None:
-            if m and m.group(1).startswith(fence) and not line.strip(" \t`~"):
-                fence = None
-            out.append("")
-            continue
-        out.append(_B58_CODE_SPAN_RE.sub(" ", line))
-    rest = "\n".join(out)
-    return bool(_B58_TAG_START_RE.search(rest) or _B58_MD_COMMENT_RE.search(rest))
+    rest = "".join(chars)
+    if _B58_MD_HIDDEN_TEXT_RE.search(rest) or _b58_md_link_title(rest):
+        return True
+    pos = rest.find("<")
+    while pos != -1:
+        nxt = rest[pos + 1:pos + 2]
+        if nxt in ("!", "?"):
+            return True
+        m = _B58_TAG_NAME_RE.match(rest, pos + 1)
+        if m:
+            if m.group(1).lower() in _B58_HTML_ELEMENTS:
+                return True
+            close = rest.find(">", m.end())
+            other = rest.find("<", m.end())
+            if close == -1 or (other != -1 and other < close):
+                return True  # unterminated: fail closed
+            if rest[m.end():close].strip(" \t/"):
+                return True  # attributes on an unknown element
+        pos = rest.find("<", pos + 1)
+    return False
 
 
 _B58_FILE_HEADER_LINE_RE = re.compile(r"^# file:", re.MULTILINE)

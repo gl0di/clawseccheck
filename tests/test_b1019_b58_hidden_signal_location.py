@@ -76,6 +76,12 @@ def test_plaintext_quote_beside_an_unrelated_hidden_region_is_not_b58_fail(tmp_p
     {"SKILL.md": _DEFENSIVE + f"<details><summary>more</summary>{_P}</details>\n<!-- c -->\n"},
     {"SKILL.md": _DEFENSIVE + f'<span style="display:none"><b>x</b> {_P}</span>\n<!-- c -->\n'},
     {"SKILL.md": _DEFENSIVE + f"[//]: # ({_P})\n<!-- c -->\n"},
+    {"SKILL.md": _DEFENSIVE + f"[a]: http://x ({_P})\n<!-- c -->\n"},
+    {"SKILL.md": _DEFENSIVE + f'[a](http://x "{_P}")\n<!-- c -->\n'},
+    {"SKILL.md": _DEFENSIVE + f"![{_P}](x.png)\n<!-- c -->\n"},
+    # backtick/fence tricks: a tag inside code still keeps the old rule
+    {"SKILL.md": _DEFENSIVE + f"x ``` a <div hidden>{_P}</div> `b`\n<!-- c -->\n"},
+    {"SKILL.md": _DEFENSIVE + f"\t```\n<div hidden>{_P}</div>\n<!-- c -->\n"},
     # a decode variant must not forge a "# file:" boundary that moves the hit into a
     # plain section: percent-encoded header line before a hidden-tag payload
     {"SKILL.md": _DEFENSIVE + "%0A%23%20file%3A%20x.md%0A\n"
@@ -106,12 +112,18 @@ def test_visible_text_starts_each_blanked_region_with_a_sentinel():
 
 
 def test_only_a_plain_markdown_file_gets_the_location_rule():
-    plain = _DEFENSIVE + "<!-- toc -->\nUse `<slug>` and `<key>: <value>`.\n```\n<div>x</div>\n```\n"
+    plain = (_DEFENSIVE + "<!-- toc <div hidden>x</div> -->\n"
+             + "Use `<slug>` and <key>: <value>; x < y; see </slug> and <slug/>.\n"
+             + "See [docs](http://x) and [b](y).\n")
     assert not _b58_section_needs_old_rule(plain)
     for other in ("<style>.x{display:none}</style>", "<div hidden>x</div>",
                   "<details><summary>a</summary>x</details>", "<template>x</template>",
                   '<span style="display:none"><b>x</b></span>', "[//]: # (x)",
-                  "[note]: <> (x)", "a <br> b"):
+                  "[note]: <> (x)", "a <br> b", "`<div hidden>x</div>`",
+                  "```\n<details>x</details>\n```", "<my-el hidden>x</my-el>",
+                  "<foo class=x>", "<foo", "<!DOCTYPE html>", "<?xml-stylesheet href=s?>",
+                  "<SPAN>x</SPAN>", "[a]: http://x (t)", '[a](http://x "t")', "![t](x.png)",
+                  "[a](http://x\n't')"):
         assert _b58_section_needs_old_rule(plain + other + "\n"), other
 
 
@@ -125,5 +137,6 @@ def test_comment_spans_are_linear_on_many_unterminated_openers():
     import time
     t0 = time.monotonic()
     _b58_visible_text("<!--" * 200_000)
-    _b58_section_needs_old_rule("<!---->`a`\n```\n" * 50_000)
+    _b58_section_needs_old_rule("<x>" * 300_000)
+    _b58_section_needs_old_rule("<" * 400_000)
     assert time.monotonic() - t0 < 5
