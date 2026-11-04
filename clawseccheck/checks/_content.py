@@ -5239,21 +5239,25 @@ _B58_TAG_NAME_RE = re.compile(r"/?([A-Za-z][A-Za-z0-9:_-]*)")
 # (CommonMark's complete set): a link reference definition (any destination - unused, it
 # renders nothing), an image (its description is alt text), and a link/image title
 # (a tooltip). Any of them in a file keeps the pre-B-1019 rule there.
-_B58_MD_HIDDEN_TEXT_RE = re.compile(r"^[ \t]*\[[^\]\n]*\]:|!\[", re.MULTILINE)
+# `]:` ANYWHERE, not only at a line start: a definition may sit in a block quote or list
+# item, and its label may hold escapes or span lines. Over-approximates on purpose.
+_B58_MD_HIDDEN_TEXT_RE = re.compile(r"\]:|!\[")
 _B58_MD_TITLE_RE = re.compile(r"\s[\"'(]")
 
 
 def _b58_md_link_title(text: str) -> bool:
     """True when a line holds an inline link that may carry a title: after its first
-    `](`, whitespace followed by a quote or paren, or no `)` at all (the link continues on
-    another line). Over-approximates on purpose (fail closed) and stays linear: one
+    `](`, whitespace followed by a quote or paren, or fewer `)` than `](` (a link that
+    continues on another line). Over-approximates on purpose (fail closed) and stays linear: one
     search per line."""
     for line in text.split("\n"):
         i = line.find("](")
         if i == -1:
             continue
         tail = line[i + 2:]
-        if ")" not in tail or _B58_MD_TITLE_RE.search(tail):
+        # every `](` on the line needs its own `)`; the title test covers the whole tail,
+        # so a title on any later link of the line is seen too.
+        if tail.count(")") < tail.count("](") + 1 or _B58_MD_TITLE_RE.search(tail):
             return True
     return False
 
