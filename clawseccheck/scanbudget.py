@@ -30,9 +30,20 @@ import threading
 import time
 from dataclasses import dataclass
 
-# Generous ceilings: a real audit is sub-second; these only catch a pathological hang.
-DEFAULT_CHECK_BUDGET_S = 15.0
-DEFAULT_AUDIT_BUDGET_S = 120.0
+# Generous ceilings that only catch a pathological hang, never a normal run.
+#
+# B-1020, measured 2026-11-04 on a real home that gained a large ~/.agents/skills tree
+# (an external tool created it): `check_installed_skills` took 21.1s at load ~2, 25.8s
+# at load ~7-10 and 51.7s at load ~20. The whole `run_all` took ~130s at load ~2 and
+# 254.8s at load ~20. The old ceilings (15s per check, 120s per audit) cut that ordinary
+# fleet off at every load, so the audit read UNKNOWN (ERR:check_installed_skills, score
+# capped by B-399) and the fleet FP gate refused to compare. 60s clears the loaded
+# per-check figure with margin; 600s clears the loaded whole-audit figure about 2.4x and
+# keeps the audit budget 10x a check, near the 7.5x the exhaustive profile keeps below.
+# Both stay at or below EXHAUSTIVE_LIMITS (120s / 900s), so --exhaustive never reads
+# LESS than a plain audit. Re-measure before lowering either.
+DEFAULT_CHECK_BUDGET_S = 60.0
+DEFAULT_AUDIT_BUDGET_S = 600.0
 
 # F-148: the same idea for the vet paths, which run the content ring outside ``run_all`` and
 # were therefore unbounded.
@@ -252,7 +263,7 @@ DEFAULT_LIMITS = ScanLimits(
     log_per_file_budget_s=3.0,
     log_max_bytes_per_file=2 * 1024 * 1024,
     # B-484: measured on a real 132-sink / 41.1 MiB corpus, an uncapped scan costs
-    # 13.6s at ~2.9 MiB/s. That technically fits under the 15s DEFAULT_CHECK_BUDGET_S,
+    # 13.6s at ~2.9 MiB/s. That technically fits under the then-15s DEFAULT_CHECK_BUDGET_S (60s since B-1020),
     # but it would spend ~90% of the whole per-check ceiling on ONE check - precisely
     # the situation B-314's cumulative ceiling exists to prevent (its own comment cites
     # 4 sinks summing to 11.6s/15s as the problem) - and it grows past 15s as a fleet
@@ -429,7 +440,7 @@ EXHAUSTIVE_LIMITS = ScanLimits(
     # audit_budget_s bounds the WHOLE CHECKS list cooperatively (checked between
     # checks), so it must clear the single slowest check (check_budget_s=120.0) by a
     # margin comparable to what DEFAULT_AUDIT_BUDGET_S already keeps over
-    # DEFAULT_CHECK_BUDGET_S (120.0 / 15.0 = 8x here vs 900.0 / 120.0 = 7.5x there),
+    # DEFAULT_CHECK_BUDGET_S (600.0 / 60.0 = 10x here vs 900.0 / 120.0 = 7.5x there),
     # while staying well under the outer --full pipeline ceilings this nests inside
     # (DEFAULT_VET_ALL_BUDGET_S=1800s, DEFAULT_FULL_BUDGET_S=2000s), so a slow
     # --exhaustive audit still leaves those later phases room instead of starving them.

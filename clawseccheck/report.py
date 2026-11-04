@@ -3116,7 +3116,7 @@ def _skill_inventory(ctx) -> list[dict]:
         # deadline fired - the exception unwinds the list the ring was building - so the
         # claim is "the base verdict survives", not "nothing is lost". The two deadlines
         # run in sequence, never nested, and the second gets only what the first left, so
-        # the per-skill ceiling stays ~15 s total rather than 15 s each (exactly, where
+        # the per-skill ceiling stays one DEFAULT_CHECK_BUDGET_S total rather than one each (exactly, where
         # the POSIX hard timer is available; cooperatively elsewhere).
         _started = time.monotonic()
         try:
