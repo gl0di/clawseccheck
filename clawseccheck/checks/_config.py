@@ -6294,6 +6294,15 @@ def check_trifecta(ctx: Context) -> Finding:
         # True -- the same "a partial sweep is not the same fact as an exhaustive
         # one" discipline `store["incomplete"]` already gets above.
         agent_auth_capped = getattr(ctx, "agent_auth_profile_store_capped", False)
+        # B-1014: a state database that EXISTS but could not be read (corrupt bytes, a
+        # PostgreSQL engine anchor, a non-table `config_machine_state`, a per-agent DB
+        # that would not open) left `*_read` False -- the same value as "no database"
+        # -- so the hedge above never fired and A1 read PASS on missing evidence (GR#4).
+        # Same disclosure as `store["incomplete"]`: a WARN hedge, never a leg, so no
+        # new FAIL and no RISK chain change (risk.py's `_has_sensitive_data` asserts
+        # legs and deliberately ignores unread stores, see its B-730 note).
+        auth_store_unread = getattr(ctx, "auth_profile_store_unreadable", False)
+        agent_auth_unread = getattr(ctx, "agent_auth_profile_store_unreadable", False)
         if (
             reach
             or store["incomplete"]
@@ -6301,6 +6310,8 @@ def check_trifecta(ctx: Context) -> Finding:
             or auth_store_present
             or agent_auth_store_present
             or agent_auth_capped
+            or auth_store_unread
+            or agent_auth_unread
         ):
             why = []
             if reach:
@@ -6356,6 +6367,20 @@ def check_trifecta(ctx: Context) -> Finding:
                     " allows, so not every agent's own auth-profile store could be"
                     " checked"
                 )
+            if auth_store_unread or agent_auth_unread:
+                why.append(
+                    "OpenClaw's "
+                    + (
+                        "shared and per-agent auth-profile stores"
+                        if auth_store_unread and agent_auth_unread
+                        else "shared auth-profile store (state/openclaw.sqlite)"
+                        if auth_store_unread
+                        else "per-agent auth-profile store"
+                        " (agents/<agent-id>/agent/openclaw-agent.sqlite)"
+                    )
+                    + " exists but could not be read, so whether it holds credentials"
+                    " is unknown, not 'none'"
+                )
             if config_blind:
                 why.append(
                     "no OpenClaw config was found on this host at all, so nothing about"
@@ -6391,6 +6416,18 @@ def check_trifecta(ctx: Context) -> Finding:
                     " holds a real, usable credential (this audit only sees its byte"
                     " length, never its value) and treat this leg as ON if it does."
                     if agent_auth_store_present
+                    else "This audit could not read OpenClaw's auth-profile store"
+                    " (see the scan errors for the file and reason: a corrupt"
+                    " database, or one whose data OpenClaw keeps in PostgreSQL)."
+                    " Check by hand whether it holds a real, usable credential and"
+                    " treat this leg as ON if it does."
+                    + (
+                        " More per-agent databases also exist than this scan's cap"
+                        " allows, so check the remaining agents' stores too."
+                        if agent_auth_capped
+                        else ""
+                    )
+                    if auth_store_unread or agent_auth_unread
                     else "This host has more per-agent databases under"
                     " agents/*/agent/openclaw-agent.sqlite than this scan's cap"
                     " allows, so its per-agent auth-profile store sweep did not cover"
