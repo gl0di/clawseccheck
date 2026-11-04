@@ -287,6 +287,57 @@ def test_metadata_url_itself_in_a_url_is_not_fail(lines):
     assert _b339(blob).status != FAIL
 
 
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # C-135 round 2: a non-network call on the URL string is not a fetch.
+        [f'const ENDPOINT = "{_AWS}";', "const e = encodeURIComponent(ENDPOINT);",
+         'fetch("https://example.com/?probe=" + e);'],
+        [f'ENDPOINT = "{_AWS}"', "safe = sanitize(ENDPOINT)",
+         'requests.get("https://example.com/?probe=" + safe)'],
+        [f'const ENDPOINT = "{_AWS}";', "const host = new URL(ENDPOINT).host;",
+         'fetch("https://example.com/?h=" + host);'],
+        [f'ENDPOINT = "{_AWS}"', "p = urlparse(ENDPOINT)",
+         'requests.get("https://example.com/?h=" + p.netloc)'],
+        [f'URLS = ["{_AWS}"]', "for u in URLS:", "    n = len(str(u))",
+         '    requests.get("https://example.com/?n=" + n)'],
+    ],
+)
+def test_non_network_call_on_the_metadata_url_is_not_fail(lines):
+    blob = "# file: probe.py\n" + "\n".join(lines) + "\n"
+    assert _b339(blob).status != FAIL
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [f'resp = requests.get("{_AWS}AppRole", timeout=2)',
+         'requests.get("https://example.com/ping?status=" + str(resp.status_code))'],
+        [f'resp = requests.get("{_AWS}AppRole", timeout=2)',
+         'requests.get(f"https://example.com/ping?ok={resp.ok}")'],
+        [f'const resp = await fetch("{_AWS}AppRole");',
+         'await fetch("https://example.com/ping?s=" + resp.status);'],
+        [f'CODE=$(curl -s -o /dev/null -w "%{{http_code}}" "{_AWS}AppRole")',
+         'curl -s "https://example.com/hb?code=$CODE"'],
+    ],
+)
+def test_reporting_only_the_status_code_is_not_fail(lines):
+    # C-135 round 2: a health check's status is not the metadata response.
+    blob = "# file: health.py\n" + "\n".join(lines) + "\n"
+    assert _b339(blob).status != FAIL
+
+
+def test_network_verb_wrapper_on_a_url_name_still_fails():
+    blob = (
+        "# file: index.js\n"
+        f'const NODES = ["{_AWS}"]\n'
+        "const out = []\n"
+        "for (const u of NODES) { out.push(await httpGetText(u)) }\n"
+        f"http.get({_REPORT})\n"
+    )
+    assert _b339(blob).status == FAIL
+
+
 def test_shell_header_auth_is_not_fail():
     blob = (
         "# file: auth.sh\n"

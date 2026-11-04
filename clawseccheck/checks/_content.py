@@ -14397,7 +14397,7 @@ def _b339_query_seed(norm: str, match_start: int) -> "str | None":
 # Anything else (a call in any spelling: `get(`, `)(`, `?.(`, `$(`, a backtick) keeps
 # the seed a fetched response, so an unusual call shape can never downgrade it.
 _B339_PURE_LITERAL_PREFIX_RE = re.compile(
-    r"\s*[\[(]?\s*(?:(?P<q>[\"'])[^\"'`\n]*(?P=q)\s*,?\s*)*[\"']?(?:https?://)?\Z"
+    r"\s*(?:[\[(]\s*)?(?:(?P<q>[\"'])[^\"'`\n]*(?P=q)\s*(?:,\s*)?)*[\"']?(?:https?://)?\Z"
 )
 
 
@@ -14510,19 +14510,52 @@ def _b339_in_network_call(text: str, names: "set[str]") -> bool:
     return False
 
 
+_B339_NET_VERB_RE = re.compile(
+    r"get|fetch|request|http|curl|download|load|pull|probe|query|call|read", re.I
+)
+
+
 def _b339_fetches(text: str, url_names: "set[str]") -> bool:
     """True when *text* passes a URL-holding name to a call or a command -- the step
-    that turns a metadata URL into a metadata response. Fail-closed: a known outbound
-    call with the name ANYWHERE in its arguments, or any call (a custom wrapper such as
-    `httpGet(u)`) with the name as its first argument."""
+    that turns a metadata URL into a metadata response: a known outbound call with the
+    name ANYWHERE in its arguments, a `curl`/`wget`/`iwr`/`irm` command naming it, or a
+    custom wrapper whose own name carries a network verb (`httpGet(u)`,
+    `fetchJson(u)`, `download(u)`) with the name as its first argument.
+
+    Deliberately NOT "any call": C-135 round 2 on B-1011 found `encodeURIComponent(u)`,
+    `str(u)`, `len(u)`, `new URL(u).host`, `urlparse(u).netloc` all turning the URL
+    STRING into a "response" and FAILing code that only reports which endpoint it
+    probes. The cost is a wrapper with a verb-less name (`go(u)`), which stays WARN."""
     if not url_names:
         return False
     alt = "|".join(re.escape(n) for n in sorted(url_names))
     return bool(
         _b339_in_network_call(text, url_names)
-        or re.search(rf"[A-Za-z0-9_\])]\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text)
+        or any(
+            _B339_NET_VERB_RE.search(m.group(1))
+            for m in re.finditer(
+                rf"(?<![\w$])([A-Za-z_$][\w$]*)\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text
+            )
+        )
         or re.search(rf"\b(?:curl|wget|iwr|irm)\b[^\n;]*\$\{{?(?:{alt})\b", text)
     )
+
+
+# A response's status, not its body: `resp.status_code`, `r.ok`, `res.statusText`.
+# Reading one of these and reporting it (a health check) is not the metadata response
+# leaving the host (C-135 round 2 on B-1011). Masked out before any taint test.
+_B339_STATUS_ATTR_RE = re.compile(
+    r"\b[A-Za-z_$][\w$]*\s*\.\s*(?:status(?:_?code|Code|Text)?|ok|reason|elapsed)\b(?!\s*\()"
+)
+
+
+def _b339_mask_status(text: str) -> str:
+    return _B339_STATUS_ATTR_RE.sub(" _status_ ", text)
+
+
+def _b339_status_only_command(text: str) -> bool:
+    """`curl -s -o /dev/null -w "%{http_code}" URL` prints only the status code."""
+    return bool(re.search(r"-o\s+/dev/null", text) and re.search(r"%\{http_code\}", text))
 
 
 def _b339_credential_in_url(
@@ -14541,6 +14574,9 @@ def _b339_credential_in_url(
     url_vars: "dict[str, str]" = {}
 
     def classify(text: str) -> "str | None":
+        text = _b339_mask_status(text)
+        if _b339_status_only_command(text):
+            return None
         if tainted and _b339_names_re(tainted).search(text):
             return "resp"
         if url_names and _b339_fetches(text, url_names):
@@ -14598,8 +14634,9 @@ def _b339_credential_in_url(
         # name through a nested outbound call (`_b339_in_network_call`), never by the
         # bare name -- that bare case is the URL itself, the round-1 FP.
         url_shapes = _b339_url_shapes(url_names) if url_names else ()
-        for call_m in _B339_URL_CALL_RE.finditer(stmt):
-            seg = stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
+        sink_stmt = _b339_mask_status(stmt)
+        for call_m in _B339_URL_CALL_RE.finditer(sink_stmt):
+            seg = sink_stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
             for shape in shapes:
                 um = shape.search(seg)
                 if um is not None:
@@ -14707,6 +14744,10 @@ def _b339_corroborated(
     # `_B339_QUERY_WINDOW`) -- seeded more permissively than the legs above (inline
     # push, open bracket literal), because the advisory shape keeps its URLs in an array.
     seed = _b339_query_seed(norm, match_start)
+    line_lo = norm.rfind("\n", 0, match_start) + 1
+    line_hi = norm.find("\n", match_end)
+    if _b339_status_only_command(norm[line_lo : line_hi if line_hi != -1 else len(norm)]):
+        seed = None  # the seed holds a status code, never the response body
     if seed is not None:
         dest = _b339_credential_in_url(
             norm, match_end, seed, own_host, _b339_seed_holds_url(norm, match_start, seed)
