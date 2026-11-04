@@ -151,9 +151,12 @@ def test_no_duplicate_case_keys():
 
 
 def test_every_fixture_row_has_a_readable_non_empty_config():
+    """Fixture rows are non-empty (corpus_rows() skips empty ones); the one deliberately
+    empty config is the synthetic row that grades the vendor's grant-all `{}`."""
     for row in BATTERY:
         cfg = _CONFIGS[row["label"]]
-        assert isinstance(cfg, dict) and cfg, row["label"]
+        assert isinstance(cfg, dict), row["label"]
+        assert cfg or row["label"] == "synthetic/empty", row["label"]
 
 
 def test_every_row_covers_the_full_tool_family():
@@ -212,7 +215,8 @@ def test_synthetic_rows_are_present_and_self_contained():
     assert len(SYNTHETIC_ROWS) >= 60, len(SYNTHETIC_ROWS)
     for row in SYNTHETIC_ROWS:
         assert row["label"].startswith("synthetic/"), row["label"]
-        assert isinstance(row["cfg"], dict) and row["cfg"], row["label"]
+        assert isinstance(row["cfg"], dict), row["label"]
+        assert row["cfg"] or row["label"] == "synthetic/empty", row["label"]
         assert not (FIXTURES / row["label"]).exists(), row["label"]
 
 

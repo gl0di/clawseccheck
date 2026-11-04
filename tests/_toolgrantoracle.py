@@ -425,6 +425,9 @@ def synthetic_configs(tables: dict) -> list:
     add("roster/defaults-ignored", {
         "agents": {"defaults": {"tools": {"profile": "minimal"}}, "entries": {"a": {}}},
     })
+    # An empty config: no policy layer at all, so the vendor allows every tool. corpus_rows()
+    # skips empty fixture configs, so without this row `{}` was never graded.
+    add("empty", {})
     return out
 
 

@@ -1759,6 +1759,7 @@ def _capability_graph(ctx) -> dict:
         _B55_FS_WRITE_TOOLS,
         _agent_legs,
         _b55_resolved_write_grant,
+        _config_was_read,
         _b351_resolvable_agents,
         _canon_tool,
         _credential_store_state,
@@ -1801,7 +1802,9 @@ def _capability_graph(ctx) -> dict:
     # second, divergent model here or calling only the G1 half B55 itself no longer
     # stops at. `_enabled_tools` itself is untouched: every OTHER caller (exec/input/
     # egress hints) keeps reading exactly what it read before.
-    write_tools, write_enumerable, _view, _legacy_write, _scope_grants = _b55_resolved_write_grant(cfg)
+    write_tools, write_enumerable, _view, _legacy_write, _scope_grants = _b55_resolved_write_grant(
+        cfg, config_read=_config_was_read(ctx),
+    )
     main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
     # B-730: the credential term read `(ctx.home / "credentials").is_dir()` -- the
     # directory-existence test B-666 disproved and replaced in A1's leg. The store is

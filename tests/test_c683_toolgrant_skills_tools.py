@@ -149,9 +149,9 @@ def test_the_alias_and_case_folding_of_the_tool_name_is_unchanged():
     assert _g({"allow": ["write"]}, "SKILLS_READ") is False
 
 
-def test_a_blind_config_still_grants_nothing():
-    assert granted({}, "skills_read") is False
-    assert granted({}, "skills_read", "a") is False
+def test_a_non_dict_config_grants_nothing():
+    assert granted(None, "skills_read") is False
+    assert granted([], "skills_read", "a") is False
 
 
 # --------------------------------------------------------------------- the vendor, executed

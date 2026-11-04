@@ -73,10 +73,10 @@ def _b68(cfg: dict):
 # Original report
 # =====================================================================================
 
-def test_empty_config_stays_unknown_no_risk():
-    # {} is `granted()`'s own deliberate divergence (a config never actually parsed is not
-    # evidence of a grant) -- `resolved_scopes({})` returns None, same as `granted({}, ...)`
-    # returns False. Never a guess.
+def test_an_unread_empty_config_stays_unknown_no_risk():
+    # An empty `ctx.config` with no config found is "nothing was read", not evidence of a
+    # grant: B55/B68 keep their UNKNOWN (`_config_was_read`). A real empty openclaw.json is
+    # the vendor's grant-all default - see tests/test_b1016_toolgrant_empty_config.py.
     assert _verdicts({}) == (UNKNOWN, UNKNOWN, False)
 
 
@@ -577,7 +577,7 @@ def test_resolved_scopes_malformed_variants_return_none():
     assert toolgrant.resolved_scopes({"tools": {"allow": "write"}}) is None
     assert toolgrant.resolved_scopes({"tools": {"allow": {}}}) is None
     assert toolgrant.resolved_scopes({"tools": {"profile": "Coding"}}) is None
-    assert toolgrant.resolved_scopes({}) is None
+    assert toolgrant.resolved_scopes(None) is None
 
 
 @pytest.mark.parametrize("bad_profile", [["x"], {"x": 1}])
