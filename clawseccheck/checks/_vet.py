@@ -7958,8 +7958,15 @@ def check_installed_skills(ctx: Context) -> Finding:
                 "flowing into subprocess/exec). If you authored this skill or "
                 "already trust its source, review whether that configuration "
                 "input, table, or helper can be influenced by untrusted content "
-                "before installing."
+                "before installing. The same limit applies when a command list is "
+                "rebound only on some branches behind a wrapper program (for "
+                "example `cmd = [\"timeout\", \"5\"] + cmd` on Linux only): static "
+                "analysis cannot follow which program finally runs, so read the "
+                "flagged call and every assignment that reaches it."
             )
+            # Accepted §2.5 residual (B-1018 row 4, conditional wrapper rebind),
+            # Dave ruling 2026-11-04 - see the note above the `conditional_out`
+            # loop in skillast.py's `_single_list_bindings_local`.
         if js_cred_flow_skills:
             # B-1005: the JS credential-flow rule cannot tell a signing client from an
             # exfiltrator - a crypto-reducer exemption was retracted after five review
