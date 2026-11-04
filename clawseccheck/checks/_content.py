@@ -14565,6 +14565,13 @@ def _b339_fetches(text: str, url_names: "set[str]") -> bool:
 # closing quote can never pair with the next literal's opening one and blank the code
 # between them. Only unprefixed, non-interpolating literals are blanked; an
 # unbalanced quote leaves the text untouched (fail-closed).
+# A literal is blanked only when it sits where an expression operand can: after an
+# operator/opening bracket/start, and before an operator/closing bracket/separator/end.
+# A quote that does not (a shell apostrophe, a regex literal) leaves the span as is.
+_B339_LITERAL_OPENERS = frozenset(["", "(", "[", "{", ",", "=", ":", "+", "%", "?"])
+_B339_LITERAL_CLOSERS = frozenset(["", ")", "]", "}", ",", ":", "+", "%", ";", "."])
+
+
 def _b339_blank_plain_strings(text: str) -> str:
     out = list(text)
     n = len(text)
@@ -14589,7 +14596,10 @@ def _b339_blank_plain_strings(text: str) -> str:
         else:
             return text
         body = text[k + len(quote) : j]
-        if ch != "`" and not prefixed and "$" not in body and "{" not in body:
+        before = text[:k].rstrip()[-1:]
+        after = text[j + len(quote) :].lstrip()[:1]
+        delimited = before in _B339_LITERAL_OPENERS and after in _B339_LITERAL_CLOSERS
+        if ch != "`" and not prefixed and delimited and "$" not in body and "{" not in body:
             for m in range(k + len(quote), j):
                 if out[m] != "\n":
                     out[m] = " "
@@ -14597,8 +14607,10 @@ def _b339_blank_plain_strings(text: str) -> str:
     return "".join(out)
 
 
-# A statement that is only a line comment (`# ...`, `// ...`) is not code.
-_B339_LINE_COMMENT_RE = re.compile(r"\s*(?:#|//)")
+# A statement that is only a line comment is not code: `#` not followed by an
+# identifier character (a JS `#private` field is code), or `//` followed by
+# whitespace or the end (`//usr/bin/curl ...` is a real shell command path).
+_B339_LINE_COMMENT_RE = re.compile(r"\s*(?:#(?![\w$])|//(?=\s|\Z))")
 
 
 def _b339_credential_in_url(

