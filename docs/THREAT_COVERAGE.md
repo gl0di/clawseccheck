@@ -597,6 +597,35 @@ historical continuity. The numbered AST-2026 table above supersedes this for new
 | Human-agent trust / decision-fatigue | B8, B18, B23 |
 | Rogue agent misalignment | B17, B22 (partial) |
 
+### OWASP MCP Top 10 (2025, Beta)
+
+> **Status:** Beta (the project's own roadmap: "Beta Release and Pilot Testing"); read 2026-11-04.
+> **Source:** <https://owasp.org/www-project-mcp-top-10/>.
+
+Documentation only: unlike the two lists above, this mapping is not in `catalog.py` and is
+not emitted per finding in `--json` or SARIF. A check is listed only where it tests that item
+on an OpenClaw config; "partial" means it covers part of the item, not most of it. No coverage
+percentage is claimed. The **Tier** column is the primary mitigation layer that arXiv
+2611.02611 ("Where Does MCP Security End?", validated on one enterprise MCP server, not
+OpenClaw) assigns each item: a **server**-primary item can be fixed in the server or its
+configuration, a **gateway**-primary item needs a layer in front of the servers, and a
+**protocol**-primary item has no reliable control at either because instructions and data
+share one natural-language channel. A config audit can reach the first kind best and the last
+kind least. The paper titles MCP06 "Intent Flow Subversion"; the OWASP title is used here.
+
+| ID | Item (OWASP) | Tier | ClawSecCheck | Status |
+|---|---|---|---|---|
+| MCP01:2025 | Token Mismanagement & Secret Exposure | server | B1, C015 (secrets at rest, including MCP server env and header maps), B24 (wildcard env passthrough, token passthrough, forwarded Authorization headers) | Partial - a secret with no recognisable shape is a declared limit (see "Non-static coverage") |
+| MCP02:2025 | Privilege Escalation via Scope Creep | server | B15 (no per-server tool restriction), `--vet-mcp` (broad OAuth scopes), B333 (annotation waives approval), B353 (every tool pre-approved) | Partial - what a server's tools actually do, or how that changes after install, is not visible to a config audit |
+| MCP03:2025 | Tool Poisoning | protocol | B331 (config-embedded descriptions), B185 (descriptions OpenClaw actually sent), B332 (name shadowing), `--vet-mcp` | Partial - descriptions are scanned one at a time, and a payload split across several is a declared limit |
+| MCP04:2025 | Software Supply Chain Attacks & Dependency Tampering | server | B24 (unpinned package specs), B166 (server command names a known exfiltration host), B13, B95, B349, the IOC data behind `--vet` | Partial - a malicious package with an ordinary config shape is a declared limit (MCP package-reputation verdicts) |
+| MCP05:2025 | Command Injection & Execution | server | B166, `--vet-mcp` (server command and arguments) | Partial - injection inside the server's own code is not analysed unless it is vetted as a skill |
+| MCP06:2025 | Prompt Injection via Contextual Payloads | protocol | B331, B185 for descriptions; A1, B4 and exec approvals bound the blast radius | Ceiling - a payload in a live tool result or resource is not statically observable |
+| MCP07:2025 | Insufficient Authentication & Authorization | server | B24 (TLS verification off, unrestricted allowed hosts), `--vet-mcp` (plaintext transport), C047 (non-local endpoint, manual review) | Partial - whether a remote server enforces authentication is not observable from the client config |
+| MCP08:2025 | Lack of Audit and Telemetry | gateway | - | Not covered - no check asks whether MCP calls are audited. B191 (`--behavioral`) reads OpenClaw's own tool-call trail as evidence of what ran, which is not the same as requiring one; B365 is the opposite risk (content shipped to a collector) |
+| MCP09:2025 | Shadow MCP Servers | gateway | - | Not covered - only MCP servers declared in config are read; an MCP process started outside it is not enumerated. B152 and B348 cover undeclared plugins, not MCP servers |
+| MCP10:2025 | Context Injection & Over-Sharing | protocol | B365 (session content to a collector), A1 (trifecta legs) | Ceiling - what a remote server learns from the calls sent to it is inherent (see "Non-static coverage") |
+
 **Sources (grounded):** OWASP Top 10 for LLM Applications 2025
 (<https://genai.owasp.org/llm-top-10/>); OWASP Agentic Skills Top 10 2026
 (<https://owasp.org/www-project-agentic-skills-top-10>); OWASP Agentic Security Initiative
