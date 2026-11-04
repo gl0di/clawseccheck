@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import parse_qsl, urlparse, urlsplit
 from .. import pathprobe
 from ..catalog import (
     BY_ID,
@@ -4285,6 +4285,16 @@ _CREDENTIAL_HEADER_NAMES = frozenset({
 # A vendor-sensitive path that holds a URL which MAY carry credentials: only a password in
 # the userinfo of the AUTHORITY is a plaintext secret.
 _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
+# OpenClaw 2026.10.10's PostgreSQL DSN: a vendor `SecretInput` (`SecretInputSchema`, registered
+# `sensitive`, resolved by `resolveCanonicalConfiguredSecretInputString` and handed to node-pg as
+# `new Client({ connectionString })`). A DSN with no password is ordinary (peer / trust auth, a
+# pgpass file, PGPASSWORD), so only a password IN the string counts: the forms node-pg's own
+# parser (pg-connection-string 2.14.1, executed) reads - URL userinfo and a `?password=` query
+# parameter, for `postgres://`, `postgresql://` and `socket://` alike - plus the libpq keyword
+# form `password=...`, which that parser ignores but which still puts the credential in the file.
+_VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
+_DSN_USERINFO_PASSWORD_RE = re.compile(r"^[a-z][a-z0-9+.-]*://[^/?#@:]*:([^/?#@]+)@", re.I)
+_DSN_KEYWORD_PASSWORD_RE = re.compile(r"(?:^|\s)password\s*=\s*('(?:[^'\\]|\\.)*'|\S*)", re.I)
 # Vendor-sensitive paths that are deliberately NOT secrets (path regex -> reason). The drift
 # test requires each vendor path to be covered above or to match one of these.
 _VENDOR_NOT_SECRET_PATHS = (
@@ -4321,6 +4331,41 @@ def _url_inline_password(value) -> "str | None":
         return None
     left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
     return password if left else None
+
+
+def _dsn_inline_password(value) -> "str | None":
+    """The password a PostgreSQL DSN carries in the string itself, or None (see
+    ``_VENDOR_SECRET_DSN_PATH_RE``). A password that is only an env reference is not one."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+
+    def literal(password: str) -> "str | None":
+        left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
+        return password if left else None
+
+    if "://" in text:
+        try:
+            query = urlsplit(text).query
+        except ValueError:
+            # Unparseable (`postgres://u:pw@[::1`): node-pg rejects it too, so it never
+            # connects - but a password in the userinfo is still a credential in the file.
+            m = _DSN_USERINFO_PASSWORD_RE.match(text)
+            return literal(m.group(1)) if m else None
+        found = _url_inline_password(text)
+        if found is not None:
+            return found
+        for key, val in parse_qsl(query, keep_blank_values=True):
+            if key == "password" and val and literal(val) is not None:
+                return val
+        return None
+    for match in _DSN_KEYWORD_PASSWORD_RE.finditer(text):
+        password = match.group(1)
+        if password.startswith("'") and password.endswith("'") and len(password) >= 2:
+            password = password[1:-1]
+        if password and literal(password) is not None:
+            return password
+    return None
 
 
 def _concrete_secret_literal(value: str) -> bool:
@@ -4369,6 +4414,10 @@ def _vendor_slot_hit(path: str, value, min_len: int) -> bool:
         # a URL password is a credential at any length: `socks5://u:p@h` is 14 characters
         if _url_inline_password(rest) is not None:
             return True
+    if _VENDOR_SECRET_DSN_PATH_RE.search(norm):
+        # the raw value, not `rest`: an embedded `${PG_PASSWORD}` must stay in place for
+        # `_dsn_inline_password` to see that the password is a reference
+        return _dsn_inline_password(value) is not None
     if len(rest) < min_len:
         return False
     if any(rx.search(norm) for rx in _VENDOR_SECRET_VALUE_PATHS):
@@ -4394,7 +4443,11 @@ def _vendor_slot_covers(path: str) -> "str | None":
     leaf = norm.rsplit(".", 1)[-1]
     if SECRET_KEY_RE.search(leaf) or _CONFIG_SECRET_LEAF_RE.fullmatch(leaf):
         return "name"
-    for group in (_VENDOR_SECRET_VALUE_PATHS, _VENDOR_SECRET_MAP_PATHS, (_VENDOR_SECRET_URL_PATH_RE,)):
+    for group in (
+        _VENDOR_SECRET_VALUE_PATHS,
+        _VENDOR_SECRET_MAP_PATHS,
+        (_VENDOR_SECRET_URL_PATH_RE, _VENDOR_SECRET_DSN_PATH_RE),
+    ):
         if any(rx.search(norm) for rx in group):
             return "path"
     return None

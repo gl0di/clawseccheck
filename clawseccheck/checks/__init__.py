@@ -158,6 +158,7 @@ from ._shared import (
     _vendor_slot_covers,
     _vendor_slot_hit,
     _url_inline_password,
+    _dsn_inline_password,
     _concrete_secret_literal,
     _header_name_is_credential,
     _map_entry_is_indirection,

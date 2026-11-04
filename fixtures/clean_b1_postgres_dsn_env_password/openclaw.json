@@ -1,0 +1,8 @@
+{
+  "database": {
+    "engine": "postgres",
+    "postgres": {
+      "connection": "postgres://openclaw:${OPENCLAW_PG_PASSWORD}@db.internal.example:5432/openclaw?sslmode=require"
+    }
+  }
+}

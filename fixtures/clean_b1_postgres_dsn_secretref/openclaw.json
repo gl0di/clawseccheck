@@ -1,0 +1,9 @@
+{
+  "database": {
+    "engine": "postgres",
+    "postgres": {
+      "connection": {"source": "env", "provider": "default", "id": "OPENCLAW_PG_DSN"},
+      "schemaPrefix": "openclaw"
+    }
+  }
+}
