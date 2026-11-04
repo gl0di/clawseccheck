@@ -5169,6 +5169,23 @@ _SKILL_LOCAL_CHAIN_RE = re.compile(
 _IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b")
 
 
+def _b13_ip_url_label(ip: str) -> str:
+    """B-1011: what to CALL a bare-IP URL `_is_public_ip` let through. That
+    helper treats the 100.64.0.0/10 shared address space (RFC 6598) as routable, so
+    Alibaba Cloud's instance-metadata address `100.100.100.200` used to be reported as a
+    "public-IP URL" -- wrong text for the one address in that range a skill most often
+    names. Wording only: the WARN itself is unchanged."""
+    if ip == "100.100.100.200":
+        return "cloud instance-metadata URL"
+    try:
+        a, b = (int(x) for x in ip.split(".")[:2])
+    except ValueError:
+        return "public-IP URL"
+    if a == 100 and 64 <= b <= 127:
+        return "shared-address-space (RFC 6598, not public) IP URL"
+    return "public-IP URL"
+
+
 # `curl URL | sh` is how uv/rustup/brew/deno legitimately install - only suspicious when the
 # host is NOT a well-known installer domain.
 _REPUTABLE_INSTALL_HOSTS = (
@@ -7125,8 +7142,8 @@ def check_installed_skills(ctx: Context) -> Finding:
                     blob, m.start(), _fr, fence_needs_negation=True
                 ):
                     warns_content.append(
-                        f"{name}: hardcoded public-IP URL ({m.group(0)}) \u2014 "
-                        "unusual for a legitimate skill"
+                        f"{name}: hardcoded {_b13_ip_url_label(m.group(1))} ({m.group(0)}) "
+                        "\u2014 unusual for a legitimate skill"
                     )
                     break
             # F-059: skill-manifest least-privilege - allowed-tools grant vs declared purpose.
