@@ -196,7 +196,7 @@ def _unicode_ok() -> bool:
         return False
 
 
-# C-510 item 2: a plain audit can spend up to ~3 minutes on hostile
+# C-510 item 2: a plain audit can spend up to ~10 minutes on hostile
 # content (checks/__init__.py's own per-check budget allows several slow checks in a
 # row) with nothing printed the whole time -- indistinguishable from a hang to a user
 # watching the terminal, and killing what looks like a stuck process mid-write is

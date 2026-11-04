@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clawseccheck.catalog import CRITICAL, FAIL
 from clawseccheck.checks import vet_skill
 from clawseccheck.skillast import analyze_python
@@ -133,3 +135,58 @@ def test_disclosure_absent_when_no_tt5_conviction_contributed(tmp_path: Path):
     assert f.status == FAIL
     assert f.severity == CRITICAL
     assert DISCLOSURE_MARK not in f.fix
+
+
+# ---------------------------------------------------------------------------
+# B-1018 row 4, folded into this residual (Dave ruling 2026-11-04): a command list
+# conditionally rebound behind a re-exec prefix. Real target: the xlsx skill's
+# scripts/recalc.py:217. The benign shape and its twin give the same vector to a
+# single-pass analyzer that does not model `timeout`'s option grammar, so both stay
+# CRITICAL and both carry the disclosure.
+# ---------------------------------------------------------------------------
+
+REBIND_MARK = "rebound only on some branches behind a wrapper program"
+
+REBIND_BENIGN_SRC = (
+    "import platform, shutil, subprocess, sys\n"
+    "\n"
+    "\n"
+    "def recalc(path, t):\n"
+    "    cmd = ['soffice', '--headless', path]\n"
+    "    if platform.system() == 'Linux' and shutil.which('timeout'):\n"
+    "        cmd = ['timeout', str(t)] + cmd\n"
+    "    elif platform.system() == 'Darwin':\n"
+    "        cmd = ['gtimeout', str(t)] + cmd\n"
+    "    return subprocess.run(cmd)\n"
+    "\n"
+    "\n"
+    "recalc(sys.argv[1], 30)\n"
+)
+
+REBIND_TWIN_SRC = (
+    "import os, platform, subprocess\n"
+    "\n"
+    "\n"
+    "def run():\n"
+    "    cmd = ['bash', '-c', os.environ['P']]\n"
+    "    if platform.system() == 'Linux':\n"
+    "        cmd = ['timeout', '5'] + cmd\n"
+    "    return subprocess.run(cmd)\n"
+)
+
+
+@pytest.mark.parametrize("src", [REBIND_BENIGN_SRC, REBIND_TWIN_SRC])
+def test_conditional_wrapper_rebind_still_convicts_tt5(src):
+    rules = {f.rule: f for f in analyze_python(src, "recalc.py")}
+    assert "TT5_CMD_INJECTION" in rules
+    assert rules["TT5_CMD_INJECTION"].severity == "crit"
+
+
+@pytest.mark.parametrize("name,src", [("xlsx-recalc", REBIND_BENIGN_SRC),
+                                      ("rebind-bash-twin", REBIND_TWIN_SRC)])
+def test_conditional_wrapper_rebind_end_to_end_discloses_in_fix(tmp_path: Path, name, src):
+    f = vet_skill(_skill(tmp_path, name, src))
+    assert f.status == FAIL
+    assert f.severity == CRITICAL
+    assert REBIND_MARK in f.fix
+    assert REBIND_MARK not in f.detail

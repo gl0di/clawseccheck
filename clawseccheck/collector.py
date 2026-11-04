@@ -161,7 +161,7 @@ _MAX_SKILL_FRONTIER_NAMES = 5_000
 # single file over _MAX_FILE_BYTES is dropped whole by collect_skill_files before the
 # per-skill budget logic ever sees it, so raising only the per-skill cap has no effect
 # on a skill with one large file. Regex/entropy scanning 1MB is still low-single-digit
-# milliseconds per check (DEFAULT_CHECK_BUDGET_S is 15s); the cross-file reassembly
+# milliseconds per check (DEFAULT_CHECK_BUDGET_S, 15s then, 60s since B-1020); the cross-file reassembly
 # checks (B90/B154) are independently bounded by their own fragment/window caps
 # regardless of blob size. Confirmed on a real config: a legitimate ~152KB skill
 # (clawstealth) was hitting the old 60KB cap and reading as UNKNOWN purely from asymmetry

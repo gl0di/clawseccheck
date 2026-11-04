@@ -3921,6 +3921,26 @@ def _single_list_bindings_local(
         # disqualifying mutation (every other rule above put the name in `unsafe`
         # through a path that also cleared or never set its `conditional` entry, or
         # that is re-checked here).
+        #
+        # Accepted §2.5 residual (B-1018 row 4, folded into the TT5
+        # configured-executable residual), Dave ruling 2026-11-04: the
+        # `assign_count == 1` gate below deliberately leaves a command list that is
+        # CONDITIONALLY REBOUND behind a re-exec prefix unresolved, so it stays
+        # TT5_CMD_INJECTION crit. Real target: Anthropic's xlsx skill,
+        # scripts/recalc.py:217 -- `cmd = ["soffice", ...]`, then
+        # `if linux: cmd = ["timeout", str(t)] + cmd` /
+        # `elif darwin: cmd = ["gtimeout", str(t)] + cmd`, then `subprocess.run(cmd)`.
+        # A sound resolution needs two things this single-pass analyzer does not
+        # have, and C-135 on B-1018 found no cheap split: (1) a merge over EVERY
+        # reaching definition (three here, each self-referential), and (2) the
+        # option grammar of each prefix program -- `timeout -s SIG -k DUR
+        # --foreground DURATION CMD...` -- to find which word is the real program,
+        # then recursion into the inner binding. Clearing it without (2) would also
+        # clear `cmd = ["bash", "-c", x]; if y: cmd = ["timeout", "5"] + cmd`, a
+        # real command injection; (2) is the per-program flag-table enumeration
+        # that failed twice (B-996, B-986). Disclosed in B13's `fix` text (the TT5
+        # bucket in checks/_vet.py), never `detail`; pinned by
+        # tests/test_fleetfp_tt5_configured_executable_residual.py.
         for name, a in conditional.items():
             if a is None or assign_count.get(name, 0) != 1:
                 continue

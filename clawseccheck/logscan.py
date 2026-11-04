@@ -129,7 +129,7 @@ _MAX_LINE_LEN = 8000  # a line longer than this gets WINDOWED (see _OVERSIZED_WI
 # Window size measured, not guessed: at window=4000 (half of _MAX_LINE_LEN), the real
 # fleet's `check_log_threat_hunt` (B164) wall-clock over all 73 trajectory sinks rose
 # from ~7.6s (before this fix) to ~13-14s - uncomfortably close to `scanbudget`'s
-# per-check hard budget (`DEFAULT_CHECK_BUDGET_S`, 15s: a check that exceeds it gets
+# per-check hard budget (`DEFAULT_CHECK_BUDGET_S`, then 15s, 60s since B-1020: a check that exceeds it gets
 # SIGALRM-interrupted mid-scan and degrades to UNKNOWN, losing the very coverage this
 # fix adds). 3000 gives a comfortable margin (~10.6s measured, ~30%+ headroom) while
 # losing only 1 of 46 real-fleet corroborated sinks versus window=4000 - a good trade,
@@ -578,7 +578,7 @@ def _scan_blob_for_compressed_indicators(
 # `_OVERSIZED_WINDOW_CHARS`), this module calls `_scan_line_content` on hundreds of
 # large windows per real trajectory corpus, and paying an O(n^2) regex on each one
 # measurably pushed a real-fleet scan (73 files) from ~7.6s to ~16s - over the
-# per-check hard budget (`scanbudget.DEFAULT_CHECK_BUDGET_S`, 15s). Fixing the shared
+# per-check hard budget (`scanbudget.DEFAULT_CHECK_BUDGET_S`, then 15s, 60s since B-1020). Fixing the shared
 # regex itself is out of this task's scope (checks/_shared.py, consumed by other
 # checks too - a change there needs its own C-135 pass). Instead: `_SECRET_PATH_RE` can
 # ONLY ever match when one of its five keyword alternatives is literally present, so a

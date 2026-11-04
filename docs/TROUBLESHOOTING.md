@@ -110,7 +110,7 @@ whether the problem is ClawSecCheck or the surrounding OpenClaw session.
 
 ClawSecCheck bounds its own runtime so a pathological input (a hostile skill, or just an
 unlucky regex) degrades to an honest `UNKNOWN` instead of hanging forever: a generous
-15-second budget per individual check, and a 120-second budget for a whole plain audit.
+60-second budget per individual check, and a 600-second budget for a whole plain audit.
 Deeper modes (`--vet` on a single target, a full `--vet-all` sweep, `--full`) carry their
 own larger budgets for the same reason, since they read much more content.
 
