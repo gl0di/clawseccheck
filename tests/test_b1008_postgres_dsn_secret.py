@@ -60,6 +60,8 @@ def _bad_dsns() -> list:
         "postgres://openclaw@db/openclaw?password=%24%7B" + pw + "%7D",  # literal to node-pg
         "host=db password=" + pw + " options='-c search_path=x://y'",  # `://` in a value
         "postgres://openclaw@[::1/openclaw?password=" + pw,  # unparseable, query password
+        "postgres://openclaw@db/openclaw?pass%77ord=" + pw,  # node-pg decodes the key
+        "postgres://openclaw@db/openclaw?ssl%70assword=" + pw,
     ]
 
 
@@ -94,7 +96,7 @@ def test_the_vendor_path_is_covered_by_a_path_rule():
 
 # ------------------------------------------------------------------------- helper level
 
-@pytest.mark.parametrize("index", range(12))
+@pytest.mark.parametrize("index", range(14))
 def test_a_dsn_with_a_literal_password_is_reported(index):
     dsn = _bad_dsns()[index]
     assert _dsn_inline_password(dsn) is not None, dsn

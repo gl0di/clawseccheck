@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import unquote_plus, urlparse, urlsplit
 from .. import pathprobe
 from ..catalog import (
     BY_ID,
@@ -4351,11 +4351,12 @@ def _dsn_inline_password(value) -> "str | None":
         return password if left else None
 
     def query_password(query: str) -> "str | None":
-        # Raw (undecoded) values: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env
+        # Raw (undecoded) VALUES: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env
         # substitution runs on the config text before it), not a reference.
         for pair in query.split("&"):
             key, _, val = pair.partition("=")
-            if key in _DSN_PASSWORD_KEYS and val and literal(val) is not None:
+            # node-pg decodes the KEY (`pass%77ord` is `password`); the value stays raw
+            if unquote_plus(key) in _DSN_PASSWORD_KEYS and val and literal(val) is not None:
                 return val
         return None
 
