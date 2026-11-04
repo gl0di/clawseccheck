@@ -491,6 +491,59 @@ def _refuse_non_regular_sqlite_paths(db_path: Path) -> None:
             )
 
 
+# B-1010: OpenClaw 2026.10.10's database-engine "anchor". When a store family is moved to
+# PostgreSQL (`database.engine: postgres` + `openclaw database port`), the vendor replaces
+# that store's SQLite file with a fresh file holding ONLY this one table (store_id, engine
+# CHECK = 'postgres', schema) -- grounded in the installed 2026.10.10 dist:
+# `doctor-database-port-*.mjs` writes it; `openEngineStore` (managed-handoff-runtime.mjs)
+# refuses to open a store as SQLite whenever `inspectStateSqlite(db).hasEngineAnchor`
+# ("This store lives in PostgreSQL schema ..."), and refuses to switch a file that still
+# holds other data. `hasEngineAnchor` is `facts.tables.has("openclaw_engine_anchor")`:
+# a REAL table, exact-case name -- executed against the vendor's own function on probe
+# files, a VIEW, a trigger or an upper-case table of that name is NOT an anchor (the
+# store stays live SQLite there, so treating those as anchors would let a planted view
+# blind every state reader while OpenClaw keeps running on the SQLite data). Any rows
+# beside a real anchor are not live data -- OpenClaw will not open that file as SQLite.
+ENGINE_ANCHOR_TABLE = "openclaw_engine_anchor"
+ENGINE_ANCHOR_REASON = (
+    "this OpenClaw store file is a database-engine anchor (table openclaw_engine_anchor): "
+    "the store's live data is kept in PostgreSQL, which this local, read-only audit does "
+    "not connect to, so its contents were not read"
+)
+
+
+def has_engine_anchor(conn: "sqlite3.Connection") -> bool:
+    """True when *conn*'s file is an OpenClaw PostgreSQL engine anchor (B-1010).
+
+    Mirrors the vendor's ``inspectStateSqlite(...).hasEngineAnchor`` exactly: a real
+    ``type='table'`` row named ``openclaw_engine_anchor`` (BINARY comparison, so exact
+    case). Raises ``sqlite3.Error`` when the schema itself cannot be read.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (ENGINE_ANCHOR_TABLE,),
+    ).fetchone()
+    return row is not None
+
+
+def refuse_engine_anchor(conn: "sqlite3.Connection") -> None:
+    """Close *conn* and raise ``sqlite3.OperationalError`` if it is an engine anchor.
+
+    Every state-DB reader already turns a ``sqlite3.Error`` that is NOT "no such table"
+    into its own "could not read" outcome (UNKNOWN, never PASS); the reason text here
+    deliberately does not contain that phrase. A schema-read failure closes the
+    connection and propagates unchanged.
+    """
+    try:
+        anchored = has_engine_anchor(conn)
+    except sqlite3.Error:
+        conn.close()
+        raise
+    if anchored:
+        conn.close()
+        raise sqlite3.OperationalError(ENGINE_ANCHOR_REASON)
+
+
 def _open_readonly(db_path: Path) -> "sqlite3.Connection":
     """One hardened way to open a per-agent trajectory database read-only.
 
@@ -538,6 +591,7 @@ def _open_readonly(db_path: Path) -> "sqlite3.Connection":
     # exclusive lock to proceed past; in WAL mode readers never block writers at all, so
     # this timeout is pure insurance for the less common journal mode.
     conn.execute("PRAGMA busy_timeout = 2000")
+    refuse_engine_anchor(conn)  # B-1010: an anchor's live data is in PostgreSQL
     return conn
 
 

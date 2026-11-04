@@ -5806,7 +5806,12 @@ def _connect_state_db(db_path: Path):
     if os.path.islink(db_path):
         raise sqlite3.OperationalError(
             "the state database path is a symbolic link; this audit does not follow links")
-    return sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    # B-1010: a PostgreSQL engine anchor is not the store's data -- refuse it with the same
+    # error type (see `trajectorystore.refuse_engine_anchor`), so every caller reports its
+    # own "could not read" outcome instead of reading an empty file as "nothing there".
+    _trajectorystore.refuse_engine_anchor(conn)
+    return conn
 
 
 def _walk_named(directory: Path, name: str, max_files: int, capped: "list | None" = None) -> "list[Path]":
