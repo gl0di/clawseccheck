@@ -410,7 +410,9 @@ def test_the_query_names_only_the_trajectory_table_and_binds_its_limit():
     # (busy_timeout, query_only) + 2 SELECT + 2 count(*) exclusion-disclosure
     # queries (round 3/4), no more. Each appears once in SOURCE even though called
     # from two places.
-    assert len(execute_line_nums) == 11, [lines[i] for i in execute_line_nums]  # C-699: +1 count
+    # B-1010: + has_engine_anchor's bound sqlite_master lookup (the PostgreSQL engine
+    # anchor test `_open_readonly` runs on every connection).
+    assert len(execute_line_nums) == 12, [lines[i] for i in execute_line_nums]  # C-699: +1 count
     # Each real call (the two SELECTs, and _table_kind's own query) is wrapped across a
     # few physical lines here (`conn.execute(\n    CONST, (...)\n).fetchall()`) -- a
     # single-LINE scan would miss a table name placed on the continuation line, so each
@@ -446,12 +448,17 @@ def test_the_query_names_only_the_trajectory_table_and_binds_its_limit():
     # with `rootpage` likewise bound -- never a value read from this file's own
     # untrusted schema spliced into SQL text.
     sqlite_master_windows = [w for w in windows if "sqlite_master" in w]
-    assert len(sqlite_master_windows) == 2, sqlite_master_windows
-    assert '"SELECT type, sql, rootpage FROM sqlite_master WHERE name = ?"' in (
+    assert len(sqlite_master_windows) == 3, sqlite_master_windows
+    # B-1010: the engine-anchor lookup, its one value bound (a module constant).
+    assert "\"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1\"," in (
         sqlite_master_windows[0]
     )
-    assert '"SELECT count(*) FROM sqlite_master WHERE rootpage = ?", (rootpage,)' in (
+    assert "(ENGINE_ANCHOR_TABLE,)" in sqlite_master_windows[0]
+    assert '"SELECT type, sql, rootpage FROM sqlite_master WHERE name = ?"' in (
         sqlite_master_windows[1]
+    )
+    assert '"SELECT count(*) FROM sqlite_master WHERE rootpage = ?", (rootpage,)' in (
+        sqlite_master_windows[2]
     )
     # `table_xinfo`'s window is the ONE deliberate exception to "never an
     # interpolated query" below -- it must be EXACTLY the guarded f-string form
