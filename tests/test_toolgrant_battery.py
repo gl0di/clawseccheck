@@ -25,7 +25,9 @@ WHAT IT COVERS. Two populations, both replayed offline from ``tests/data/toolgra
   so a new group is swept the day it appears.
 
 TWO TOOL SETS. The six-tool family is parametrized per cell (a failure names one cell).
-``EXTENDED_TOOLS`` — ``gateway``, ``plugins``, ``ls``, ``openclaw``, ``pdf`` — is checked one
+``EXTENDED_TOOLS`` — ``gateway``, ``plugins``, ``ls``, ``openclaw``, ``pdf``, plus
+``dispatch_action`` and ``tool_call`` (openclaw@2026.10.10's renamed Tool Search tool and its
+alias, CLAWSECCHECK-B-1007) — is checked one
 test per tool over every row, and the synthetic rows are checked one test per tool. Making
 those 4,173 further cells parametrized cases would have been the same assertion with a longer
 log, and the suite's test-count claims in the docs (``tests/test_doc_facts.py``) move with
@@ -78,7 +80,7 @@ FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 DATA = Path(__file__).resolve().parent / "data" / "toolgrant_battery.json"
 
 TOOL_FAMILY = ("read", "write", "edit", "apply_patch", "exec", "automations")
-EXTENDED_TOOLS = ("gateway", "plugins", "ls", "openclaw", "pdf")
+EXTENDED_TOOLS = ("gateway", "plugins", "ls", "openclaw", "pdf", "dispatch_action", "tool_call")
 ALL_TOOLS = TOOL_FAMILY + EXTENDED_TOOLS
 
 _EDGE_CASE_LABELS = frozenset({
@@ -278,7 +280,8 @@ def test_matches_the_installed_runtime(label, scope, tool, expected):
 
 @pytest.mark.parametrize("tool", EXTENDED_TOOLS)
 def test_extended_tool_matches_the_installed_runtime(tool):
-    """gateway/plugins/ls/openclaw/pdf over every fixture AND every synthetic row."""
+    """gateway/plugins/ls/openclaw/pdf/dispatch_action/tool_call over every fixture AND every
+    synthetic row."""
     wrong = _mismatches(BATTERY, tool)
     assert not wrong, f"{len(wrong)} cell(s) disagree for {tool!r}, first: {wrong[:8]}"
 

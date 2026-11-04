@@ -78,16 +78,38 @@ names a user wrote, so it alone can see the moved tables - for ``gateway``, ``pl
 ``ls``, ``openclaw`` and ``pdf`` reached through a group-level allow/deny. None of the 8
 ``alsoAllow`` entries in the fixture corpus changes its answer.
 
-ALIAS TABLE - THREE ENTRIES, GROUNDED, NOT TWO. ``checks/_shared.py``'s ``_TOOL_NAME_ALIASES``
-and ``toolpolicy.py``'s copy of the same table both carry only ``{"bash": "exec",
-"apply-patch": "apply_patch"}``. The real ``TOOL_NAME_ALIASES`` (the ``tool-policy-shared``
-bundle) has a third: ``"cron": "automations"`` - a "permanently accepted alias ... same
-contract as bash -> exec" per the dist's own comment (``automations-tool-name-*``). Neither
-existing copy is wrong for what it covers (bash/apply-patch), but a guard comparing them to
-EACH OTHER (a peer) would stay green while both are missing the same third entry - the
-"anchor a guard on the producer" lesson. This module's own three-entry table is grounded
-against the dist directly in ``tests/test_toolgrant_dist_grounding.py``, not against either
-sibling copy.
+ALIAS TABLE - FOUR ENTRIES ON openclaw@2026.10.10, THREE BEFORE IT, GROUNDED, NOT TWO.
+``checks/_shared.py``'s ``_TOOL_NAME_ALIASES`` and ``toolpolicy.py``'s copy of the same table
+both carry only ``{"bash": "exec", "apply-patch": "apply_patch"}``. The real
+``TOOL_NAME_ALIASES`` (the ``tool-policy-shared`` bundle) has a third: ``"cron": "automations"``
+- a "permanently accepted alias ... same contract as bash -> exec" per the dist's own comment
+(``automations-tool-name-*``). Neither existing copy is wrong for what it covers
+(bash/apply-patch), but a guard comparing them to EACH OTHER (a peer) would stay green while
+both are missing the same third entry - the "anchor a guard on the producer" lesson. This
+module's own table is grounded against the dist directly in
+``tests/test_toolgrant_dist_grounding.py``, not against either sibling copy.
+
+``tool_call -> dispatch_action`` is the fourth, and it is BUILD-GATED.
+openclaw@2026.10.10 renamed the Tool Search catalog's call-through control tool: the
+``tool-search`` bundle's ``TOOL_CALL_RAW_TOOL_NAME`` is ``"tool_call"`` on 2026.10.9 and
+``"dispatch_action"`` on 2026.10.10, and the same release added the alias plus a second,
+non-table rule in ``createToolPolicyMatcher`` (``legacyDispatcher``): when the asked name
+normalizes to ``dispatch_action``, the LITERAL ``"tool_call"`` is also matched against the
+deny and allow patterns. That is how a glob that reaches only the old spelling still
+reaches the renamed tool - executed on 2026.10.10: ``allow: ["tool_*"]`` grants
+``dispatch_action`` and ``deny: ["tool_*"]`` denies it, neither of which the alias alone
+explains (the alias folds a policy ENTRY, and ``"tool_*"`` is not the key ``"tool_call"``).
+Before 2026.10.10 neither rule exists and ``tool_call`` is an ordinary tool id, so
+``granted()`` and ``_normalize_tool_name()`` take an optional ``version``
+(``(year, month, patch, ...)``): below ``_TOOL_CALL_ALIAS_SINCE`` both rules are off; ``None``
+means the newest grounded build, the same default ``retiredformats.find_retired`` uses. No
+caller in ``clawseccheck/`` passes it today, and none asks about either name except the
+user-written ``alsoAllow`` candidate filter in ``checks/_shared.py``, where the two answers
+differ only for a config naming both spellings across allow and deny on an older build. The
+sibling copies stay at two entries on purpose: ``toolpolicy.py`` folds names only to decide
+whether the fixed tool ``read`` matches, and ``checks/_shared.py``'s ``_canon_tool`` compares
+against fixed fs/exec sets; neither set contains ``automations`` or ``dispatch_action``, so a
+third or fourth entry cannot change their answer.
 
 ``read`` IMPLIES ``skills_read`` (openclaw@2026.10.1, C-683; same bundle and function): a policy
 whose allow list names ``read`` - directly, through ``group:fs`` or a glob - grants
@@ -127,7 +149,7 @@ docstring explains):
   ``show_widget`` at this layer (``tests/test_toolgrant_dist_grounding.py``). No check asks
   about either target by name (only the ``alsoAllow`` filter could, with a user-written
   entry); a consumer that starts to would need this modelled and its own differential (the
-  three-entry alias map above is unaffected - that is a different table).
+  alias map above is unaffected - that is a different table).
 * glob patterns other than a bare ``*`` interior wildcard are handled (``_matches`` below is
   the same compiled-regex approach ``toolpolicy.py::_matches`` already carries, grounded
   against ``glob-pattern-DFVWJ-hh.mjs`` - openclaw@2026.9.3) - this is modelled, not
@@ -195,11 +217,30 @@ class _GlobalScope:
 GLOBAL_SCOPE = _GlobalScope()
 
 # TOOL_NAME_ALIASES (the tool-policy-shared bundle; a Map since 2026.9.2, its three pairs
-# unchanged through openclaw@2026.9.7 - compared whole against the EXECUTED Map on 2026-09-30).
-# Three entries - see the module docstring's "ALIAS TABLE" section for why this is not a copy
-# of checks/_shared.py's/toolpolicy.py's two-entry tables. Grounded directly against the dist
-# in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
-_TOOL_NAME_ALIASES = {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}
+# unchanged through openclaw@2026.10.9; openclaw@2026.10.10 adds "tool_call" ->
+# "dispatch_action", compared whole against the EXECUTED Map on 2026-11-04). See the module
+# docstring's "ALIAS TABLE" section for why this is not a copy of checks/_shared.py's/
+# toolpolicy.py's two-entry tables, and why the fourth pair is build-gated. Grounded directly
+# against the dist in tests/test_toolgrant_dist_grounding.py, never against either sibling copy.
+_TOOL_NAME_ALIASES = {
+    "bash": "exec",
+    "apply-patch": "apply_patch",
+    "tool_call": "dispatch_action",
+    "cron": "automations",
+}
+# The first build whose resolver folds "tool_call" to "dispatch_action" and runs the matcher's
+# legacyDispatcher rule (both absent from the 2026.10.9 dist, both present in 2026.10.10).
+_TOOL_CALL_ALIAS_SINCE = (2026, 10, 10)
+_DISPATCHER = "dispatch_action"
+_LEGACY_DISPATCHER = "tool_call"
+
+
+def _dispatcher_rules_apply(version) -> bool:
+    """Does the build *version* fold ``tool_call`` and run ``legacyDispatcher``? ``None`` (or a
+    malformed value) means the newest grounded build, where both rules exist."""
+    if not isinstance(version, tuple) or len(version) < 3:
+        return True
+    return tuple(version)[:3] >= _TOOL_CALL_ALIAS_SINCE
 
 # CORE_TOOL_GROUPS - the object the vendor's ``expandToolGroups`` actually consults
 # (``TOOL_GROUPS = { ...CORE_TOOL_GROUPS }`` in tool-policy-shared, built by
@@ -322,17 +363,20 @@ def _normalize_agent_id(value) -> str:
     return folded or _DEFAULT_AGENT_ID
 
 
-def _normalize_tool_name(name) -> str:
-    """normalizeToolPolicyName: trim + lowercase (non-strings fold to ""), then alias."""
+def _normalize_tool_name(name, version=None) -> str:
+    """normalizeToolPolicyName: trim + lowercase (non-strings fold to ""), then alias. The
+    ``tool_call`` alias applies only on builds that have it (``_dispatcher_rules_apply``)."""
     text = name.strip().lower() if isinstance(name, str) else ""
+    if text == _LEGACY_DISPATCHER and not _dispatcher_rules_apply(version):
+        return text
     return _TOOL_NAME_ALIASES.get(text, text)
 
 
-def _expand_groups(entries) -> list:
+def _expand_groups(entries, version=None) -> list:
     """expandToolGroups: normalize each entry, expand a known group id to its members, dedup."""
     out: list = []
     for raw in entries or []:
-        value = _normalize_tool_name(raw)
+        value = _normalize_tool_name(raw, version)
         if not value:
             continue
         members = _CORE_TOOL_GROUPS.get(value)
@@ -357,19 +401,25 @@ def _matches(name: str, patterns) -> bool:
     return False
 
 
-def _policy_allows(name: str, policy) -> bool:
+def _policy_allows(name: str, policy, version=None) -> bool:
     """isToolAllowedByPolicyName + createToolPolicyMatcher: deny wins, then allow (empty
     allow == allow everything), then two implications: read=>skills_read (openclaw@2026.10.1,
-    C-683; also needs ``read`` itself not denied) and write=>apply_patch."""
+    C-683; also needs ``read`` itself not denied) and write=>apply_patch.
+
+    From openclaw@2026.10.10 the matcher's ``legacyDispatcher`` rule
+    also tests the literal ``"tool_call"`` against deny and allow when ``name`` is
+    ``dispatch_action``, so a pattern written for the old spelling (``tool_*``) still reaches
+    the renamed tool. ``name`` is already normalized, so this fires for both spellings."""
     if not policy:
         return True
-    deny = _expand_groups(policy.get("deny"))
-    if _matches(name, deny):
+    legacy = name == _DISPATCHER and _dispatcher_rules_apply(version)
+    deny = _expand_groups(policy.get("deny"), version)
+    if _matches(name, deny) or (legacy and _matches(_LEGACY_DISPATCHER, deny)):
         return False
-    allow = _expand_groups(policy.get("allow"))
+    allow = _expand_groups(policy.get("allow"), version)
     if not allow:
         return True
-    if _matches(name, allow):
+    if _matches(name, allow) or (legacy and _matches(_LEGACY_DISPATCHER, allow)):
         return True
     if name == "skills_read" and _matches("read", allow) and not _matches("read", deny):
         return True
@@ -539,7 +589,7 @@ def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
     return policies
 
 
-def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
+def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE, version=None) -> bool:
     """Is ``tool`` granted at ``scope`` (``GLOBAL_SCOPE``, or a declared agent id) by ``cfg``?
 
     The port of ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` - see the
@@ -552,11 +602,15 @@ def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE) -> bool:
     agent id, never the global scope (executed: an agent with that id resolves exactly like
     one named ``w``). See ``GLOBAL_SCOPE``'s own docstring (the ``_GlobalScope`` class) for
     why this replaced an earlier ``agent: bool`` keyword a caller could forget to pass.
+
+    ``version`` is the numeric build the answer is for (``(year, month, patch, ...)``);
+    ``None`` means the newest grounded build. It changes only the ``tool_call`` /
+    ``dispatch_action`` rules (see the module docstring's "ALIAS TABLE" section).
     """
     if not isinstance(cfg, dict) or not cfg:
         return False
-    name = _normalize_tool_name(tool)
-    return all(_policy_allows(name, policy) for policy in _policies(cfg, scope))
+    name = _normalize_tool_name(tool, version)
+    return all(_policy_allows(name, policy, version) for policy in _policies(cfg, scope))
 
 
 # Layers `resolved_scopes()`/`checks/_capability.py` cannot resolve and that CAN restrict.

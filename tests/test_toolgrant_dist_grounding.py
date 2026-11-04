@@ -69,9 +69,15 @@ def vendor() -> dict:
     return oracle.vendor_tables()
 
 
-# --------------------------------------------------------------------- alias table (3, not 2)
+# --------------------------------------------------------------------- alias table (4, not 2)
 
-def test_dist_tool_name_aliases_has_three_entries_including_cron():
+_DIST_ALIASES = {
+    "bash": "exec", "apply-patch": "apply_patch", "tool_call": "dispatch_action",
+    "cron": "automations",
+}
+
+
+def test_dist_tool_name_aliases_has_four_entries_including_cron_and_tool_call():
     text = dist_text("tool-policy-shared-*.js", symbol="TOOL_NAME_ALIASES",
                      contains="TOOL_NAME_ALIASES")
     # BOTH declaration shapes, because the vendor changed the container without changing
@@ -86,7 +92,8 @@ def test_dist_tool_name_aliases_has_three_entries_including_cron():
     body = match.group(1) if match.group(1) is not None else match.group(2)
     # `"k": "v"` (object) and `["k", "v"]` (Map) both reduce to a quoted pair.
     entries = dict(re.findall(r'"([^"]+)"\s*[:,]\s*"([^"]+)"', body))
-    assert entries == {"bash": "exec", "apply-patch": "apply_patch", "cron": "automations"}, entries
+    # openclaw@2026.10.10 added "tool_call" -> "dispatch_action" (CLAWSECCHECK-B-1007).
+    assert entries == _DIST_ALIASES, entries
     assert toolgrant._TOOL_NAME_ALIASES == entries
 
 
@@ -98,9 +105,7 @@ def test_our_alias_table_disagrees_with_the_two_narrower_sibling_copies():
 
     assert toolpolicy._TOOL_NAME_ALIASES == {"bash": "exec", "apply-patch": "apply_patch"}
     assert _shared._TOOL_NAME_ALIASES == {"bash": "exec", "apply-patch": "apply_patch"}
-    assert toolgrant._TOOL_NAME_ALIASES == {
-        "bash": "exec", "apply-patch": "apply_patch", "cron": "automations",
-    }
+    assert toolgrant._TOOL_NAME_ALIASES == _DIST_ALIASES
 
 
 def test_cron_alias_resolves_the_same_as_automations():
@@ -179,7 +184,7 @@ def test_the_canvas_and_update_plan_expansions_are_outside_the_grant_predicate(v
     ``progress_card`` in ``expandShippedCoreToolPolicyNames`` (tool-policy bundle). That runs
     in the tool-CONSTRUCTION pipeline, after ``resolveConfiguredToolPolicies``; the predicate
     ``granted()`` ports (``isToolAllowedByPolicies`` over that resolver's output) never applies
-    it, and ``TOOL_NAME_ALIASES`` is still the three-entry map. So an ``allow: ["canvas"]``
+    it, and ``TOOL_NAME_ALIASES`` does not map either name. So an ``allow: ["canvas"]``
     config does NOT grant ``show_widget`` at the layer toolgrant.py answers for — measured
     below by execution — while the pipeline that builds the tool list would. If a check ever
     asks ``granted(cfg, "show_widget")`` this is the gap to close, with its own differential."""
