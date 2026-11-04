@@ -155,14 +155,15 @@ docstring explains):
   against ``glob-pattern-DFVWJ-hh.mjs`` - openclaw@2026.9.3) - this is modelled, not
   skipped; listed here only to say explicitly that it is NOT one of the omissions.
 
-An unreadable/empty config is not evidence of a grant: ``granted()`` returns ``False`` for
-``cfg`` that is not a non-empty ``dict``, a DELIBERATE divergence from the vendor (which
-answers ``True`` for ``{}`` - nothing said restricts nothing) for the same reason
-``toolpolicy.read_reaches_outside_workspace`` makes the identical choice (see its own
-docstring / ``tests/test_b666_read_reach.py::test_a_blind_config_is_not_evidence_of_exposure``):
-a config this tool never actually parsed must not read as "everything is granted". The S1
-battery only exercises non-empty fixture configs, so this divergence sits outside its scope
-by construction, not as an exception carved out of a disagreement.
+An EMPTY config follows the vendor: ``{}`` carries no policy layer, so every tool is
+granted (executed: ``resolveConfiguredToolPolicies`` + ``isToolAllowedByPolicies`` answer
+``True`` for ``{}``, exactly as for a non-empty config with no ``tools`` block), and
+``resolved_scopes({})`` is the single GLOBAL default scope. Only a ``cfg`` that is not a
+``dict`` at all answers ``False`` / ``[]`` / ``None``. This leaf cannot tell a real empty
+``openclaw.json`` from a config the collector never found or could not parse - both reach
+it as ``{}`` - so "never read" is decided by the callers that hold the ``Context``
+(``ctx.config_found`` / ``ctx.config_parse_error``), which keep their UNKNOWN for it: see
+``checks/_capability.py``'s ``_config_was_read``. The battery pins ``{}`` as a synthetic row.
 
 Verified against the vendor: ``tests/test_toolgrant_battery.py`` replays assertions captured
 by EXECUTING ``resolveConfiguredToolPolicies``/``isToolAllowedByPolicies`` - the six-tool
@@ -568,7 +569,7 @@ def _policies(cfg: dict, scope=GLOBAL_SCOPE) -> list:
     answers are unchanged: it is now ``all(_policy_allows(name, p) for p in _policies(...))``,
     the same computation as before, just named.
 
-    Caller's responsibility: ``cfg`` must already be a non-empty ``dict`` (``granted()`` and
+    Caller's responsibility: ``cfg`` must already be a ``dict`` (``granted()`` and
     ``policy_layers()`` both guard this before calling in)."""
     agent_tools = _agent_tools(cfg, scope)
     global_tools = cfg.get("tools")
@@ -610,7 +611,7 @@ def granted(cfg: dict, tool: str, scope=GLOBAL_SCOPE, version=None) -> bool:
     ``None`` means the newest grounded build. It changes only the ``tool_call`` /
     ``dispatch_action`` rules (see the module docstring's "ALIAS TABLE" section).
     """
-    if not isinstance(cfg, dict) or not cfg:
+    if not isinstance(cfg, dict):
         return False
     name = _normalize_tool_name(tool, version)
     return all(_policy_allows(name, policy, version) for policy in _policies(cfg, scope))
@@ -649,7 +650,7 @@ def policy_layers(cfg: dict, scope=GLOBAL_SCOPE) -> list:
     stripped out, so the grant this scope carries is OpenClaw's own permissive default, not
     anything the operator declared.
     """
-    if not isinstance(cfg, dict) or not cfg:
+    if not isinstance(cfg, dict):
         return []
     return [
         policy for policy in _policies(cfg, scope)
@@ -729,7 +730,7 @@ def resolved_scopes(cfg: dict) -> "list[ScopeResolution] | None":
 
     Returns ``None`` -- the caller keeps its base UNKNOWN, never a guess -- for any of:
 
-    * ``cfg`` is not a non-empty ``dict`` (matches ``granted()``'s own deliberate divergence);
+    * ``cfg`` is not a ``dict`` (an empty one is an ordinary config: one GLOBAL scope);
     * the global ``tools`` block, an agent's own ``tools`` block, or (with no roster)
       ``agents.defaults.tools`` is present but not a well-formed policy block
       (``_block_well_formed``: not a mapping, a list/allow/deny key that isn't a list, or a
@@ -744,7 +745,7 @@ def resolved_scopes(cfg: dict) -> "list[ScopeResolution] | None":
     function only marks them, it does not filter them out, so a caller that wants a strict
     per-scope answer set (``checks/_capability.py``'s ``_fs_scope_grants``) does that itself.
     """
-    if not isinstance(cfg, dict) or not cfg:
+    if not isinstance(cfg, dict):
         return None
     if "tools" in cfg and not _block_well_formed(cfg["tools"]):
         return None

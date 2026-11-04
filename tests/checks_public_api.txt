@@ -147,6 +147,7 @@ _check_unicode_obfuscation
 _code_mode_default
 _codex_appserver_yolo_reach
 _codex_unmoded_server_names
+_config_was_read
 _credential_is_plaintext
 _credential_store_state
 _defensive_context

@@ -358,6 +358,7 @@ from ._capability import (
     _approval_bypass_actors,
     _b31_collect_deny_lists,
     _b55_resolved_write_grant,
+    _config_was_read,
     _b55_write_tools_granted,
     _b68_fs_tools_granted,
     _b737_provenance,

@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from clawseccheck.catalog import FAIL, PASS, UNKNOWN
+from clawseccheck.catalog import FAIL, PASS, UNKNOWN, WARN
 from clawseccheck.checks import (
     check_audit_log,                  # B10
     check_cachetrace_redaction,       # B82
@@ -163,8 +163,13 @@ class TestRegressionGuardIsInert:
     # Context directly, so no installed version is resolved and the check cannot tell which
     # default applies; its own UNKNOWN is the honest answer, not the B-228 guard firing.
     # The guard's real assertion (its detail must not appear) stays live for it above.
-    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace",
-                                    "check_skill_workshop_autonomy"}
+    _OWN_UNKNOWN_ON_EMPTY_CONFIG = {"check_skill_workshop_autonomy"}
+    # B68 left the UNKNOWN set: a real, parsed "{}" is OpenClaw's grant-all default (the
+    # vendor resolver grants every tool with no policy layer, toolgrant follows it), and
+    # tools.fs.workspaceOnly defaults to false, so the fs tools ARE granted unconfined -
+    # the same WARN `{"meta": {}}` already got. A config never read keeps its UNKNOWN
+    # (tests/test_b1016_toolgrant_empty_config.py).
+    _OWN_WARN_ON_EMPTY_CONFIG = {"check_exec_applypatch_workspace"}
 
     def test_readable_config_other_guarded_checks_still_pass(self, tmp_path):
         # A valid, fully-parsed "{}" config declares nothing dangerous, so every guarded
@@ -189,6 +194,9 @@ class TestRegressionGuardIsInert:
                     f"{check_fn.__name__} is registered as returning its own UNKNOWN on "
                     f"an empty config but returned {finding.status!r}"
                 )
+                continue
+            if check_fn.__name__ in self._OWN_WARN_ON_EMPTY_CONFIG:
+                assert finding.status == WARN, (check_fn.__name__, finding.status)
                 continue
             assert finding.status == PASS, (
                 f"{check_fn.__name__} returned {finding.status!r} (expected PASS) on a "

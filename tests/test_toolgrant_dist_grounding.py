@@ -448,7 +448,8 @@ def test_synthetic_configs_reach_every_group_and_profile_they_are_given():
     for profile in fake["profiles"]:
         assert f"synthetic/profile/{profile}" in rows, profile
     assert list(dict(oracle.synthetic_configs(fake))) == list(rows)  # deterministic order
-    assert all(isinstance(cfg, dict) and cfg for cfg in rows.values())
+    assert all(isinstance(cfg, dict) for cfg in rows.values())
+    assert [label for label, cfg in rows.items() if not cfg] == ["synthetic/empty"]
 
 
 def test_all_tool_ids_includes_names_the_catalog_only_mentions_indirectly():

@@ -4321,6 +4321,51 @@
  },
  {
   "agents": [],
+  "label": "bad_b2_msteams_account_open",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "dispatch_action": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "gateway": {
+    "global": true
+   },
+   "ls": {
+    "global": true
+   },
+   "openclaw": {
+    "global": true
+   },
+   "pdf": {
+    "global": true
+   },
+   "plugins": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "tool_call": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
   "label": "bad_b305_c135_forged_header_bypass",
   "results": {
    "apply_patch": {
@@ -16346,6 +16391,96 @@
  },
  {
   "agents": [],
+  "label": "clean_b1_postgres_dsn_env_password",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "dispatch_action": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "gateway": {
+    "global": true
+   },
+   "ls": {
+    "global": true
+   },
+   "openclaw": {
+    "global": true
+   },
+   "pdf": {
+    "global": true
+   },
+   "plugins": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "tool_call": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b1_postgres_dsn_secretref",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "dispatch_action": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "gateway": {
+    "global": true
+   },
+   "ls": {
+    "global": true
+   },
+   "openclaw": {
+    "global": true
+   },
+   "pdf": {
+    "global": true
+   },
+   "plugins": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "tool_call": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
   "label": "clean_b224_softhyphen_benign",
   "results": {
    "apply_patch": {
@@ -17466,6 +17601,96 @@
    },
    "write": {
     "global": false
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b2_msteams_default_entry_closes_base",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "dispatch_action": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "gateway": {
+    "global": true
+   },
+   "ls": {
+    "global": true
+   },
+   "openclaw": {
+    "global": true
+   },
+   "pdf": {
+    "global": true
+   },
+   "plugins": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "tool_call": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  }
+ },
+ {
+  "agents": [],
+  "label": "clean_b2_msteams_named_accounts_only",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "dispatch_action": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "gateway": {
+    "global": true
+   },
+   "ls": {
+    "global": true
+   },
+   "openclaw": {
+    "global": true
+   },
+   "pdf": {
+    "global": true
+   },
+   "plugins": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "tool_call": {
+    "global": true
+   },
+   "write": {
+    "global": true
    }
   }
  },
@@ -26693,6 +26918,53 @@
     "global": true
    }
   }
+ },
+ {
+  "agents": [],
+  "cfg": {},
+  "label": "synthetic/empty",
+  "results": {
+   "apply_patch": {
+    "global": true
+   },
+   "automations": {
+    "global": true
+   },
+   "dispatch_action": {
+    "global": true
+   },
+   "edit": {
+    "global": true
+   },
+   "exec": {
+    "global": true
+   },
+   "gateway": {
+    "global": true
+   },
+   "ls": {
+    "global": true
+   },
+   "openclaw": {
+    "global": true
+   },
+   "pdf": {
+    "global": true
+   },
+   "plugins": {
+    "global": true
+   },
+   "read": {
+    "global": true
+   },
+   "tool_call": {
+    "global": true
+   },
+   "write": {
+    "global": true
+   }
+  },
+  "synthetic": true
  },
  {
   "agents": [],
