@@ -196,7 +196,9 @@ _EXEMPT = {
                             "self-modification / supply-chain topic (18 checks + "
                             "helpers); topic-faithful and over budget by design. A finer "
                             "split is a later cycle.",
-    "checks/_content.py": "~17,895 lines (restated 2026-10-14, C-730 — was ~17,155; the "
+    "checks/_content.py": "~18,420 lines (restated 2026-11-04, B-1011 — B339's URL-query "
+                          "exfil leg and its bare-listing match; was ~17,895. "
+                          "Restated 2026-10-14, C-730 — was ~17,155; the "
                           "one-pass scanners that replaced five quadratic patterns, each kept "
                           "beside its scanner as the definition it is tested against. "
                           "Restated 2026-09-26 on integration/4.3.0 after the "

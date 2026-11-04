@@ -319,10 +319,11 @@ def test_non_network_call_on_the_metadata_url_is_not_fail(lines):
          'await fetch("https://example.com/ping?s=" + resp.status);'],
     ],
 )
-def test_reporting_only_the_status_code_is_not_fail(lines):
-    # C-135 round 2: a health check's status is not the metadata response.
+def test_reporting_only_the_status_code_is_a_documented_fail(lines):
+    # No status exemption: every discriminator tried was evadable (see the comment
+    # above `_b339_credential_in_url`). A derived value of the response is a FAIL.
     blob = "# file: health.py\n" + "\n".join(lines) + "\n"
-    assert _b339(blob).status != FAIL
+    assert _b339(blob).status == FAIL
 
 
 def test_network_verb_wrapper_on_a_url_name_still_fails():
@@ -410,10 +411,11 @@ def test_unfamiliar_wrapper_on_a_url_name_still_fails():
          'await fetch("https://example.com/t?onAli=" + ok);'],
     ],
 )
-def test_fetch_reduced_to_its_status_on_the_spot_is_not_fail(lines):
-    # C-135 round 3: an "am I on a cloud host" probe reporting a status or boolean.
+def test_fetch_reduced_to_its_status_on_the_spot_is_a_documented_fail(lines):
+    # Same documented limit: an "am I on a cloud host" probe that reports a status
+    # or boolean off-host FAILs, like a length or expiry derived from the response.
     blob = "# file: probe.py\n" + "\n".join(lines) + "\n"
-    assert _b339(blob).status != FAIL
+    assert _b339(blob).status == FAIL
 
 
 def test_status_then_more_chained_is_still_a_response():
