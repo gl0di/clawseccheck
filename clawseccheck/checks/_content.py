@@ -5170,29 +5170,86 @@ def _b58_pattern_hit_count(pat: re.Pattern, s: str) -> int:
     return sum(1 for _ in pat.finditer(s))
 
 
+def _b58_comment_spans(text: str) -> list:
+    """B-1019: (start, end) of every HTML comment, in one linear pass - the same comments
+    `_B58_HTML_COMMENT_RE` (`<!--(.*?)-->`) finds, plus an unterminated `<!--` running to
+    the end of the text. Not the regex itself: on many unterminated `<!--` it rescans to
+    the end from each one (quadratic)."""
+    spans = []
+    pos = text.find("<!--")
+    while pos != -1:
+        end = text.find("-->", pos + 4)
+        if end == -1:
+            spans.append((pos, len(text)))
+            break
+        spans.append((pos, end + 3))
+        pos = text.find("<!--", end + 3)
+    return spans
+
+
 def _b58_visible_text(text: str) -> str:
-    """B-1019: `text` with every hidden region blanked to spaces - each HTML comment (an
+    """B-1019: `text` with every hidden region blanked - each HTML comment (an
     unterminated `<!--` runs to the end, as a renderer hides it) and each hidden-styled
     tag `_b58_hidden_segments` reads. Used to tell whether an injection hit on a
     whole-document variant actually sits INSIDE a hidden region, rather than in plain text
-    while an unrelated comment elsewhere supplies the html-comment signal."""
+    while an unrelated comment elsewhere supplies the html-comment signal.
+
+    A blanked region starts with a `|` sentinel, not a space: INJECTION_PATTERNS join
+    words with a literal space and normalization collapses whitespace, so all-space
+    blanking would glue `ignore <!--x--> previous instructions` into a NEW visible match
+    and hide a real hidden hit behind an equal count. Newlines are kept, so the result
+    has the same length and line structure as `text`."""
     chars = list(text)
 
     def _blank(a: int, b: int) -> None:
         for i in range(a, b):
-            if chars[i] not in "\n":
+            if chars[i] != "\n":
                 chars[i] = " "
+        if a < b and chars[a] != "\n":
+            chars[a] = "|"
 
-    for m in _B58_HTML_COMMENT_RE.finditer(text):
-        _blank(*m.span())
-    tail = text.rfind("<!--")
-    if tail != -1 and "-->" not in text[tail:]:
-        _blank(tail, len(text))
+    for a, b in _b58_comment_spans(text):
+        _blank(a, b)
     if _B58_HIDDEN_STYLE_RE.search(text):
         for m in _b58_hidden_tags(text):
             if _B58_HIDDEN_STYLE_RE.search(m.group("attrs") or ""):
                 _blank(*m.span())
     return "".join(chars)
+
+
+_B58_UNMODELLED_HIDING_RE = re.compile(
+    r"<\s*style\b|<[^<>]*?\s(?:hidden|aria-hidden\s*=\s*[\"']?true)\b",
+    re.IGNORECASE,
+)
+
+
+def _b58_hiding_unresolved(text: str) -> bool:
+    """B-1019 fail-closed: True when `text` carries a way of hiding content that
+    `_b58_visible_text` does not map to a span - a `<style>` block (class-based hiding),
+    a `hidden` / `aria-hidden="true"` attribute, or a hidden-style token outside every
+    region it blanked (a nested or oversize tag the hidden-tag reader did not resolve).
+    The location-aware rule then does not apply and the pre-B-1019 rule is kept."""
+    if _B58_UNMODELLED_HIDING_RE.search(text):
+        return True
+    if not _B58_HIDDEN_STYLE_RE.search(text):
+        return False
+    spans = _b58_comment_spans(text)
+    spans += [m.span() for m in _b58_hidden_tags(text)
+              if _B58_HIDDEN_STYLE_RE.search(m.group("attrs") or "")]
+    # Merge the spans once, then one bisect per hidden-style token (linear-ish, never
+    # spans x tokens).
+    merged: list[list[int]] = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    starts = [a for a, _ in merged]
+    for m in _B58_HIDDEN_STYLE_RE.finditer(text):
+        i = bisect.bisect_right(starts, m.start()) - 1
+        if i < 0 or m.start() >= merged[i][1]:
+            return True
+    return False
 
 
 def _b58_extract_actionable(seg_norm: str) -> bool:
@@ -6541,6 +6598,7 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
             )
             hidden = True
         _visible_cache: dict = {}
+        hiding_unresolved = _b58_hiding_unresolved(text)
 
         def visible_variant(v: str) -> str:
             # The visible counterpart of a whole-document variant: `norm` maps to the
@@ -6594,6 +6652,7 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                         and (
                             is_extract
                             or "base64:" in signals
+                            or hiding_unresolved
                             or _b58_pattern_hit_count(pat, variant)
                             > _b58_pattern_hit_count(pat, visible_variant(variant))
                         )
