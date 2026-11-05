@@ -3741,7 +3741,8 @@ def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     what completes the "shell -c <payload>" shape, which a flag-presence check on the
     STALE, pre-mutation literal can never see (the flag and the payload are typically
     added together, in that same call). `_REEXEC_WRAPPER_NAMES` (env/sudo/ssh/...)
-    need no flag at all -- true unconditionally, same as in the stricter check."""
+    need no flag at all -- true unconditionally, same as in the stricter check; `find`
+    is included because the append may itself add the `-exec` action (B-1021)."""
     if not elts:
         return False
     prog = elts[0]
@@ -3750,7 +3751,8 @@ def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
     if basename in _PYTHON_INTERPRETERS and _python_option_list_closed(elts):
         return False  # B-1018: a later append can only reach the module/script's argv
-    return basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
+    return (basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
+            or basename == "find")  # B-1021: a later append can add `-exec sh -c <x> ;`
 
 
 # B-1018: the Python interpreters in `_SHELL_EVAL_FLAG_INTERPRETERS`.
@@ -4257,7 +4259,28 @@ _SHELL_EVAL_FLAG_INTERPRETERS = frozenset({
     "python", "python2", "python3", "perl", "ruby", "php", "node", "deno",
 })
 _EVAL_FLAG_NAMES = frozenset({"-c", "-e", "--eval", "/c", "-command", "--command"})
-_REEXEC_WRAPPER_NAMES = frozenset({"env", "sudo", "doas", "nohup", "ssh"})
+_REEXEC_WRAPPER_NAMES = frozenset({
+    "env", "sudo", "doas", "nohup", "ssh",
+    # B-1021: more programs whose usage line is "[options] ... COMMAND [ARG]...", read
+    # from each tool's own `--help` (coreutils, util-linux, findutils, procps, polkit,
+    # busybox). Like env/sudo above they are matched on argv[0] alone, WITHOUT parsing
+    # their option grammar: every later element counts as command position, so a
+    # tainted `sh -c` string, a tainted program word, or a tainted word that only LOOKS
+    # like a wrapper option all convict. That is deliberately fail-closed -- a per-tool
+    # option table is the enumerative shape B-996/B-986 retracted -- and it over-
+    # approximates the same way env/sudo always have: `["timeout", "30", "git",
+    # "clone", url]` with a tainted url reads as command injection, not argument
+    # injection. Measured 2026-11-05: the only real-fleet Python argv list headed by any
+    # of these names is the xlsx recalc.py `timeout`/`gtimeout` prefix, which is
+    # already the accepted B-1018 row-4 residual (crit before and after).
+    "timeout", "gtimeout", "nice", "ionice", "stdbuf", "setsid", "xargs", "busybox",
+    "chroot", "taskset", "flock", "chrt", "unshare", "nsenter", "runuser", "setpriv",
+    "prlimit", "pkexec", "su", "time", "watch",
+})
+# B-1021: `find` runs a program only behind one of these actions (`find PATH... -exec
+# CMD ... ;`), so -- like an interpreter's eval flag -- it is shell-indirect only when
+# one of them is literally present in the same argv.
+_FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 
 
 def _argv0_is_shell_indirect_exec(elts: list) -> bool:
@@ -4277,6 +4300,13 @@ def _argv0_is_shell_indirect_exec(elts: list) -> bool:
     basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
     if basename in _REEXEC_WRAPPER_NAMES:
         return True
+    if basename == "find":
+        return any(
+            isinstance(e, ast.Constant)
+            and isinstance(e.value, str)
+            and e.value.lower() in _FIND_EXEC_ACTIONS
+            for e in elts[1:]
+        )
     if basename in _SHELL_EVAL_FLAG_INTERPRETERS:
         return any(
             isinstance(e, ast.Constant)
