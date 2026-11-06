@@ -2235,8 +2235,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   silently dropped); plus the full byte range of an over-length log line (via overlapping
   windows) instead of only its head and tail. It applies
   to B164/B180, which run on **every** audit, so it has effect with or without `--full`. The
-  per-check and whole-audit wall-clock budgets are unchanged - the byte plan, not the clock,
-  is what widened, so a bigger scan cannot degrade a check into a capped `UNKNOWN`. Slower, and
+  per-check and whole-audit wall-clock budgets are raised in the same step (120 s per check and
+  900 s for the whole audit, against 60 s and 150 s for a plain run), so a bigger scan cannot
+  degrade a check into a capped `UNKNOWN`. That makes `--exhaustive` the way to a complete run
+  on a very large fleet, where a plain run can reach its 150 s whole-audit budget and mark the
+  checks it did not reach `UNKNOWN` (a plain message in the finding names this flag). Slower, and
   it still does not guarantee the whole corpus on a large fleet - a normal run already
   discloses exactly what it skipped, and `--exhaustive` states its own coverage the same way
   when it, too, has to leave sinks out; it narrows that gap substantially rather than closing

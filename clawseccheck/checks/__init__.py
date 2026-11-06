@@ -43,6 +43,7 @@ from ..catalog import (
 from ..scanbudget import (
     DEFAULT_AUDIT_BUDGET_S,
     DEFAULT_CHECK_BUDGET_S,
+    EXHAUSTIVE_LIMITS,
     ScanBudgetExceeded,
     audit_budget_exceeded,
     audit_deadline,
@@ -1909,7 +1910,13 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
             "passed nor failed). The rest of the audit ran normally. This only bounds a "
             "pathological / hostile input; it is not itself a finding."
         ),
-        fix="Re-run on a quieter machine; report the check name if it recurs on a normal config.",
+        fix=(
+            "Re-run on a quieter machine. For a complete run on a large fleet, re-run with "
+            f"--exhaustive: it raises the time budget to {EXHAUSTIVE_LIMITS.audit_budget_s:g}s "
+            f"for the whole audit and {EXHAUSTIVE_LIMITS.check_budget_s:g}s per check (slower, "
+            "and it also widens the log and trajectory scan caps). "
+            "Report the check name if it recurs on a normal config."
+        ),
         framework="Engine robustness",
         scored=False,
         evidence=[f"scan budget: {kind}"],
@@ -1922,9 +1929,9 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
             audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S,
             on_check_done=None) -> list[Finding]:
     # C-510 item 2: a plain audit gives no progress feedback while it can
-    # spend up to ~10 minutes on hostile content (a slow check, or several, chewing
-    # through their own check_budget_s) -- a silent terminal for that long is
-    # indistinguishable from a hang, and a user who kills what they believe is a stuck
+    # spend up to ~3.5 minutes (the 150s audit cap plus one 60s check) on hostile
+    # content (a slow check, or several, chewing through their own check_budget_s) -- a
+    # silent terminal for that long is indistinguishable from a hang, and a user who kills what they believe is a stuck
     # process is exactly the mid-write condition that produces corrupt monitor/baseline
     # state elsewhere in this tool. `on_check_done`, when given, is called as
     # `on_check_done(done_count, total_count)` after EVERY check completes -- normally,

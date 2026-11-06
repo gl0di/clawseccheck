@@ -30,20 +30,45 @@ import threading
 import time
 from dataclasses import dataclass
 
-# Generous ceilings that only catch a pathological hang, never a normal run.
+# Ceilings that only catch a pathological hang, never a normal run.
 #
 # B-1020, measured 2026-11-04 on a real home that gained a large ~/.agents/skills tree
 # (an external tool created it): `check_installed_skills` took 21.1s at load ~2, 25.8s
 # at load ~7-10 and 51.7s at load ~20. The whole `run_all` took ~130s at load ~2 and
 # 254.8s at load ~20. The old ceilings (15s per check, 120s per audit) cut that ordinary
 # fleet off at every load, so the audit read UNKNOWN (ERR:check_installed_skills, score
-# capped by B-399) and the fleet FP gate refused to compare. 60s clears the loaded
-# per-check figure with margin; 600s clears the loaded whole-audit figure about 2.4x and
-# keeps the audit budget 10x a check, near the 7.5x the exhaustive profile keeps below.
-# Both stay at or below EXHAUSTIVE_LIMITS (120s / 900s), so --exhaustive never reads
-# LESS than a plain audit. Re-measure before lowering either.
+# capped by B-399) and the fleet FP gate refused to compare. 60s per check clears the
+# loaded per-check figure with margin, and 600s per audit clears the loaded whole-audit
+# figure about 2.4x.
+#
+# THE SPLIT (2026-11-06). B-1020 applied 60s/600s to EVERY plain run, and a live chat run
+# on that same large home then took ~4.5 min for the audit and ~17 min for the whole
+# flow; one agent gave up after ~2.5 min and told the user "the audit hung". The 120s
+# whole-audit cap had been what bounded an interactive run. So the two consumers get two
+# profiles instead of one number:
+#
+#   * DEFAULT (what a user or a host agent runs): per check 60s, whole audit 150s. A
+#     large fleet may now read some late checks as UNKNOWN ("the overall audit time
+#     budget was exhausted", engine_degraded, never a fabricated PASS) - and that finding
+#     names `--exhaustive`, the way to a complete run.
+#   * LONG (LONG_CHECK_BUDGET_S / LONG_AUDIT_BUDGET_S, the B-1020 figures): for a caller
+#     that wants completeness over latency. `--exhaustive` carries a larger pair
+#     (EXHAUSTIVE_LIMITS, 120s / 900s) and is the CLI path; `audit(check_budget_s=...,
+#     audit_budget_s=...)` takes the LONG pair without widening any scan cap, which is
+#     what scripts/fleet_fp_gate.py needs (a gate must grade the plain-run posture, and
+#     `--exhaustive` changes B164/B180's text and so their fingerprints).
+#
+# Per-check 60s sits BELOW the 150s audit cap, so the arithmetic holds: the audit cap is
+# cooperative (checked between checks), hence the worst case for a default run is the cap
+# plus one check that started just before it, 150 + 60 = 210s. A per-check cap at or
+# above the audit cap would make the audit cap fiction; do not raise the first past the
+# second. LONG keeps the 10x ratio, EXHAUSTIVE 7.5x. Both LONG and DEFAULT stay at or
+# below EXHAUSTIVE_LIMITS (120s / 900s), so --exhaustive never reads LESS than a plain or
+# long audit. Re-measure before lowering either LONG figure.
 DEFAULT_CHECK_BUDGET_S = 60.0
-DEFAULT_AUDIT_BUDGET_S = 600.0
+DEFAULT_AUDIT_BUDGET_S = 150.0
+LONG_CHECK_BUDGET_S = 60.0
+LONG_AUDIT_BUDGET_S = 600.0
 
 # F-148: the same idea for the vet paths, which run the content ring outside ``run_all`` and
 # were therefore unbounded.
@@ -439,8 +464,9 @@ EXHAUSTIVE_LIMITS = ScanLimits(
     check_budget_s=120.0,
     # audit_budget_s bounds the WHOLE CHECKS list cooperatively (checked between
     # checks), so it must clear the single slowest check (check_budget_s=120.0) by a
-    # margin comparable to what DEFAULT_AUDIT_BUDGET_S already keeps over
-    # DEFAULT_CHECK_BUDGET_S (600.0 / 60.0 = 10x here vs 900.0 / 120.0 = 7.5x there),
+    # margin comparable to what the LONG pair already keeps (LONG_AUDIT_BUDGET_S /
+    # LONG_CHECK_BUDGET_S = 600.0 / 60.0 = 10x vs 900.0 / 120.0 = 7.5x here; the 150s
+    # DEFAULT audit cap is deliberately tight, for interactive runs),
     # while staying well under the outer --full pipeline ceilings this nests inside
     # (DEFAULT_VET_ALL_BUDGET_S=1800s, DEFAULT_FULL_BUDGET_S=2000s), so a slow
     # --exhaustive audit still leaves those later phases room instead of starving them.

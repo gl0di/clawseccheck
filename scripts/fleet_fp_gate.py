@@ -92,6 +92,7 @@ from clawseccheck import (  # noqa: E402
 from clawseccheck.catalog import FAIL_WEIGHT_STATUSES  # noqa: E402
 from clawseccheck.collector import skill_load_roots  # noqa: E402
 from clawseccheck.safeio import secure_dir, secure_write_text  # noqa: E402
+from clawseccheck.scanbudget import LONG_AUDIT_BUDGET_S, LONG_CHECK_BUDGET_S  # noqa: E402
 
 SCHEMA = 1
 
@@ -436,6 +437,11 @@ def build_snapshot(home=DEFAULT_HOME):
     _ctx, findings, score = audit(
         home_path, include_native=False, include_host=True,
         include_sockets=True, include_deptree=True,
+        # B-1020: a gate wants completeness over latency. The interactive default
+        # (60s/150s) cuts a large real fleet off as UNKNOWN, which refuses the compare;
+        # the long pair is the measured figure that completes. Budgets only: no scan cap
+        # widens, so the graded surface and the fingerprints stay a plain run's.
+        check_budget_s=LONG_CHECK_BUDGET_S, audit_budget_s=LONG_AUDIT_BUDGET_S,
     )
 
     rows = fail_rows(findings, scope="audit")

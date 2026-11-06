@@ -110,7 +110,7 @@ whether the problem is ClawSecCheck or the surrounding OpenClaw session.
 
 ClawSecCheck bounds its own runtime so a pathological input (a hostile skill, or just an
 unlucky regex) degrades to an honest `UNKNOWN` instead of hanging forever: a generous
-60-second budget per individual check, and a 600-second budget for a whole plain audit.
+60-second budget per individual check, and a 150-second budget for a whole plain audit.
 Deeper modes (`--vet` on a single target, a full `--vet-all` sweep, `--full`) carry their
 own larger budgets for the same reason, since they read much more content.
 
@@ -123,6 +123,14 @@ mechanism** - the fix is to re-run narrower:
 - Target a single skill or plugin with `--vet <path>` instead of a full sweep.
 - Point `--home` at a smaller or more specific config location if you were scanning
   something unusually large.
+
+A plain audit on a very large installed-skill fleet can reach the 150-second whole-audit
+budget. The checks it did not reach then read `UNKNOWN` ("the overall audit time budget was
+exhausted") - they are never reported as passing - and the score is capped accordingly.
+Re-run with `--exhaustive` for a complete run: it raises the budgets to 120 seconds per
+check and 900 seconds for the whole audit (and also widens the log and trajectory scan
+caps, so it is slower). A host agent running the audit should expect a plain run on such a
+fleet to take a few minutes and should not report it as hung before that.
 
 If a *plain* audit (no flags) still hits its budget, that's unusual enough to be worth
 reporting - see "Filing a good bug report" below, and include `--debug` output.
