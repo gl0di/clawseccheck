@@ -574,6 +574,31 @@ def test_build_snapshot_wires_risk_rows_into_the_fail_set(monkeypatch):
     assert ("risk", "RISK-02") in ids_by_scope
 
 
+def test_build_snapshot_runs_the_audit_with_the_long_budget(monkeypatch):
+    """B-1020 / 2026-11-06 split: the interactive default (60s/150s) cuts a large real fleet
+    off as UNKNOWN and the gate then refuses to compare, so the gate must pass the long pair
+    explicitly -- and only the two ceilings, never `exhaustive` (that changes B164/B180's
+    text and so their fingerprints, i.e. it would grade a different posture)."""
+    from clawseccheck.scanbudget import LONG_AUDIT_BUDGET_S, LONG_CHECK_BUDGET_S
+
+    seen = {}
+
+    def fake_audit(home, **kw):
+        seen.update(kw)
+        return SimpleNamespace(plugin_index_records=[]), [], SimpleNamespace(score=100, grade="A")
+
+    monkeypatch.setattr(gate, "audit", fake_audit)
+    monkeypatch.setattr(gate, "discover_targets", lambda home: ([], []))
+    monkeypatch.setattr(gate, "discover_plugin_roots", lambda ctx: ([], []))
+    monkeypatch.setattr(gate, "load_ignore", lambda home: set())
+    monkeypatch.setattr(gate, "risk_paths", lambda ctx, findings, ignore=None: [])
+
+    gate.build_snapshot(home="/nonexistent/does-not-matter")
+    assert seen["check_budget_s"] == LONG_CHECK_BUDGET_S == 60.0
+    assert seen["audit_budget_s"] == LONG_AUDIT_BUDGET_S == 600.0
+    assert not seen.get("exhaustive")
+
+
 # ------------------------------------------------------- layer 2: local, real baseline
 
 def _recorded_baseline():

@@ -143,3 +143,86 @@ class TestCliFlag:
         out_b = capsys.readouterr().out
         assert rc_a == rc_b == 0
         assert out_a == out_b
+
+
+class TestInteractiveVersusLongBudget:
+    """The 2026-11-06 split: a plain (interactive) run is bounded at 150s for the whole
+    audit, the long pair (B-1020's measured 60s / 600s) stays available to a caller that
+    wants completeness over latency (scripts/fleet_fp_gate.py), and `--exhaustive` never
+    reads LESS than either."""
+
+    def test_default_whole_audit_budget_is_interactive(self):
+        from clawseccheck import scanbudget
+
+        assert scanbudget.DEFAULT_AUDIT_BUDGET_S == 150.0
+        assert scanbudget.DEFAULT_CHECK_BUDGET_S == 60.0
+        assert DEFAULT_LIMITS.audit_budget_s == 150.0
+
+    def test_long_pair_is_the_b1020_figures(self):
+        from clawseccheck import scanbudget
+
+        assert scanbudget.LONG_CHECK_BUDGET_S == 60.0
+        assert scanbudget.LONG_AUDIT_BUDGET_S == 600.0
+
+    def test_the_audit_cap_is_not_fiction(self):
+        # A per-check cap at or above the audit cap would let one check outlast the
+        # whole-audit deadline it is supposed to sit inside.
+        from clawseccheck import scanbudget
+
+        assert scanbudget.DEFAULT_CHECK_BUDGET_S < scanbudget.DEFAULT_AUDIT_BUDGET_S
+        assert scanbudget.LONG_CHECK_BUDGET_S < scanbudget.LONG_AUDIT_BUDGET_S
+
+    def test_exhaustive_never_reads_less_than_either_profile(self):
+        from clawseccheck import scanbudget
+
+        pairs = (
+            (scanbudget.DEFAULT_CHECK_BUDGET_S, scanbudget.DEFAULT_AUDIT_BUDGET_S),
+            (scanbudget.LONG_CHECK_BUDGET_S, scanbudget.LONG_AUDIT_BUDGET_S),
+        )
+        for check, whole in pairs:
+            assert EXHAUSTIVE_LIMITS.check_budget_s >= check
+            assert EXHAUSTIVE_LIMITS.audit_budget_s >= whole
+
+    def test_audit_passes_the_profile_budgets_to_run_all(self, monkeypatch):
+        import clawseccheck
+
+        seen = {}
+
+        def fake_run_all(ctx, check_budget_s, audit_budget_s, on_check_done=None):
+            seen["pair"] = (check_budget_s, audit_budget_s)
+            return []
+
+        monkeypatch.setattr(clawseccheck, "run_all", fake_run_all)
+        clawseccheck.audit(SAFE)
+        assert seen["pair"] == (60.0, 150.0)
+        clawseccheck.audit(SAFE, exhaustive=True)
+        assert seen["pair"] == (EXHAUSTIVE_LIMITS.check_budget_s, EXHAUSTIVE_LIMITS.audit_budget_s)
+
+    def test_audit_budget_override_changes_only_the_two_ceilings(self, monkeypatch):
+        import clawseccheck
+        from clawseccheck import scanbudget
+
+        seen = {}
+
+        def fake_run_all(ctx, check_budget_s, audit_budget_s, on_check_done=None):
+            seen["pair"] = (check_budget_s, audit_budget_s)
+            seen["exhaustive"] = ctx.exhaustive
+            return []
+
+        monkeypatch.setattr(clawseccheck, "run_all", fake_run_all)
+        clawseccheck.audit(SAFE, check_budget_s=scanbudget.LONG_CHECK_BUDGET_S,
+                           audit_budget_s=scanbudget.LONG_AUDIT_BUDGET_S)
+        assert seen["pair"] == (60.0, 600.0)
+        assert seen["exhaustive"] is False   # no scan cap widened
+
+    def test_budget_skip_finding_names_the_way_out(self):
+        from clawseccheck.checks import _check_budget_finding
+
+        def check_x(ctx):  # pragma: no cover - only its name is read
+            return []
+
+        for kind in ("audit", "check"):
+            f = _check_budget_finding(check_x, kind, 60.0)
+            assert "--exhaustive" in f.fix
+            assert f"{EXHAUSTIVE_LIMITS.audit_budget_s:g}s" in f.fix
+            assert f.engine_degraded and f.scored is False
