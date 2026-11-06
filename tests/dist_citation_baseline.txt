@@ -8,8 +8,8 @@
 # grow: `compare` fails on any pair NOT in this file. Fixing an entry and
 # re-recording removes it here; that is progress, never a failure.
 #
-# openclaw-version: 2026.10.10
-# generated: 2026-11-03
+# openclaw-version: 2026.11.1
+# generated: 2026-11-06
 # violations: 294
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
