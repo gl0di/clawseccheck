@@ -130,7 +130,9 @@ exhausted") - they are never reported as passing - and the score is capped accor
 Re-run with `--exhaustive` for a complete run: it raises the budgets to 120 seconds per
 check and 900 seconds for the whole audit (and also widens the log and trajectory scan
 caps, so it is slower). A host agent running the audit should expect a plain run on such a
-fleet to take a few minutes and should not report it as hung before that.
+fleet to take a few minutes (up to about 4), with no output until it finishes, and should not
+report it as hung or silent while the process is still running - an early return or a
+"still running" status from the tool runner means keep waiting, not failure.
 
 If a *plain* audit (no flags) still hits its budget, that's unusual enough to be worth
 reporting - see "Filing a good bug report" below, and include `--debug` output.

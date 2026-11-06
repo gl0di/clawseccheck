@@ -42,9 +42,9 @@ agent session logs, the text of installed skills, the two global OpenClaw dotenv
 hold real operational secrets - parsed but never echoed except for a few non-secret toggle/URL
 keys - the content of OpenClaw's own OAuth credential store, scanned only to flag *whether* a
 file holds a plaintext secret, never its value, and credential-adjacent path existence elsewhere -
-all read-only, nothing leaves the machine) so there are no surprises. The default audit is
-inspection-only - the optional active tests
-(`--canary`/`--redteam`/`--dryrun`) simulate an attack against your *own* agent locally and are
+all read-only, nothing leaves the machine). The default audit is
+inspection-only; the active tests
+(`--canary`/`--redteam`/`--dryrun`) attack your *own* agent locally and are
 **opt-in**, never run unless you ask for them.
 
 ## What ClawSecCheck does (be transparent)
@@ -161,10 +161,7 @@ as a run having told you so - only a run is evidence. If no run this session has
 on OpenClaw visibility, run the bare default audit ONCE anyway (`python3 {baseDir}/audit.py`,
 no other flags) even if you suspect sandboxing - it is read-only, exits 0, and costs one
 command. Its own output tells you and the user whether the session is sandboxed, in wording
-you must relay verbatim; never write your own paraphrase of it. Never assert sandboxing from
-priors - only a run's own output may state it. Do not invent your own command line either;
-`--version` / `--menu` above are the one prescribed invocation, not a template to add untested
-flags to. Once that run has reported, the stop rule below governs everything after.
+you must relay verbatim; never write your own paraphrase of it. Never assert sandboxing from priors - only a run's own output may state it. Once that run has reported, the stop rule below governs everything after.
 
 **Stop rule - checked next, before proceeding further in this step.** If a run this session
 already reported no OpenClaw config found, or reported that this session is sandboxed
@@ -172,17 +169,15 @@ and cannot see the host's real OpenClaw setup: STOP here. Do not proceed to the
 capability self-report, the judge panel, `--attest`, or any live test below - there is
 nothing real to attest to or test. Tell the user plainly that this chat session cannot
 see their host's real OpenClaw setup, and offer to run it from the agent's main session
-(not a sandboxed/dashboard one) or a host terminal instead. This applies even when the
-user then asks for "all 5 layers" or "the full audit" - a bigger request does not change
-what this session can actually see, and re-running deeper commands against nothing
-real produces a report ABOUT the sandbox, not about the user's agent.
+(not a sandboxed/dashboard one) or a host terminal instead. This holds even when the
+user then asks for "all 5 layers" or "the full audit": a bigger request does not change
+what this session can see, and deeper runs against nothing real only report ABOUT the sandbox.
 
 **If item 1 was chosen**, first resolve the capability self-report (F-043) per [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md) -> `Choice: deeper / capability check` - **read that section before you run it** - and feed the SAME attestation into both commands below, in the SAME turn.
 
 **Attestation rule.** Every field describes the USER'S agent - this chat session's own
 runtime, tools and policy, never the sandbox that happens to be hosting the conversation.
-If the stop rule above already fired, you never reach this paragraph; if for any other
-reason you cannot actually observe the user's real agent, answer the affected fields
+If for any reason you cannot actually observe the user's real agent, answer the affected fields
 `unknown` rather than describing what you CAN see (the sandbox) as if it were the thing
 being audited.
 
@@ -206,9 +201,9 @@ one sub-check stays UNKNOWN.
 
 **For any other item**, run that mode's flag directly (`python3 {baseDir}/audit.py`; `python` on Windows); no self-report, no audit judge panel.
 
-**The command errors, hangs, or produces nothing at all?** That is ClawSecCheck *itself*, not the audited setup. Never guess at a fix or edit the user's OpenClaw config to work around it yourself.
+**The command errors or produces nothing at all?** That is ClawSecCheck *itself*, not the audited setup - but only once the process has EXITED. A full audit takes one to a few minutes (up to about 4) and prints NOTHING until it finishes. If your runner returns early, backgrounds it, or shows "still running"/empty partial output, that is not "no output": poll the SAME process until it exits, and never start a second copy. Never guess at a fix or edit the user's OpenClaw config to work around it yourself.
 
-**If a run prints a first-run welcome screen, a sandbox notice, an error, or nothing at
+**If a run prints a first-run welcome screen, a sandbox notice, an error, or (after it exits) nothing at
 all, relay what it printed as-is, stop, and read
 [`docs/playbook/RUN_NOTES.md`](docs/playbook/RUN_NOTES.md) before you do anything else.**
 
