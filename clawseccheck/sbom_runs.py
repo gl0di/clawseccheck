@@ -51,10 +51,11 @@ _COMPONENT_KINDS = ("skills", "mcp_servers", "plugins")
 
 
 def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" = None, *,
-                  version: "str | None" = None) -> "str | None":
+                  version: "str | None" = None,
+                  error_sink: "list[str] | None" = None) -> "str | None":
     """Persist one --sbom snapshot (the native build_sbom(ctx) dict). Returns the run
     id ('ts') on success, or None on write failure - never raises, same contract as
-    runstore.save_run."""
+    runstore.save_run (including *error_sink*, which receives the OSError text)."""
     ts = when if when is not None else datetime.now().isoformat(timespec="seconds")
     p = pathprobe.expand_user(path)
     base = {
@@ -71,7 +72,9 @@ def save_sbom_run(sbom: dict, path: str = DEFAULT_SBOM_RUNS, when: "str | None" 
             row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
             secure_append_text(p, json.dumps(row) + "\n")
             _rotate_journal(p, max_lines=_SBOM_RUNS_MAX_LINES, keep=_SBOM_RUNS_KEEP)
-    except OSError:
+    except OSError as exc:
+        if error_sink is not None:
+            error_sink.append(str(exc))
         return None
     return ts
 

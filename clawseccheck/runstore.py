@@ -45,13 +45,16 @@ _RUNS_KEEP = 50
 
 
 def save_run(findings, path: str = DEFAULT_RUNS, when: "str | None" = None, *,
-             home: "str | None" = None, version: "str | None" = None) -> "str | None":
+             home: "str | None" = None, version: "str | None" = None,
+             error_sink: "list[str] | None" = None) -> "str | None":
     """Append one run's full finding list, keyed by run id (its 'ts').
 
     Returns the run id on success, or None if the write failed - never raises,
     the same fail-open, best-effort local-store contract history.record() and
     monitor.record_events() already use (a planted symlink or an unwritable
     directory must not take a --save-run invocation down harder than that).
+    *error_sink*, when given, receives the OSError text of a failed write so the
+    caller can say WHY (a read-only store looks different from a full disk).
 
     *findings* is serialized through report._finding_to_dict - the same frozen
     public shape --json already emits per finding, sanitized the same way, so a
@@ -76,7 +79,9 @@ def save_run(findings, path: str = DEFAULT_RUNS, when: "str | None" = None, *,
             row = {**base, "chain_hash": _chain_hash(prev_hash, base)}
             secure_append_text(p, json.dumps(row) + "\n")
             _rotate_journal(p, max_lines=_RUNS_MAX_LINES, keep=_RUNS_KEEP)
-    except OSError:
+    except OSError as exc:
+        if error_sink is not None:
+            error_sink.append(str(exc))
         return None
     return ts
 

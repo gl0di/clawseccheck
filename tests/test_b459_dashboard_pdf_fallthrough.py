@@ -119,7 +119,10 @@ def test_a_rider_says_nothing_about_a_pdf_that_was_never_written(tmp_path):
     assert rc == 0
     assert "carries the findings only" not in out
     assert "states this on its own first page" not in out
-    assert str(out_pdf) not in out, "named a file that was never written"
+    # The failure note names the REQUESTED path (so the user can see what was not written);
+    # nothing else may describe that file as if it existed.
+    claims = "\n".join(ln for ln in out.splitlines() if "could not write PDF report" not in ln)
+    assert str(out_pdf) not in claims, "named a file that was never written"
 
 
 def test_the_successful_path_is_unchanged(tmp_path):

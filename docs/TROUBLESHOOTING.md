@@ -152,6 +152,33 @@ it and changes nothing. If it is a pipe, a device or padded with nesting you did
 treat the plugin or skill as suspect and remove or replace the file; once it is an ordinary
 file with sensible nesting, re-run to get a verdict.
 
+## `NOT SAVED` - the local store `~/.clawseccheck` is read-only
+
+An agent host that sandboxes writes to its workspace (for example OpenClaw's Codex harness)
+can make `~/.clawseccheck` read-only. The audit still runs to the end and its grade,
+findings and exit code are exactly what a writable store would give. What cannot happen is
+anything that is saved afterwards, and the tool says so once, on stderr, instead of failing
+or staying quiet:
+
+```text
+note: NOT SAVED - score history could not be written to ~/.clawseccheck (Read-only file system). ...
+```
+
+It names what was lost - the score history (`--trend`, `--percentile` and the menu's "last
+check" line read it), the coverage dates, a `--save-run` / `--save-sbom-run` snapshot - and
+why. A PDF is reported on its own line: `(could not write PDF report: ... showing the full
+report inline.)` with `--dashboard --pdf`, or exit code 1 for a bare `--pdf`, because there
+the file is the whole deliverable. `--monitor` exits 1 with `MONITORING NOT ESTABLISHED`,
+since no baseline was stored.
+
+ClawSecCheck never writes somewhere else on its own. To keep these results, choose a
+location yourself:
+
+- `--data-dir <a writable directory>` moves history, baseline, events, coverage dates, saved
+  runs and a bare `--pdf` together;
+- `--pdf <path>` names the PDF alone (a directory inside your workspace is the usual choice);
+- `--no-history` stops the history and coverage writes, so there is nothing to report.
+
 ## Where the diagnostics live
 
 - `--debug` - re-raises the real exception with its full traceback instead of the clean
