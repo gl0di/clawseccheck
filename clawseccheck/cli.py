@@ -883,6 +883,43 @@ class SkillSweep:
         """
         return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED", "UNKNOWN")]
 
+    def not_scanned_reasons(self) -> dict[str, str]:
+        """``{name: why}`` for every name :meth:`not_scanned` returns - the coverage
+        page used to print ``skills not swept: pptx`` with the name and nothing else,
+        so the reader could not tell a crashed scan from a budget stop from a
+        size-capped one. Three different facts, one bare word.
+
+        The reason is the engine's own, never invented: SKIPPED and UNKNOWN rows have a
+        fixed meaning (see ``counts()``); a TRUNCATED row carries the producer's
+        sentence from its finding (the part after "coverage is incomplete: "), or - when
+        the scan was cut by raising :class:`ScanBudgetExceeded`, so no finding exists -
+        says exactly that. Sanitized, because the sentence embeds the attacker-chosen
+        skill name. Same-named targets share one entry (the first non-empty reason),
+        matching how the page already keys its list by display name.
+        """
+        by_name: dict[str, Finding] = {}
+        for name, _path, f in self.findings:
+            by_name.setdefault(name, f)
+        out: dict[str, str] = {}
+        for name, status, _ev in self.rows:
+            if status not in ("SKIPPED", "TRUNCATED", "UNKNOWN") or name in out:
+                continue
+            if status == "SKIPPED":
+                why = "never reached: the whole-sweep time budget ran out first"
+            elif status == "UNKNOWN":
+                why = "the scan raised an engine error, so no verdict was reached"
+            else:
+                f = by_name.get(name)
+                detail = " ".join(_sanitize(f.detail).split()) if f is not None else ""
+                marker = _VET_COVERAGE_GAP_SUBSTRING + ": "
+                if marker in detail:
+                    detail = detail.split(marker, 1)[1]
+                why = detail or (
+                    "its own scan budget ran out, so only part of it was read"
+                )
+            out[name] = why if len(why) <= 220 else why[:217].rstrip() + "..."
+        return out
+
 
 def _discovery_gap_note(reasons: list[str]) -> str:
     """One narration line naming that the skill scan could not claim full coverage
