@@ -813,7 +813,7 @@ _EXEMPT = {
                     "identical B-811 DoS class), and an allowlist-not-denylist tightening of "
                     "the token sub-key filter — all of it belongs in the SAME state-DB-readers "
                     "seam, reinforcing that boundary rather than arguing for a fifth.",
-    "cli.py": "~7,009 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~7,514 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "

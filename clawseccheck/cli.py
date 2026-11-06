@@ -527,6 +527,72 @@ def _watch_extra_monitor_args(args) -> "tuple[str, ...]":
     return tuple(extra)
 
 
+#: Local-store writes that FAILED during this run, as ``(what, path, os-error text)``.
+#: A read-only ``~/.clawseccheck`` is the ordinary state of a sandboxed agent host (the
+#: Codex harness's sandbox only lets a run write inside its workspace): the audit is
+#: complete, but history, coverage dates and any saved run silently went nowhere, and
+#: the user was never told. Every best-effort writer already catches its own OSError so
+#: the run never crashes; this is where they report it, and ``main`` prints ONE note at
+#: the end (``_flush_state_write_problems``) - no fallback location is ever invented.
+_STATE_WRITE_PROBLEMS: "list[tuple[str, str, str]]" = []
+
+
+def _note_state_write_problem(what: str, path, err: str) -> None:
+    """Remember that *what* could not be written to *path* (reported once, at exit)."""
+    _STATE_WRITE_PROBLEMS.append((what, str(path), str(err)))
+
+
+def _state_write_reason(err: str) -> str:
+    """The short reason out of an ``OSError`` text, never its (path-bearing) tail."""
+    m = re.match(r"\[Errno \d+\] ([^:]+)", err)
+    return _sanitize(m.group(1).strip() if m else (err.strip()[:80] or "the write failed"))
+
+
+def _flush_state_write_problems() -> None:
+    """Print one stderr note per store directory that could not be written, then reset.
+
+    Names what was not saved, why, and how to fix it. The audit's verdict, score and exit
+    code are deliberately untouched - a store that cannot be written never changes what
+    was found. Never raises: this runs on the way out of ``main``.
+    """
+    problems = list(_STATE_WRITE_PROBLEMS)
+    _STATE_WRITE_PROBLEMS.clear()
+    if not problems:
+        return
+    by_dir: "dict[str, list[tuple[str, str]]]" = {}
+    try:
+        _home = os.path.expanduser("~")
+    except (OSError, RuntimeError):
+        _home = ""
+    for what, path, err in problems:
+        store = os.path.dirname(path) or "."
+        # One spelling per directory ("~/.clawseccheck", not the expanded absolute form that
+        # names the OS user), so two writers into the same store share one note.
+        if _home and _home != os.sep and (store == _home or store.startswith(_home + os.sep)):
+            store = "~" + store[len(_home):]
+        by_dir.setdefault(store, []).append((what, err))
+    try:
+        for store, items in by_dir.items():
+            whats = list(dict.fromkeys(w for w, _ in items))
+            reason = _state_write_reason(items[0][1])
+            shown = _redact_home_paths(_sanitize(store))
+            tail = ("--no-history skips the score-history and coverage writes. "
+                    if any(w in ("score history", "coverage dates") for w in whats) else "")
+            print(f"note: NOT SAVED - {', '.join(whats)} could not be written to {shown} "
+                  f"({reason}). The audit itself finished; its verdict, score and exit "
+                  "code are unaffected, and nothing was written anywhere else. To keep "
+                  f"these, re-run with --data-dir <a writable directory> (or make {shown} "
+                  f"writable). {tail}".rstrip(), file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
+#: What to do when a PDF could not be written. Offers an explicit, user-chosen path - the
+#: tool never falls back to some other location on its own (local-only, least surprise).
+_PDF_WRITE_FIX = ("To save it, re-run with --pdf <path> in a directory you can write to "
+                  "(for example your workspace), or --data-dir <a writable directory>.")
+
+
 def _record_run(capability: str, args) -> None:
     """Coverage-ledger write, gated by --no-history (B-156).
 
@@ -542,7 +608,10 @@ def _record_run(capability: str, args) -> None:
     """
     if getattr(args, "no_history", False):
         return
-    record_run(capability, path=_coverage_path(args))
+    _path = _coverage_path(args)
+    _err = record_run(capability, path=_path)
+    if _err is not None:
+        _note_state_write_problem("coverage dates", _path, _err)
 
 
 def _record_history_point(score, args, live_signal, findings) -> None:
@@ -605,8 +674,10 @@ def _record_history_point(score, args, live_signal, findings) -> None:
     # would compare them. `--home` defaults to the string "~/.openclaw", so this is
     # a real value on every run, and `_sanitize_home` keeps it the user-typed
     # `~/...` form rather than an absolute path naming the operator (§8/B-381).
-    history_record(score, args.history, home=args.home, findings=findings,
-                   version=__version__)
+    _err = history_record(score, args.history, home=args.home, findings=findings,
+                          version=__version__)
+    if _err is not None:
+        _note_state_write_problem("score history", args.history, _err)
 
 
 # Vet-MCP icon / verdict constants - shared by the standalone --vet-mcp path
@@ -3435,8 +3506,11 @@ def _guarded_main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+    _STATE_WRITE_PROBLEMS.clear()
     try:
-        return _main(argv)
+        _rc = _main(argv)
+        _flush_state_write_problems()
+        return _rc
     except KeyboardInterrupt:
         # C-509: Ctrl+C mid-scan is a normal, expected user action on a
         # `--full` run that can take minutes -- not a bug -- but this docstring's own
@@ -5869,10 +5943,13 @@ def _main(argv=None) -> int:
                 # branch below is untouched: rc 0 there is B-459's own deliberate fix,
                 # and its stdout placement is part of that fix (see its own comment).
                 print(f"(could not write PDF report: "
-                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')})",
+                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')} "
+                      f"\u2014 nothing was written. {_PDF_WRITE_FIX})",
                       file=sys.stderr)
                 return 1
-            _emit(f"(could not write PDF report: {exc} \u2014 showing the full report inline)")
+            _emit(f"(could not write PDF report: "
+                  f"{_path_problem_text(args.pdf, exc, what='PDF report file')} "
+                  f"\u2014 showing the full report inline. {_PDF_WRITE_FIX})")
         if not args.dashboard:
             # C-726: docs/USAGE.md promises a `MEDIA:~/...` line for a bare --pdf; the
             # message used to carry the absolute path and no MEDIA line at all.
@@ -6230,7 +6307,9 @@ def _main(argv=None) -> int:
                 # write it must never destroy the analysis: fall through with
                 # pdf_written=None so render_dashboard renders every section inline
                 # instead of collapsing to a card that points at a file we never wrote.
-                _emit(f"(could not write PDF report: {exc} \u2014 showing the full report inline)")
+                _emit(f"(could not write PDF report: "
+                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')} "
+                      f"\u2014 showing the full report inline. {_PDF_WRITE_FIX})")
         _card = _with_next_actions(
             render_dashboard(
                 findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
@@ -6283,11 +6362,14 @@ def _main(argv=None) -> int:
         }[args.format]
         _emit(_sbom_renderer(ctx))
         if getattr(args, "save_sbom_run", False):
+            _sbom_errs: "list[str]" = []
             _saved_sbom_id = _save_sbom_run_snapshot(build_sbom(ctx), _sbom_runs_path(args),
-                                                      version=__version__)
+                                                      version=__version__,
+                                                      error_sink=_sbom_errs)
             if _saved_sbom_id is None:
-                _emit_trailer(args, "\n(could not save SBOM run \u2014 see --data-dir's "
-                                    "directory for write access)", machine_output=True)
+                _note_state_write_problem("saved SBOM run (--save-sbom-run)",
+                                          _sbom_runs_path(args),
+                                          _sbom_errs[0] if _sbom_errs else "")
             else:
                 _emit_trailer(args, f"\n(SBOM run saved as {_saved_sbom_id} \u2014 diff it "
                                     f"later with --sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)",
@@ -6904,8 +6986,10 @@ def _main(argv=None) -> int:
         # state. A frequent poll would have quietly padded the score trend with a row per
         # poll while claiming to write nothing.
         if not _skip_live_test_persist and not _probe:
-            history_record(score, args.history, home=args.home,
-                           findings=findings, version=__version__)
+            _hist_err = history_record(score, args.history, home=args.home,
+                                       findings=findings, version=__version__)
+            if _hist_err is not None:
+                _note_state_write_problem("score history", args.history, _hist_err)
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
         # With nothing to report it must not promise a repeat alert that will never come.
@@ -6922,17 +7006,21 @@ def _main(argv=None) -> int:
         # returning 0 forever while persisting nothing, so cron saw a healthy job.
         if journal_err is not None:
             print(f"MONITORING NOT ESTABLISHED \u2014 could not record drift events to "
-                  f"{args.events}: {journal_err}\n"
+                  f"{_redact_home_paths(_sanitize(str(args.events)))}: "
+                  f"{_state_write_reason(str(journal_err))}\n"
                   "The drift above was NOT written to the journal, so the baseline was "
                   "deliberately left unchanged and this run's changes will be re-reported "
-                  "next time. Fix the journal path's permissions and re-run.",
+                  "next time. Fix the journal path's permissions, or re-run with "
+                  "--data-dir <a writable directory>.",
                   file=sys.stderr)
             return 1
         if state_err is not None:
             print(f"MONITORING NOT ESTABLISHED \u2014 could not write monitor state to "
-                  f"{args.state}: {state_err}\n"
+                  f"{_redact_home_paths(_sanitize(str(args.state)))}: "
+                  f"{_state_write_reason(str(state_err))}\n"
                   "No baseline was saved, so this run cannot detect future changes. Fix "
-                  "the state path's permissions and re-run.", file=sys.stderr)
+                  "the state path's permissions, or re-run with --data-dir <a writable "
+                  "directory>.", file=sys.stderr)
             return 1
         # C-419: opt-in machine channel. `rc=1` above is RESERVED for "monitoring is not
         # established" - a cron job has to be able to tell "drift was found" from "the
@@ -7432,11 +7520,14 @@ def _main(argv=None) -> int:
     # _flag_coherence_notes, which mirrors "save"'s own entry rather than a separate
     # allowlist).
     if getattr(args, "save_run", False):
+        _run_errs: "list[str]" = []
         _saved_run_id = _save_run_snapshot(findings, _runs_path(args), home=args.home,
-                                            version=__version__)
+                                            version=__version__, error_sink=_run_errs)
         if _saved_run_id is None:
-            _emit_trailer(args, "\n(could not save run \u2014 see --data-dir/--history's "
-                                "directory for write access)")
+            # Reported once, at exit, with the reason and the fix (see
+            # _flush_state_write_problems) - not a bare "see --data-dir".
+            _note_state_write_problem("saved run (--save-run)", _runs_path(args),
+                                      _run_errs[0] if _run_errs else "")
         else:
             _emit_trailer(args, f"\n(run saved as {_saved_run_id} \u2014 diff it later with "
                                 f"--diff {_saved_run_id} <OTHER_RUN_ID>)")
