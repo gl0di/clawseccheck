@@ -8744,9 +8744,9 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     owner-only core tool list on both builds. In 2026.9.7 the non-sandboxed tool list
     spreads ``...createAvailablePortalTools(options)`` instead (call site
     ``openclaw-tools-DCQphGzC.mjs:17666-17675``; defined in
-    ``sessions-spawn-tool-B5tfhM3J.mjs:143-145``), which returns no tool when
-    ``senderIsOwner === false`` and there is no ``sessionPortalTarget``, and otherwise
-    returns the portal tool (``sandboxed: Boolean(sandbox)``,
+    ``sessions-spawn-tool-B5tfhM3J.mjs:143-145``), which on 2026.9.7 returned no tool
+    when ``senderIsOwner === false`` and there is no ``sessionPortalTarget``, and
+    otherwise returns the portal tool (``sandboxed: Boolean(sandbox)``,
     ``agent-tools-D5UK6LHM.mjs:656``), which can open a portal to any local port 1-65535
     (``PortalOpenParamsSchema``, ``src-BvzgK7Oj.mjs:5856-5865``) and whose tool result
     text contains the tokenized URL (``formatPortalResult``,
@@ -8754,6 +8754,12 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     an internal service, and its model context holds the bearer URL. This check does not
     model 9.7's session-bound portal tool for a non-owner sender with an attached worker
     environment (``prepareSessionPortalToolAccess``, ``agent-tools-D5UK6LHM.mjs:309-317``).
+    On 2026.11.1 the non-owner case changed shape: ``createAvailablePortalTools``
+    (``sessions-spawn-tool-DyTpSYwQ.mjs:288-300``) always returns the portal tool, and
+    when ``senderIsOwner === false`` with no ``sessionPortalTarget`` (``ownerUnavailable``)
+    its ``execute`` throws ``ToolInputError`` ("portal needs the owner's authority")
+    instead. So the tool is offered to a non-owner and the call is refused; this check
+    reads no per-sender state and its verdict is unchanged.
 
     THREE TRANSPORTS, evaluated in this order because that is the vendor's own
     precedence (``createGatewayPortalService.open``, ``server-start-BkBmUb8t.mjs:
