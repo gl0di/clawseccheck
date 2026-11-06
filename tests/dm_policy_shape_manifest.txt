@@ -2,11 +2,11 @@
 # Do not hand-edit. Regenerate on an OpenClaw upgrade re-baseline (this is a step in
 # that protocol -- see docs/process/OPENCLAW_UPGRADE_PROTOCOL.md).
 #
-# version: 2026.10.10   channels: 28   with-a-dm-policy-surface: 19
-# generated: 2026-11-03
+# version: 2026.11.1   channels: 28   with-a-dm-policy-surface: 19
+# generated: 2026-11-06
 # depth-cap: 20
 # converged: yes  (cap+8 yields 5652 total paths vs 5652)
-# source-module: schema-C86TiUEs.mjs   export: buildConfigSchemaCore   (+2 agreeing alias export(s))
+# source-module: schema-C1hfaR0w.mjs   export: buildConfigSchemaCore   (+2 agreeing alias export(s))
 # nested_dm_policy=yes channels: matrix
 # excluded as non-channel siblings of channels.*: defaults, modelByChannel (see NON_CHANNEL_SIBLINGS in this script for why)
 #
