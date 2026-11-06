@@ -217,7 +217,7 @@ from .collector import agent_roster
 #: pin, which no harness module imported) and answered identically on every row too. The chain is now
 #: 9.5 = ... = 10.6 = 10.7 = 10.8 = 10.9, and the floor stays where it is.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 10, 10)
+ORACLE_MAX = (2026, 11, 1)
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 

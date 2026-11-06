@@ -239,7 +239,7 @@ def test_default_image_is_not_named_for_a_build_nobody_read():
     # builds (2026.8.3 was never read, so the step function is not extrapolated), or newer
     # than the last row
     for build in (None, "", "2026.9.7-beta.1", "2026.9", "2026.8.0", "2026.7.35", "2026.8.3",
-                  "2026.9.2-1", "2026.9.7.1", "2026.9.10", "2026.10.11", "2027.1.1"):
+                  "2026.9.2-1", "2026.9.7.1", "2026.9.10", "2026.10.11", "2026.11.2", "2027.1.1"):
         detail = _detail_on(build)
         assert "node:" not in detail, (build, detail)
         assert "default image for the installed build" in detail, (build, detail)
