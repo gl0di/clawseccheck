@@ -112,6 +112,11 @@ kept here so the always-loaded playbook stays lean.
   stamp decides B33). Read-only `PATH` lookup, no subprocess.
 - `--no-update-notice` - suppress the offline "your build may be stale" reminder
   (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only - never a network call.
+- `CLAWSECCHECK_NO_PROGRESS=1` (environment variable, no flag) - suppress the one-line "still running"
+  notice that every long run (the audit and every mode that runs the check engine or a long scan:
+  `--json`, `--full`, `--dashboard`, `--vet*`, `--monitor`, ...) prints to stderr before it starts
+  collecting. stdout is never touched. `--quiet` does not silence it. Fast modes (`--version`,
+  `--menu`, `--brief`, `--explain`, `--verify-*`, ...) never print it.
 - `--no-freshness-notice` - suppress the report's advisory freshness lines (also via
   `CLAWSECCHECK_NO_FRESHNESS_NOTICE=1`). On a normal audit that is three advisories: the
   coverage-freshness reminder for the opt-in capabilities (`--self-test` / `--redteam` /

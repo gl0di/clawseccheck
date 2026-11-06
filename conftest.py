@@ -115,6 +115,19 @@ def _stub_deptree_scan(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _silence_long_run_notice(monkeypatch):
+    """Suite default: no "auditing ... still running" stderr line.
+
+    The CLI prints that one line at the start of every long run (cli._announce_long_run),
+    and a few hundred tests assert on a run's exact stderr - which is about the NOTE they
+    exercise, not this line. Setting the documented escape here keeps those assertions
+    meaningful instead of loosening them one by one. Tests that are about the line itself
+    (tests/test_long_run_notice.py) delete the variable again.
+    """
+    monkeypatch.setenv("CLAWSECCHECK_NO_PROGRESS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _stub_host_detect(monkeypatch):
     """Keep host-monitor detection deterministic and offline across the suite.
 

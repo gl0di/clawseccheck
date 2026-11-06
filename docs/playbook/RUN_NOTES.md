@@ -27,7 +27,7 @@ seconds, move the command to the background, or show "still running" or an empty
 That is not "no output": keep waiting and polling the SAME process until it EXITS, and do not start
 a second copy while the first is running. Only an exited process with empty stdout, or a crash with
 a traceback, counts as "produces nothing". `--brief --exit-code` exits non-zero by design when
-findings are open - that is a result, not a failure.
+findings are open - that is a result, not a failure. The audit prints one "still running" line to stderr at start; that line is not the result.
 
 **The command errors, or exited having produced nothing at all?** That means ClawSecCheck *itself*
 has a problem - not the audited OpenClaw setup. Tell the user plainly that the tool hit a snag (not their

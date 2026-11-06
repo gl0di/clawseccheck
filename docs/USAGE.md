@@ -597,6 +597,11 @@ actual "is there a newer version?" lookup belongs to your package tooling or you
 the notice with `--no-update-notice` or `CLAWSECCHECK_NO_UPDATE_NOTICE=1`; after any update, verify
 the engine with `--verify-self`.
 
+A long run (the audit and every mode that runs the check engine or a long scan) prints one line to
+stderr as it starts - `ClawSecCheck: auditing <home> - this usually takes 1-4 minutes ... the audit is
+still running: wait for it to exit.` - because it prints nothing else until it finishes. stdout is
+unchanged; silence the line with `CLAWSECCHECK_NO_PROGRESS=1`.
+
 ## Threat monitoring
 
 Two complementary things:

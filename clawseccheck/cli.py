@@ -246,6 +246,61 @@ def _default_audit_progress_cb(args):
     return _cb
 
 
+#: Modes that run the check engine or a long scan and so stay silent for a long while.
+#: Every mode that reaches the shared ``audit()`` call is here (so ``--trend``,
+#: ``--percentile``, ``--next``, ``--dashboard``, ``--monitor`` ... all count), plus the
+#: vet family and ``--show-suppressed``, which dispatch before it. Deliberately absent:
+#: the fast, engine-free modes (``--menu``, ``--brief``, ``--explain``, ``--retest``,
+#: ``--verify-*``, ``--diff``, ``--watch-log``, the self-test family, ...). The default
+#: audit (no primary mode: text, ``--json``, ``--card``, ``--full`` ...) is announced
+#: separately, after the first-run onboarding screen has had its chance to answer.
+_LONG_RUN_MODES = frozenset({
+    "vet", "vet_skill", "vet_plugin", "vet_all", "vet_mcp", "vet_source", "advise",
+    "show_suppressed", "risk_paths", "badge", "html", "sarif", "pdf", "trend",
+    "percentile", "next", "dashboard", "dashboard_findings", "sbom", "incident",
+    "incident_open", "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
+    "behavioral", "monitor",
+})
+
+#: Vet-family modes: the subject is a target, not the OpenClaw home.
+_VET_RUN_MODES = frozenset({"vet", "vet_skill", "vet_plugin", "vet_all", "vet_mcp",
+                            "vet_source", "advise"})
+
+
+def _announce_long_run(args, mode) -> None:
+    """One plain-ASCII line on STDERR, printed before collection begins.
+
+    Why: a tool-calling agent that runs the audit through an exec tool with a yield
+    window (Codex ``exec_command``) gets an empty result at the window's end - the audit
+    prints nothing until it finishes - and has been seen reporting "it produced no
+    output" about a process that was still running. Hosts that merge stderr into the
+    output show this line at that point, so the early return carries its own
+    explanation. STDERR only: stdout (the report / the JSON) is never touched.
+
+    ``CLAWSECCHECK_NO_PROGRESS`` (any non-empty value, like the other
+    ``CLAWSECCHECK_NO_*`` switches) silences it. ``--quiet`` is deliberately NOT the
+    escape: it is a ``--full`` modifier, and ``--full --quiet`` is exactly a long run.
+    """
+    if os.environ.get("CLAWSECCHECK_NO_PROGRESS"):
+        return
+    if mode in _VET_RUN_MODES:
+        what = "vetting"
+        usually = "this can take a while"
+    else:
+        try:
+            shown = _redact_home_paths(_sanitize(str(args.home)))
+        except Exception:
+            shown = "the OpenClaw home"
+        what = f"auditing {shown}"
+        usually = "this usually takes 1-4 minutes"
+    try:
+        print(f"ClawSecCheck: {what} - {usually} and prints nothing else until it "
+              "finishes. If your tool returns early with no output, the audit is still "
+              "running: wait for it to exit.", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 # B-351: when set, every _emit() line is also appended here. The appended --full
 # sections are printed as they are produced - the skill sweep in particular narrates
 # per-target because progress feedback matters on a run that can take minutes - so a
@@ -5049,6 +5104,9 @@ def _main(argv=None) -> int:
     # dispatches (see _empty_mode_target), so it covers every mode flag that takes a
     # required value instead of only this family.
 
+    if _mode in _LONG_RUN_MODES:
+        _announce_long_run(args, _mode)
+
     _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
     _detect_undetermined = None  # B-682: why the classification is less than it looks
     if _mode == "vet":
@@ -5516,6 +5574,8 @@ def _main(argv=None) -> int:
                                     sandboxed=sandbox_sync_marker_present()))
             return 0
 
+    if _mode is None:
+        _announce_long_run(args, _mode)
     logger.info("auditing home=%s", args.home)
     # A home that exists but can't be read at all must be a controlled, honest outcome
     # for a security tool - a plain-language error, never a raw traceback (B-076).
