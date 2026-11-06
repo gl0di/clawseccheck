@@ -177,6 +177,8 @@ def test_enabled_with_unrecognized_isolation_value_warns():
 #   2026.10.7             node:24.22.1-slim   (registry tarball, read 2026-10-30)
 #   2026.10.8             node:24.22.1-slim   (registry tarball, read 2026-10-30)
 #   2026.10.9             node:24.22.1-slim   (installed dist, read 2026-10-30)
+#   2026.10.10            node:24.22.1-slim   (installed dist, read 2026-11-03)
+#   2026.11.1             node:24.22.1-slim   (installed dist, read 2026-11-06)
 # The check used to print node:24.19.0-slim on every build -- wrong on 2026.8.x/9.1/9.2 and,
 # after 2026.9.7, wrong again. Now it names the image only for a build whose default was
 # actually read (exact match); every other build gets no literal at all.
@@ -216,6 +218,7 @@ def test_default_image_is_named_per_measured_build():
         "2026.10.8": "node:24.22.1-slim",
         "2026.10.9": "node:24.22.1-slim",
         "2026.10.10": "node:24.22.1-slim",
+        "2026.11.1": "node:24.22.1-slim",
     }
     from clawseccheck.checks._config import _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD as table
     # the table is EXACTLY these measured builds -- no row was added on an inference
