@@ -234,18 +234,16 @@ def test_extradirs_path_that_does_not_exist_stays_silent(tmp_path):
 
 def test_unconfirmed_root_gap_says_skill_root_not_installed_skill(tmp_path, unlock):
     """The reviewer's wording item: a directory discovery never entered is not known
-    to hold a skill at all (a `vendor-cache`-style container is the same shape as the
+    to hold a skill at all (a `.cache`-style container is the same shape as the
     round-1 `"skill discovery could not read/list '...'"` markers) — the detail text
     must say "skill-root directory", never assert the confirmed identity "installed
-    skill directory". The folder is deliberately NOT dot-named: OpenClaw's loader skips
-    every dot-directory, so discovery no longer enters one and an unreadable one is not
-    a gap (see tests/test_c707_coverage_disclosure.py)."""
+    skill directory"."""
     home = tmp_path / "home"
     home.mkdir(parents=True)
     (home / "openclaw.json").write_text(
         json.dumps({"gateway": {"bind": "127.0.0.1"}}), encoding="utf-8")
     _skill(home / "skills", "clean")
-    cache = home / "skills" / "vendor-cache"
+    cache = home / "skills" / ".cache"
     cache.mkdir()
     cache.chmod(0o000)
     unlock(cache)

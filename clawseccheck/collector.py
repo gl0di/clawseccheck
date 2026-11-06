@@ -4742,9 +4742,7 @@ def _is_own_source(p: Path) -> bool:
     return not remaining
 
 
-def _iter_skill_dirs_guarded(
-    base: Path, allow_symlink: bool, ctx: Context, hidden_skills=None, hidden_incomplete=None,
-):
+def _iter_skill_dirs_guarded(base: Path, allow_symlink: bool, ctx: Context):
     """``iter_discovered_skill_dirs`` that degrades to a limit hit instead of raising.
 
     B-289: skill roots used to be either inside the audited home or named by the config,
@@ -4778,8 +4776,6 @@ def _iter_skill_dirs_guarded(
         # so its _MAX_DIRS cap hit lands tagged like every other skill-coverage limit.
         limit_hits=_ScopedLimitSink(ctx.limit_hits, LIMIT_DOMAIN_SKILL),
         unassessable=unassessable,
-        hidden_skills=hidden_skills,
-        hidden_incomplete=hidden_incomplete,
     )
     while True:
         try:
@@ -4957,17 +4953,11 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     if _safe_is_dir(plugin_skills, ctx, what=f"'{plugin_skills}'", domain=LIMIT_DOMAIN_SKILL):
         roots.append((plugin_skills, True))
     seen_roots: set[Path] = set()
-    # Skill folders inside a dot-directory under a root (an installer's update-backup folder).
-    # The loaders in the OpenClaw dist skip every entry whose name starts with "." (see the
-    # citation at the skip in skilldiscovery.iter_discovered_skill_dirs), so these are on disk
-    # but never loaded: discovery does not walk them, they are not in the installed population
-    # and are not graded. They are COUNTED, though, and disclosed below - a hidden directory
-    # is also a classic hiding place, so "not scanned" is said out loud, never left silent.
-    # (Until this change they were read and graded - C-707 item 4 - which listed a skill's
-    # own update backups as extra installed skills; the live OpenClaw 2026.11.1 chat run that
-    # showed three `clawseccheck-*` entries for one loaded skill is what reversed it.)
-    dot_dir_skills: list[str] = []
-    dot_dir_incomplete: list[str] = []
+    # Skill folders inside a dot-directory under a root (an installer's backup folder). The
+    # loaders in the OpenClaw dist skip every entry whose name starts with "." (the skill-root
+    # discovery, the workspace refresh and the resource loader), so these are on disk but not
+    # loaded. They are still read below: a hostile copy missed is the worse error.
+    dot_dir_skills: set[str] = set()
     for base, allow_symlink in roots:
         # B-303: a load root that exists but is not traversable (most commonly the whole
         # home, e.g. chmod 000) must be skipped like a root that does not exist at all -
@@ -4990,10 +4980,13 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         # B-404: the single source of truth for "which roots did the real
         # discovery engine confirm and walk" - see the field's docstring on Context.
         ctx.installed_skill_roots.append(base)
-        for sd, target in _iter_skill_dirs_guarded(
-            base, allow_symlink, ctx,
-            hidden_skills=dot_dir_skills, hidden_incomplete=dot_dir_incomplete,
-        ):
+        for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
+            if base != plugin_skills:
+                try:
+                    if any(part.startswith(".") for part in sd.relative_to(base).parts):
+                        dot_dir_skills.add(str(target))
+                except ValueError:
+                    pass
             if len(ctx.installed_skills) >= _MAX_SKILLS:
                 # B-268: this used to `return` - the collection stopped dead, leaving
                 # ctx.installed_skills a silently truncated view with no trace that more
@@ -5067,16 +5060,14 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
 
     if dot_dir_skills:
         n_dot = len(dot_dir_skills)
-        lead = "At least " if dot_dir_incomplete else ""
         note_disclosure(
             ctx.disclosures,
             "skills_in_dot_directories",
             "skills",
-            f"{lead}{n_dot} skill {'folder sits' if n_dot == 1 else 'folders sit'} inside a "
+            f"{n_dot} skill {'folder sits' if n_dot == 1 else 'folders sit'} inside a "
             "dot-directory (a folder whose name starts with '.', such as an installer backup) "
-            "under a skills root. OpenClaw's skill loader skips such folders, so they are not "
-            "loaded; this audit does not scan them or count them as installed, and a clean "
-            "result says nothing about their content.",
+            "under a skills root. They are present on disk but not loaded by OpenClaw, whose "
+            "skill loader skips such folders; this audit still reads them.",
         )
     # The default bundled tier, gated like the personal ~/.agents/skills root so a fixture or
     # custom --home stays hermetic; a persistent relocation replaces that tier.

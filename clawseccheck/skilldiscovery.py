@@ -7,12 +7,6 @@ from . import pathprobe
 
 _MAX_DEPTH = 6
 _MAX_DIRS = 2_000
-# Bounds for the disclosure-only probe of directories the walk does not descend into (see
-# the hidden-entry branch in `iter_discovered_skill_dirs`): how many such directories are
-# probed per walk, and how many directories each probe may visit. The probe only feeds a
-# count into a disclosure, so a bound here costs precision of that count, never a verdict.
-_MAX_HIDDEN_PROBES = 100
-_HIDDEN_PROBE_MAX_DIRS = 200
 
 
 def _exists_as_entry(path: Path) -> bool:
@@ -150,28 +144,12 @@ def iter_discovered_skill_dirs(
     # ``_note_unreadable_manifest`` - so the two shapes cannot drift into two different
     # sentences about one fact, which is exactly how attempt 3 went wrong one layer up.
     unassessable=None,
-    # Same duck-typed ``.append(str)`` shape. Receives the bare NAME of every skill folder
-    # found inside a hidden (dot-named) directory the walk deliberately did not descend into
-    # - see the comment at the skip. ``hidden_incomplete``, when given, receives one string
-    # if that disclosure-only count is a lower bound (probe budget spent). Both default to
-    # ``None``: no existing caller changes.
-    hidden_skills=None,
-    hidden_incomplete=None,
-    _max_dirs: "int | None" = None,
 ):
-    """Yield ``(display_path, resolved_dir)`` for grouped layouts up to six levels.
-
-    Like OpenClaw's own loader this never descends into a directory whose name starts with
-    ``.`` (nor ``node_modules``), at any level below the root; the root itself is always
-    walked, so a dot-named load root such as ``~/.agents/skills`` is unaffected.
-    """
+    """Yield ``(display_path, resolved_dir)`` for grouped layouts up to six levels."""
     try:
         base_target = base.resolve()
     except (OSError, ValueError, RuntimeError):
         return
-    _hidden_probes = 0
-    # Resolved at call time, not as a default argument, so a patched module cap still applies.
-    _max_dirs = _MAX_DIRS if _max_dirs is None else _max_dirs
     # B-654 (narrowed after the retraction pin caught the first version): *ancestors* is
     # the list of open "candidate" ids on the path from *base* down to this node - a
     # candidate is a directory whose own SKILL.md is present but not a regular file.
@@ -197,9 +175,9 @@ def iter_discovered_skill_dirs(
             continue
         seen_dirs.add(target)
         visited += 1
-        if visited > _max_dirs:
+        if visited > _MAX_DIRS:
             limit_hits.append(
-                f"skill discovery under '{base}' exceeded the {_max_dirs}-directory cap"
+                f"skill discovery under '{base}' exceeded the {_MAX_DIRS}-directory cap"
             )
             _walk_was_cut_short = True
             break
@@ -273,7 +251,7 @@ def iter_discovered_skill_dirs(
             )
             continue
         for entry in entries:
-            if entry.name in {"node_modules", "__pycache__"}:
+            if entry.name in {".git", "node_modules", "__pycache__"}:
                 continue
             try:
                 is_link = pathprobe.is_symlink(entry)
@@ -283,45 +261,6 @@ def iter_discovered_skill_dirs(
                 if not pathprobe.is_dir(entry_target):
                     continue
             except (OSError, ValueError, RuntimeError):
-                continue
-            if entry.name.startswith("."):
-                # A hidden directory is NOT walked, because OpenClaw does not load from it:
-                # every skill loader in the installed dist skips any child entry whose name
-                # starts with "." (openclaw 2026.11.1, dist/skill-root-discovery-*.mjs
-                # `listChildDirectories` include-filter and `hasCandidateSymlinkChild`;
-                # dist/settings-manager-*.mjs `loadSkillsFromDirInternal`, the
-                # `entry.name.startsWith(".") || entry.name === "node_modules"` continue).
-                # The installer's own update-backup folder is the real case: an update moves
-                # the previous copy of a package into `<install base>/.openclaw-install-
-                # backups/<name>-<uuid>` (dist/install-package-dir-*.mjs). That is stale
-                # content on disk, not part of the agent's attack surface, and listing it made
-                # one skill read as three "installed" skills. The rule is OpenClaw's own,
-                # matched exactly - never a name list of ours, so it cannot be widened into a
-                # place to hide something OpenClaw would load; `.git` falls out of it.
-                #
-                # Not silent, though: a hidden directory is also a classic hiding place. Skills
-                # found inside one are counted (bounded probe; never read, never graded) into
-                # *hidden_skills* so the collector can say "N skill folders were not scanned
-                # because OpenClaw does not load them". It is a disclosure, not a limit hit:
-                # `LIMIT_DOMAIN_SKILL` means "my scan was truncated" and would turn B13 into
-                # UNKNOWN for content that is outside the population by design. A hidden
-                # directory nested inside a hidden one is not probed separately.
-                if hidden_skills is not None:
-                    if _hidden_probes >= _MAX_HIDDEN_PROBES:
-                        if hidden_incomplete is not None and not hidden_incomplete:
-                            hidden_incomplete.append("probe budget spent")
-                    else:
-                        _hidden_probes += 1
-                        _probe_cut: list[str] = []
-                        for _sd, _t in iter_discovered_skill_dirs(
-                            entry_target,
-                            allow_symlink_entries=allow_symlink_entries,
-                            limit_hits=_probe_cut,
-                            _max_dirs=_HIDDEN_PROBE_MAX_DIRS,
-                        ):
-                            hidden_skills.append(_sd.name)
-                        if _probe_cut and hidden_incomplete is not None and not hidden_incomplete:
-                            hidden_incomplete.append("probe cap hit")
                 continue
             queue.append((display / entry.name, entry_target, depth + 1, child_ancestors))
 
