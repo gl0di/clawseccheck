@@ -4795,6 +4795,57 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
     )
 
 
+_DEFAULT_SANDBOX_IMAGE = "openclaw-sandbox:bookworm-slim"
+
+
+def _sandbox_image_advice(sandbox: dict) -> str:
+    """Advice-only sentence for B4's `fix`: a sandboxed session also needs its container image.
+
+    Grounded against the installed openclaw@2026.11.1 (cite the strings, not the rotating
+    bundle names): the docker backend runs `image inspect <image>` before it creates a
+    container and, when the image is absent, throws "Sandbox image not found: <image>."
+    (for the default image it adds "Build it with scripts/sandbox-setup.sh before enabling
+    Docker sandboxing"; for any other "Build or pull it first."); the sandbox context wraps
+    that as a `SandboxProvisioningError`, so the session never starts. The image is
+    `agents.defaults.sandbox.docker.image` (a string) and defaults to
+    `openclaw-sandbox:bookworm-slim`; the backend is `agents.defaults.sandbox.backend`
+    (default "docker"). Both are read by plain dict traversal, like `_sandbox_docker_binds`.
+
+    We cannot see the container engine's image store (root-only, and no subprocess in a
+    check), so this NEVER changes the verdict - it only tells the user the dependency
+    exists. It lives in `fix`, never `detail`: `baseline.fingerprint()` hashes `detail`.
+    A non-docker backend (ssh, a plugin backend) does not read the image, so it gets no
+    sentence rather than a wrong one. Only the two WARN branches (defaults / per-agent
+    'non-main') carry it: the PASS text is pinned byte-identical (C-641/C-641b) and a PASS
+    finding is not rendered with its advice anyway.
+    """
+    backend = sandbox.get("backend") if isinstance(sandbox, dict) else None
+    if isinstance(backend, str) and backend.strip() and backend.strip() != "docker":
+        return ""
+    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
+    image = docker.get("image") if isinstance(docker, dict) else None
+    shown = None
+    if isinstance(image, str):
+        # printable-only and length-capped: the value is operator config but ends up on a terminal
+        shown = "".join(ch for ch in image.strip() if ch.isprintable())[:200] or None
+    if shown is None and image is not None:
+        subject = "its configured container image (agents.defaults.sandbox.docker.image)"
+        how = "Build or pull that image first."
+    elif shown is None or shown == _DEFAULT_SANDBOX_IMAGE:
+        subject = f"the container image {_DEFAULT_SANDBOX_IMAGE} (the default)"
+        how = "OpenClaw's own error text says to build it with scripts/sandbox-setup.sh."
+    else:
+        subject = f"the container image {shown} (agents.defaults.sandbox.docker.image)"
+        how = "Build or pull that image first."
+    return (
+        f" A sandboxed session also needs {subject} to exist on the host that runs the "
+        "gateway: when it is missing, OpenClaw cannot start the session and fails it with "
+        "a SandboxProvisioningError ('Sandbox image not found'). clawseccheck cannot see "
+        "the container engine, so it did not verify this - confirm with your container "
+        f"engine's image-inspect command. {how}"
+    )
+
+
 def check_sandbox(ctx: Context) -> Finding:
     cfg = ctx.config
     # Real path: agents.defaults.sandbox.mode (values: "off", "non-main", "all")
@@ -4964,7 +5015,8 @@ def check_sandbox(ctx: Context) -> Finding:
             "Set agents.defaults.sandbox.mode to 'all' so the main session is sandboxed "
             "too, and configure agents.defaults.sandbox.docker for network isolation. "
             "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
-            "this WARN does not by itself open that chain.",
+            "this WARN does not by itself open that chain."
+            + _sandbox_image_advice(default_sandbox),
             evidence=["agents.defaults.sandbox.mode=non-main"],
             config_field_paths={"agents.defaults.sandbox.mode"},
         )
@@ -4987,7 +5039,8 @@ def check_sandbox(ctx: Context) -> Finding:
             "Set sandbox.mode to 'all' on each agent named in the evidence, or remove that "
             "per-agent sandbox.mode so the agent inherits agents.defaults.sandbox.mode. "
             "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
-            "this WARN does not by itself open that chain.",
+            "this WARN does not by itself open that chain."
+            + _sandbox_image_advice(default_sandbox),
             non_main_agents,
         )
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
