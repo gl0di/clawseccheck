@@ -1173,6 +1173,12 @@ class Context:
     # labels these "bundled" rather than folding them into a plain "(N installed)" count
     # that implies the user chose each one.
     installed_skill_bundled: set = field(default_factory=set)
+    # Keys (into installed_skills) of skill copies found inside a dot-directory below a skills
+    # root, e.g. the installer's `.openclaw-install-backups/<name>-<uuid>`. OpenClaw's loaders
+    # skip such folders, so these are NOT installed/loaded skills; they are still read and
+    # graded (C-707 item 4, Dave: a missed hostile copy is the worse error). report.py uses
+    # this set only to keep them out of the "N installed" count and to label them.
+    installed_skill_hidden: set = field(default_factory=set)
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -4956,7 +4962,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # Skill folders inside a dot-directory under a root (an installer's backup folder). The
     # loaders in the OpenClaw dist skip every entry whose name starts with "." (the skill-root
     # discovery, the workspace refresh and the resource loader), so these are on disk but not
-    # loaded. They are still read below: a hostile copy missed is the worse error.
+    # loaded. They are still read and graded below (a hostile copy missed is the worse error),
+    # but kept out of the "installed" count (`ctx.installed_skill_hidden`) and labelled.
+    # Grounding (openclaw 2026.11.1 dist): skill-root-discovery-*.mjs:44 (`listChildDirectories`
+    # drops any child whose name starts with "."), settings-manager-*.mjs:3364
+    # (`loadSkillsFromDirInternal`), and install-package-dir-*.mjs:472 (an update moves the old
+    # copy into `<install base>/.openclaw-install-backups/<name>-<uuid>`).
     dot_dir_skills: set[str] = set()
     for base, allow_symlink in roots:
         # B-303: a load root that exists but is not traversable (most commonly the whole
@@ -4981,10 +4992,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         # discovery engine confirm and walk" - see the field's docstring on Context.
         ctx.installed_skill_roots.append(base)
         for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
+            in_dot_dir = False
             if base != plugin_skills:
                 try:
                     if any(part.startswith(".") for part in sd.relative_to(base).parts):
                         dot_dir_skills.add(str(target))
+                        in_dot_dir = True
                 except ValueError:
                     pass
             if len(ctx.installed_skills) >= _MAX_SKILLS:
@@ -5014,6 +5027,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             # must be judged by what it points at. A malicious skill renamed to an own-skill
             # name now enters the inventory and is audited like any other.
             if _is_own_source(target):
+                if in_dot_dir:
+                    # An update backup of ClawSecCheck's own skill: not an installed copy, so
+                    # it is not "self-excluded" either (that list reads as "your install, left
+                    # out" and would also mark the BOM incomplete). It is still counted by the
+                    # dot-directory disclosure below.
+                    continue
                 # B-507: excluded, but no longer SILENTLY excluded -- record the name so
                 # report.py can disclose it instead of the inventory count just quietly
                 # shrinking by one with no trace anywhere in the output. Deduped: the
@@ -5034,6 +5053,8 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                     key = f"{original}#{suffix}"
                     suffix += 1
             seen.add(key)
+            if in_dot_dir:
+                ctx.installed_skill_hidden.add(key)
             if base == plugin_skills:
                 # B-507: this root is DELIBERATELY symlinks into a plugin's own bundled
                 # skills/ dir (see the B-161 comment above `plugin_skills = ...`) -- e.g.
@@ -5067,7 +5088,8 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             f"{n_dot} skill {'folder sits' if n_dot == 1 else 'folders sit'} inside a "
             "dot-directory (a folder whose name starts with '.', such as an installer backup) "
             "under a skills root. They are present on disk but not loaded by OpenClaw, whose "
-            "skill loader skips such folders; this audit still reads them.",
+            "skill loader skips such folders; this audit still reads and grades them, and does "
+            "not count them as installed.",
         )
     # The default bundled tier, gated like the personal ~/.agents/skills root so a fixture or
     # custom --home stays hermetic; a persistent relocation replaces that tier.

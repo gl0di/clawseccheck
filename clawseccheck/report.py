@@ -2351,6 +2351,13 @@ def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int 
     return "clear"
 
 
+# One phrase for skill copies sitting in dot-directories (e.g. `.openclaw-install-backups`),
+# shared by the roster header and the per-skill lines. OpenClaw's loaders skip dot-named
+# child directories (dist skill-root-discovery:44, settings-manager loadSkillsFromDirInternal),
+# and the installer parks the previous copy of an updated skill there (install-package-dir:472).
+_HIDDEN_FOLDER_PHRASE = "hidden folders OpenClaw does not load (scanned anyway)"
+
+
 def _skills_roster_text(inv: dict, ctx) -> str:
     """How a skill ROSTER's population is described - the one phrase, in one place.
 
@@ -2374,7 +2381,12 @@ def _skills_roster_text(inv: dict, ctx) -> str:
     ONLY skill is ClawSecCheck itself has an empty roster, and "none installed" there is
     exactly the sentence B-507 was filed against - true of the list, false about the user.
     """
-    skills = inv["skills"]
+    # Copies in a dot-directory (an installer backup) are scanned but are NOT installed or
+    # loaded (collector.installed_skill_hidden): kept out of every "installed" figure below
+    # and named in their own phrase at the end.
+    hidden_names = getattr(ctx, "installed_skill_hidden", None) or set()
+    skills = [s for s in inv["skills"] if s.get("name") not in hidden_names]
+    n_hidden = len(inv["skills"]) - len(skills)
     n_skills = len(skills)
     self_excluded = getattr(ctx, "self_excluded_skills", None) or []
     bundled_names = getattr(ctx, "installed_skill_bundled", None) or set()
@@ -2410,6 +2422,8 @@ def _skills_roster_text(inv: dict, ctx) -> str:
         text = f"{n_skills} installed"
     if self_excluded:
         text += f" · {len(self_excluded)} self-excluded"
+    if n_hidden:
+        text += f" · {n_hidden} in {_HIDDEN_FOLDER_PHRASE}"
     return text
 
 
@@ -3460,6 +3474,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     icon = _ICON_ASCII if ascii_only else _ICON
     skills = inv["skills"]
     n_skills = len(skills)
+    hidden_names = getattr(ctx, "installed_skill_hidden", None) or set()
     # B-507: self-excluded names (ClawSecCheck's own content-verified install, B-265) and
     # the bundled-vs-user-installed split -- see the Context field docstrings in
     # collector.py for what each signal means and why it is scoped the way it is.
@@ -3533,16 +3548,29 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # blow the budget with a name list. The count stays exact either way, and the overflow
     # is disclosed, never silently cut. `None` (the full report, `--dashboard --full`)
     # lists them all, exactly as before.
-    clean = [_sanitize(s["name"]) for s in skills if s["name"] not in flagged_names]
+    clean = [_sanitize(s["name"]) for s in skills
+             if s["name"] not in flagged_names and s["name"] not in hidden_names]
+    clean_hidden = [_sanitize(s["name"]) for s in skills
+                    if s["name"] not in flagged_names and s["name"] in hidden_names]
     if clean:
         shown = clean if clean_roster_limit is None else clean[:clean_roster_limit]
         roster = ", ".join(shown)
         if len(shown) < len(clean):
             roster += f", +{len(clean) - len(shown)} more"
         lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + roster)
+    if clean_hidden:
+        lines.append(
+            f"   {icon.get(PASS, '?')} {len(clean_hidden)} clean in {_HIDDEN_FOLDER_PHRASE}: "
+            + ", ".join(clean_hidden if clean_roster_limit is None
+                        else clean_hidden[:clean_roster_limit])
+            + ("" if clean_roster_limit is None or len(clean_hidden) <= clean_roster_limit
+               else f", +{len(clean_hidden) - clean_roster_limit} more"))
     for s in flagged:
         reason_text = "; ".join(s.get("reasons") or []) or s["verdict"]
-        lines.append(f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}  {s['verdict']} - {reason_text}")
+        where = f" [in {_HIDDEN_FOLDER_PHRASE}]" if s["name"] in hidden_names else ""
+        lines.append(
+            f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}{where}  "
+            f"{s['verdict']} - {reason_text}")
     return lines
 
 
