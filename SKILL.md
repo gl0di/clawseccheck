@@ -161,7 +161,9 @@ as a run having told you so - only a run is evidence. If no run this session has
 on OpenClaw visibility, run the bare default audit ONCE anyway (`python3 {baseDir}/audit.py`,
 no other flags) even if you suspect sandboxing - it is read-only, exits 0, and costs one
 command. Its own output tells you and the user whether the session is sandboxed, in wording
-you must relay verbatim; never write your own paraphrase of it. Never assert sandboxing from priors - only a run's own output may state it. Once that run has reported, the stop rule below governs everything after.
+you must relay verbatim; never write your own paraphrase of it. Never assert sandboxing from priors - only a run's own output may state it. Do not invent your own command line either;
+`--version` / `--menu` above are the one prescribed invocation, not a template to add untested
+flags to. Once that run has reported, the stop rule below governs everything after.
 
 **Stop rule - checked next, before proceeding further in this step.** If a run this session
 already reported no OpenClaw config found, or reported that this session is sandboxed
@@ -201,7 +203,7 @@ one sub-check stays UNKNOWN.
 
 **For any other item**, run that mode's flag directly (`python3 {baseDir}/audit.py`; `python` on Windows); no self-report, no audit judge panel.
 
-**The command errors or produces nothing at all?** That is ClawSecCheck *itself*, not the audited setup - but only once the process has EXITED. A full audit takes one to a few minutes (up to about 4) and prints NOTHING until it finishes. If your runner returns early, backgrounds it, or shows "still running"/empty partial output, that is not "no output": poll the SAME process until it exits, and never start a second copy. Never guess at a fix or edit the user's OpenClaw config to work around it yourself.
+**The command errors or produces nothing at all?** That is ClawSecCheck *itself*, not the audited setup - but only once the process has EXITED. A full audit takes up to ~4 min and prints NOTHING until done; "still running" is not "no output" - poll the SAME process, never start a second copy. Never guess at a fix or edit the user's OpenClaw config to work around it yourself.
 
 **If a run prints a first-run welcome screen, a sandbox notice, an error, or (after it exits) nothing at
 all, relay what it printed as-is, stop, and read
