@@ -46,20 +46,21 @@ _MAX_BYTES_PER_FILE = 8_000_000
 
 # ---------------------------------------------------------------------------
 # B-732: OpenClaw locates a session's trajectory sidecar through a POINTER file
-# (``<session>.trajectory-path.json``) that names the runtime file by an absolute path,
-# not only by the ``agents/*/sessions/*.trajectory.jsonl`` glob this module used alone
-# before. Grounded against the installed dist (``paths-*.mjs``, ``cleanup-*.mjs``):
+# (``<session>.trajectory-path.json``) naming the runtime file by an absolute path, not only
+# by the ``agents/*/sessions/*.trajectory.jsonl`` glob this module used alone before.
+# Grounded against OpenClaw 2026.10.x (``paths-*.mjs``, ``cleanup-*.mjs``):
 #
 #   isTrajectoryPointerArtifactName(name) = name.endsWith(".trajectory-path.json")
-#   TRAJECTORY_POINTER_FILE_MAX_BYTES = 65536
-#   resolveTrajectoryPointerFilePath(sessionFile) =
-#       sessionFile.endsWith(".jsonl") ? sessionFile.slice(0,-6)+".trajectory-path.json" : ...
-#   safeTrajectorySessionFileName(sessionId) =
-#       (/[^A-Za-z0-9_-]/g -> "_", sliced to 120) or "session" if nothing alnum survives
-#   validation (cleanup-*.mjs): traceSchema === "openclaw-trajectory-pointer" &&
-#       schemaVersion === 1 && sessionId === <expected> && typeof runtimeFile === "string"
-#       && runtimeFile.trim() !== ""
+#   TRAJECTORY_POINTER_FILE_MAX_BYTES = 65536; resolveTrajectoryPointerFilePath: .jsonl -> that
+#   safeTrajectorySessionFileName(id) = (/[^A-Za-z0-9_-]/g -> "_").slice(0,120) or "session"
+#   validation (cleanup-*.mjs): traceSchema === "openclaw-trajectory-pointer" && schemaVersion
+#       === 1 && sessionId === <expected> && typeof runtimeFile === "string" && trim() !== ""
 #
+# OpenClaw 2026.11.1 retired pointer files to a doctor migration reader
+# (``collectRetainedTrajectoryPointers``, ``doctor-session-sqlite-*.mjs``) that checks only
+# traceSchema + a string runtimeFile, no size cap; TRAJECTORY_POINTER_FILE_MAX_BYTES is gone.
+# So the 64 KiB cap and the schemaVersion / sessionId / non-empty-runtimeFile checks below
+# are now OUR OWN defensive bounds. ``safeTrajectorySessionFileName`` is unchanged (2026.11.1).
 # A pointer is attacker-writable (anything that can write into agents/*/sessions/ can
 # write one), and the vendor's own reader `path.resolve()`s runtimeFile unconditionally
 # -- so unlike the runtime-content read below, following one is a read-PRIMITIVE, not a
@@ -68,7 +69,7 @@ _MAX_BYTES_PER_FILE = 8_000_000
 _POINTER_SUFFIX = ".trajectory-path.json"
 _POINTER_TRACE_SCHEMA = "openclaw-trajectory-pointer"
 _POINTER_SCHEMA_VERSION = 1
-_POINTER_MAX_BYTES = 65536  # TRAJECTORY_POINTER_FILE_MAX_BYTES, paths-*.mjs
+_POINTER_MAX_BYTES = 65536  # our own bound; OpenClaw <=2026.10.x: TRAJECTORY_POINTER_FILE_MAX_BYTES
 
 # C-135: no per-pointer bound existed before max_files trimmed the FINAL union, so a
 # directory salted with many pointer files paid real I/O (stat/read/json.loads/resolve)
