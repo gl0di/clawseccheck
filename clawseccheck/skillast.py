@@ -3451,6 +3451,121 @@ def _b1022_mutated_argv_taint(
     return False
 
 
+# B-1024: `os.exec*` / `os.spawn*` run a program given as a SEPARATE argument. `v` forms
+# take the argv as one list, `l` forms as trailing positional arguments (an `e` form's
+# last positional is the environment mapping, not argv). `spawn*` has the mode first.
+# Listed exactly (not by prefix) so an unrelated `os.exec_foo` is never claimed;
+# `os.system`/`os.popen` are already TT5 sinks via `_is_exec_sink_call` and
+# `posix_spawn*` is not part of this rule.
+_OS_EXEC_VECTOR = frozenset({"execv", "execve", "execvp", "execvpe"})
+_OS_EXEC_LIST = frozenset({"execl", "execle", "execlp", "execlpe"})
+_OS_SPAWN_VECTOR = frozenset({"spawnv", "spawnve", "spawnvp", "spawnvpe"})
+_OS_SPAWN_LIST = frozenset({"spawnl", "spawnle", "spawnlp", "spawnlpe"})
+
+
+def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
+    """B-1024: `(sink_name, program_expr, argv)` for an `os.exec*`/`os.spawn*` call, or
+    None when it is not one / its shape cannot be read. `argv` is a list of element
+    expressions for an `l` form, or the single argv expression for a `v` form. Anything
+    with a starred positional before the argv, or too few arguments, is None (not
+    claimed) -- the generic DANGEROUS_SINK still reports the call."""
+    f = node.func
+    if not (isinstance(f, ast.Attribute) and _attr_base(f.value) in _EXEC_SINK_BASES_OS):
+        return None
+    attr = f.attr
+    if attr in _OS_EXEC_VECTOR | _OS_EXEC_LIST:
+        lead = 0
+    elif attr in _OS_SPAWN_VECTOR | _OS_SPAWN_LIST:
+        lead = 1  # mode
+    else:
+        return None
+    args = node.args
+    if any(isinstance(a, ast.Starred) for a in args[: lead + 1]) or len(args) < lead + 2:
+        return None
+    prog = args[lead]
+    if attr in _OS_EXEC_VECTOR or attr in _OS_SPAWN_VECTOR:
+        return f"os.{attr}", prog, args[lead + 1]
+    rest = list(args[lead + 1:])
+    if attr.endswith(("le", "lpe")) and rest:
+        rest = rest[:-1]  # trailing environment mapping
+    return f"os.{attr}", prog, rest
+
+
+def _os_exec_spawn_verdict(
+    node: ast.Call,
+    parts: tuple,
+    tainted: set,
+    list_bindings: "dict | None",
+    scope: ast.AST,
+    ref_res: "_RefResolver | None",
+    tree: ast.AST,
+) -> "str | None":
+    """B-1024: `"crit"` (command injection), `"info"` (argument injection) or None for an
+    `os.exec*`/`os.spawn*` call, using the same classification subprocess argv lists get.
+
+    crit: the program argument is tainted; argv[0] is tainted; the program OR argv[0] is
+    a shell / interpreter-with-eval-flag / re-exec wrapper (`_argv0_is_shell_indirect_exec`,
+    judged on `[program] + argv[1:]` AND on argv itself, because `execv("/bin/sh",
+    ["x", "-c", q])` runs the shell whatever argv[0] says) and any later element is
+    tainted; or the argv is not a readable list at all (unresolved name, call result,
+    mutated binding) and anything about it is tainted. info: only a non-program element
+    of a readable list is tainted. None: nothing tainted reaches the call."""
+    _name, prog, argv = parts
+
+    def _t(e: ast.AST) -> bool:
+        # same vocabulary the subprocess sink uses for its own arguments
+        # (`_call_args_tainted_for_exec_sink`): a tainted name, an inline source call, or
+        # a positively resolved source
+        return (
+            bool(_names_in(e) & tainted)
+            or _value_is_tainted_source(e, tainted, tree)
+            or (ref_res is not None and ref_res.source_in(e))
+        )
+
+    if _t(prog):
+        return "crit"
+    if isinstance(argv, list):
+        elts = argv
+    else:
+        expr = argv
+        if isinstance(expr, ast.Name) and list_bindings and expr.id in list_bindings:
+            expr = list_bindings[expr.id]
+        if (
+            isinstance(expr, ast.BinOp)
+            and isinstance(expr.op, ast.Add)
+            and isinstance(expr.left, (ast.List, ast.Tuple))
+            and expr.left.elts
+            and isinstance(expr.left.elts[0], ast.Constant)
+            and isinstance(expr.left.elts[0].value, str)
+            and not _prog_name_could_become_shell_indirect(expr.left.elts)
+        ):
+            expr = ast.List(elts=[*expr.left.elts, expr.right], ctx=ast.Load())
+        if isinstance(expr, (ast.List, ast.Tuple)):
+            elts = list(expr.elts)
+        else:
+            # Not a readable list: tainted (directly, or fed by a tainted append/extend)
+            # means the argv could be anything, including `-c <payload>`.
+            probe = ast.Call(func=node.func, args=[argv], keywords=[])
+            if _t(argv) or _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree):
+                return "crit"
+            return None
+    if not elts:
+        return None
+    if _t(elts[0]):
+        return "crit"
+    tail_tainted = any(_t(e) for e in elts[1:])
+    if not tail_tainted and isinstance(argv, ast.Name):
+        # a bound literal that a later append/extend fed with tainted data (B-1022); a
+        # shell / re-exec head never reaches here -- B-953 already dropped its binding
+        probe = ast.Call(func=node.func, args=[argv], keywords=[])
+        tail_tainted = _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree)
+    if not tail_tainted:
+        return None
+    if _argv0_is_shell_indirect_exec(elts) or _argv0_is_shell_indirect_exec([prog, *elts[1:]]):
+        return "crit"
+    return "info"
+
+
 def _file_read_prefilter(source: str) -> bool:
     """Cheap text-level pre-check: True when *source* could contain a file-read call
     (`open(`/`read_text`/`read_bytes`). Deliberately a plain SUBSTRING test, not a
@@ -13944,7 +14059,7 @@ def analyze_python(
     # `subprocess.check_call([os.environ["P"], "x"])`, no bound Name anywhere) still
     # enters the pass below instead of being skipped outright at this gate.
     _has_inline_exec_sink_source = any(
-        _is_exec_sink_call(n.func)[0]
+        (_is_exec_sink_call(n.func)[0] or _os_exec_spawn_parts(n) is not None)
         and any(
             _value_is_tainted_source(a, set(), tree) or ref_res.source_in(a)
             for a in list(n.args) + [kw.value for kw in n.keywords]
@@ -14124,6 +14239,39 @@ def analyze_python(
                         f"external input flows into {exec_name} ({flow_kind} flow) \u2014 command/code injection",
                     )
                     continue
+
+            # B-1024: os.exec*/os.spawn* -- program is a separate argument, argv a list.
+            os_parts = _os_exec_spawn_parts(node)
+            if os_parts is not None:
+                ext_visible = _tainted_names_visible(
+                    node, ext_taint_map, owner_map, parent_scope, shadow_cache
+                )
+                _own = owner_map.get(node)
+                verdict = _os_exec_spawn_verdict(
+                    node,
+                    os_parts,
+                    ext_visible,
+                    list_bindings_by_call.get(node),
+                    _own if isinstance(_own, (ast.FunctionDef, ast.AsyncFunctionDef)) else tree,
+                    ref_res,
+                    tree,
+                )
+                if verdict == "crit":
+                    add(
+                        "TT5_CMD_INJECTION",
+                        "crit",
+                        ln,
+                        f"external input flows into {os_parts[0]} \u2014 command/code injection",
+                    )
+                elif verdict == "info":
+                    add(
+                        "TT5_ARG_INJECTION",
+                        "info",
+                        ln,
+                        f"external input flows into {os_parts[0]} as a non-program list argument "
+                        "\u2014 argument injection, not command injection",
+                    )
+                continue
 
             # TT4: file-read tainted value flows into a data-bearing network sink.
             is_net_data, net_name = _is_net_out_data_sink(node.func)
