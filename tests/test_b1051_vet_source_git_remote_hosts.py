@@ -27,6 +27,7 @@ GOOD: dict = {}
     "git://evil-infra.example/o/r.git",
     "git@evil-infra.example:o/r.git",
     "evil-infra.example:o/r.git",
+    "git@evil-infra.example:repo",
     "git:evil-infra.example/o/r@v1",
     "git+https://sub.evil-infra.example/o/r.git@v1.0",
 ])
