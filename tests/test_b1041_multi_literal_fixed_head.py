@@ -91,3 +91,58 @@ def test_untainted_multi_literal_command_yields_nothing():
 def test_single_literal_binding_verdict_is_unchanged():
     assert _tt5(_HEAD + "cmd = ['git', 'diff']\ncmd.append(q)\nsubprocess.run(cmd)\n") == ARG
     assert _tt5(_HEAD + "cmd = ['sh', '-c']\ncmd.append(q)\nsubprocess.run(cmd)\n") == CMD
+
+
+_TWO = "cmd = ['git', 'diff']\nif staged:\n    cmd = ['git', 'log']\n"
+
+
+@pytest.mark.parametrize("body", [
+    # aliasing / indirect mutation of the head
+    _TWO + "x = cmd\nx.insert(0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "x = cmd\nx[0] = 'sh'\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "box = [cmd]\nbox[0][0] = 'sh'\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "mutate(cmd)\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "import operator\noperator.setitem(cmd, 0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "cmd.__setitem__(0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "cmd.__delitem__(0)\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "cmd[0:1] = ['sh', '-c']\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "del cmd[0]\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "del cmd\ncmd = ['git']\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "y = cmd.copy()\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "for _ in cmd:\n    pass\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "n = len(cmd)\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "cmd.append(cmd)\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    _TWO + "cmd.append(q)\nsubprocess.run(cmd)\ndef g():\n    cmd.insert(0, 'sh')\n",
+    _TWO + "cmd.append(q)\nsubprocess.run(cmd)\ndef g(x):\n    x[0] = 'sh'\ng(cmd)\n",
+    # scope confusion: the sink is not directly in the scope holding the assignments
+    _TWO + "cmd.append(q)\nrun = lambda: subprocess.run(cmd)\nrun()\n",
+    _TWO + "cmd.append(q)\nr = [subprocess.run(cmd) for _ in (1,)]\n",
+    _TWO + "cmd.append(q)\nclass K:\n    subprocess.run(cmd)\n",
+    _TWO + "cmd.append(q)\ndef g(cmd):\n    subprocess.run(cmd)\ng(get())\n",
+    # another function rebinds the module-level name through `global`
+    _TWO + "cmd.append(q)\nsubprocess.run(cmd)\ndef g():\n    global cmd\n    cmd = get()\n",
+])
+def test_aliasing_or_scope_confusion_keeps_command_injection(body):
+    assert _tt5(_HEAD + body) == CMD
+
+
+def test_the_original_benign_twin_is_still_argument_injection():
+    body = ("cmd = ['git', 'diff']\nif staged:\n    cmd = ['git', 'diff', '--cached']\n"
+            "cmd.append(q)\nsubprocess.run(cmd)\n")
+    assert _tt5(_HEAD + body) == ARG
+    fn = ("def f(p):\n    cmd = ['git', 'diff']\n    if staged:\n"
+          "        cmd = ['git', 'diff', '--cached']\n    cmd.append(p)\n    subprocess.run(cmd)\nf(q)\n")
+    assert _tt5(_HEAD + fn) == ARG
+
+
+@pytest.mark.parametrize("body", [
+    _TWO + "def g():\n    cmd.append(q)\n    subprocess.run(cmd)\ng()\n",
+    "def f():\n    cmd = ['git', 'diff']\n    if staged:\n        cmd = ['git', 'log']\n"
+    "    def g():\n        cmd.append(q)\n        subprocess.run(cmd)\n    g()\nf()\n",
+    "def f():\n    cmd = ['git', 'diff']\n    if staged:\n        cmd = ['git', 'log']\n"
+    "    cmd.append(q)\n    def g(x=subprocess.run(cmd)):\n        pass\n    g()\nf()\n",
+])
+def test_closure_or_default_sinks_are_never_downgraded(body):
+    # the sink is in a nested function / a default argument, not in the scope that holds the
+    # literal assignments: no shortcut (today these report nothing at all -- never ARG)
+    assert _tt5(_HEAD + body) != ARG

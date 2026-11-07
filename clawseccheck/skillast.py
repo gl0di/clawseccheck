@@ -6461,6 +6461,81 @@ def _b1041_head_kind(value: ast.AST, name: str) -> "str | None":
     return None
 
 
+_PARENT_MAP_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _parent_map(tree: ast.AST) -> dict:
+    cached = _PARENT_MAP_CACHE.get(tree)
+    if cached is None:
+        cached = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        _PARENT_MAP_CACHE[tree] = cached
+    return cached
+
+
+_B1041_OPAQUE_SCOPES = (
+    ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.ClassDef,
+)
+
+
+def _b1041_binding_scope(node: ast.Call, tree: ast.AST) -> "ast.AST | None":
+    """B-1041: the Module or FunctionDef whose own body holds `node` -- the scope that
+    binds every bare name the call reads -- or None when the call sits in a lambda,
+    comprehension or class body, or in a decorator / default / annotation of a def (code
+    that runs in the ENCLOSING scope but hangs off the def's subtree). The first scope
+    boundary above the call is the answer, so no nested scope can lie between them."""
+    parents = _parent_map(tree)
+    child, cur = node, parents.get(node)
+    while cur is not None:
+        if isinstance(cur, _B1041_OPAQUE_SCOPES):
+            return None
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return cur if any(child is b for b in cur.body) else None
+        if isinstance(cur, ast.Module):
+            return cur
+        child, cur = cur, parents.get(cur)
+    return None
+
+
+def _b1041_uses_are_plain(scope: ast.AST, name: str) -> bool:
+    """B-1041: is EVERY mention of `name` under `scope` (nested scopes included) one of: a
+    plain store handled by the caller (assignment / `+=` target), an argument of an
+    exec-sink call, the receiver of `.append(...)` / `.extend(...)`, or the left operand of
+    `+`? Anything else -- aliasing (`x = name`), passing it to another call (`setitem(name,
+    ...)`, `f(name)`), a container, another attribute (`name.insert`, `name.__setitem__`,
+    `name.copy`), a subscript or slice (read, write or `del`), iteration -- might let the
+    head change behind the analysis, so the carve-out refuses."""
+    parents = {c: n for n in ast.walk(scope) for c in ast.iter_child_nodes(n)}
+    for n in ast.walk(scope):
+        if not (isinstance(n, ast.Name) and n.id == name):
+            continue
+        if isinstance(n.ctx, (ast.Store, ast.Del)):
+            par = parents.get(n)
+            if isinstance(n.ctx, ast.Del) or not isinstance(par, (ast.Assign, ast.AugAssign)):
+                return False
+            continue  # a direct Assign / AugAssign target: judged by the caller
+        par = parents.get(n)
+        if isinstance(par, ast.Attribute) and par.value is n:
+            call = parents.get(par)
+            if not (
+                par.attr in _TRAILING_ONLY_MUTATORS
+                and isinstance(call, ast.Call)
+                and call.func is par
+            ):
+                return False
+            continue
+        if isinstance(par, ast.BinOp) and isinstance(par.op, ast.Add) and par.left is n:
+            continue
+        if isinstance(par, ast.keyword):
+            par = parents.get(par)
+            if isinstance(par, ast.Call) and _is_exec_sink_call(par.func)[0]:
+                continue
+            return False
+        if isinstance(par, ast.Call) and n in par.args and _is_exec_sink_call(par.func)[0]:
+            continue
+        return False
+    return True
+
+
 def _b1041_name_keeps_fixed_head(scope: ast.AST, name: str, tree: ast.AST) -> bool:
     """B-1041: is `name`, in `scope`, bound ONLY to command lists whose head is one fixed
     program that is never a shell / wrapper, so the head is known safe whichever branch ran?
@@ -6505,6 +6580,8 @@ def _b1041_name_keeps_fixed_head(scope: ast.AST, name: str, tree: ast.AST) -> bo
         for n in ast.walk(tree)
     ):
         return False  # a star-import can bind any name
+    if not _b1041_uses_are_plain(scope, name):
+        return False
     own = list(_scope_own_nodes(scope))
     ok_targets: set = set()
     literal_seen = False
@@ -6864,12 +6941,12 @@ def _subprocess_taint_is_command_injection(
     # by `cmd = cmd + [...]`) but whose EVERY assignment is a literal list headed by a
     # fixed non-shell program -- the head is known safe, so a tainted element is only an
     # argument. Any other assignment keeps the unresolved-Name crit below.
-    if (
-        isinstance(first, ast.Name)
-        and tree is not None
-        and _b1041_name_keeps_fixed_head(_call_scope(node, owner_map, tree), first.id, tree)
-    ):
-        return False
+    if isinstance(first, ast.Name) and tree is not None:
+        # only when the sink sits DIRECTLY in the Module / FunctionDef whose body holds the
+        # literal assignments (not in a lambda, comprehension, class body or decorator)
+        b1041_scope = _b1041_binding_scope(node, tree)
+        if b1041_scope is not None and _b1041_name_keeps_fixed_head(b1041_scope, first.id, tree):
+            return False
     # B-413 layer 2: `first` is a bare, unresolved Name -- possibly the wrapper's OWN
     # parameter, which is genuinely tainted at THIS scope (layer 1 is correct about
     # that) but may still be safe if EVERY intra-file call site binds it to a
