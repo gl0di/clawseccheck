@@ -331,3 +331,64 @@ def test_remediation_has_no_paste_ready_command():
     `fix` leads for B398 and no command is published."""
     from clawseccheck.catalog import remediation_for
     assert remediation_for("B398")["commands"] == []
+
+
+# ---- B-1003: any other shipped .pyc is a pre-install WARN disclosure -----------------
+
+def _vet_check(sk: Path, pre_install: bool):
+    ctx = Context(home=sk.parent)
+    ctx.pre_install = pre_install
+    ctx.installed_skills[sk.name] = "x"
+    collect_skill_files(sk, ctx)
+    return check_unchecked_hash_pyc(ctx)
+
+
+@pytest.mark.parametrize("mode", [TIMESTAMP, CHECKED])
+def test_b1003_other_pyc_warns_pre_install_only(tmp_path, mode):
+    from clawseccheck.catalog import WARN
+    sk = _skill(tmp_path)
+    _pyc(sk, mode)
+    f = _vet_check(sk, True)
+    assert f.status == WARN
+    assert "__pycache__/output.cpython-314.pyc" in f.detail
+    assert "instead of the .py source" in f.detail
+    assert "reinstall without __pycache__" in f.fix.lower()
+    assert _vet_check(sk, False).status == PASS  # installed-skill audit path unchanged
+
+
+def test_b1003_no_pyc_is_clean_pre_install(tmp_path):
+    assert _vet_check(_skill(tmp_path), True).status == PASS
+
+
+def test_b1003_unchecked_pyc_keeps_the_fail_verdict(tmp_path):
+    sk = _skill(tmp_path)
+    _pyc(sk, UNCHECKED)
+    _pyc(sk, TIMESTAMP, "other.cpython-314.pyc")
+    assert _vet_check(sk, True).status == FAIL
+
+
+def test_b1003_uppercase_loose_pyc_and_archive_member_warn(tmp_path):
+    from clawseccheck.catalog import WARN
+    sk = _skill(tmp_path)
+    os.rename(_pyc(sk, TIMESTAMP), sk / "legacy.PYC")
+    assert _vet_check(sk, True).status == WARN
+    sk2 = tmp_path / "sk2"
+    sk2.mkdir()
+    (sk2 / "SKILL.md").write_text("---\nname: sk2\ndescription: d\n---\n# x\n", encoding="utf-8")
+    pyc = _pyc(sk, CHECKED).read_bytes()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("pkg/mod.pyc", pyc)
+    (sk2 / "bundle.zip").write_bytes(buf.getvalue())
+    assert _vet_check(sk2, True).status == WARN
+
+
+def test_b1003_dossier_carries_the_note(tmp_path, capsys):
+    sk = _skill(tmp_path)
+    _pyc(sk, TIMESTAMP)
+    out = _dossier(sk, capsys)
+    assert "compiled Python (.pyc)" in out
+    assert "reinstall without __pycache__" in out.lower()
+    assert not out.splitlines()[0].rstrip().endswith("DO-NOT-INSTALL")  # never a FAIL on this alone
+    persistence = [ln for ln in out.splitlines() if ln.strip().startswith("Persistence")]
+    assert persistence and "PASS" not in persistence[0]

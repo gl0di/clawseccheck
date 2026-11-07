@@ -1246,6 +1246,13 @@ class Context:
     # The ordinary skill walk prunes __pycache__, so these are gathered by `_scan_skill_pycs`.
     skill_unchecked_pycs: dict = field(default_factory=dict)
     skill_pyc_gaps: dict = field(default_factory=dict)
+    # B-1003 / B398: every OTHER loadable .pyc (timestamp / checked-hash / reserved flags), per
+    # skill dir. A forged timestamp pyc whose header matches the shipped .py, or a checked-hash
+    # pyc run under `--check-hash-based-pycs never`, is imported INSTEAD of the source, and a
+    # matching header proves nothing. `pre_install` is True only on the `--vet` path, where it
+    # turns into B398's WARN; an installed skill legitimately carries runtime pycs.
+    skill_compiled_pycs: dict = field(default_factory=dict)
+    pre_install: bool = False
     # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
     # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
     # found - this skill will not appear to the agent"), which is a false statement about a
@@ -2629,6 +2636,11 @@ def _note_archive_member_pyc(
         if member_rel not in lst:
             lst.append(member_rel)
             lst.sort()
+    elif len(data) >= _PYC_MIN_LOADABLE:
+        lst = ctx.skill_compiled_pycs.setdefault(key, [])
+        if member_rel not in lst:
+            lst.append(member_rel)
+            lst.sort()
 
 
 def _scan_skill_pycs(base_dir: Path, ctx) -> None:
@@ -2644,6 +2656,7 @@ def _scan_skill_pycs(base_dir: Path, ctx) -> None:
     so they are classified the same way, and the suffix match is case-insensitive.
     """
     found: list[str] = []
+    compiled: list[str] = []
 
     def _rel(p: str) -> str:
         try:
@@ -2699,12 +2712,16 @@ def _scan_skill_pycs(base_dir: Path, ctx) -> None:
                 _gap(f"{_rel(full)}: .pyc header could not be read")
             elif flags == PYC_UNCHECKED_HASH_FLAGS:
                 found.append(_rel(full).replace(os.sep, "/"))
+            else:
+                compiled.append(_rel(full).replace(os.sep, "/"))
         if capped:
             break
     if capped:
         _gap(f"pyc scan stopped at its {capped}; the rest of the skill was not looked at")
     if found:
         ctx.skill_unchecked_pycs[str(base_dir)] = sorted(found)
+    if compiled:
+        ctx.skill_compiled_pycs[str(base_dir)] = sorted(compiled)
 
 
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:

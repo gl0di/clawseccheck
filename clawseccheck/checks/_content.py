@@ -11616,6 +11616,12 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
 
     A ``.pyc`` with no sibling source is NOT flagged here: that was considered and left
     out, because stale caches of removed modules are common on real installs.
+
+    B-1003: two sibling routes cannot be convicted by header alone - a forged TIMESTAMP pyc
+    whose recorded mtime+size match the shipped ``.py``, and a checked-hash pyc run under
+    ``python3 --check-hash-based-pycs never``. A matching stored source hash is not evidence
+    of benignity, so on the pre-install path ONLY (``ctx.pre_install``; an installed skill
+    legitimately carries runtime pycs) ANY other loadable ``.pyc`` is a WARN disclosure.
     """
     skills = getattr(ctx, "installed_skills", None)
     found = getattr(ctx, "skill_unchecked_pycs", {})
@@ -11641,6 +11647,30 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
             + (" Part of the skill could not be inspected for .pyc files either: "
                + "; ".join(gap_ev[:3]) + "." if gap_ev else ""),
             ev + [f"not inspected: {g}" for g in gap_ev],
+        )
+    compiled = getattr(ctx, "skill_compiled_pycs", {})
+    if compiled and getattr(ctx, "pre_install", False):
+        # B-1003: pre-install only. A timestamp pyc forged to match the shipped .py (survives
+        # mtime-preserving tar/unzip) or a checked-hash pyc run under
+        # `--check-hash-based-pycs never` is imported instead of the source, and a header
+        # that matches the source proves nothing - so disclose, never FAIL on this alone.
+        cev = [f"{Path(k).name}: {rel}" for k, rels in sorted(compiled.items()) for rel in rels]
+        cextra = f" (+{len(cev) - 6} more)" if len(cev) > 6 else ""
+        return _custom(
+            "B398",
+            MEDIUM,
+            WARN,
+            "This skill ships compiled Python (.pyc): " + "; ".join(cev[:6]) + cextra
+            + ". Python may run it instead of the .py source you reviewed.",
+            "Reinstall without __pycache__, or delete the .pyc files, before trusting this "
+            "review. A .pyc whose header matches its .py is not evidence it is benign: a "
+            "timestamp-based one can be forged to match, and a hash-checked one is skipped "
+            "by `python3 --check-hash-based-pycs never`. A legitimate author may ship them "
+            "by accident, so this alone is a warning, not a conviction."
+            + (" Part of the skill could not be inspected for .pyc files either: "
+               + "; ".join(f"{Path(k).name}: {g}" for k, gl in sorted(gaps.items()) for g in gl)[:300]
+               + "." if gaps else ""),
+            cev,
         )
     if gaps:
         return _custom(
