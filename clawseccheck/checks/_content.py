@@ -65,7 +65,7 @@ from ._shared import (
     _enabled_tools,
     _finding,
     _hint,
-    _is_public_ip,
+    _ip_reaches_nonlocal_host,
     _mcp_servers,
     _mcp_tool_texts,
     _skill_frontmatter_block,
@@ -4133,7 +4133,7 @@ def _clickfix_public_ip_fetch(cmd: str) -> bool:
     command's URL targets a bare, PUBLIC IPv4/IPv6 literal host - not a domain name.
     Reuses `_install_host_is_public_ip` (B103's already-vetted public-vs-private/
     loopback/link-local/TEST-NET classifier - IPv4 via pure integer-octet math in
-    `_is_public_ip`, IPv6 via stdlib `ipaddress` single-address properties, both stable
+    `_ip_reaches_nonlocal_host`, IPv6 via stdlib `ipaddress` single-address properties, both stable
     across Python 3.9-3.12) instead of a new private-IP table. A legitimate, documented
     installer command publishes a stable domain name, never a raw IP - vendors need a
     domain for TLS identity and because IPs churn - so a public-IP-literal fetch host
@@ -7874,13 +7874,14 @@ def _install_host_is_public_ip(host: str) -> bool:
     TEST-NET literal - an install directive that fetches from `127.0.0.1`, `192.168.x.x` or
     `[::1]` is an air-gapped / homelab / fleet-internal mirror on the operator's own network,
     not an anonymous swappable supply-chain source, so it must NOT FAIL. IPv4 goes through
-    `_is_public_ip` (explicit TEST-NET/private handling, stable across Python versions); IPv6
+    `_ip_reaches_nonlocal_host` (explicit CIDR tables, stable across Python versions; B-1017:
+    RFC 6598 shared space / multicast / reserved still count as "not local"); IPv6
     is classified via stdlib `ipaddress`."""
     if not host:
         return False
     h = host.strip().strip("[]")
     if _INSTALL_IPV4_HOST_RE.match(h):
-        return _is_public_ip(h)
+        return _ip_reaches_nonlocal_host(h)
     if ":" in h:  # IPv6 literal (urlparse strips the [] but be defensive)
         try:
             ip = ipaddress.ip_address(h)

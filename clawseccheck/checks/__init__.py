@@ -127,6 +127,8 @@ from ._shared import (
     INPUT_TOOL_HINTS,
     _is_own_source,
     _is_posix,
+    _ip_reaches_nonlocal_host,
+    _ipv4_class,
     _is_public_ip,
     _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,
