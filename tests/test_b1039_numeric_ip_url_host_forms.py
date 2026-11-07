@@ -23,8 +23,15 @@ from clawseccheck.checks._content import (
 )
 from clawseccheck.checks._vet import _IOC_IPURL_RE, _IPV4_LITERAL_RE, _url_host_is_local
 
-FORMS = ("0x8.8.8.8", "0x08080808", "2130706433", "8.8", "1.2.3", "010.8.8.8", "0X7F.0.0.1",
-         "0x7f000001", "4294967295")
+# Spellings that stay "ambiguous" (hex / leading-zero / out-of-range): off-host, never local.
+AMBIGUOUS_FORMS = ("0x8.8.8.8", "0x08080808", "010.8.8.8", "0X7F.0.0.1", "0x7f000001", "0x7f.1",
+                   "127.0x1", "4294967296", "999.1.1.1", "1.2.3.300", "0x1ffffffff")
+# Pure-decimal short forms decode like inet_aton (curl / getaddrinfo / WHATWG): one meaning.
+DECODED_OFF_HOST = {"8.8": "public", "1.2.3": "public", "134744072": "public",
+                    "4294967295": "special"}
+DECODED_LOOPBACK = ("127.1", "127", "2130706433", "127.0.1", "0")
+# Every spelling that must raise B103 / B13.
+FORMS = AMBIGUOUS_FORMS + tuple(DECODED_OFF_HOST)
 
 
 def _vet(md: str) -> tuple:
@@ -38,10 +45,42 @@ def _vet(md: str) -> tuple:
 
 
 @pytest.mark.parametrize("host", FORMS)
-def test_every_form_is_ambiguous_and_matches_both_host_regexes(host):
-    assert _ipv4_class(host) == "ambiguous"
+def test_every_form_matches_both_host_regexes_and_is_off_host(host):
+    assert _ipv4_class(host) == DECODED_OFF_HOST.get(host, "ambiguous")
     assert _INSTALL_IPV4_HOST_RE.match(host)
     assert _IPV4_LITERAL_RE.match(host)
+
+
+@pytest.mark.parametrize("host", DECODED_LOOPBACK)
+def test_decoded_loopback_short_forms_are_local(host):
+    assert _ipv4_class(host) == "local"
+    assert _INSTALL_IPV4_HOST_RE.match(host)
+    assert _url_host_is_local(f"http://{host}/x")
+    assert not _install_host_is_public_ip(host)
+    assert _install_host_is_local(host)
+    assert not _install_entry_findings(
+        "s", [{"id": "a", "kind": "download", "url": f"https://{host}/p.tar.gz"}])
+    assert _IOC_IPURL_RE.search(f"http://{host}:9222/x").group(1) == host
+    status, text = _vet(f"# helper\nCDP at http://{host}:9222/json and http://{host}/\n")
+    assert status == PASS, text
+
+
+@pytest.mark.parametrize("host,cls", (("127.1", "local"), ("127", "local"),
+                                      ("2130706433", "local"), ("134744072", "public"),
+                                      ("8.8", "public"), ("1.2.3", "public"),
+                                      ("0x7f.1", "ambiguous"), ("127.0x1", "ambiguous"),
+                                      ("4294967296", "ambiguous"), ("1.16777216", "ambiguous"),
+                                      ("1.2.65536", "ambiguous"), ("256.1", "ambiguous"),
+                                      ("0127.1", "ambiguous")))
+def test_short_form_decoding_matches_inet_aton(host, cls):
+    assert _ipv4_class(host) == cls
+
+
+@pytest.mark.parametrize("host", ("4294967296", "0x7f.1", "127.0x1", "0127.1"))
+def test_what_does_not_decode_can_never_clear_a_finding(host):
+    assert not _url_host_is_local(f"http://{host}/x")
+    assert _install_host_is_public_ip(host)
+    assert not _install_host_is_local(host)
 
 
 @pytest.mark.parametrize("host", FORMS)
@@ -67,11 +106,11 @@ def test_b13_warns_on_every_form(host):
     assert m and m.group(1) == host
     status, text = _vet(f"# helper\nSends telemetry to http://{host}/collect\n")
     assert status == WARN, text
-    assert "numeric-IP URL" in text
+    assert ("numeric-IP URL" if host in AMBIGUOUS_FORMS else "IP URL") in text
 
 
 @pytest.mark.parametrize("host", FORMS)
-def test_url_host_is_never_local_for_any_form(host):
+def test_url_host_is_never_local_for_any_off_host_form(host):
     assert not _url_host_is_local(f"http://{host}/x")  # F-021 must not be cleared
 
 
@@ -131,3 +170,34 @@ def test_plain_lan_dotted_quad_is_still_local():
     assert not _install_host_is_public_ip("10.0.0.1")
     status, text = _vet("# helper\nSends telemetry to http://10.0.0.1/collect\n")
     assert status == PASS, text
+
+
+@pytest.mark.parametrize("host", ("999.1.1.1", "1.2.3.300", "4294967296", "0x1ffffffff"))
+def test_numeric_but_invalid_host_fails_closed_everywhere(host):
+    """Security review of 5868428b: a host that matches the numeric shape but does not
+    validate must not read as LOCAL (that cleared B103's plaintext FAIL and F-021)."""
+    assert _ipv4_class(host) == "ambiguous"
+    assert not _url_host_is_local(f"http://{host}/x")
+    assert not _install_host_is_local(host)
+    assert _install_host_is_public_ip(host)
+    # plaintext http to it still FAILs (Rule A is not cleared) and so does https (raw IP)
+    for scheme in ("http", "https"):
+        entry = {"id": "a", "kind": "download", "url": f"{scheme}://{host}/p.tar.gz"}
+        assert _install_entry_findings("s", [entry]), (scheme, host)
+    status, text = _vet(f"# helper\nSends telemetry to http://{host}/collect\n")
+    assert status == WARN, text
+
+
+@pytest.mark.parametrize("host", ("a:b", "::g", "1:2:3:4:5:6:7:8:9", ":"))
+def test_unparseable_ipv6_is_not_local(host):
+    assert not _install_host_is_local(host)
+
+
+@pytest.mark.parametrize("host", ("::1", "fe80::1", "fd00::1", "localhost", "nas.lan"))
+def test_install_host_local_positive_cases_unchanged(host):
+    assert _install_host_is_local(host)
+
+
+@pytest.mark.parametrize("host", ("2606:4700::1111", "example.com"))
+def test_install_host_not_local_for_public_names_and_v6(host):
+    assert not _install_host_is_local(host)

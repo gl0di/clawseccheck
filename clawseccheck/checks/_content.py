@@ -66,6 +66,7 @@ from ._shared import (
     _finding,
     _hint,
     _ip_reaches_nonlocal_host,
+    _ipv4_class,
     _NUMERIC_IP_HOST_PATTERN,
     _mcp_servers,
     _mcp_tool_texts,
@@ -7917,9 +7918,24 @@ def _install_host_is_local(host: str) -> bool:
         (".local", ".localhost", ".internal", ".lan", ".home.arpa")
     ):
         return True
-    # An IP literal that is NOT a public IP is loopback/private/link-local/ULA/TEST-NET.
-    if (_INSTALL_IPV4_HOST_RE.match(h) or ":" in h):
-        return not _install_host_is_public_ip(h)
+    # B-1039: POSITIVE-only. `not _install_host_is_public_ip(h)` also called a numeric host
+    # that failed to classify (and an unparseable IPv6 string) "local", clearing the
+    # plaintext-transport FAIL - local must be affirmed, never inferred from "not public".
+    if _INSTALL_IPV4_HOST_RE.match(h):
+        return _ipv4_class(h) in ("local", "documentation")
+    if ":" in h:  # IPv6 literal: loopback/private/link-local/ULA/reserved/multicast
+        try:
+            ip = ipaddress.ip_address(h)
+        except ValueError:
+            return False
+        return (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        )
     return False
 
 

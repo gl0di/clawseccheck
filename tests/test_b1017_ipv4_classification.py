@@ -92,7 +92,7 @@ def test_public_ranges_including_the_range_edges(ip):
     assert _ip_reaches_nonlocal_host(ip)
 
 
-@pytest.mark.parametrize("bad", ("evil.com", "", "1.2.3.4.5", "999.1.1.1", "::1", "1.2.3.x", "1_0.8.8.8", "+8.8.8.8", " 8.8.8.8"))
+@pytest.mark.parametrize("bad", ("evil.com", "", "1.2.3.4.5", "::1", "1.2.3.x", "1_0.8.8.8", "+8.8.8.8", " 8.8.8.8"))
 def test_non_ipv4_is_neither(bad):
     assert _ipv4_class(bad) is None
     assert not _is_public_ip(bad)
@@ -191,7 +191,7 @@ def test_b100_clickfix_corroborator():
 # only ever RAISE a finding, never clear one.
 
 AMBIGUOUS = ("010.8.8.8", "0x8.8.8.8", "0X8.8.8.8", "08.8.8.8", "127.000.000.001",
-             "10.8.8.08", "0x7f.0.0.1", "1.2.3", "2130706433", "8.8", "0x7f000001")
+             "10.8.8.08", "0x7f.0.0.1", "0x7f000001", "0x7f.1", "127.0x1", "4294967296")
 
 
 @pytest.mark.parametrize("ip", AMBIGUOUS)

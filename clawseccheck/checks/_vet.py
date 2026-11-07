@@ -3280,7 +3280,9 @@ def _url_host_is_local(url: str) -> bool:
     if host in _LOCAL_HOSTNAMES or host.endswith(".localhost"):
         return True
     if _IPV4_LITERAL_RE.match(host):
-        return not _ip_reaches_nonlocal_host(host)
+        # B-1039: POSITIVE-only. `not _ip_reaches_nonlocal_host(h)` also read a numeric host
+        # that `_ipv4_class` could not classify as local, and that cleared the finding.
+        return _ipv4_class(host) in ("local", "documentation")
     return False
 
 
