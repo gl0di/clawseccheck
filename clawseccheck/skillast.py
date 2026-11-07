@@ -1089,6 +1089,31 @@ _CURL_WGET_PROGRAMS = {"curl", "wget"}
 _CURL_OUTPUT_FLAGS = {"-o", "--output"}
 _SCRIPT_LIKE_EXTS = (".sh", ".bash", ".py", ".ps1", ".rb", ".pl")
 
+# B-1059: a credential's value is the CONTENT of ~/.ssh/id_rsa etc. -- there is no benign
+# curl/wget position for it (not a header, not the body, not even the `-o` output name),
+# so the egress-sink test is simply "a credential-tainted name reaches a curl/wget argv
+# call at all" (in its argv list OR an `input=`/`stdin=`/`env=` kwarg -- `hit_names` is
+# computed over the whole Call, so a stdin-piped `curl --data @-` is covered without a
+# position list to keep complete). This path takes NO in-cluster carve-out, deliberately:
+# a carve-out that CLEARS a credential-exfil finding must be airtight (CLAUDE.md 2.5),
+# and proving a curl argv "reaches only the cluster API" is a full argv parse (routing
+# flags --proxy/--resolve/--connect-to/-K, clustered/glued options, schemeless
+# positional hosts) that a hand-rolled denylist cannot do soundly -- so sending even an
+# in-cluster service-account token through curl fails CLOSED here (that IS exfil when the
+# real destination is an attacker host). The measured B-415 in-cluster leniency still
+# applies to the Python net-sink path via `_is_incluster_auth_exempt`; no benign
+# curl-in-cluster shape has been observed on the real fleet, so none is carved out
+# speculatively -- the fleet FP gate surfaces one if it exists.
+#
+# SCOPE (inherited, not new): this reuses `_is_curl_wget_argv_call`, the SAME matcher
+# DROPPER_DOWNLOAD_TO_TMP (C-205) uses, so it inherits that matcher's resolution limits --
+# a literal `subprocess.<attr>(["curl"|"wget", ...])` only; a `curl.exe` basename, a
+# program/argv reached through a variable, a bare `run` from `from subprocess import run`,
+# or an `args=`-keyword argv are not recognised. Widening the matcher changes DROPPER too
+# and needs its own cross-consumer adversarial pass, so it is deliberately NOT done here;
+# the broad alternative ("any subprocess carrying a credential is egress") is unsound -- it
+# convicts local credential tools (gpg --encrypt, logger) that never leave the host.
+
 
 def _is_curl_wget_argv_call(node: ast.AST) -> bool:
     """subprocess.run/call/check_call/check_output/Popen(['curl', ...] | ['wget', ...])
@@ -14466,23 +14491,45 @@ def analyze_python(
             incluster_pure = _incluster_pure_tainted_names(tree, _fsctx)
             str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
+                if not isinstance(node, ast.Call):
+                    continue
+                is_net = _is_net_sink(node.func, net_sink_aliases)
+                # B-1059: a curl/wget argv-list subprocess call is an egress sink too --
+                # the credential never touches a Python net library, it is handed to curl
+                # (`subprocess.run(["curl","--data-binary",d,url])`, `-H`, `--url-query`...).
+                is_curl = _is_curl_wget_argv_call(node)
+                if not (is_net or is_curl):
                     continue
                 hit_names = _names_in(node) & cred_tainted
                 if not hit_names:
                     continue
-                # Exemption applies ONLY when every hit name is in-cluster-pure (never
-                # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
-                # the position+destination checks in _is_incluster_auth_exempt hold.
-                if hit_names <= incluster_pure and _is_incluster_auth_exempt(
-                    node, hit_names, str_map
-                ):
-                    continue
+                if is_curl and not is_net:
+                    # a credential reaching a curl/wget call is exfil, fail-closed: NO
+                    # in-cluster carve-out here (see _is_curl_wget_argv_call's B-1059 note)
+                    # -- an SA token sent via curl to an attacker host is exfil, and a
+                    # sound "reaches only the cluster API" proof is a full argv parse this
+                    # does not attempt.
+                    _detail = (
+                        "credential-file contents flow into a curl/wget egress argv "
+                        "(read secret -> send out)"
+                    )
+                else:
+                    # Exemption applies ONLY when every hit name is in-cluster-pure (never
+                    # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
+                    # the position+destination checks in _is_incluster_auth_exempt hold.
+                    if hit_names <= incluster_pure and _is_incluster_auth_exempt(
+                        node, hit_names, str_map
+                    ):
+                        continue
+                    _detail = (
+                        "credential-file contents flow into a network sink "
+                        "(read secret -> send out)"
+                    )
                 add(
                     "CRED_EXFIL_FLOW",
                     "crit",
                     getattr(node, "lineno", 0),
-                    "credential-file contents flow into a network sink (read secret -> send out)",
+                    _detail,
                 )
 
     # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls
