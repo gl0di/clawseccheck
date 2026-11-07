@@ -5768,8 +5768,15 @@ _IPV4_LOCAL_NETS = tuple(ipaddress.ip_network(n) for n in (
     "169.254.0.0/16",  # RFC 3927 link-local
     "172.16.0.0/12",   # RFC 1918
     "192.0.0.0/24",    # RFC 6890 IETF protocol assignments (DS-Lite / NAT64 discovery,
-                       # on-link only); was swallowed by the old whole-/16 TEST-NET test
+                       # mostly on-link); was swallowed by the old whole-/16 TEST-NET test.
+                       # Exception: the two globally-reachable /32s in _IPV4_PUBLIC_EXCEPTIONS
     "192.168.0.0/16",  # RFC 1918
+))
+# Globally-reachable /32s inside the otherwise on-link 192.0.0.0/24 (IANA IPv4 Special-Purpose
+# Address Registry): 192.0.0.9 PCP anycast (RFC 7723), 192.0.0.10 TURN anycast (RFC 8155).
+# Checked BEFORE the local table.
+_IPV4_PUBLIC_EXCEPTIONS = tuple(ipaddress.ip_network(n) for n in (
+    "192.0.0.9/32", "192.0.0.10/32",
 ))
 # "documentation": example addresses (RFC 5737). Exactly the three /24s - the old test
 # excluded whole /16s ((192,0), (198,51), (203,0)), which hid ~65k real public addresses
@@ -5790,16 +5797,36 @@ _IPV4_SPECIAL_NETS = tuple(ipaddress.ip_network(n) for n in (
 ))
 
 
+_IPV4_DEC_PART_RE = re.compile(r"\d+")
+_IPV4_HEX_PART_RE = re.compile(r"0[xX][0-9a-fA-F]*")
+
+
 def _ipv4_class(ip: str):
-    """B-1017: 'local' | 'documentation' | 'shared' | 'special' | 'public', or None when
-    *ip* is not a dotted-quad IPv4 literal (a DNS name, an out-of-range octet, ...)."""
-    try:
-        octs = [int(x) for x in ip.split(".")]
-    except ValueError:
+    """B-1017: 'local' | 'documentation' | 'shared' | 'special' | 'public' | 'ambiguous', or
+    None when *ip* is not an IPv4 literal at all (a DNS name, an out-of-range octet, ...).
+
+    'ambiguous' is a numeric host whose meaning depends on the reader: curl and the inet_aton
+    family read a leading-zero octet as OCTAL and a 0x octet as HEX, and accept fewer than four
+    parts (`8.8`, `2130706433`), so `010.8.8.8` is sent to 8.8.8.8 while a decimal reading says
+    10.8.8.8 (LAN). Emulating that parser exactly is a drift surface, so the class never clears
+    anything: `_ip_reaches_nonlocal_host` counts it as off-host and no other predicate calls it
+    local, documentation or public."""
+    parts = ip.split(".")
+    if not 1 <= len(parts) <= 4:
         return None
-    if len(octs) != 4 or any(o < 0 or o > 255 for o in octs):
+    numeric = all(_IPV4_DEC_PART_RE.fullmatch(x) or _IPV4_HEX_PART_RE.fullmatch(x) for x in parts)
+    if not numeric:
+        return None
+    if len(parts) != 4 or any(
+        x[0] == "0" and len(x) > 1 for x in parts  # leading zero -> octal; 0x -> hex
+    ):
+        return "ambiguous"
+    octs = [int(x) for x in parts]
+    if any(o > 255 for o in octs):
         return None
     addr = ipaddress.IPv4Address(bytes(octs))
+    if any(addr in n for n in _IPV4_PUBLIC_EXCEPTIONS):
+        return "public"
     if any(addr in n for n in _IPV4_LOCAL_NETS):
         return "local"
     if any(addr in n for n in _IPV4_DOC_NETS):
@@ -5830,8 +5857,10 @@ def _ip_reaches_nonlocal_host(ip: str) -> bool:
     the RFC 5737 documentation /24s. Unlike `_is_public_ip` this keeps RFC 6598 shared space
     (a Tailscale exfil peer, Alibaba IMDS 100.100.100.200), multicast, benchmarking and
     reserved space IN: those used to count as 'public' to every caller and still must, since
-    clearing a finding for them would be fail-open. False for a non-IPv4 string."""
-    return _ipv4_class(ip) in ("public", "shared", "special")
+    clearing a finding for them would be fail-open. 'ambiguous' numeric forms (leading-zero /
+    hex octets, fewer than four parts) are IN too: curl reads `010.8.8.8` as 8.8.8.8. False
+    for a non-IPv4 string."""
+    return _ipv4_class(ip) in ("public", "shared", "special", "ambiguous")
 
 
 # `_OWN_ENGINE_MARKERS` / `_is_own_source` used to be DEFINED here. B-265 relocated them

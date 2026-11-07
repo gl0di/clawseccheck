@@ -5184,6 +5184,8 @@ def _b13_ip_url_label(ip: str) -> str:
         return "shared-address-space (RFC 6598, not public) IP URL"
     if cls == "special":
         return "reserved-range (multicast / benchmarking / reserved, not public) IP URL"
+    if cls == "ambiguous":
+        return "numeric-IP URL (leading-zero / hex octets read differently by curl)"
     return "public-IP URL"
 
 
