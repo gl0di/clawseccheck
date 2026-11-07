@@ -39,6 +39,9 @@ _HEAD = "import sys, os, subprocess\nq = sys.argv[1]\n"
     "a = ['sh']\na.extend(['-c', q])\nsubprocess.run(list(a))\n",
     "a = ['sh']\na.extend(['-c', q])\nsubprocess.run(a, shell=False)\n",
     "a = ['sh.exe']\na.extend(['-c', q])\nsubprocess.run(a)\n",
+    # the keyword spelling of the same slot
+    "a = ['sh']\na.extend(['-c', q])\nsubprocess.run(args=a)\n",
+    "a = ['env']\na.append(q)\nsubprocess.Popen(args=a)\n",
     # inline source in the mutation argument, no named taint at all
     "a = ['sh']\na.extend(['-c', sys.argv[1]])\nsubprocess.run(a)\n",
     "a = ['sh']\na.extend(['-c', os.environ['P']])\nsubprocess.run(a)\n",
@@ -76,6 +79,10 @@ def test_mutated_ordinary_program_argv_stays_argument_injection(body):
 ])
 def test_no_finding_when_nothing_tainted_reaches_this_argv(body):
     assert _tt5(_HEAD + body) == []
+
+
+def test_args_keyword_without_taint_is_quiet():
+    assert _tt5(_HEAD + "a = ['sh']\na.extend(['-c', 'ls'])\nsubprocess.run(args=a)\n") == []
 
 
 def test_unparseable_and_dynamic_shapes_do_not_raise():

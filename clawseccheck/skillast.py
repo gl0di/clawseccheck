@@ -3417,6 +3417,10 @@ def _b1022_mutated_argv_taint(
     textual position relative to the sink (conservative), and the mutation's argument
     is judged by the same inline/named source vocabulary as the sink's own arguments."""
     first = node.args[0] if node.args else None
+    if first is None:
+        # `subprocess.run(args=a)`: the keyword spelling of the same slot. The classifier
+        # does not read a keyword argv, so a tainted keyword call is already crit there.
+        first = next((k.value for k in node.keywords if k.arg == "args"), None)
     if (
         isinstance(first, ast.Call)
         and isinstance(first.func, ast.Name)
@@ -3464,31 +3468,62 @@ _OS_SPAWN_LIST = frozenset({"spawnl", "spawnle", "spawnlp", "spawnlpe"})
 
 
 def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
-    """B-1024: `(sink_name, program_expr, argv)` for an `os.exec*`/`os.spawn*` call, or
-    None when it is not one / its shape cannot be read. `argv` is a list of element
-    expressions for an `l` form, or the single argv expression for a `v` form. Anything
-    with a starred positional before the argv, or too few arguments, is None (not
-    claimed) -- the generic DANGEROUS_SINK still reports the call."""
+    """B-1024: `(sink_name, program_expr, argv, all_exprs)` for an `os.exec*`/`os.spawn*`
+    call, or None when it is not one. `argv` is a list of element expressions for an `l`
+    form, or the single argv expression for a `v` form; `all_exprs` is every argument and
+    keyword value of the call.
+
+    `program_expr` is None -- the OPAQUE shape -- whenever the call cannot be mapped onto
+    its program/argv slots soundly: a starred positional (`*rest`, a `**kw`), a keyword
+    this table does not know, a slot given twice, an `l` form with any keyword, or a
+    missing program/argv. The verdict then fails closed on `all_exprs` alone. Keywords of
+    a `v` form map by name (`file`/`path` -> program, `args`/`argv` -> argv; `mode` and
+    `env` are ignored), so `os.execvp(file='git', args=['git', q])` still reads as a
+    readable list."""
     f = node.func
     if not (isinstance(f, ast.Attribute) and _attr_base(f.value) in _EXEC_SINK_BASES_OS):
         return None
     attr = f.attr
-    if attr in _OS_EXEC_VECTOR | _OS_EXEC_LIST:
-        lead = 0
-    elif attr in _OS_SPAWN_VECTOR | _OS_SPAWN_LIST:
-        lead = 1  # mode
+    if attr in _OS_EXEC_VECTOR:
+        lead, vector = 0, True
+    elif attr in _OS_SPAWN_VECTOR:
+        lead, vector = 1, True
+    elif attr in _OS_EXEC_LIST:
+        lead, vector = 0, False
+    elif attr in _OS_SPAWN_LIST:
+        lead, vector = 1, False
     else:
         return None
-    args = node.args
-    if any(isinstance(a, ast.Starred) for a in args[: lead + 1]) or len(args) < lead + 2:
-        return None
-    prog = args[lead]
-    if attr in _OS_EXEC_VECTOR or attr in _OS_SPAWN_VECTOR:
-        return f"os.{attr}", prog, args[lead + 1]
-    rest = list(args[lead + 1:])
-    if attr.endswith(("le", "lpe")) and rest:
-        rest = rest[:-1]  # trailing environment mapping
-    return f"os.{attr}", prog, rest
+    name = f"os.{attr}"
+    all_exprs = list(node.args) + [k.value for k in node.keywords]
+    opaque = (name, None, None, all_exprs)
+    if any(isinstance(a, ast.Starred) for a in node.args) or any(
+        k.arg is None for k in node.keywords
+    ):
+        return opaque
+    args = list(node.args)
+    if not vector:
+        # `l` forms: file (and the spawn mode) positionally, then argv[0], argv[1:]...
+        if node.keywords or len(args) < lead + 2:
+            return opaque
+        rest = args[lead + 1:]
+        if attr.endswith(("le", "lpe")):
+            rest = rest[:-1]  # trailing environment mapping (no Starred here, checked above)
+        return name, args[lead], rest, all_exprs
+    slots = (["mode"] if lead else []) + ["prog", "argv"] + (["env"] if "e" in attr[lead + 4:] else [])
+    if len(args) > len(slots):
+        return opaque
+    got = dict(zip(slots, args))
+    kw_slot = {"file": "prog", "path": "prog", "args": "argv", "argv": "argv",
+               "mode": "mode", "env": "env"}
+    for k in node.keywords:
+        slot = kw_slot.get(k.arg)
+        if slot is None or slot not in slots or slot in got:
+            return opaque
+        got[slot] = k.value
+    if "prog" not in got or "argv" not in got:
+        return opaque
+    return name, got["prog"], got["argv"], all_exprs
 
 
 def _os_exec_spawn_verdict(
@@ -3503,14 +3538,18 @@ def _os_exec_spawn_verdict(
     """B-1024: `"crit"` (command injection), `"info"` (argument injection) or None for an
     `os.exec*`/`os.spawn*` call, using the same classification subprocess argv lists get.
 
-    crit: the program argument is tainted; argv[0] is tainted; the program OR argv[0] is
-    a shell / interpreter-with-eval-flag / re-exec wrapper (`_argv0_is_shell_indirect_exec`,
-    judged on `[program] + argv[1:]` AND on argv itself, because `execv("/bin/sh",
-    ["x", "-c", q])` runs the shell whatever argv[0] says) and any later element is
-    tainted; or the argv is not a readable list at all (unresolved name, call result,
-    mutated binding) and anything about it is tainted. info: only a non-program element
-    of a readable list is tainted. None: nothing tainted reaches the call."""
-    _name, prog, argv = parts
+    crit: anything tainted in an OPAQUE call (see `_os_exec_spawn_parts`); the program
+    argument is tainted; argv[0] is tainted; the program OR argv[0] is a shell /
+    interpreter-with-eval-flag / re-exec wrapper (`_argv0_is_shell_indirect_exec`, judged
+    on `[program] + argv[1:]` AND on argv itself, because `execv("/bin/sh", ["x", "-c",
+    q])` runs the shell whatever argv[0] says) and any later element is tainted; the argv
+    is not a readable list at all (unresolved name, call result, mutated binding) and
+    anything about it is tainted; or the argv is a literal that is only STALE or PARTIAL
+    -- a name a later append/extend fed, or `[...] + rest` -- while the PROGRAM could be a
+    shell/wrapper (`_prog_name_could_become_shell_indirect`, no literal eval flag needed:
+    the flag typically arrives through the very mutation or concatenation). info: only a
+    non-program element of a fully readable list is tainted. None: nothing tainted."""
+    _name, prog, argv, all_exprs = parts
 
     def _t(e: ast.AST) -> bool:
         # same vocabulary the subprocess sink uses for its own arguments
@@ -3522,8 +3561,12 @@ def _os_exec_spawn_verdict(
             or (ref_res is not None and ref_res.source_in(e))
         )
 
+    if prog is None:
+        return "crit" if any(_t(e) for e in all_exprs) else None
     if _t(prog):
         return "crit"
+    prog_literal = isinstance(prog, ast.Constant) and isinstance(prog.value, str)
+    stale = False  # argv is a literal that a mutation / concatenation makes incomplete
     if isinstance(argv, list):
         elts = argv
     else:
@@ -3531,15 +3574,20 @@ def _os_exec_spawn_verdict(
         if isinstance(expr, ast.Name) and list_bindings and expr.id in list_bindings:
             expr = list_bindings[expr.id]
         if (
-            isinstance(expr, ast.BinOp)
+            prog_literal
+            and isinstance(expr, ast.BinOp)
             and isinstance(expr.op, ast.Add)
             and isinstance(expr.left, (ast.List, ast.Tuple))
             and expr.left.elts
             and isinstance(expr.left.elts[0], ast.Constant)
             and isinstance(expr.left.elts[0].value, str)
             and not _prog_name_could_become_shell_indirect(expr.left.elts)
+            and not _prog_name_could_become_shell_indirect([prog, *expr.left.elts[1:], expr.right])
         ):
+            # `["x", ...] + rest`: only when neither the program nor the left head can
+            # be a shell / wrapper (a non-literal program is never folded either)
             expr = ast.List(elts=[*expr.left.elts, expr.right], ctx=ast.Load())
+            stale = True
         if isinstance(expr, (ast.List, ast.Tuple)):
             elts = list(expr.elts)
         else:
@@ -3556,12 +3604,16 @@ def _os_exec_spawn_verdict(
     tail_tainted = any(_t(e) for e in elts[1:])
     if not tail_tainted and isinstance(argv, ast.Name):
         # a bound literal that a later append/extend fed with tainted data (B-1022); a
-        # shell / re-exec head never reaches here -- B-953 already dropped its binding
+        # shell / re-exec head in the literal never reaches here -- B-953 already dropped
+        # its binding -- but the PROGRAM argument can still be one
         probe = ast.Call(func=node.func, args=[argv], keywords=[])
-        tail_tainted = _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree)
+        if _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree):
+            tail_tainted = stale = True
     if not tail_tainted:
         return None
     if _argv0_is_shell_indirect_exec(elts) or _argv0_is_shell_indirect_exec([prog, *elts[1:]]):
+        return "crit"
+    if stale and _prog_name_could_become_shell_indirect([prog, *elts[1:]]):
         return "crit"
     return "info"
 

@@ -121,7 +121,6 @@ def test_os_system_and_popen_unchanged():
 
 @pytest.mark.parametrize("call", [
     "os.execvp('sh')",            # too few arguments
-    "os.execvp(*q)",              # starred positional
     "os.spawnv(os.P_WAIT)",       # mode only
     "os.execl()",
     "os.execvp('sh', [])",        # empty argv
@@ -133,3 +132,69 @@ def test_unparseable_or_unclaimed_shapes_yield_no_tt5_and_do_not_raise(call):
 
 def test_syntax_error_source_does_not_raise():
     assert isinstance(skillast.analyze_python(_HEAD + "os.execvp('sh', ['sh', '-c', q]\n"), list)
+
+
+# --- follow-up: security review bypasses (program-as-head, keywords, starred tails) ---
+
+@pytest.mark.parametrize("body", [
+    # 1. the PROGRAM is the shell; argv is stale / partial / unreadable
+    "a = ['x']\na.append('-c')\na.append(q)\nos.execv('/bin/sh', a)\n",
+    "a = ['x']\na.extend(['-c', q])\nos.execv('/bin/sh', a)\n",
+    "a = ['x']\na.extend(['-c', q])\nos.spawnv(os.P_WAIT, '/bin/sh', a)\n",
+    "os.execv('/bin/sh', ['x'] + ['-c', q])\n",
+    "os.execv('/bin/sh', ['x'] + [q])\n",
+    "os.execv('/bin/sh', ['x', '-c'] + [q])\n",
+    "def f(a):\n    os.execv('/bin/sh', a)\nf(q)\n",
+    "def f(rest):\n    os.execv('/bin/sh', ['sh'] + rest)\nf(q)\n",
+    "os.execvp('timeout', ['x'] + [q])\n",
+    "a = ['x']\na.append(q)\nos.execv('/usr/bin/python3', a)\n",
+    "os.execv('/usr/bin/python3', ['python3'] + [q])\n",
+    # non-literal program is never folded with a concatenation
+    "def f(prog, rest):\n    os.execv(prog, ['x'] + rest)\nf('sh', q)\n",
+    # 2. keywords map onto the slots; anything unmappable fails closed
+    "os.execvp(file='sh', args=['sh', '-c', q])\n",
+    "os.execve(path='/bin/sh', argv=['sh', '-c', q], env={})\n",
+    "os.spawnv(mode=os.P_WAIT, file='sh', args=['sh', '-c', q])\n",
+    "os.spawnvp(os.P_WAIT, 'sh', args=['sh', '-c', q])\n",
+    "os.execvp(file=q, args=['x'])\n",
+    "os.execvp(bogus='sh', args=['sh', '-c', q])\n",       # unknown keyword
+    "os.execvp('sh', ['sh'], args=['sh', '-c', q])\n",    # slot given twice
+    "os.execvp('sh', **{'args': ['sh', '-c', q]})\n",     # **kwargs
+    "os.execl('/bin/sh', 'sh', '-c', q, mode=1)\n",       # keyword on an l form
+    "os.execvp(*q)\n",                                    # starred positional
+    # 3. starred tails: argv is unreadable, the env strip must not apply
+    "rest = [q]\nos.execl('/bin/sh', 'sh', '-c', *rest)\n",
+    "os.execle('/bin/sh', 'sh', '-c', q, *e)\n",
+    "os.execle('/bin/sh', 'sh', '-c', *[q])\n",
+    "os.execle('/bin/ls', 'ls', *['x'], {'A': q})\n",
+    "os.spawnl(os.P_WAIT, '/bin/sh', 'sh', *[q])\n",
+    "os.execv('/bin/sh', *[q])\n",
+])
+def test_review_bypasses_are_command_injection(body):
+    assert _tt5(_HEAD + body) == CMD
+
+
+@pytest.mark.parametrize("body", [
+    # benign twins stay info
+    "a = ['git']\na.append(q)\nos.execv('/usr/bin/git', a)\n",
+    "a = ['python3', '-m', 'mod']\na.append(q)\nos.execv('/usr/bin/python3', a)\n",
+    "os.execv('/usr/bin/git', ['git'] + [q])\n",
+    "os.execv('/usr/bin/git', ['git', 'log'] + [q])\n",
+    "os.execv('/usr/bin/python3', ['python3', '-m', 'mod'] + [q])\n",
+    "os.execvp(file='git', args=['git', 'log', q])\n",
+    "os.spawnv(mode=os.P_WAIT, file='git', args=['git', q])\n",
+    "os.execvp('git', ['git', *['log'], q])\n",
+])
+def test_review_bypass_benign_twins_stay_argument_injection(body):
+    assert _tt5(_HEAD + body) == ARG
+
+
+@pytest.mark.parametrize("body", [
+    "os.execvp(file='git', args=['git', 'log'])\n",
+    "os.execle('/bin/ls', 'ls', '-l', *e)\n",             # starred, nothing tainted
+    "os.execle('/bin/ls', 'ls', '-l', {'A': q})\n",       # env mapping still stripped
+    "os.execv('/bin/sh', ['x'] + ['-c', 'ls'])\n",        # untainted concatenation
+    "a = ['x']\na.append('-c')\nos.execv('/bin/sh', a)\n",  # untainted mutation
+])
+def test_review_bypass_shapes_without_taint_yield_nothing(body):
+    assert _tt5(_HEAD + body) == []
