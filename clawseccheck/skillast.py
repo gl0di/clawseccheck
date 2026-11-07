@@ -19691,6 +19691,148 @@ def _sh_cred_env_in_body_lines(masked: str) -> set:
     return hits
 
 
+# B-1063: DNS-label exfiltration. A DNS lookup tool (dig/drill/nslookup/host/getent) is
+# an outbound channel the HTTP-centric SHELL_CRED_EXFIL model never saw: a secret placed
+# in the QUERY NAME leaves the box over DNS. A credential FILE needs an ENCODER
+# (base64/hex) to fit a <=63-char label, so a bare config read beside a dig is NOT flagged
+# (a benign `dig $(jq -r .dns_server openclaw.json)` reads one field, never encodes it); a
+# credential-shaped ENV VAR is already short enough to ride a label verbatim, so it needs
+# no encoder. See `_sh_dns_cred_exfil_lines` for the full rule.
+# Tool match: the unambiguous tool names match as a whole word anywhere on the line,
+# tolerating a path prefix (`/usr/bin/dig`) and any wrapper (`timeout 5 dig`, `env dig`,
+# `xargs dig`). `host` is ALSO an ordinary word ($HOST, hostname, host:port), so it is
+# matched only in command position (line start / after a separator / after a common
+# wrapper) AND followed by an argument.
+_SH_DNS_TOOL_RE = re.compile(
+    r"(?:^|[\s;&|(`/])(?:dig|drill|nslookup|resolvectl)\b", re.I
+)
+# ReDoS-safe: no two space-quantifiers are adjacent over the same text. Branch 1 is a
+# line start or separator followed by optional spaces; branch 2 is a wrapper word followed
+# by required spaces. The original `...[ \t]+)[ \t]*host` had an adjacent `[ \t]+`/`[ \t]*`
+# pair -> catastrophic backtracking on a run of spaces before a non-`host` word.
+_SH_DNS_HOST_RE = re.compile(
+    r"(?:(?:^|[;&|(`])[ \t]*"
+    r"|\b(?:do|then|else|sudo|env|timeout|nice|xargs|exec|command|if|while|until|time)\b[ \t]+)"
+    r"host[ \t]+(?=\S)",
+    re.I,
+)
+_SH_GETENT_HOSTS_RE = re.compile(r"\bgetent[ \t]+(?:hosts|ahosts\w*)\b", re.I)
+# The encoder is the low-FP discriminator for a whole-file credential: real DNS exfil must
+# base64/hex a file to fit it into <=63-char labels, while a benign config-driven lookup
+# reads one field and never encodes it. Kept to the CLEAR encoders; `tr -d`/`cut`/`fold`
+# are deliberately excluded (ordinary whitespace/field trimming, too common to treat as
+# an exfil encoder).
+_SH_ENCODER_RE = re.compile(
+    r"\b(?:base64|base32|basenc|xxd|hexdump|uuencode|openssl|od)\b"
+    r"|printf\b[^|;&]*%0?2?[xX]",
+    re.I,
+)
+
+
+def _sh_dns_line(raw: str) -> bool:
+    return bool(
+        _SH_DNS_TOOL_RE.search(raw)
+        or _SH_DNS_HOST_RE.search(raw)
+        or _SH_GETENT_HOSTS_RE.search(raw)
+    )
+
+
+def _sh_dns_cred_exfil_lines(masked: str) -> set:
+    """B-1063: physical line numbers where a credential (a cred FILE read or a
+    credential-shaped env var) is encoded and placed into a DNS lookup's query name --
+    DNS-tunnel exfiltration.
+
+    A credential FILE needs an ENCODER (base64/hex/...) to fit into a <=63-char DNS
+    label, so a bare config read beside a dig is deliberately NOT flagged (a benign
+    config-driven lookup reads one field and never encodes it). A credential-shaped ENV
+    VAR is already short enough to ride a label verbatim, so it needs NO encoder -- it is
+    flagged whenever it reaches the DNS query directly or through a variable.
+
+    Taint is tracked to a fixpoint over plain AND declaration-keyword assignments
+    (`local`/`declare`/`export`/...), carrying three facts per variable: it references a
+    cred env var (env), it touches a cred file (file), and an encoder appears in its
+    derivation (enc). A variable reaches the DNS query as exfil material when it is
+    env-tainted, or file-tainted AND enc-tainted.
+
+    Line-based (a backslash-continued binding/lookup is a known gap, shared with the
+    sibling SHELL_ENV_EXFIL raw-socket check). Emitted at ``info`` severity -> WARN,
+    routed into the warns_env_exfil bucket, same as the Python ENV_EXFIL_FLOW and the
+    B-1065 body-exfil rule.
+    """
+    lines = masked.splitlines()
+    # Collect (var, rhs) for plain `VAR=...` and declaration-keyword assignments.
+    assigns: list = []
+    for raw in lines:
+        m = _SH_VAR_ASSIGN_RE.match(raw)
+        if m:
+            assigns.append((m.group("var"), m.group("val")))
+            continue
+        dm = _SH_VAR_DECL_ASSIGN_RE.match(raw)
+        if dm:
+            assigns.append((dm.group("var"), raw[dm.end():]))
+
+    def _refs(text: str) -> set:
+        return set(_SH_VAR_REF_RE.findall(text))
+
+    env_t: set = set()   # vars carrying a credential-shaped ENV VAR (no encoder needed)
+    file_t: set = set()  # vars whose value touches a credential FILE
+    enc_t: set = set()   # vars with an encoder somewhere in their derivation chain
+    changed = True
+    while changed:
+        changed = False
+        for var, val in assigns:
+            refs = _refs(val)
+            if (bool(_SH_CRED_ENV_RE.search(val)) or (refs & env_t)) and var not in env_t:
+                env_t.add(var)
+                changed = True
+            if (bool(_SH_CRED_FILE_RE.search(val)) or (refs & file_t)) and var not in file_t:
+                file_t.add(var)
+                changed = True
+            if (bool(_SH_ENCODER_RE.search(val)) or (refs & enc_t)) and var not in enc_t:
+                enc_t.add(var)
+                changed = True
+    ready = env_t | (file_t & enc_t)
+
+    def _dns_arg_texts(raw: str) -> list:
+        # The argument text of each DNS command on the line: from the tool name to the
+        # next top-level command separator (`;`/`&`). Sliced at `;`/`&` only, NOT `|`, so
+        # a `$(... | encoder)` substitution inside the query stays intact while a
+        # credential sitting on a SEPARATE command of the same line (`dig x; cat $TOKEN`)
+        # is not mis-attributed to the lookup.
+        spans: list = []
+        for rx in (_SH_DNS_TOOL_RE, _SH_DNS_HOST_RE, _SH_GETENT_HOSTS_RE):
+            for m in rx.finditer(raw):
+                tail = raw[m.end():]
+                sep = re.search(r"[;&]", tail)
+                spans.append(tail[: sep.start()] if sep else tail)
+        return spans
+
+    hits: set = set()
+    for i, raw in enumerate(lines, 1):
+        if not _sh_dns_line(raw):
+            continue
+        for arg in _dns_arg_texts(raw):
+            arg_refs = _refs(arg)
+            # A cred env var rides a DNS label verbatim (no encoder needed). A cred FILE
+            # must be encoded within the same query -- and a reference to a file-tainted
+            # variable counts as the credential file, an encoder-tainted variable as the
+            # encoder, so a mix of a literal and a variable on either side is still caught
+            # (`dig $(cat $F | base64)` with F a file-tainted var). A variable already
+            # fully resolved to exfil material (env-tainted, or file+encoder-tainted) also
+            # reaches the query.
+            has_cred_file = bool(_SH_CRED_FILE_RE.search(arg)) or bool(arg_refs & file_t)
+            has_encoder = bool(_SH_ENCODER_RE.search(arg)) or bool(arg_refs & enc_t)
+            if (
+                _SH_CRED_ENV_RE.search(arg)
+                or (arg_refs & env_t)
+                or (has_cred_file and has_encoder)
+                or (ready and (arg_refs & ready))
+            ):
+                hits.add(i)
+                break
+    return hits
+
+
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
@@ -19790,6 +19932,18 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
             "a credential-shaped environment variable is sent in a curl request body "
             "(-d/--data/--form) \u2014 confirm the destination is a trusted first-party API, "
             "not an attacker-controlled host",
+        )
+
+    # B-1063: a credential encoded into a DNS lookup's query name (dig/nslookup/host ...
+    # base64(secret).attacker) -- DNS-tunnel exfiltration. "info" -> WARN (warns_env_exfil).
+    for i in sorted(_sh_dns_cred_exfil_lines(masked)):
+        add(
+            "SHELL_DNS_EXFIL",
+            "info",
+            i,
+            "an encoded credential is placed in a DNS lookup's query name "
+            "(dig/nslookup/host) \u2014 possible DNS-tunnel exfiltration; confirm the queried "
+            "name is not carrying secret data off-box",
         )
 
     # C-630: plaintext reverse shell (bash /dev/tcp, nc -e, socat exec:, fd-bound shell).
