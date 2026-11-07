@@ -6541,9 +6541,13 @@ def _git_clone_source(target: str, info: dict) -> "tuple[str | None, str | None]
     (None, None) when the host is unusable (empty, or option-shaped: a host starting with
     ``-`` is how ``ssh://-oProxyCommand=...`` turned a clone into command execution)."""
     host = info.get("host") or ""
-    if not host or host.startswith("-"):
-        return None, None
     ref = info.get("ref")
+    # Option-shaped pieces never reach git: a '-'-leading host (`ssh://-oProxyCommand=..`),
+    # scp user (`-oProxyCommand=x@host:path` would make the whole argument an option) or
+    # ref. The emitted command also ends git's options with `--` before the remote.
+    if (not host or host.startswith("-") or target.lstrip().startswith("-")
+            or (ref or "").lstrip().startswith("-")):
+        return None, None
     low = target.lower()
     if low.startswith("git:") and not low.startswith("git://"):
         path = target[len("git:"):]
@@ -6605,7 +6609,7 @@ def render_vet_plan(target: str) -> str:
                      "yourself, without running any of its code, into \"$QUARANTINE\"")
         else:
             branch_flag = f" --branch {_shq(ref)}" if ref else ""
-            fetch = (f"git clone --depth 1{branch_flag} {_shq(clone_url)} "
+            fetch = (f"git clone --depth 1{branch_flag} -- {_shq(clone_url)} "
                      "\"$QUARANTINE/repo\"")
     elif eco == "clawhub":
         fetch = (f"# resolve '{name}' via your ClawHub client's normal pull/install path, "
