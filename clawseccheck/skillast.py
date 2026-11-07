@@ -6173,6 +6173,109 @@ def _b863_tier1_tier2_verdict(
     return False
 
 
+def _b1041_head_kind(value: ast.AST, name: str) -> "str | None":
+    """B-1041: how does assigning `value` to `name` treat the command list's HEAD? `"lit"`:
+    a non-empty list/tuple literal whose first element is a string constant that cannot
+    become a shell / wrapper (`_prog_name_could_become_shell_indirect`); `"self"`:
+    `name + ...` (head kept, whatever the earlier assignments made it); a `<head-kind> +
+    anything` concatenation is its left operand's kind; None: anything else."""
+    if isinstance(value, (ast.List, ast.Tuple)):
+        if (
+            value.elts
+            and isinstance(value.elts[0], ast.Constant)
+            and isinstance(value.elts[0].value, str)
+            and not _prog_name_could_become_shell_indirect(value.elts)
+        ):
+            return "lit"
+        return None
+    if isinstance(value, ast.Name):
+        return "self" if value.id == name else None
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return _b1041_head_kind(value.left, name)
+    return None
+
+
+def _b1041_name_keeps_fixed_head(scope: ast.AST, name: str, tree: ast.AST) -> bool:
+    """B-1041: is `name`, in `scope`, bound ONLY to command lists whose head is one fixed
+    program that is never a shell / wrapper, so the head is known safe whichever branch ran?
+
+    True only when every store of the name in the scope's own body is a plain
+    `name = <list literal | name + ... | literal + ...>` (`_b1041_head_kind`) or a
+    `name += ...` (which never touches index 0), at least one of them a literal head, and
+    nothing else can change index 0: the name is not a parameter, no `global`/`nonlocal`
+    declares it, no `for`/`with`/walrus/unpack/`except`/`match`/import binds or `del`s it, no
+    star-import can supply it, and no index assignment or argv[0]-invalidating mutator
+    (`.insert/.remove/.pop/.clear/.sort/.reverse`) touches it ANYWHERE under the scope,
+    nested functions included. Any non-literal or shell-capable assignment -> False, which
+    keeps the unresolved-argv crit default (B-952's reason the name is not a single binding
+    at all: the branch that skips an assignment leaves the earlier value, and here every
+    earlier value has the same fixed head)."""
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        a = scope.args
+        params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+        if any(x is not None and x.arg == name for x in params):
+            return False
+    for n in ast.walk(scope):
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            return False
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (
+                isinstance(f, ast.Attribute)
+                and isinstance(f.value, ast.Name)
+                and f.value.id == name
+                and f.attr in _ARGV0_INVALIDATING_MUTATORS
+            ):
+                return False
+        if (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            return False
+    if any(
+        isinstance(n, ast.ImportFrom) and any(al.name == "*" for al in n.names)
+        for n in ast.walk(tree)
+    ):
+        return False  # a star-import can bind any name
+    own = list(_scope_own_nodes(scope))
+    ok_targets: set = set()
+    literal_seen = False
+    for n in own:
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    kind = _b1041_head_kind(n.value, name)
+                    if kind is None:
+                        return False
+                    literal_seen = literal_seen or kind == "lit"
+                    ok_targets.add(id(t))
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == name
+        ):
+            if not isinstance(n.op, ast.Add):
+                return False
+            ok_targets.add(id(n.target))
+    for n in own:
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+            if id(n) not in ok_targets:
+                return False
+        elif isinstance(n, ast.ExceptHandler) and n.name == name:
+            return False
+        elif n.__class__.__name__ in ("MatchAs", "MatchStar") and getattr(n, "name", None) == name:
+            return False
+        elif n.__class__.__name__ == "MatchMapping" and getattr(n, "rest", None) == name:
+            return False
+        elif isinstance(n, (ast.Import, ast.ImportFrom)) and any(
+            (al.asname or al.name.split(".")[0]) == name for al in n.names
+        ):
+            return False
+    return literal_seen
+
+
 def _call_scope(node: ast.Call, owner_map: "dict | None", tree: ast.AST) -> ast.AST:
     """The function a call sits in (per `owner_map`), else the module `tree` -- the scope
     handed to the single-binding resolvers, same choice the sink loop makes."""
@@ -6476,6 +6579,16 @@ def _subprocess_taint_is_command_injection(
                 return True  # tainted arg handed to a shell/interpreter -> command injection
         return False  # only a non-program argv element is tainted -> argument injection
 
+    # B-1041: a bare Name that is not one single binding (rebound among branches, grown
+    # by `cmd = cmd + [...]`) but whose EVERY assignment is a literal list headed by a
+    # fixed non-shell program -- the head is known safe, so a tainted element is only an
+    # argument. Any other assignment keeps the unresolved-Name crit below.
+    if (
+        isinstance(first, ast.Name)
+        and tree is not None
+        and _b1041_name_keeps_fixed_head(_call_scope(node, owner_map, tree), first.id, tree)
+    ):
+        return False
     # B-413 layer 2: `first` is a bare, unresolved Name -- possibly the wrapper's OWN
     # parameter, which is genuinely tainted at THIS scope (layer 1 is correct about
     # that) but may still be safe if EVERY intra-file call site binds it to a
