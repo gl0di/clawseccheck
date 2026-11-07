@@ -2624,7 +2624,8 @@ _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit, *,
                                   coverage_page: dict | None = None,
-                                  plugin_sweep=None) -> None:
+                                  plugin_sweep=None, risk=None, behavioral=None,
+                                  adjudication=None) -> None:
     """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
 
     These three used to WIN the mode race against `--dashboard`, run their own bare
@@ -2656,7 +2657,8 @@ def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit,
         (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
         (getattr(args, "html", None), "HTML report",
          lambda: render_html(findings, score, native=ctx.native, ctx=ctx,
-                             coverage_page=coverage_page, plugin_sweep=plugin_sweep)),
+                             coverage_page=coverage_page, plugin_sweep=plugin_sweep,
+                             risk=risk, behavioral=behavioral, adjudication=adjudication)),
         (getattr(args, "sarif", None), "SARIF",
          lambda: render_sarif(findings, score, __version__, ctx=ctx)),
     ):
@@ -6347,10 +6349,6 @@ def _main(argv=None) -> int:
             extra_findings=_dashboard_off_check_findings,
             sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"
                                if args.fast else None))
-        # B-586 + B-723: written only now, against the score the completed phases earned.
-        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
-                                      coverage_page=_dashboard_coverage_page,
-                                      plugin_sweep=plugin_sweep)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
@@ -6362,6 +6360,14 @@ def _main(argv=None) -> int:
             ctx, findings,
             vet_targets=_dashboard_vet_targets,
             version=__version__, bundle=judged_bundle, score=score)
+        # B-586 + B-723: written only now, against the score the completed phases earned.
+        # B-1068: and only after P9, so the HTML carries the same RISK / Behavioural /
+        # Second opinion blocks the PDF of this run carries.
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
+                                      coverage_page=_dashboard_coverage_page,
+                                      plugin_sweep=plugin_sweep, risk=paths,
+                                      behavioral=behavioral_phase,
+                                      adjudication=adjudication_phase)
         if _defer_pdf:
             try:
                 _pdf_dest = _report_dest(args.pdf)

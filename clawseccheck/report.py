@@ -7074,7 +7074,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None,
-                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None) -> str:
+                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None,
+                risk=None, behavioral=None, adjudication=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes the brand mark + wordmark, a grade badge (colored via
@@ -7301,6 +7302,33 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         ) if _cov_lines else ""
     else:
         coverage_page_html = ""
+
+    # B-1068: the --full pipeline blocks the PDF of the same run carries (RISK chains,
+    # Behavioural, Second opinion with its per-item verdicts, surface coverage, Worth a
+    # glance) - rendered from the SAME line renderers `render_pdf` uses, so the two
+    # exports cannot drift again. Before this the HTML had no risk/behavioral/
+    # adjudication parameter at all, and an HTML built beside a PDF from one judged
+    # bundle silently lacked the second opinion. Shown only when the caller supplied a
+    # pipeline phase (the --dashboard --full path); every other caller's page is
+    # byte-identical. Home paths are redacted here exactly as the PDF's _pipeline_block
+    # redacts them (B-866).
+    pipeline_html = ""
+    if risk is not None or behavioral is not None or adjudication is not None:
+        _blocks = (
+            ("RISK chains", _risk_chain_lines(risk or [], ascii_only=False)),
+            ("Behavioural", _behavioral_block_lines(behavioral, ascii_only=False)),
+            (_SEC_SECOND_OPINION, _second_opinion_lines(adjudication, ascii_only=False)
+             + _second_opinion_item_lines(adjudication)),
+            ("Coverage of OpenClaw surfaces", _coverage_lines(findings, ascii_only=False)),
+            ("Worth a glance", _worth_a_glance_lines(findings, ascii_only=False)),
+        )
+        pipeline_html = "".join(
+            f'<section class="pipeline" aria-label="{esc(title)}">'
+            f'<h2 class="section-title">{esc(title)}</h2>'
+            f'<pre class="cov-page-body">'
+            f'{esc(chr(10).join(_redact_home_paths(str(ln)) for ln in lines))}</pre>'
+            '</section>'
+            for title, lines in _blocks if lines)
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
     # `score.capped` alone - see the matching comment in render_report for why
@@ -7735,6 +7763,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         {subject_inventory_html}
 
         {coverage_page_html}
+
+        {pipeline_html}
 
         <h2 class="section-title">{esc(section_findings)}</h2>
         {nav_html}
