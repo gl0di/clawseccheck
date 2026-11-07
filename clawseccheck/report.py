@@ -16,6 +16,7 @@ import shlex
 import tempfile
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from . import pathprobe
@@ -6520,8 +6521,23 @@ def render_advise_json(profile, *, version: str) -> str:
 # new verdict/scoring logic. The plain-language preamble (4 numbered steps + a consent
 # line) comes first for a reader who doesn't parse shell; the exact commands follow
 # underneath, reordered so --vet-source (the pre-download reputation gate) is step 1.
+#: B-1052: forges whose ``https://HOST/OWNER/REPO`` URL is a git repository, so --vet-plan
+#: clones it instead of downloading the HTML landing page. A URL ending in ``.git`` is a
+#: repository on any host.
+_GIT_FORGE_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org", "codeberg.org"})
+
+
+def _is_repo_url(info: dict, target: str) -> bool:
+    """B-1052: an http(s) URL that names a git repository rather than a file to download."""
+    path = urlsplit(target).path.rstrip("/")
+    parts = [p for p in path.split("/") if p]
+    if path.endswith(".git") and parts:
+        return True
+    return (info.get("host") or "") in _GIT_FORGE_HOSTS and len(parts) == 2
+
+
 def _git_clone_source(target: str, info: dict) -> "tuple[str | None, str | None]":
-    """B-1051: (what to hand ``git clone``, the ref to check out) for a git source, or
+    """B-1052: (what to hand ``git clone``, the ref to check out) for a git source, or
     (None, None) when the host is unusable (empty, or option-shaped: a host starting with
     ``-`` is how ``ssh://-oProxyCommand=...`` turned a clone into command execution)."""
     host = info.get("host") or ""
@@ -6573,14 +6589,16 @@ def render_vet_plan(target: str) -> str:
         # metadata, which is untrusted code with the user's permissions BEFORE the scan.
         fetch = (f"pip download --only-binary=:all: --no-deps -d \"$QUARANTINE\" "
                   f"{_shq(name + ('==' + version if version else ''))}")
-    elif eco == "git":
+    elif eco == "git" or (eco == "url" and _is_repo_url(info, target)):
         # info only keeps host + the repo-name tail, not the full owner/repo path - pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
         # reconstructing it from parsed fields (which would drop the owner segment).
         # C-745: `git clone --depth 1` without --recurse-submodules runs no repo code
         # (hooks are not cloned) and fetches no submodules, so it needs no extra flag.
-        # B-1051: the other git-remote spellings (git+https://, ssh://, git://, scp-style
-        # git@host:path) now parse as git, so they are cloned from their own remote.
+        # B-1052: the other git-remote spellings (git+https://, ssh://, git://, scp-style
+        # git@host:path) and a forge repo URL (https://github.com/o/r[.git]) are cloned
+        # too - a plain curl of a repo URL saves its HTML landing page, and the plan's
+        # --advise step then has nothing to assess.
         clone_url, ref = _git_clone_source(target, info)
         if clone_url is None:
             fetch = (f"# '{name}' has no host this plan can clone safely \u2014 fetch it "
@@ -6600,7 +6618,7 @@ def render_vet_plan(target: str) -> str:
     # clawhub/unresolved branches above are already a full "#"-commented explanation, so
     # they are left as-is rather than doubly annotated.
     fetch_note = "   # (git clone / pip download / curl per ecosystem)" if eco in (
-        "npm", "pypi", "git", "url") else ""
+        "npm", "pypi", "git", "url") and not fetch.startswith("#") else ""
 
     pypi_note = (
         ["  # No wheel for this package? Stop and tell the user - do NOT retry without",
