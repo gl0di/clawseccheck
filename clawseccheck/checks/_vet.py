@@ -10901,7 +10901,9 @@ def _parse_git_remote(t: str) -> "dict | None":
         ref = ref or (frag if frag and "=" not in frag else None)
     else:
         m = _SOURCE_SCP_RE.match(t)
-        if not m:
+        # A repo path has a '/' or ends in .git - `example.com:8080`, `org.x:lib:1.0`,
+        # `skill.md:readme` are not git remotes (C-135 on B-1051).
+        if not m or not ("/" in m.group("path") or m.group("path").endswith(".git")):
             return None
         host, path, scheme = m.group("host").lower(), m.group("path"), "ssh"
     parts = [p for p in path.split("/") if p]

@@ -60,6 +60,8 @@ def test_git_remote_parse_shapes(target, host, owner, ref, scheme):
     ("npm:left-pad", "npm"), ("npm:@scope/pkg@1.0.0", "npm"), ("pypi:requests==2.0", "pypi"),
     ("clawhub:foo", "clawhub"), ("left-pad", "registry"), ("C:\\\\x\\\\y", "registry"),
     ("localhost:8080", "registry"), ("https://github.com/a/b", "url"),
+    ("example.com:8080", "registry"), ("org.apache:commons:1.0", "registry"),
+    ("skill.md:readme", "registry"), ("1.2.3.4:22", "registry"),
 ])
 def test_non_git_shapes_are_unchanged(target, eco):
     assert _parse_source_target(target)["ecosystem"] == eco
@@ -75,3 +77,7 @@ def test_host_heuristics_now_reach_git_remotes():
 def test_a_clean_pinned_remote_is_still_only_unknown():
     f = vet_source("git+https://github.com/a/b.git@v1.2", known_bad={}, known_good=GOOD)
     assert f.status == UNKNOWN, f.detail
+
+
+def test_scp_form_without_a_slash_still_parses_when_it_names_a_dot_git_repo():
+    assert _parse_source_target("git@example.org:repo.git")["ecosystem"] == "git"
