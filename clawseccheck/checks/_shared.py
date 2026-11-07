@@ -3913,8 +3913,12 @@ def _open_channels(cfg: dict) -> list[str]:
             # this is a plain per-node read, not a new merge rule.
             if node.get("enabled") is False:
                 continue
+            # B-1053: a raw `node.get("dmPolicy")` read a world-open matrix DM channel
+            # (matrix declares ONLY the nested `dm.policy`, B-619) as "not open", and B2
+            # printed a clean PASS on it while A1 already counted the leg. Read the union
+            # of the nested-aware resolution and the flat key (_dm_policy_values).
             if (
-                node.get("dmPolicy") == "open"
+                "open" in _dm_policy_values(name, node)
                 or _norm_group_policy(name, node.get("groupPolicy")) == "open"
             ):
                 out.append(name)
@@ -4193,12 +4197,14 @@ def _external_input_channels(cfg: dict) -> list[str]:
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            dm_policy = node.get("dmPolicy")
+            # B-1053: nested-aware (matrix declares only `dm.policy`, B-619), unioned
+            # with the flat key so nothing previously counted drops out.
+            dm_values = _dm_policy_values(name, node)
             group_policy = _norm_group_policy(name, node.get("groupPolicy"))
             # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
             # genuine policy member - only a hashable value even needs the `in` test.
             if (
-                (isinstance(dm_policy, Hashable) and dm_policy in _UNTRUSTED_INPUT_POLICIES)
+                bool(dm_values & _UNTRUSTED_INPUT_POLICIES)
                 or (
                     isinstance(group_policy, Hashable)
                     and group_policy in _UNTRUSTED_INPUT_POLICIES
@@ -5192,6 +5198,41 @@ def _declared_dm_policy(channel_name: str, node) -> str | None:
     # imessageCfg.dmPolicy / msteamsCfg?.dmPolicy, all `?? "pairing"`, none consult a
     # `dm` object because their schema doesn't define one - see the module comment).
     return flat
+
+
+def _dm_policy_values(channel_name: str, node) -> set:
+    """B-1053: every dm-policy value *node* could be running with, for an "is it open /
+    is it external input?" membership test.
+
+    The union of what ``_declared_dm_policy`` resolves (the nested ``dm.policy`` matrix
+    declares, the discord/slack precedence) and the raw flat ``dmPolicy`` the open-ingress
+    predicates read before this fix. A UNION on purpose: it only ever ADDS a channel to an
+    open/untrusted set - the nested matrix form those predicates were blind to - and never
+    removes one they already reported, so no FAIL/WARN is cleared by this change (rule:
+    a change that can clear a finding must be fail-closed; this one cannot). Values that
+    are not non-empty strings are dropped (B-378 idiom).
+    """
+    out = set()
+    if not isinstance(node, dict):
+        return out
+    declared = _declared_dm_policy(channel_name, node)
+    # C-135 on this fix: matrix with `dm.enabled: false` ignores every DM whatever
+    # `dm.policy` says (vendor docs, docs/channels/matrix.md "dm.enabled ... When false,
+    # Matrix ignores all DMs"; docs/channels/matrix/access-control.md recommends it to
+    # silence DMs). Matrix is an external plugin in 2026.11.1, so the runtime gate could not
+    # be executed - the docs are the grounding, and they are used here ONLY to keep the
+    # NEW nested contribution from opening a channel the operator closed. The flat key
+    # below is unaffected, so nothing reported before this fix is cleared.
+    dm = node.get("dm")
+    if (channel_name in _DM_POLICY_NESTED_ONLY_CHANNELS and isinstance(dm, dict)
+            and dm.get("enabled") is False):
+        declared = None
+    if declared:
+        out.add(declared)
+    flat = node.get("dmPolicy")
+    if isinstance(flat, str) and flat:
+        out.add(flat)
+    return out
 
 
 def _untrusted_input_channels(cfg: dict) -> list[str]:
