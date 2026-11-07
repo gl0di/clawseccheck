@@ -7909,6 +7909,28 @@ def _fold_fs_path_uncached(
             return None
         return _fold_pjoin(_FOLD_UNK if left is None else left, _FOLD_UNK if right is None else right)
 
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # B-1057: string concatenation of path parts -- `"id_" + "rsa"` -> "id_rsa", or
+        # `os.environ["HOME"] + "/.aws/credentials"` -> "\x00/.aws/credentials". An
+        # UNKNOWN side folds to the _FOLD_UNK sentinel (never a substring of any Gate-V
+        # pattern), so a credential filename spelled wholly in the KNOWN parts still
+        # completes a match while an unknown prefix/suffix can only WIDEN the span, never
+        # complete it -- the identical fail-closed discipline the `/` (Div) branch above
+        # uses (an earlier version returned None whenever EITHER side was unknown, which
+        # was fail-OPEN: a known `.aws/credentials` tail was dropped because an unrelated
+        # `os.environ[...]` prefix did not resolve). Arithmetic/list `+` stays excluded by
+        # bailing when a side is a NON-STRING constant (`1 + 2`, `b"x" + b"y"`, `[a]+[b]`,
+        # and the mixed `1 + "x"` which is a runtime TypeError, never a path) and when
+        # BOTH sides are unresolved (no path content at all to fold).
+        for side in (node.left, node.right):
+            if isinstance(side, ast.Constant) and not isinstance(side.value, str):
+                return None
+        left = _fold_seg(node.left, ctx, visiting, depth + 1)
+        right = _fold_seg(node.right, ctx, visiting, depth + 1)
+        if left is None and right is None:
+            return None
+        return (_FOLD_UNK if left is None else left) + (_FOLD_UNK if right is None else right)
+
     if not isinstance(node, ast.Call):
         return None
     f = node.func
