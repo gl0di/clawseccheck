@@ -3497,10 +3497,21 @@ def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
     name = f"os.{attr}"
     all_exprs = list(node.args) + [k.value for k in node.keywords]
     opaque = (name, None, None, all_exprs)
-    if any(isinstance(a, ast.Starred) for a in node.args) or any(
-        k.arg is None for k in node.keywords
-    ):
+    if any(k.arg is None for k in node.keywords):
         return opaque
+    if any(isinstance(a, ast.Starred) for a in node.args):
+        # B-1040: a starred argument AFTER argv[0] of a plain `l` form (`execl(p, a0, 'x',
+        # *rest)`) is just an unreadable tail of argv -- the verdict reads it as a partial
+        # literal. Anywhere else (the program, the mode, argv[0], any `v` form, an `e`
+        # form whose last positional is the environment) the slots cannot be mapped.
+        if not (
+            not vector
+            and not attr.endswith(("le", "lpe"))
+            and not node.keywords
+            and len(node.args) >= lead + 2
+            and not any(isinstance(a, ast.Starred) for a in node.args[: lead + 2])
+        ):
+            return opaque
     args = list(node.args)
     if not vector:
         # `l` forms: file (and the spawn mode) positionally, then argv[0], argv[1:]...
@@ -3526,14 +3537,20 @@ def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
     return name, got["prog"], got["argv"], all_exprs
 
 
-def _single_str_binding(scope: ast.AST, name: str, before_line: int) -> "ast.Constant | None":
+def _single_str_binding(
+    scope: ast.AST, name: str, before_line: int, accept: "object | None" = None
+) -> "ast.AST | None":
     """B-1024: the string literal a bare `name` is provably bound to in `scope`, or None.
 
     Deliberately small: exactly one store of the name in the scope's own body, a plain
     top-level `name = "literal"` statement (never inside an if/for/try/with, so a path
     that skips it cannot leave an earlier value behind), located before `before_line`,
     the name not a parameter of the scope, and no `global`/`nonlocal`/other rebinding
-    anywhere (`_b1018_other_unsafe`). Anything else is unresolved."""
+    anywhere (`_b1018_other_unsafe`). Anything else is unresolved.
+
+    B-1040: `accept`, when given, replaces the "is a string literal" test on the bound
+    value (a callable on the value node), so the same single-binding proof can resolve a
+    name bound once to `sys.executable`."""
     body = getattr(scope, "body", None)
     if not body:
         return None
@@ -3552,11 +3569,31 @@ def _single_str_binding(scope: ast.AST, name: str, before_line: int) -> "ast.Con
     if len(found) != 1:
         return None
     st = found[0]
-    if not (isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)):
+    if accept is not None:
+        if not accept(st.value):
+            return None
+    elif not (isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)):
         return None
     if getattr(st, "lineno", before_line) >= before_line or _b1018_other_unsafe(scope, name, st):
         return None
     return st.value
+
+
+# B-1040: stand-in program name for `sys.executable` when the question is "could a later
+# element of this argv still be read as an interpreter option?" (`_python_option_list_closed`).
+_SYSEXE_AS_PYTHON = ast.Constant(value="python3")
+
+
+def _is_sys_executable(expr: ast.AST, scope: ast.AST, line: int, tree: ast.AST) -> bool:
+    """B-1040: is `expr` the current interpreter -- `sys.executable` (verified: `sys` not
+    rebound, `_b863_a0_is_verified_sys_executable`), or a bare Name bound exactly once, by a
+    plain top-level statement before `line`, to it (`_single_str_binding`'s proof)?"""
+    if isinstance(expr, ast.Name):
+        found = _single_str_binding(
+            scope, expr.id, line, lambda v: _b863_a0_is_verified_sys_executable(v, tree)
+        )
+        return found is not None
+    return _b863_a0_is_verified_sys_executable(expr, tree)
 
 
 def _os_exec_spawn_verdict(
@@ -3600,30 +3637,46 @@ def _os_exec_spawn_verdict(
         return "crit"
     # a bare Name program bound once to a string literal reads as that literal; any other
     # non-literal program stays opaque (never a shell by assumption, never folded)
+    line = getattr(node, "lineno", 0)
+    prog_py = _is_sys_executable(prog, scope, line, tree)  # B-1040
     if isinstance(prog, ast.Name):
-        prog = _single_str_binding(scope, prog.id, getattr(node, "lineno", 0)) or prog
+        prog = _single_str_binding(scope, prog.id, line) or prog
     prog_literal = isinstance(prog, ast.Constant) and isinstance(prog.value, str)
+    # B-1040: the program as far as option parsing is concerned -- a literal, or the
+    # current interpreter read as `python3` (its option list may be closed by a script).
+    prog_eff = prog if prog_literal else (_SYSEXE_AS_PYTHON if prog_py else None)
     stale = False  # argv is a literal that a mutation / concatenation makes incomplete
     if isinstance(argv, list):
         elts = argv
+        if any(isinstance(e, ast.Starred) for e in elts):
+            stale = True  # `os.execl(p, a0, *rest)`: the literal is only part of the argv
     else:
         expr = argv
         if isinstance(expr, ast.Name) and list_bindings and expr.id in list_bindings:
             expr = list_bindings[expr.id]
+        left = expr.left if isinstance(expr, ast.BinOp) else None
+        left_head = left.elts[0] if isinstance(left, (ast.List, ast.Tuple)) and left.elts else None
+        # B-1040: a head that is the current interpreter reads as `python3`, so the
+        # B-1018 closed-option-list test decides it exactly like a literal python head.
+        head_py = left_head is not None and _is_sys_executable(left_head, scope, line, tree)
         if (
-            prog_literal
+            prog_eff is not None
             and isinstance(expr, ast.BinOp)
             and isinstance(expr.op, ast.Add)
-            and isinstance(expr.left, (ast.List, ast.Tuple))
-            and expr.left.elts
-            and isinstance(expr.left.elts[0], ast.Constant)
-            and isinstance(expr.left.elts[0].value, str)
-            and not _prog_name_could_become_shell_indirect(expr.left.elts)
-            and not _prog_name_could_become_shell_indirect([prog, *expr.left.elts[1:], expr.right])
+            and left_head is not None
+            and (
+                (isinstance(left_head, ast.Constant) and isinstance(left_head.value, str))
+                or head_py
+            )
+            and not _prog_name_could_become_shell_indirect(
+                [_SYSEXE_AS_PYTHON, *left.elts[1:]] if head_py else left.elts
+            )
+            and not _prog_name_could_become_shell_indirect([prog_eff, *left.elts[1:], expr.right])
         ):
             # `["x", ...] + rest`: only when neither the program nor the left head can
-            # be a shell / wrapper (a non-literal program is never folded either)
-            expr = ast.List(elts=[*expr.left.elts, expr.right], ctx=ast.Load())
+            # be a shell / wrapper (a non-literal program is never folded either, but
+            # the current interpreter is read as python3 -- B-1040)
+            expr = ast.List(elts=[*left.elts, expr.right], ctx=ast.Load())
             stale = True
         if isinstance(expr, (ast.List, ast.Tuple)):
             elts = list(expr.elts)
@@ -3654,8 +3707,8 @@ def _os_exec_spawn_verdict(
     if _argv0_is_shell_indirect_exec(elts) or _argv0_is_shell_indirect_exec([prog, *elts[1:]]):
         return "crit"
     if stale and (
-        not prog_literal  # an unresolved program may itself be the shell
-        or _prog_name_could_become_shell_indirect([prog, *elts[1:]])
+        prog_eff is None  # an unresolved program may itself be the shell
+        or _prog_name_could_become_shell_indirect([prog_eff, *elts[1:]])
     ):
         return "crit"
     return "info"
@@ -6120,6 +6173,13 @@ def _b863_tier1_tier2_verdict(
     return False
 
 
+def _call_scope(node: ast.Call, owner_map: "dict | None", tree: ast.AST) -> ast.AST:
+    """The function a call sits in (per `owner_map`), else the module `tree` -- the scope
+    handed to the single-binding resolvers, same choice the sink loop makes."""
+    own = owner_map.get(node) if owner_map else None
+    return own if isinstance(own, (ast.FunctionDef, ast.AsyncFunctionDef)) else tree
+
+
 def _subprocess_taint_is_command_injection(
     node: ast.Call,
     tainted: set,
@@ -6238,9 +6298,25 @@ def _subprocess_taint_is_command_injection(
         and isinstance(first.op, ast.Add)
         and isinstance(first.left, (ast.List, ast.Tuple))
         and first.left.elts
-        and isinstance(first.left.elts[0], ast.Constant)
-        and isinstance(first.left.elts[0].value, str)
-        and not _prog_name_could_become_shell_indirect(first.left.elts)
+        and (
+            (
+                isinstance(first.left.elts[0], ast.Constant)
+                and isinstance(first.left.elts[0].value, str)
+                and not _prog_name_could_become_shell_indirect(first.left.elts)
+            )
+            # B-1040: `[sys.executable, "tool.py"] + rest` -- the current interpreter reads
+            # as python3, so only a closed option list (script / `-m mod`) is trusted
+            or (
+                tree is not None
+                and _is_sys_executable(
+                    first.left.elts[0], _call_scope(node, owner_map, tree),
+                    getattr(node, "lineno", 0), tree,
+                )
+                and not _prog_name_could_become_shell_indirect(
+                    [_SYSEXE_AS_PYTHON, *first.left.elts[1:]]
+                )
+            )
+        )
     ):
         first = ast.List(elts=[*first.left.elts, first.right], ctx=ast.Load())
     if isinstance(first, (ast.List, ast.Tuple)):
