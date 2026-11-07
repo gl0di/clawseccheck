@@ -10164,6 +10164,7 @@ def _merge_narrowed_scope_gap(finding: Finding, root: Path) -> Finding:
 def _vet_resolved_skill(p: Path) -> Finding:
     """The B13 scan itself, over an ALREADY-RESOLVED target (see ``vet_skill``)."""
     ctx = Context(home=p)
+    ctx.pre_install = True  # B-1003: B398 warns on ANY shipped .pyc here (not on an installed skill)
     if pathprobe.is_dir(p):
         if _is_own_source(p):
             # B-786: record the same way collector.py's sweep-level self-exclusion does
