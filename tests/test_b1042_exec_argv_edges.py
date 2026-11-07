@@ -15,6 +15,8 @@ Offline, stdlib only, no files written.
 """
 from __future__ import annotations
 
+import ast as _ast
+
 import pytest
 
 from clawseccheck import skillast
@@ -101,7 +103,6 @@ def test_eval_flag_in_a_variable_is_command_injection(body):
 @pytest.mark.parametrize("body", [
     "flag = '-x'\nsubprocess.run(['sh', flag, q])\n",
     "script = 'run.sh'\nsubprocess.run(['sh', script, q])\n",
-    "subprocess.run(['sh', 'run.sh', get(), q])\n",       # a literal script ended the options
     "subprocess.run(['sh', get()])\nsubprocess.run(['sh', q])\n",
     "subprocess.run(['sh', q])\n",                         # the tainted element IS the opaque slot
     "subprocess.run(['git', get(), q])\n",                 # not a shell
@@ -161,3 +162,92 @@ def test_posix_spawn_untainted_yields_nothing(call):
 def test_module_level_list_mutated_in_a_function_is_a_documented_limit():
     src = _HEAD + "a = ['git']\ndef f():\n    a.append(q)\n    subprocess.run(a)\nf()\n"
     assert isinstance(skillast.analyze_python(src), list)
+
+
+# --- hardening round: shell option grammar is not modelled -------------------------------
+
+@pytest.mark.parametrize("body", [
+    "subprocess.run(['sh', 'run.sh', get(), q])\n",
+    "subprocess.run(['sh', '-l', 'run.sh', get(), q])\n",
+    "subprocess.run(['sh', '-o', 'pipefail', get(), q])\n",
+    "subprocess.run(['bash', '--rcfile', 'x', get(), q])\n",
+    "subprocess.run(['sh', get(), 'x', q])\n",
+    "subprocess.run(['sh', 'a', 'b', 'c', get(), 'd', q])\n",
+    "subprocess.run(['cmd.exe', '/k', get(), q])\n",
+    "subprocess.run(['cmd', '/q', '/d', get(), q])\n",
+    "subprocess.run(['powershell', '-NoProfile', get(), q])\n",
+    "os.execvp('sh', ['sh', 'run.sh', get(), q])\n",
+    "os.execv('/bin/sh', ['x', '-o', 'pipefail', get(), q])\n",
+])
+def test_unreadable_element_after_a_shell_head_with_a_tainted_later_element_is_crit(body):
+    assert _tt5(_HEAD + body) == CMD
+
+
+@pytest.mark.parametrize("body", [
+    "subprocess.run(['sh', 'run.sh', q, 'x'])\n",          # the first unreadable element IS the tainted one
+    "subprocess.run(['sh', 'run.sh', 'a', q])\n",           # nothing unreadable
+    "subprocess.run(['sh', '-l', 'run.sh', get()])\nsubprocess.run(['sh', q])\n",
+    "subprocess.run(['python3', 'run.py', get(), q])\n",    # an interpreter, not a shell
+])
+def test_shell_head_benign_twins_are_unchanged(body):
+    assert _tt5(_HEAD + body) == ARG
+
+
+# --- hardening round: closure / invalidating mutation never yields a rebuilt head ----------
+
+def _appended_head(src: str, name: str = "a") -> str:
+    return skillast._b1042_appended_head(_ast.parse(src), name)[0]
+
+
+@pytest.mark.parametrize("src", [
+    "a = []\na.append('git')\ndef g():\n    a.insert(0, 'sh')\n",
+    "a = []\na.append('git')\ndef g():\n    a.append('sh')\n",
+    "a = []\na.append('git')\nf = lambda: a.append('sh')\n",
+    "a = []\na.append('git')\n[a.append(x) for x in 'ab']\n",
+    "a = []\na.append('git')\nclass K:\n    a.extend(['x'])\n",
+    "a = []\na.append('git')\na.clear()\n",
+    "a = []\na.append('git')\na.insert(0, 'sh')\n",
+    "a = []\na.append('git')\na.pop(0)\n",
+    "a = []\na.append('git')\na.remove('git')\n",
+    "a = []\na.append('git')\na.reverse()\n",
+    "a = []\na.append('git')\na.sort()\n",
+    "a = []\na.append('git')\na[0:1] = ['sh']\n",
+    "a = []\na.append('git')\na[0] = 'sh'\n",
+    "a = []\na.append('git')\ndel a[0]\n",
+    "a = []\na.append('git')\na.__setitem__(0, 'sh')\n",
+    "a = []\na.append('git')\nlist.insert(a, 0, 'sh')\n",
+    "def g():\n    del a[0]\na = []\na.append('git')\n",
+])
+def test_rebuilt_head_is_never_claimed_with_closure_or_invalidating_writes(src):
+    assert _appended_head(src) != "lit"
+
+
+def test_plain_straight_line_appends_still_rebuild_the_head():
+    assert _appended_head("a = []\na.append('git')\na.append('x')\n") == "lit"
+
+
+@pytest.mark.parametrize("body", [
+    "a = []\na.append('git')\ndef g():\n    a.insert(0, 'sh')\na.append(q)\nsubprocess.run(a)\n",
+    "a = []\na.append('git')\nf = lambda: a.append('sh')\na.append(q)\nsubprocess.run(a)\n",
+    "a = []\na.append('git')\na[0] = 'sh'\na.append(q)\nsubprocess.run(a)\n",
+])
+def test_those_shapes_are_never_weaker_than_before(body):
+    assert _tt5(_HEAD + body) in (ARG, CMD)
+
+
+# --- hardening round: further head-changing spellings drop the binding ----------------------
+
+@pytest.mark.parametrize("body", [
+    "cmd = ['git', 'diff']\ndel cmd[0]\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\ndel cmd[0:1]\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\nlist.insert(cmd, 0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\nlist.__setitem__(cmd, 0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\ncmd.__setitem__(0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\ncmd.__delitem__(0)\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\ncmd.__iadd__(['x'])\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\ncmd.__imul__(2)\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "import operator\ncmd = ['git', 'diff']\noperator.setitem(cmd, 0, 'sh')\ncmd.append(q)\nsubprocess.run(cmd)\n",
+    "cmd = ['git', 'diff']\ncmd[0] += 'x'\ncmd.append(q)\nsubprocess.run(cmd)\n",
+])
+def test_head_changing_spellings_keep_command_injection(body):
+    assert _tt5(_HEAD + body) == CMD

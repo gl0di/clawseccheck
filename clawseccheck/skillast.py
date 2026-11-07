@@ -3605,11 +3605,12 @@ def _b1042_resolve_flags(elts: list, scope: ast.AST, line: int) -> "tuple[list, 
     `elts'` has every bare Name element that is provably bound once to a string literal
     (`_single_str_binding`) replaced by that literal, so `flag = "-c"; ["sh", flag, q]`
     reads as `["sh", "-c", q]` to `_argv0_is_shell_indirect_exec`. `opaque_index` is, for a
-    real shell head only, the index of the first element that sits where the shell's own
-    option list could still hold `-c` yet is not a readable literal (a call, an unresolved
-    name, a splice): leading `-x` option literals are skipped, a non-option literal (the
-    script path) ends the options. The caller convicts it only when a LATER element is
-    tainted."""
+    real shell head only, the index of the FIRST element that is not a readable string
+    literal (a call, an unresolved name, a splice). The shell's option grammar is
+    deliberately not modelled (it has no closed table -- `-o NAME`, `-O shopt`, `--rcfile F`,
+    cmd's `/k`/`/c`/`/q` all take or shift positions), so literals between the head and that
+    element, `-x`-style or `/x`-style or plain, never end the search. The caller convicts it
+    only when ANY later element is tainted."""
     head = elts[0] if elts else None
     if not (isinstance(head, ast.Constant) and isinstance(head.value, str)) or len(elts) < 2:
         return elts, None
@@ -3619,20 +3620,16 @@ def _b1042_resolve_flags(elts: list, scope: ast.AST, line: int) -> "tuple[list, 
     shell = base in _B1042_SHELLS
     out = [head]
     opaque = None
-    in_options = True
     for i, e in enumerate(elts[1:], 1):
         if isinstance(e, ast.Name):
             lit = _single_str_binding(scope, e.id, line)
             if lit is not None:
                 e = lit
         out.append(e)
-        if shell and in_options:
-            if isinstance(e, ast.Constant) and isinstance(e.value, str):
-                if not e.value.startswith("-"):
-                    in_options = False
-            else:
-                opaque = i
-                in_options = False
+        if shell and opaque is None and not (
+            isinstance(e, ast.Constant) and isinstance(e.value, str)
+        ):
+            opaque = i
     return out, opaque
 
 
@@ -4212,6 +4209,33 @@ _TRAILING_ONLY_MUTATORS = frozenset({"append", "extend"})
 # Deliberately NOT in either set above: `count`/`index` (read-only, never mutate) and
 # `copy` (returns a NEW list; the bound name's own object is untouched).
 
+# B-1042: dunder (and `operator.*`) spellings of in-place mutation. `__setitem__`/
+# `__delitem__` can replace or drop index 0; `__iadd__`/`__imul__` are listed too, mirroring
+# the argv[0]-invalidating set -- the name is simply not trusted after any of them.
+_LIST_DUNDER_MUTATORS = frozenset({
+    "__setitem__", "__delitem__", "__iadd__", "__imul__",
+    "setitem", "delitem", "iadd", "imul",
+})
+
+
+def _call_mutates_list_head(n: ast.Call) -> set:
+    """B-1042: the Name(s) whose list this call may mutate in a way that can change index 0:
+    `name.insert(...)`-style receivers (`_ARGV0_INVALIDATING_MUTATORS` or a dunder /
+    `operator` mutator) and the first argument of `list.insert(name, ...)` /
+    `operator.setitem(name, ...)`-style calls. Empty set when the call is neither."""
+    f = n.func
+    if not (
+        isinstance(f, ast.Attribute)
+        and (f.attr in _ARGV0_INVALIDATING_MUTATORS or f.attr in _LIST_DUNDER_MUTATORS)
+    ):
+        return set()
+    found: set = set()
+    if isinstance(f.value, ast.Name):
+        found.add(f.value.id)
+    if n.args and isinstance(n.args[0], ast.Name):
+        found.add(n.args[0].id)
+    return found
+
 
 _WIN_EXEC_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
 
@@ -4378,7 +4402,37 @@ def _b1042_appended_head(scope: ast.AST, name: str) -> "tuple[str, ast.List | No
         for m in muts
         if m[4] not in own
     )
-    if first[3] and head is not None and not nested_shell:
+    # B-1042 hardening: a mutation outside the scope's own statements (closure, lambda,
+    # comprehension, class body) or ANY argv[0]-invalidating write anywhere under the scope
+    # (clear/insert/pop/remove/reverse/sort/slice or index assignment, `del name[...]`, the
+    # dunder / `list.<mutator>(name, ...)` spellings) means the rebuilt prefix cannot be
+    # trusted: never claim a literal head then
+    comp_ids = {
+        id(x)
+        for c in ast.walk(scope)
+        if isinstance(c, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+        for x in ast.walk(c)
+    }  # a comprehension is its own scope too
+    nested_mut = any(m[4] not in own or m[4] in comp_ids for m in muts)
+    invalidated = False
+    for n in ast.walk(scope):
+        if isinstance(n, ast.Call) and name in _call_mutates_list_head(n):
+            invalidated = True
+        elif (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            invalidated = True
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Subscript)
+            and isinstance(n.target.value, ast.Name)
+            and n.target.value.id == name
+        ):
+            invalidated = True
+    if first[3] and head is not None and not nested_shell and not nested_mut and not invalidated:
         # the literal prefix: the straight-line mutations from the first one up to the
         # first conditional one (a python head is only safe once a script / `-m mod`
         # element has closed its option list, B-1018)
@@ -4505,17 +4559,28 @@ def _single_list_bindings_local(
                     unsafe.add(t.value.id)  # cmd[0] = ... could replace the program
         elif isinstance(n, ast.Call):
             f = n.func
+            unsafe |= _call_mutates_list_head(n)  # B-1042: dunder / list.<mutator>(name, ...)
             if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
                 if f.attr in _ARGV0_INVALIDATING_MUTATORS:
                     unsafe.add(f.value.id)  # could change/remove whatever is at index 0
                 elif f.attr in _TRAILING_ONLY_MUTATORS:
                     trailing_mutated.add(f.value.id)
+        elif isinstance(n, ast.Delete):
+            for t in n.targets:  # B-1042: `del cmd[0]` drops index 0
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                    unsafe.add(t.value.id)
         elif (
             isinstance(n, ast.AugAssign)
             and isinstance(n.target, ast.Name)
             and isinstance(n.op, ast.Add)
         ):
             trailing_mutated.add(n.target.id)  # cmd += [...] mutates like .extend()
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Subscript)
+            and isinstance(n.target.value, ast.Name)
+        ):
+            unsafe.add(n.target.value.id)  # B-1042: `cmd[0] += "x"`
     for name in sorted(trailing_mutated):
         # B-1042: `a = []` whose HEAD arrives through `.append`/`.extend`/`+=`
         empty = bindings.get(name)
@@ -4627,6 +4692,13 @@ def _b1018_other_unsafe(scope: ast.AST, name: str, assign: ast.Assign) -> bool:
                 and f.attr in _ARGV0_INVALIDATING_MUTATORS
             ):
                 return True
+            if name in _call_mutates_list_head(n):  # B-1042: dunder / list.<mutator>(name, ...)
+                return True
+        if isinstance(n, ast.Delete) and any(
+            isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == name
+            for t in n.targets
+        ):
+            return True
     return False
 
 
