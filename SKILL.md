@@ -1,7 +1,7 @@
 ---
 name: clawseccheck
 version: 4.4.5
-description: Free, local, read-only security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, logs, agent session logs, and installed skills, plus a bounded host-security scan. It changes no OpenClaw config, skill or bootstrap file; its own history and state stay under ~/.clawseccheck (--no-history skips it, --purge removes it). Grades your setup A-F when all five check layers ran, naming what's missing otherwise. --monitor records a local baseline so every later run alerts on what changed - a new MCP server, an edited skill, config drift, a finding that appeared or cleared. No API key, no network calls; the only external command it runs is your own read-only openclaw security audit (skip with --no-native). --save and --html write only to the path you give. Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A-F security score, watch your OpenClaw setup for changes, or ask what changed since the last check.
+description: Free, local, read-only security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, logs, agent session logs, and installed skills, plus a bounded host-security scan. It changes no OpenClaw config, skill or bootstrap file; its own history and state stay under ~/.clawseccheck (--no-history skips it, --purge removes it). Grades your setup A-F when all five check layers ran, naming what's missing otherwise. --monitor records a local baseline so every later run alerts on what changed - a new MCP server, an edited skill, config drift, a finding that appeared or cleared. No API key, no network calls; its one external command is your own read-only openclaw security audit (--no-native skips it). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A-F security score, watch your OpenClaw setup for changes, or ask what changed since the last check, or vet a skill, plugin or package before installing it.
 license: MIT
 metadata: {"openclaw":{"emoji":"\ud83e\udd9e","os":["darwin","linux","win32"],"user-invocable":true},"display_name":{"en":"ClawSecCheck \u2014 OpenClaw Security Self-Audit"},"display_description":{"en":"Free, local security self-audit for your own OpenClaw agent. Reads your OpenClaw config, bootstrap files, log files, agent session logs, and installed skills \u2014 read-only against your OpenClaw setup, plus a bounded host-security scan; it keeps its own history and state under ~/.clawseccheck (removable with --purge; --no-history skips the history). Reports the most urgent holes, and grades your setup A\u2013F when all five check layers ran \u2014 short of that it names the missing layers instead of printing a number. It is built to be run again, not once: --monitor records a local baseline and every later run alerts on what changed \u2014 a new MCP server, a new or edited skill, config drift, a finding that appeared or cleared. Nothing here changes your OpenClaw config, a skill, or a bootstrap file. Flags that take an output path (--save, --html, --sarif, --badge, --pdf PATH) write only where you point them. The opt-in writes that can land inside your OpenClaw home without you choosing the path include --apply-ignore-proposals (confirmation-gated; appends only suppressions you approved to .clawseccheckignore) and a no-PATH --pdf (auto-resolves inside your OpenClaw home when its own attachment directory exists). No API key; the scanner itself makes no network calls, and the single external command it can run is your own read-only openclaw security audit (skip it with --no-native). Use it when you want to check or audit your OpenClaw agent's security, find prompt-injection or misconfiguration risks, see your A\u2013F security score, watch your OpenClaw setup for changes, or ask what changed since the last check."},"tags":{"en":["security","openclaw","ai-agent","audit","prompt-injection","llm-security","self-audit","sarif"]}}
 ---
@@ -23,6 +23,9 @@ Activate when the user says anything like:
 "am I vulnerable to prompt injection in OpenClaw", "scan my OpenClaw agent",
 "how secure is my OpenClaw setup", "test my OpenClaw agent for attacks",
 "audit my OpenClaw agent".
+
+Also BEFORE an install: "check this skill before I install it", "is this plugin safe to
+install", "vet clawhub:<slug>" (or npm:/pypi:/a git URL/a folder) - mode C (item 3).
 
 Do NOT activate on a bare, unqualified "security check", "audit me", "am I vulnerable", or
 "fix this" that names no OpenClaw/agent/skill/plugin/MCP subject - those are too generic to
@@ -342,15 +345,14 @@ ClawSecCheck is a **reports-only checker**. It does NOT fix, and it does NOT app
 
 ## Keeping ClawSecCheck current (advisory only)
 
-A **stale security scanner is itself a risk**, so the tool nudges honestly, 100% offline (see [`docs/USAGE.md`](docs/USAGE.md), "Staleness reminder (offline)"). **Updating is the user's own action, never an automatic step** - never check for or install updates as a side effect of running an audit; if the user explicitly asks, they run the tool they installed it with (`openclaw skills update clawseccheck` / `clawhub update --all`). Anything that reaches the network is an **explicit, user-initiated** action.
+A stale scanner is a risk; the tool nudges offline (`docs/USAGE.md`, "Staleness reminder"). **Updating is the user's own action, never an automatic step** - never as a side effect of an audit; on an explicit ask the user runs `openclaw skills update clawseccheck` / `clawhub update --all`. Network access is only ever user-initiated.
 
 ---
 
 ## Reference docs (loaded on demand, not at audit time)
 
-Twelve supplementary references live outside this playbook. **When a section here names one of these files, read that file -
-or just the one section of it you need - before you act. Never reconstruct its protocol from
-memory:**
+**When a section names one of these files, read it (or the one section you need) before you
+act; never reconstruct its protocol from memory:**
 
 - [`docs/FLOW_CHOICES.md`](docs/FLOW_CHOICES.md) - the Step 5 branches; read only the `## Choice: ...` section the user's choice maps to.
 - [`docs/ISOLATION.md`](docs/ISOLATION.md) - context-firewall protocol; read it before any deep read of untrusted text.
