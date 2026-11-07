@@ -3734,6 +3734,32 @@ _TRAILING_ONLY_MUTATORS = frozenset({"append", "extend"})
 # `copy` (returns a NEW list; the bound name's own object is untouched).
 
 
+_WIN_EXEC_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
+
+
+def _argv0_basename(value: str) -> str:
+    """B-1023: the comparable program name of a literal argv[0] -- directory part (either
+    slash) dropped, lowercased, then Windows name normalisation undone so `sh.exe`,
+    `sh.exe.` (Windows drops trailing dots and spaces), `sh.exe ` , `bash.com` and a
+    stacked `sh.exe.exe` all classify exactly like the bare name. Trailing dots/
+    whitespace and PATHEXT-style suffixes (`.exe`, `.com`, `.bat`, `.cmd`) are stripped
+    repeatedly until neither applies; a name that is nothing but a suffix (`.exe`) is
+    left alone. `cmd.exe`/`powershell.exe` stay in `_SHELL_EVAL_FLAG_INTERPRETERS`
+    verbatim and `cmd`/`powershell` were already there, so their behaviour is unchanged.
+    Fail-closed direction only: over-stripping can only make a name look MORE like a
+    shell / wrapper (crit), never hide one."""
+    name = value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    while True:
+        stripped = name.rstrip(". \t\r\n\x00")
+        for suf in _WIN_EXEC_SUFFIXES:
+            if stripped.endswith(suf) and len(stripped) > len(suf):
+                stripped = stripped[: -len(suf)]
+                break
+        if stripped == name:
+            return name
+        name = stripped
+
+
 def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     """Like `_argv0_is_shell_indirect_exec`'s own argv[0]-identification half, but
     WITHOUT requiring an eval flag (`-c`/`-e`/...) to already be present in `elts[1:]`
@@ -3748,7 +3774,7 @@ def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     prog = elts[0]
     if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
         return False
-    basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    basename = _argv0_basename(prog.value)
     if basename in _PYTHON_INTERPRETERS and _python_option_list_closed(elts):
         return False  # B-1018: a later append can only reach the module/script's argv
     return (basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
@@ -4297,7 +4323,7 @@ def _argv0_is_shell_indirect_exec(elts: list) -> bool:
     prog = elts[0]
     if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
         return False
-    basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    basename = _argv0_basename(prog.value)
     if basename in _REEXEC_WRAPPER_NAMES:
         return True
     if basename == "find":
