@@ -119,6 +119,6 @@ def test_a_first_run_onboarding_screen_is_not_announced(tmp_path):
     env.pop("CLAWSECCHECK_NO_PROGRESS", None)
     proc = subprocess.run(
         [sys.executable, "-m", "clawseccheck", "--home", str(empty), "--data-dir",
-         str(tmp_path / "state"), "--no-update-notice"],
+         str(tmp_path / "state"), "--no-update-notice", "--no-deptree", "--no-host"],
         cwd=REPO_ROOT, capture_output=True, text=True, env=env)
     assert not _notice_lines(proc.stderr), proc.stderr[:300]
