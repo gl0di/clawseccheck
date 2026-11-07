@@ -7640,7 +7640,19 @@ def check_installed_skills(ctx: Context) -> Finding:
             for relpath, src, _verified in _sh_files:
                 for af in analyze_shell(src, relpath):
                     msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                    if _verified:
+                    if af.severity != "crit":
+                        # B-1065: a non-crit shell signal (today only SHELL_ENV_BODY_EXFIL
+                        # -- a credential-shaped env var in a curl request body) is
+                        # ambiguous the same way the Python ENV_EXFIL_FLOW is: an
+                        # authed-API/OAuth script legitimately posts a secret to its OWN
+                        # endpoint. So it WARNs, into the SAME warns_env_exfil bucket the
+                        # Python rule uses ("Possible secret exfiltration ... confirm the
+                        # destination is a trusted first-party API"), never FAIL. This is
+                        # the shell twin of the severity `else` the JS pass below already
+                        # has; every existing analyze_shell rule is "crit" and so is
+                        # unaffected (comment at _signal_buckets' warns_env_exfil note).
+                        warns_env_exfil.append(msg)
+                    elif _verified:
                         crit.append(msg)
                     else:
                         warns_declared_unverified.append(msg)

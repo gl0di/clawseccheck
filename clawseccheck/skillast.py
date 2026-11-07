@@ -19627,6 +19627,70 @@ def _sh_newline_offsets(text: str) -> list[int]:
     return offs
 
 
+# B-1065: curl flags whose VALUE is request BODY/FORM data the server receives -- the
+# data-exfil channel. Kept DISTINCT from -H/--header (curlgrammar role AUTH_HEADER): a
+# secret in an `Authorization: Bearer $TOKEN` header is ordinary authed-API traffic (a
+# skill talking to its OWN api), which is exactly why analyze_shell's raw-socket-only
+# SHELL_ENV_EXFIL deliberately left `$VAR` piped to curl out of scope. The BODY channel
+# is the different, exfil-shaped case: a raw secret placed in POST data to a host.
+_SH_CURL_BODY_FLAGS = frozenset({
+    "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+    "--form", "--form-string",
+})
+
+
+def _sh_cred_env_in_body_lines(masked: str) -> set:
+    """B-1065: physical line numbers where a credential-shaped env var
+    (``$...SECRET``/``$...TOKEN``/... per ``_SH_CRED_ENV_RE``) is the value of a curl
+    DATA/FORM body flag (``-d``/``--data*``/``-F``/``--form*``) -- a secret sent off-box
+    in the request body.
+
+    This is the shell twin of the Python ``ENV_EXFIL_FLOW`` rule, which the shell side
+    had no equivalent for: ``SHELL_ENV_EXFIL`` fires only on a RAW socket (nc//dev/tcp),
+    and curl bodies were deliberately excluded because a ``$VAR`` reaching curl is often
+    an authed-API script. The discriminator here is the curl option ROLE, parsed with
+    the real positional ``curlargv``: a secret in a body flag's value is flagged; a
+    secret in ``-H``/``--header`` (role AUTH_HEADER) is NOT -- that is the legitimate
+    auth channel, and the corpus confirms legit scripts put the credential in the header
+    (`Authorization: Bearer $KEY`) with only non-secret data in the body.
+
+    Emitted at ``info`` severity (WARN, never FAIL): a body credential is genuinely
+    ambiguous -- an OAuth token endpoint legitimately posts ``client_secret=$SECRET`` to
+    its OWN provider -- which is exactly the ``warns_env_exfil`` "confirm the destination
+    is a trusted first-party API" case. Scoped to curl: ``curlargv`` is curl-specific, so
+    wget's own ``--post-data``/``--body-data`` body channel is a known remaining gap.
+    """
+    hits: set = set()
+    for i, raw in enumerate(masked.splitlines(), 1):
+        if "curl" not in raw or not _SH_CRED_ENV_RE.search(raw):
+            continue
+        commands = _shellwords.scan_line(raw)
+        if commands is None:
+            continue
+        for cmd in commands:
+            words = cmd.words
+            if not words:
+                continue
+            idx = 0
+            if idx < len(words) and words[idx].text == "do" and idx + 1 < len(words):
+                idx += 1
+            while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx].text):
+                idx += 1
+            if idx < len(words) and words[idx].text == "sudo" and idx + 1 < len(words):
+                idx += 1
+            if idx >= len(words) or words[idx].text != "curl":
+                continue
+            for t in _curlargv.parse_argv(words[idx + 1:]):
+                if (
+                    t.long_name in _SH_CURL_BODY_FLAGS
+                    and t.value_text
+                    and _SH_CRED_ENV_RE.search(t.value_text)
+                ):
+                    hits.add(i)
+                    break
+    return hits
+
+
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
@@ -19712,6 +19776,21 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "a credential-shaped environment variable is sent over a raw socket "
                 "(nc//dev/tcp) \u2014 credential exfiltration",
             )
+
+    # B-1065: a credential-shaped env var in a curl request BODY (-d/--data/--form) --
+    # the shell twin of Python's ENV_EXFIL_FLOW. "info" severity -> WARN (routed into the
+    # warns_env_exfil bucket in checks/_vet.py, never FAIL): a body credential is
+    # ambiguous (an OAuth token endpoint legitimately posts client_secret to its own
+    # provider), exactly the warns_env_exfil "confirm the destination is first-party" case.
+    for i in sorted(_sh_cred_env_in_body_lines(masked)):
+        add(
+            "SHELL_ENV_BODY_EXFIL",
+            "info",
+            i,
+            "a credential-shaped environment variable is sent in a curl request body "
+            "(-d/--data/--form) \u2014 confirm the destination is a trusted first-party API, "
+            "not an attacker-controlled host",
+        )
 
     # C-630: plaintext reverse shell (bash /dev/tcp, nc -e, socat exec:, fd-bound shell).
     for _rs_ln, _rs_shape in _sh_reverse_shell_lines(masked):
