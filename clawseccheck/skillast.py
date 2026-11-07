@@ -1425,7 +1425,15 @@ _INCLUSTER_DEST_WORD_HTTPS_RE = re.compile(
 # were already gated. "post"/"urlopen" stay ungated: no comparably common
 # non-network false-positive shape for those two turned up during the same review.
 _NET_SINK_ATTRS_ANY = {"post", "urlopen"}
-_NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect", "put", "patch", "request"}
+# B-1058: `sendmail`/`send_message` are smtplib's data-bearing send methods -- email is a
+# network egress channel for a credential just as much as an HTTP POST. Base-gated like
+# the socket send family below, so they only count when the receiver resolves to a known
+# networking base/alias (a `smtplib.SMTP(...)` object registered by _net_sink_alias_names);
+# an unrelated object's own `.send_message(...)` never fires.
+_NET_SINK_ATTRS_BASED = {
+    "send", "sendall", "sendto", "connect", "put", "patch", "request",
+    "sendmail", "send_message",
+}
 _NET_SINK_BASES = {
     "requests",
     "httpx",
@@ -8030,7 +8038,11 @@ def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool
 # constructor-shaped call (attr starts uppercase, or the literal "socket" module-level
 # factory) seeds an alias, so an unrelated `x = requests.get(url)` response object does
 # NOT retroactively make `x.put(...)` a sink for something that isn't request-shaped.
-_NET_SINK_CTOR_BASES = frozenset({"socket"})  # base.attr() ctor pairs beyond CapitalCase
+# base.attr() ctor pairs recognized beyond CapitalCase. B-1058: `socket.create_connection`
+# / `create_server` return a connected socket a later `s.sendall(...)` writes to; without
+# them `s = socket.create_connection(...)` never registered as a sink alias (only the
+# lowercase `socket.socket()` did), so a credential sent over that socket read INSTALL.
+_NET_SINK_CTOR_BASES = frozenset({"socket", "create_connection", "create_server"})
 # Full dotted-path spellings (via _dotted_path) recognized as networking constructor
 # MODULES, on top of the single-segment _NET_SINK_BASES lookup. Needed for a submodule
 # whose _attr_base last-segment alone isn't trustworthy as a bare base -- e.g.
@@ -8429,6 +8441,25 @@ def _socket_stdio_shell_findings(tree: ast.AST) -> list:
 
 
 def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) -> bool:
+    # B-1058: `getattr(X, "urlopen")(...)` with a CONSTANT attr name is deterministic --
+    # it is exactly `X.urlopen` -- so resolve it to the same (attr, base) test. A
+    # NON-constant attr name (`getattr(X, var)`) stays the declared dynamic-dispatch
+    # ceiling and is not resolved here.
+    if (
+        isinstance(func, ast.Call)
+        and isinstance(func.func, ast.Name)
+        and func.func.id == "getattr"
+        and len(func.args) >= 2
+        and isinstance(func.args[1], ast.Constant)
+        and isinstance(func.args[1].value, str)
+    ):
+        attr = func.args[1].value
+        if attr in _NET_SINK_ATTRS_ANY or attr == "urlopen":
+            return True
+        if attr in _NET_SINK_ATTRS_BASED:
+            base = _attr_base(func.args[0])
+            return base in _NET_SINK_BASES or base in net_sink_aliases
+        return False
     if isinstance(func, ast.Name):
         return func.id == "urlopen"
     if isinstance(func, ast.Attribute):
