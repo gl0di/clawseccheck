@@ -3390,6 +3390,67 @@ def _call_args_tainted_for_exec_sink(
     return False, False
 
 
+def _b1022_mutated_argv_taint(
+    node: ast.Call,
+    scope: ast.AST,
+    tainted: set,
+    ref_res: "_RefResolver | None",
+    tree: ast.AST,
+) -> bool:
+    """B-1022: is the subprocess sink's argv a bare local Name (`subprocess.run(a)`, or
+    `run(list(a))`) that a LITERAL list was bound to and that `.append()`/`.extend()`
+    later fed an externally-tainted element, in the same scope?
+
+    Taint propagation never marks the receiver of `.append(tainted)` tainted (an
+    `a += [q]` is an AugAssign and does propagate), so `a=['sh']; a.extend(['-c', q]);
+    subprocess.run(a)` had no tainted Name in the sink call at all and TT5 stayed
+    silent -- while the same list handed through a one-parameter wrapper was crit.
+    Returning True here only makes the caller treat the call as tainted; the verdict
+    (crit vs TT5_ARG_INJECTION) is still `_subprocess_taint_is_command_injection`'s: a
+    shell / re-exec-wrapper head is dropped from the single-literal bindings by B-953,
+    so the Name stays unresolved and is crit, while `['git', 'log']` keeps its binding
+    and reads as argument injection.
+
+    Deliberately narrow: only a Name that has at least one list/tuple literal
+    assignment in `scope` (a name built from a call -- `shlex.split(...)` -- or only
+    ever assigned elsewhere is not claimed), mutation calls in the SAME scope, any
+    textual position relative to the sink (conservative), and the mutation's argument
+    is judged by the same inline/named source vocabulary as the sink's own arguments."""
+    first = node.args[0] if node.args else None
+    if (
+        isinstance(first, ast.Call)
+        and isinstance(first.func, ast.Name)
+        and first.func.id in ("list", "tuple")
+        and len(first.args) == 1
+        and not first.keywords
+        and isinstance(first.args[0], ast.Name)
+        and not _name_rebound_anywhere(tree, first.func.id)
+    ):
+        first = first.args[0]
+    if not isinstance(first, ast.Name):
+        return False
+    name = first.id
+    nodes = list(_scope_own_nodes(scope))
+    if not any(
+        isinstance(n, ast.Assign)
+        and isinstance(n.value, (ast.List, ast.Tuple))
+        and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+        for n in nodes
+    ):
+        return False
+    for n in nodes:
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in _TRAILING_ONLY_MUTATORS
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == name
+            and _call_args_tainted_for_exec_sink(n, tainted, ref_res=ref_res, tree=tree)[0]
+        ):
+            return True
+    return False
+
+
 def _file_read_prefilter(source: str) -> bool:
     """Cheap text-level pre-check: True when *source* could contain a file-read call
     (`open(`/`read_text`/`read_bytes`). Deliberately a plain SUBSTRING test, not a
@@ -13946,9 +14007,28 @@ def analyze_python(
                 any_t, direct = _call_args_tainted_for_exec_sink(
                     node, ext_visible, ref_res=ref_res, tree=tree
                 )
+                # B-1022: taint that reaches the argv list only through a later
+                # `.append()`/`.extend()` on its bound Name. Such a call has no tainted
+                # NAME in its own arguments, so the artifact-read exemptions below (which
+                # reason over the call's own arguments) must not run for it.
+                mut_taint = False
+                if (
+                    not any_t
+                    and exec_name.startswith("subprocess.")
+                    and _b1022_mutated_argv_taint(
+                        node,
+                        owner_map.get(node)
+                        if isinstance(owner_map.get(node), (ast.FunctionDef, ast.AsyncFunctionDef))
+                        else tree,
+                        ext_visible,
+                        ref_res,
+                        tree,
+                    )
+                ):
+                    any_t, direct, mut_taint = True, False, True
                 # B-638: the tainted input is exactly the read of a file this artifact
                 # ships (see the OBFUSCATED_EXEC site above).
-                if any_t and shipped_exec is not None and (
+                if any_t and not mut_taint and shipped_exec is not None and (
                     (ln, node.col_offset) in shipped_exec or (ln, node.col_offset) in unshipped_exec
                 ):
                     continue
@@ -13978,7 +14058,7 @@ def analyze_python(
                     # waved through -- the exact B-916 failure this site already
                     # documents, for the new resolver instead of the old one.
                     _all_args = list(node.args) + [kw.value for kw in node.keywords]
-                    if shipped_exec is None and _all_args and all(
+                    if not mut_taint and shipped_exec is None and _all_args and all(
                         (
                             not (_names_in(_a) & ext_visible)
                             and not _value_is_tainted_source(_a, ext_visible, tree)
