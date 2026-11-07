@@ -5800,30 +5800,59 @@ _IPV4_SPECIAL_NETS = tuple(ipaddress.ip_network(n) for n in (
 _IPV4_DEC_PART_RE = re.compile(r"\d+")
 _IPV4_HEX_PART_RE = re.compile(r"0[xX][0-9a-fA-F]*")
 
+# B-1039: the SHAPE of a numeric-IP URL host - one to four dot-separated parts, each decimal
+# or 0x-hex (`8.8.8.8`, `0x8.8.8.8`, `0x08080808`, `2130706433`, `8.8`, `1.2.3`, `010.8.8.8`).
+# It only says "this host is spelled as numbers"; `_ipv4_class` decides what it means
+# (everything but a plain dotted quad is "ambiguous", i.e. off-host - never local). Callers
+# MUST anchor it to a whole URL host (`^...$` on a parsed hostname, or the lookahead in
+# `_IOC_IPURL_RE`): bare it matches the `1.2.3` of a version string.
+_NUMERIC_IP_HOST_PATTERN = r"(?:0[xX][0-9a-fA-F]+|\d+)(?:\.(?:0[xX][0-9a-fA-F]+|\d+)){0,3}"
+
 
 def _ipv4_class(ip: str):
     """B-1017: 'local' | 'documentation' | 'shared' | 'special' | 'public' | 'ambiguous', or
     None when *ip* is not an IPv4 literal at all (a DNS name, an out-of-range octet, ...).
 
     'ambiguous' is a numeric host whose meaning depends on the reader: curl and the inet_aton
-    family read a leading-zero octet as OCTAL and a 0x octet as HEX, and accept fewer than four
-    parts (`8.8`, `2130706433`), so `010.8.8.8` is sent to 8.8.8.8 while a decimal reading says
-    10.8.8.8 (LAN). Emulating that parser exactly is a drift surface, so the class never clears
-    anything: `_ip_reaches_nonlocal_host` counts it as off-host and no other predicate calls it
-    local, documentation or public."""
+    family read a leading-zero octet as OCTAL and a 0x octet as HEX, so `010.8.8.8` is sent to
+    8.8.8.8 while a decimal reading says 10.8.8.8 (LAN). Emulating those readings is a drift
+    surface, so the class never clears anything: `_ip_reaches_nonlocal_host` counts it as
+    off-host and no other predicate calls it local, documentation or public.
+
+    The one exception (B-1039) is a pure-decimal, no-leading-zero short form (`127.1`, `127`,
+    `2130706433`, `8.8`): every inet_aton-family reader gives it exactly one meaning, so it is
+    decoded and classified like the dotted quad it stands for. A short form that does not
+    decode (out of range) is "ambiguous", never None, so it can only raise a finding. So is any
+    other numeric-shaped host that does not validate (`999.1.1.1`): None means "not numeric at
+    all" (a DNS name, five parts), never "numeric but invalid"."""
     parts = ip.split(".")
     if not 1 <= len(parts) <= 4:
         return None
     numeric = all(_IPV4_DEC_PART_RE.fullmatch(x) or _IPV4_HEX_PART_RE.fullmatch(x) for x in parts)
     if not numeric:
         return None
-    if len(parts) != 4 or any(
-        x[0] == "0" and len(x) > 1 for x in parts  # leading zero -> octal; 0x -> hex
-    ):
+    if any(x[0] == "0" and len(x) > 1 for x in parts):  # leading zero -> octal; 0x -> hex
         return "ambiguous"
-    octs = [int(x) for x in parts]
-    if any(o > 255 for o in octs):
-        return None
+    if len(parts) != 4:
+        # B-1039: a pure-decimal short form has exactly ONE meaning under inet_aton (curl,
+        # getaddrinfo and the WHATWG URL parser all follow it): a.b -> a.0.0.b (b < 2^24),
+        # a.b.c -> a.b.0.c (c < 2^16), N -> the 32-bit integer (N < 2^32). Decode exactly that
+        # so `127.1` / `127` / `2130706433` read as loopback and `8.8` as 8.0.0.8. Anything
+        # that does not decode (out of range, non-ASCII digits) stays "ambiguous": it can
+        # only ever RAISE a finding, never clear one.
+        if not all(x.isascii() and x.isdigit() for x in parts):
+            return "ambiguous"
+        nums = [int(x) for x in parts]
+        if any(o > 255 for o in nums[:-1]) or nums[-1] >= 256 ** (5 - len(parts)):
+            return "ambiguous"
+        # the last part fills every remaining byte, big-endian (`127.1` -> 127.0.0.1)
+        octs = nums[:-1] + list(nums[-1].to_bytes(5 - len(parts), "big"))
+    else:
+        octs = [int(x) for x in parts]
+        if any(o > 255 for o in octs):
+            # numeric-shaped but not a valid address (`999.1.1.1`): fail closed. None would
+            # read as "not an IP" and let a stand-down predicate treat the host as local.
+            return "ambiguous"
     addr = ipaddress.IPv4Address(bytes(octs))
     if any(addr in n for n in _IPV4_PUBLIC_EXCEPTIONS):
         return "public"

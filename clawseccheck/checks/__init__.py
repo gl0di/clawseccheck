@@ -129,6 +129,7 @@ from ._shared import (
     _is_posix,
     _ip_reaches_nonlocal_host,
     _ipv4_class,
+    _NUMERIC_IP_HOST_PATTERN,
     _is_public_ip,
     _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,

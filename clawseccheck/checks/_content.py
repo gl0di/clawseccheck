@@ -66,6 +66,8 @@ from ._shared import (
     _finding,
     _hint,
     _ip_reaches_nonlocal_host,
+    _ipv4_class,
+    _NUMERIC_IP_HOST_PATTERN,
     _mcp_servers,
     _mcp_tool_texts,
     _skill_frontmatter_block,
@@ -4357,7 +4359,11 @@ _INSTALL_HEADING_RE = re.compile(
 )
 
 
-_INSTALL_IPV4_HOST_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# B-1039: any numeric-IP-shaped host (hex / leading-zero / fewer-than-four-part / single integer
+# included) goes to `_ipv4_class`, which calls every non-dotted-quad form "ambiguous" (off-host,
+# never local) - so `https://0x08080808/` and `https://2130706433/` no longer slip past B103's
+# raw-IP FAIL. Matched against a parsed hostname only (no path/port/userinfo), whole string.
+_INSTALL_IPV4_HOST_RE = re.compile(r"^" + _NUMERIC_IP_HOST_PATTERN + r"\Z")
 
 
 # ---------- B103: install-directive supply-chain (B-099) ----------
@@ -7912,9 +7918,24 @@ def _install_host_is_local(host: str) -> bool:
         (".local", ".localhost", ".internal", ".lan", ".home.arpa")
     ):
         return True
-    # An IP literal that is NOT a public IP is loopback/private/link-local/ULA/TEST-NET.
-    if (_INSTALL_IPV4_HOST_RE.match(h) or ":" in h):
-        return not _install_host_is_public_ip(h)
+    # B-1039: POSITIVE-only. `not _install_host_is_public_ip(h)` also called a numeric host
+    # that failed to classify (and an unparseable IPv6 string) "local", clearing the
+    # plaintext-transport FAIL - local must be affirmed, never inferred from "not public".
+    if _INSTALL_IPV4_HOST_RE.match(h):
+        return _ipv4_class(h) in ("local", "documentation")
+    if ":" in h:  # IPv6 literal: loopback/private/link-local/ULA/reserved/multicast
+        try:
+            ip = ipaddress.ip_address(h)
+        except ValueError:
+            return False
+        return (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_unspecified
+            or ip.is_multicast
+        )
     return False
 
 

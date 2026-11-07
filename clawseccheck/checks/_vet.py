@@ -96,6 +96,7 @@ from ._shared import (
     _is_own_source,
     _ip_reaches_nonlocal_host,
     _ipv4_class,
+    _NUMERIC_IP_HOST_PATTERN,
     _mcp_servers,
     _own_source_symlinks,
     _skill_declares_telemetry_disclosure,
@@ -3264,7 +3265,7 @@ def _config_write_carries_dangerous_payload(blob: str) -> bool:
 # shape test first: _ip_reaches_nonlocal_host("evil.com") would ALSO return False (it's not a
 # parseable IPv4), so applying it directly to every hostname would blind F-021 to
 # every real domain-name attack - only a literal-IP host may be excluded this way.
-_IPV4_LITERAL_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_IPV4_LITERAL_RE = re.compile(r"^" + _NUMERIC_IP_HOST_PATTERN + r"\Z")
 
 
 _LOCAL_HOSTNAMES = frozenset({"localhost", "0.0.0.0", "::1"})
@@ -3279,7 +3280,9 @@ def _url_host_is_local(url: str) -> bool:
     if host in _LOCAL_HOSTNAMES or host.endswith(".localhost"):
         return True
     if _IPV4_LITERAL_RE.match(host):
-        return not _ip_reaches_nonlocal_host(host)
+        # B-1039: POSITIVE-only. `not _ip_reaches_nonlocal_host(h)` also read a numeric host
+        # that `_ipv4_class` could not classify as local, and that cleared the finding.
+        return _ipv4_class(host) in ("local", "documentation")
     return False
 
 
@@ -5167,7 +5170,15 @@ _SKILL_LOCAL_CHAIN_RE = re.compile(
 )
 
 
-_IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b")
+# B-1039: the first alternative is the historical dotted quad (unchanged, incl. its loose tail);
+# the second takes the other numeric spellings of a host (`0x8.8.8.8`, `0x08080808`,
+# `2130706433`, `8.8`, `1.2.3`, `010.8.8.8`) and, unlike the first, must END the host - a
+# trailing word char / `@` / `%` / `-` or `.word` means a DNS label (`http://1.example.com`).
+_IOC_IPURL_RE = re.compile(
+    r"\bhttps?://(\d{1,3}(?:\.\d{1,3}){3}|"
+    + _NUMERIC_IP_HOST_PATTERN
+    + r"(?![\w@%-])(?!\.[\w@%-]))(?::\d{2,5})?\b"
+)
 
 
 def _b13_ip_url_label(ip: str) -> str:
