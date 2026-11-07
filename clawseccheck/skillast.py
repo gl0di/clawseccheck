@@ -3526,6 +3526,39 @@ def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
     return name, got["prog"], got["argv"], all_exprs
 
 
+def _single_str_binding(scope: ast.AST, name: str, before_line: int) -> "ast.Constant | None":
+    """B-1024: the string literal a bare `name` is provably bound to in `scope`, or None.
+
+    Deliberately small: exactly one store of the name in the scope's own body, a plain
+    top-level `name = "literal"` statement (never inside an if/for/try/with, so a path
+    that skips it cannot leave an earlier value behind), located before `before_line`,
+    the name not a parameter of the scope, and no `global`/`nonlocal`/other rebinding
+    anywhere (`_b1018_other_unsafe`). Anything else is unresolved."""
+    body = getattr(scope, "body", None)
+    if not body:
+        return None
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        a = scope.args
+        params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+        if any(x is not None and x.arg == name for x in params):
+            return None
+    found = [
+        st for st in body
+        if isinstance(st, ast.Assign)
+        and len(st.targets) == 1
+        and isinstance(st.targets[0], ast.Name)
+        and st.targets[0].id == name
+    ]
+    if len(found) != 1:
+        return None
+    st = found[0]
+    if not (isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)):
+        return None
+    if getattr(st, "lineno", before_line) >= before_line or _b1018_other_unsafe(scope, name, st):
+        return None
+    return st.value
+
+
 def _os_exec_spawn_verdict(
     node: ast.Call,
     parts: tuple,
@@ -3565,6 +3598,10 @@ def _os_exec_spawn_verdict(
         return "crit" if any(_t(e) for e in all_exprs) else None
     if _t(prog):
         return "crit"
+    # a bare Name program bound once to a string literal reads as that literal; any other
+    # non-literal program stays opaque (never a shell by assumption, never folded)
+    if isinstance(prog, ast.Name):
+        prog = _single_str_binding(scope, prog.id, getattr(node, "lineno", 0)) or prog
     prog_literal = isinstance(prog, ast.Constant) and isinstance(prog.value, str)
     stale = False  # argv is a literal that a mutation / concatenation makes incomplete
     if isinstance(argv, list):
@@ -3590,6 +3627,8 @@ def _os_exec_spawn_verdict(
             stale = True
         if isinstance(expr, (ast.List, ast.Tuple)):
             elts = list(expr.elts)
+            if any(isinstance(e, ast.Starred) for e in elts):
+                stale = True  # `["x", *rest]`: the literal is only part of the argv
         else:
             # Not a readable list: tainted (directly, or fed by a tainted append/extend)
             # means the argv could be anything, including `-c <payload>`.
@@ -3603,17 +3642,21 @@ def _os_exec_spawn_verdict(
         return "crit"
     tail_tainted = any(_t(e) for e in elts[1:])
     if not tail_tainted and isinstance(argv, ast.Name):
-        # a bound literal that a later append/extend fed with tainted data (B-1022); a
-        # shell / re-exec head in the literal never reaches here -- B-953 already dropped
-        # its binding -- but the PROGRAM argument can still be one
+        # a bound literal that a later append/extend (B-1022) or `+=` fed with tainted
+        # data -- the name itself is then tainted; a shell / re-exec head in the literal
+        # never reaches here -- B-953 already dropped its binding -- but the PROGRAM
+        # argument can still be one
         probe = ast.Call(func=node.func, args=[argv], keywords=[])
-        if _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree):
+        if _t(argv) or _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree):
             tail_tainted = stale = True
     if not tail_tainted:
         return None
     if _argv0_is_shell_indirect_exec(elts) or _argv0_is_shell_indirect_exec([prog, *elts[1:]]):
         return "crit"
-    if stale and _prog_name_could_become_shell_indirect([prog, *elts[1:]]):
+    if stale and (
+        not prog_literal  # an unresolved program may itself be the shell
+        or _prog_name_could_become_shell_indirect([prog, *elts[1:]])
+    ):
         return "crit"
     return "info"
 

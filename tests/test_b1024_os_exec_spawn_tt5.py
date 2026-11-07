@@ -198,3 +198,63 @@ def test_review_bypass_benign_twins_stay_argument_injection(body):
 ])
 def test_review_bypass_shapes_without_taint_yield_nothing(body):
     assert _tt5(_HEAD + body) == []
+
+
+# --- last hardening round: stale + unresolved program, `+=`, starred list element ---
+
+@pytest.mark.parametrize("body", [
+    # 1. stale argv + a program that is not a literal and does not resolve to one
+    "a = ['x']\na.append(q)\nprog = get()\nos.execv(prog, a)\n",
+    "def f(prog):\n    a = ['x']\n    a.append(q)\n    os.execv(prog, a)\nf('sh')\n",
+    "a = ['x']\na += [q]\nos.execv(sys.executable, a)\n",
+    "os.execv(sys.executable, ['x', *q])\n",
+    # a name rebound later is not a single binding
+    "prog = '/usr/bin/git'\nprog = get()\na = ['git']\na.append(q)\nos.execv(prog, a)\n",
+    # 2. `+=` on the argv name
+    "a = ['x']\na += [q]\nos.execv('/bin/sh', a)\n",
+    "a = ['x']\na += ['-c', q]\nos.execv('/bin/sh', a)\n",
+    "a = ['x']\na += [q]\nos.spawnv(os.P_WAIT, '/bin/sh', a)\n",
+    "a = ['x']\na += [q]\nos.execv('/usr/bin/python3', a)\n",
+    # 3. a starred element inside a v-form argv list literal
+    "os.execv('/bin/sh', ['x', *q])\n",
+    "os.execv('/bin/sh', ['x', *['-c', q]])\n",
+    "os.execv('/usr/bin/python3', ['python3', *q])\n",
+    "a = ['x', *q]\nos.execv('/bin/sh', a)\n",
+    "os.spawnv(os.P_WAIT, '/bin/sh', ['x', *q])\n",
+])
+def test_last_round_bypasses_are_command_injection(body):
+    assert _tt5(_HEAD + body) == CMD
+
+
+@pytest.mark.parametrize("body", [
+    "a = ['git']\na += [q]\nos.execv('/usr/bin/git', a)\n",
+    "a = ['python3', '-m', 'mod']\na += [q]\nos.execv('/usr/bin/python3', a)\n",
+    "os.execv('/usr/bin/git', ['git', *q])\n",
+    "os.execv('/usr/bin/python3', ['python3', '-m', 'mod', *q])\n",
+    "os.execvp('git', ['git', *['log'], q])\n",
+    # a program bound once to a string literal reads as that literal
+    "prog = '/usr/bin/git'\nos.execv(prog, ['git'] + [q])\n",
+    "prog = '/usr/bin/git'\na = ['git']\na.append(q)\nos.execv(prog, a)\n",
+])
+def test_last_round_benign_twins_stay_argument_injection(body):
+    assert _tt5(_HEAD + body) == ARG
+
+
+@pytest.mark.parametrize("body", [
+    "a = ['x']\na += ['y']\nos.execv('/bin/sh', a)\n",
+    "os.execv('/bin/sh', ['x', *['-c', 'ls']])\n",
+    "os.execvp('git', ['git', *['log'], 'x'])\n",
+    "prog = get()\nos.execv(prog, ['x', *['y']])\n",
+])
+def test_last_round_untainted_shapes_yield_nothing(body):
+    assert _tt5(_HEAD + body) == []
+
+
+def test_resolved_shell_program_binding_is_judged_as_the_shell():
+    assert _tt5(_HEAD + "prog = '/bin/sh'\nos.execv(prog, ['x', '-c', q])\n") == CMD
+
+
+def test_plus_equals_through_subprocess_keeps_its_verdicts():
+    # ordinary head: argument injection; shell head: crit (binding dropped by B-953)
+    assert _tt5(_HEAD + "a = ['git']\na += [q]\nsubprocess.run(a)\n") == ARG
+    assert _tt5(_HEAD + "a = ['sh']\na += ['-c', q]\nsubprocess.run(a)\n") == CMD
