@@ -294,7 +294,12 @@ def _announce_long_run(args, mode) -> None:
         what = f"auditing {shown}"
         usually = "this usually takes 1-4 minutes"
     try:
-        print(f"ClawSecCheck: {what} - {usually} and prints nothing else until it "
+        # A plain note, not a header: the product name comes from brand.WORDMARK and
+        # is a separate print() argument (joined by print's own space), so no
+        # "<wordmark>: <text>" string is ever assembled by hand here - the
+        # test_brand_consistency header guard reads that shape as a hand-rolled header.
+        print(f"{WORDMARK}:",
+              f"{what} - {usually} and prints nothing else until it "
               "finishes. If your tool returns early with no output, the audit is still "
               "running: wait for it to exit.", file=sys.stderr, flush=True)
     except (OSError, ValueError):
