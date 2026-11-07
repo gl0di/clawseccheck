@@ -7889,19 +7889,50 @@ def _install_host_is_public_ip(host: str) -> bool:
     if _INSTALL_IPV4_HOST_RE.match(h):
         return _ip_reaches_nonlocal_host(h)
     if ":" in h:  # IPv6 literal (urlparse strips the [] but be defensive)
-        try:
-            ip = ipaddress.ip_address(h)
-        except ValueError:
-            return False
-        return not (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_unspecified
-            or ip.is_multicast
-        )
+        local = _ipv6_literal_is_local(h)
+        # fail closed: an unparseable literal is not "public", but every parseable one that
+        # is not affirmatively local (global, reserved, multicast, Teredo) reaches off-host
+        return False if local is None else not local
     return False
+
+
+_IPV6_LOCAL_NETS = (
+    ipaddress.ip_network("fe80::/10"),  # link-local
+    ipaddress.ip_network("fc00::/7"),  # unique local (ULA)
+)
+
+
+def _ipv6_embedded_ipv4(ip: "ipaddress.IPv6Address"):
+    """The IPv4 address an IPv6 literal carries, or None. Explicit bit arithmetic (no
+    `is_private` / `is_global` / `ipv4_mapped`, whose answers differ across Python 3.10-3.14):
+    IPv4-mapped `::ffff:a.b.c.d`, IPv4-translated `::ffff:0:a.b.c.d`, 6to4 `2002:AABB:CCDD::/48`
+    and IPv4-compatible `::a.b.c.d` (`::` and `::1` are NOT compatible forms). Teredo
+    (2001::/32) is deliberately not unwrapped: it is never local, so the caller treats it as
+    off-host without having to decode the obfuscated client address."""
+    n = int(ip)
+    if n >> 32 in (0xFFFF, 0xFFFF0000) or (n >> 32 == 0 and n > 1):
+        return ipaddress.IPv4Address(n & 0xFFFFFFFF)
+    if n >> 112 == 0x2002:
+        return ipaddress.IPv4Address((n >> 80) & 0xFFFFFFFF)
+    return None
+
+
+def _ipv6_literal_is_local(h: str):
+    """True / False for an IPv6 literal (local = loopback `::1`, unspecified `::`, link-local,
+    ULA, or an embedded IPv4 that `_ipv4_class` calls local/documentation); None when *h* does
+    not parse. Reserved, multicast and global space are NOT local (fail closed), and an
+    embedded PUBLIC IPv4 (`::ffff:8.8.8.8`, `::8.8.8.8`, `2002:808:808::1`) is not local either."""
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return None
+    if ip.version != 6:  # defensive: a v4 string never reaches here via the ":" gate
+        return None
+    v4 = _ipv6_embedded_ipv4(ip)
+    if v4 is not None:
+        return _ipv4_class(str(v4)) in ("local", "documentation")
+    n = int(ip)
+    return n in (0, 1) or any(ip in net for net in _IPV6_LOCAL_NETS)
 
 
 def _install_host_is_local(host: str) -> bool:
@@ -7923,19 +7954,8 @@ def _install_host_is_local(host: str) -> bool:
     # plaintext-transport FAIL - local must be affirmed, never inferred from "not public".
     if _INSTALL_IPV4_HOST_RE.match(h):
         return _ipv4_class(h) in ("local", "documentation")
-    if ":" in h:  # IPv6 literal: loopback/private/link-local/ULA/reserved/multicast
-        try:
-            ip = ipaddress.ip_address(h)
-        except ValueError:
-            return False
-        return (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_unspecified
-            or ip.is_multicast
-        )
+    if ":" in h:  # IPv6 literal: positive-only, see `_ipv6_literal_is_local`
+        return _ipv6_literal_is_local(h) is True
     return False
 
 
