@@ -66,6 +66,7 @@ from ._shared import (
     _finding,
     _hint,
     _ip_reaches_nonlocal_host,
+    _NUMERIC_IP_HOST_PATTERN,
     _mcp_servers,
     _mcp_tool_texts,
     _skill_frontmatter_block,
@@ -4357,7 +4358,11 @@ _INSTALL_HEADING_RE = re.compile(
 )
 
 
-_INSTALL_IPV4_HOST_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# B-1039: any numeric-IP-shaped host (hex / leading-zero / fewer-than-four-part / single integer
+# included) goes to `_ipv4_class`, which calls every non-dotted-quad form "ambiguous" (off-host,
+# never local) - so `https://0x08080808/` and `https://2130706433/` no longer slip past B103's
+# raw-IP FAIL. Matched against a parsed hostname only (no path/port/userinfo), whole string.
+_INSTALL_IPV4_HOST_RE = re.compile(r"^" + _NUMERIC_IP_HOST_PATTERN + r"\Z")
 
 
 # ---------- B103: install-directive supply-chain (B-099) ----------

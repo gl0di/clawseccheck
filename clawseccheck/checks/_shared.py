@@ -5800,6 +5800,14 @@ _IPV4_SPECIAL_NETS = tuple(ipaddress.ip_network(n) for n in (
 _IPV4_DEC_PART_RE = re.compile(r"\d+")
 _IPV4_HEX_PART_RE = re.compile(r"0[xX][0-9a-fA-F]*")
 
+# B-1039: the SHAPE of a numeric-IP URL host - one to four dot-separated parts, each decimal
+# or 0x-hex (`8.8.8.8`, `0x8.8.8.8`, `0x08080808`, `2130706433`, `8.8`, `1.2.3`, `010.8.8.8`).
+# It only says "this host is spelled as numbers"; `_ipv4_class` decides what it means
+# (everything but a plain dotted quad is "ambiguous", i.e. off-host - never local). Callers
+# MUST anchor it to a whole URL host (`^...$` on a parsed hostname, or the lookahead in
+# `_IOC_IPURL_RE`): bare it matches the `1.2.3` of a version string.
+_NUMERIC_IP_HOST_PATTERN = r"(?:0[xX][0-9a-fA-F]+|\d+)(?:\.(?:0[xX][0-9a-fA-F]+|\d+)){0,3}"
+
 
 def _ipv4_class(ip: str):
     """B-1017: 'local' | 'documentation' | 'shared' | 'special' | 'public' | 'ambiguous', or
