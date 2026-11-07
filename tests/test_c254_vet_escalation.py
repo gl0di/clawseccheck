@@ -306,6 +306,57 @@ def test_ctx_absent_on_engine_output_degrades_to_none_not_a_crash():
 
 
 # ---------------------------------------------------------------------------
+# B-1067: a no-op --vet-judged must not soften an axis. The primary carries
+# several bare instance attributes besides .ctx -- lexical_loose_code,
+# unanalysed_code, analysed_loose_code, bundled_contexts -- that build_profile
+# reads to keep a plugin's danger / connections / persistence axes honest when
+# the loose code was only partly readable. dataclasses.replace drops them, and
+# the original C-135 fix restored only .ctx BY NAME, so when lexical_loose_code
+# was added later a no-op escalation silently re-rendered an UNKNOWN danger axis
+# as PASS -- a vet result softened with no evidence. _carry_instance_attrs now
+# propagates every bare attribute generically.
+# ---------------------------------------------------------------------------
+
+_BARE_VET_ATTRS = (
+    "ctx", "lexical_loose_code", "unanalysed_code",
+    "analysed_loose_code", "bundled_contexts",
+)
+
+
+def test_b1067_all_bare_vet_attrs_survive_a_no_op_escalation():
+    primary = Finding("B13", "t", MEDIUM, PASS, "detail", "", "fw", evidence=["p: x"])
+    sentinels = {name: [object()] for name in _BARE_VET_ATTRS}
+    for name, val in sentinels.items():
+        setattr(primary, name, val)
+    escalated = escalate_vet_output(primary, _verdicts_json([], target="p"), target="p")
+    for name, val in sentinels.items():
+        assert getattr(escalated, name, None) is val, name
+
+
+def test_b1067_no_op_judged_does_not_soften_plugin_danger_axis():
+    # A plugin primary whose loose code was read lexically only -> build_profile's
+    # danger axis is UNKNOWN (partial read, _plugin_partial_read_danger_reason),
+    # never an affirmative PASS. A no-op --vet-judged (empty verdicts) must keep it
+    # UNKNOWN; before the fix it flipped to PASS "no malware signature or known-bad
+    # indicator" over bytes the scan never really read.
+    def _mk():
+        p = Finding("B13", "no known-bad indicator", MEDIUM, PASS, "d", "", "fw",
+                    evidence=["plug: scanned"])
+        p.lexical_loose_code = ["loose.mjs"]
+        return p
+
+    def _danger(prof):
+        return next(a for a in prof.axes if a.axis == "danger")
+
+    base = build_profile(_mk(), "plug", "plugin")
+    assert _danger(base).status == UNKNOWN  # sanity: the plain dossier is UNKNOWN
+    escalated = escalate_vet_output(_mk(), _verdicts_json([], target="plug"), target="plug")
+    judged = build_profile(escalated, "plug", "plugin")
+    assert _danger(judged).status == _danger(base).status
+    assert _danger(judged).reason == _danger(base).reason
+
+
+# ---------------------------------------------------------------------------
 # escalate_vet_output() -- the hard invariant, via build_profile round-trip
 # ---------------------------------------------------------------------------
 
