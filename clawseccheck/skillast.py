@@ -3465,6 +3465,12 @@ _OS_EXEC_VECTOR = frozenset({"execv", "execve", "execvp", "execvpe"})
 _OS_EXEC_LIST = frozenset({"execl", "execle", "execlp", "execlpe"})
 _OS_SPAWN_VECTOR = frozenset({"spawnv", "spawnve", "spawnvp", "spawnvpe"})
 _OS_SPAWN_LIST = frozenset({"spawnl", "spawnle", "spawnlp", "spawnlpe"})
+# B-1042: `os.posix_spawn(path, argv, env, *, ...)` / `posix_spawnp`: program, argv list and
+# the environment, positionally, then keyword-only knobs that never change what runs.
+_OS_POSIX_SPAWN = frozenset({"posix_spawn", "posix_spawnp"})
+_POSIX_SPAWN_KNOBS = frozenset({
+    "file_actions", "setpgroup", "resetids", "setsid", "setsigmask", "setsigdef", "scheduler",
+})
 
 
 def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
@@ -3484,7 +3490,8 @@ def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
     if not (isinstance(f, ast.Attribute) and _attr_base(f.value) in _EXEC_SINK_BASES_OS):
         return None
     attr = f.attr
-    if attr in _OS_EXEC_VECTOR:
+    posix = attr in _OS_POSIX_SPAWN
+    if attr in _OS_EXEC_VECTOR or posix:
         lead, vector = 0, True
     elif attr in _OS_SPAWN_VECTOR:
         lead, vector = 1, True
@@ -3521,13 +3528,17 @@ def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
         if attr.endswith(("le", "lpe")):
             rest = rest[:-1]  # trailing environment mapping (no Starred here, checked above)
         return name, args[lead], rest, all_exprs
-    slots = (["mode"] if lead else []) + ["prog", "argv"] + (["env"] if "e" in attr[lead + 4:] else [])
+    slots = (["mode"] if lead else []) + ["prog", "argv"] + (
+        ["env"] if posix or "e" in attr[lead + 4:] else []
+    )
     if len(args) > len(slots):
         return opaque
     got = dict(zip(slots, args))
     kw_slot = {"file": "prog", "path": "prog", "args": "argv", "argv": "argv",
                "mode": "mode", "env": "env"}
     for k in node.keywords:
+        if posix and k.arg in _POSIX_SPAWN_KNOBS:
+            continue
         slot = kw_slot.get(k.arg)
         if slot is None or slot not in slots or slot in got:
             return opaque
@@ -3577,6 +3588,52 @@ def _single_str_binding(
     if getattr(st, "lineno", before_line) >= before_line or _b1018_other_unsafe(scope, name, st):
         return None
     return st.value
+
+
+# B-1042: the programs whose FIRST non-option argument is not necessarily a script -- real
+# shells, where a variable in that slot may hold `-c`. (Interpreters are resolved for a
+# bound flag but never treated as opaque: `["python3", script_var, arg]` is ordinary.)
+_B1042_SHELLS = frozenset({
+    "sh", "bash", "zsh", "ksh", "dash", "csh", "tcsh", "ash",
+    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh",
+})
+
+
+def _b1042_resolve_flags(elts: list, scope: ast.AST, line: int) -> "tuple[list, int | None]":
+    """B-1042: `(elts', opaque_index)` for an argv whose literal head is a shell/interpreter.
+
+    `elts'` has every bare Name element that is provably bound once to a string literal
+    (`_single_str_binding`) replaced by that literal, so `flag = "-c"; ["sh", flag, q]`
+    reads as `["sh", "-c", q]` to `_argv0_is_shell_indirect_exec`. `opaque_index` is, for a
+    real shell head only, the index of the first element that sits where the shell's own
+    option list could still hold `-c` yet is not a readable literal (a call, an unresolved
+    name, a splice): leading `-x` option literals are skipped, a non-option literal (the
+    script path) ends the options. The caller convicts it only when a LATER element is
+    tainted."""
+    head = elts[0] if elts else None
+    if not (isinstance(head, ast.Constant) and isinstance(head.value, str)) or len(elts) < 2:
+        return elts, None
+    base = _argv0_basename(head.value)
+    if base not in _SHELL_EVAL_FLAG_INTERPRETERS:
+        return elts, None
+    shell = base in _B1042_SHELLS
+    out = [head]
+    opaque = None
+    in_options = True
+    for i, e in enumerate(elts[1:], 1):
+        if isinstance(e, ast.Name):
+            lit = _single_str_binding(scope, e.id, line)
+            if lit is not None:
+                e = lit
+        out.append(e)
+        if shell and in_options:
+            if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                if not e.value.startswith("-"):
+                    in_options = False
+            else:
+                opaque = i
+                in_options = False
+    return out, opaque
 
 
 # B-1040: stand-in program name for `sys.executable` when the question is "could a later
@@ -3796,6 +3853,14 @@ def _os_exec_spawn_verdict(
         return None
     if _argv0_is_shell_indirect_exec(elts) or _argv0_is_shell_indirect_exec([prog, *elts[1:]]):
         return "crit"
+    # B-1042: an eval flag held in a single-literal variable, or an unreadable element where
+    # a shell's own option list could still hold one, with a tainted element after it
+    for cand in (elts, [prog, *elts[1:]]):
+        r_elts, opaque = _b1042_resolve_flags(cand, scope, line)
+        if _argv0_is_shell_indirect_exec(r_elts) or (
+            opaque is not None and any(_t(e) for e in r_elts[opaque + 1:])
+        ):
+            return "crit"
     if stale and (
         prog_eff is None  # an unresolved program may itself be the shell
         or _prog_name_could_become_shell_indirect([prog_eff, *elts[1:]])
@@ -4233,6 +4298,106 @@ def _python_option_list_closed(elts: list) -> bool:
     return bool(first.value) and not first.value.startswith("-")
 
 
+# B-1042(d), accepted limit: a MODULE-level list mutated INSIDE a function and passed to a
+# sink there (`a = ['git']` at module scope, `def f(): a.append(q); subprocess.run(a)`) is
+# judged per scope -- the function sees no binding for `a` and the module scope sees no
+# mutation. Resolving it needs a whole-program view of every function that can run between
+# the module-level assignment and the sink (the same dynamism that retired the
+# argv0-resolver rounds in `_subprocess_taint_is_command_injection`), so it is left as is
+# and not claimed. Pinned only as "does not raise" in tests/test_b1042_exec_argv_edges.py.
+
+
+def _b1042_appended_head(scope: ast.AST, name: str) -> "tuple[str, ast.List | None]":
+    """B-1042: for `name = []` grown by `.append(x)` / `.extend([...])` / `name += [...]` in
+    `scope`, decide what the HEAD of the list is. Returns `("shell", None)` when it is, or
+    may be, a shell / wrapper / interpreter literal (the binding is then dropped and the
+    argv stays unresolved -> crit); `("lit", List)` with the literal prefix rebuilt from the
+    FIRST mutation when that is a straight-line statement of the scope body appending a
+    safe string-literal head; `("keep", None)` otherwise (flow unknown and no shell literal
+    appended -- today's behaviour).
+
+    Only the order of statements in the scope body is trusted: the lexically first mutation
+    is the head when it is itself a top-level statement (nothing can execute before it).
+    Otherwise the flow is uncertain and the list fails closed only when SOME mutation,
+    anywhere under the scope (nested functions included -- a closure may run first), appends
+    a shell/wrapper literal as the first element of its payload."""
+    top: set = set()
+    for st in getattr(scope, "body", ()):
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+            top.add(id(st.value))
+        elif isinstance(st, ast.AugAssign):
+            top.add(id(st))
+    muts: list = []  # (lineno, col, payload elements, straight-line?, node id)
+    for n in ast.walk(scope):
+        payload = None
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in _TRAILING_ONLY_MUTATORS
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == name
+            and len(n.args) == 1
+            and not n.keywords
+        ):
+            arg = n.args[0]
+            if n.func.attr == "append":
+                payload = [arg]
+            elif isinstance(arg, (ast.List, ast.Tuple)):
+                payload = list(arg.elts)
+            else:
+                payload = [ast.Starred(value=arg, ctx=ast.Load())]
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == name
+            and isinstance(n.op, ast.Add)
+        ):
+            v = n.value
+            payload = list(v.elts) if isinstance(v, (ast.List, ast.Tuple)) else [
+                ast.Starred(value=v, ctx=ast.Load())
+            ]
+        if payload is not None:
+            muts.append(
+                (getattr(n, "lineno", 0), getattr(n, "col_offset", 0), payload, id(n) in top, id(n))
+            )
+    if not muts:
+        return "keep", None
+    muts.sort(key=lambda m: (m[0], m[1]))
+
+    def _lit_head(payload: list) -> "ast.Constant | None":
+        h = payload[0] if payload else None
+        return h if isinstance(h, ast.Constant) and isinstance(h.value, str) else None
+
+    first = muts[0]
+    head = _lit_head(first[2])
+    # a mutation inside a nested scope (a closure) may run before the first own one; an own
+    # conditional one that is lexically later cannot
+    own = {id(n) for n in _scope_own_nodes(scope)}
+    nested_shell = any(
+        (h := _lit_head(m[2])) is not None and _prog_name_could_become_shell_indirect([h])
+        for m in muts
+        if m[4] not in own
+    )
+    if first[3] and head is not None and not nested_shell:
+        # the literal prefix: the straight-line mutations from the first one up to the
+        # first conditional one (a python head is only safe once a script / `-m mod`
+        # element has closed its option list, B-1018)
+        prefix: list = []
+        for m in muts:
+            if not m[3]:
+                break
+            prefix.extend(m[2])
+        if _prog_name_could_become_shell_indirect(prefix):
+            return "shell", None
+        return "lit", ast.List(elts=prefix, ctx=ast.Load())
+    if any(
+        (h := _lit_head(m[2])) is not None and _prog_name_could_become_shell_indirect([h])
+        for m in muts
+    ):
+        return "shell", None
+    return "keep", None
+
+
 def _single_list_bindings_local(
     scope: ast.AST, conditional_out: "dict | None" = None
 ) -> dict[str, ast.List | ast.Tuple]:
@@ -4351,6 +4516,17 @@ def _single_list_bindings_local(
             and isinstance(n.op, ast.Add)
         ):
             trailing_mutated.add(n.target.id)  # cmd += [...] mutates like .extend()
+    for name in sorted(trailing_mutated):
+        # B-1042: `a = []` whose HEAD arrives through `.append`/`.extend`/`+=`
+        empty = bindings.get(name)
+        if empty is not None and not empty.elts:
+            verdict, rebuilt = _b1042_appended_head(scope, name)
+            if verdict == "shell":
+                unsafe.add(name)
+                conditional[name] = None
+                continue
+            if rebuilt is not None:
+                bindings[name] = rebuilt
     for name in trailing_mutated:
         lit = bindings.get(name)
         if lit is None and conditional.get(name) is not None:
@@ -6659,12 +6835,27 @@ def _subprocess_taint_is_command_injection(
         # is ITSELF a shell/indirect-execution interpreter -- the rest of the argv
         # list is text that interpreter parses and runs, not inert execve data (see
         # _argv0_is_shell_indirect_exec's docstring, layer 2's identical check below).
-        if _argv0_is_shell_indirect_exec(first.elts):
+        # B-1042: `flag = "-c"; ["sh", flag, q]` -- a single-literal binding in a flag
+        # position is resolved, and an unreadable element where a shell's option list could
+        # still hold `-c` convicts a tainted element AFTER it (an element at or before it
+        # is only the script path / a flag, never a command string)
+        p_elts, p_opaque = first.elts, None
+        if tree is not None:
+            p_elts, p_opaque = _b1042_resolve_flags(
+                first.elts, _call_scope(node, owner_map, tree), getattr(node, "lineno", 0)
+            )
+        if _argv0_is_shell_indirect_exec(p_elts):
+            tail = p_elts[1:]
+        elif p_opaque is not None:
+            tail = p_elts[p_opaque + 1:]
+        else:
+            tail = None
+        if tail is not None:
             rest_names = set()
-            for elt in first.elts[1:]:
+            for elt in tail:
                 rest_names |= _names_in(elt)
             if (rest_names & tainted) or (
-                ref_res is not None and any(ref_res.source_in(e) for e in first.elts[1:])
+                ref_res is not None and any(ref_res.source_in(e) for e in tail)
             ):
                 return True  # tainted arg handed to a shell/interpreter -> command injection
         return False  # only a non-program argv element is tainted -> argument injection
