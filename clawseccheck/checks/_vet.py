@@ -5276,9 +5276,16 @@ _RESERVED_EXAMPLE_DOMAINS = frozenset({"example.com", "example.net", "example.or
 # shell token, so a clustered or preceded `-c` (`sh -lc`, `bash -ec`, `sh --norc -c`,
 # `sh -e -c`, `sh +e -c`, `dash -c`, `/bin/sh -c`) does not evade it (the exact-token
 # `-c` form was an incomplete-fix parser differential caught by the commit security
-# review). The `(?<![.\w~-])` left boundary stops the shell token matching a `.sh`
+# review). The `(?<![.\w~=-])` left boundary stops the shell token matching a `.sh`
 # FILE EXTENSION (`xargs sh deploy.sh -config` is a script run, not a `-c` shell, and
-# stays unmatched) while still allowing a `/bin/sh` path. A bare (non-option) word
+# stays unmatched) or an OPTION VALUE (`shellcheck --shell=sh -C` is a lint command,
+# where `sh` sits after `=` -- a C-135 FP), while still allowing a `/bin/sh` path.
+# Excluding `=` means a shell reached through an exec-wrapper's split option
+# (`xargs env --split-string=sh -c {}`) is NOT matched -- an inherited ceiling in the
+# same option-grammar class below, and a far rarer shape than the benign shellcheck FP
+# the exclusion prevents (`env sh -c {}`, the non-split form, is still caught since the
+# wrapper is skipped). An FP is a release blocker; this niche evasion is not. A
+# bare (non-option) word
 # between the shell and the `c`-flag breaks the run, so a script operand (`sh file ...`,
 # `sh -n f`), a non-shell child (`xargs shellcheck`), and a `--coverage` flag on a
 # script all stay unmatched. CEILING (same option-arity class the SHELL_REVERSE_SHELL
@@ -5301,7 +5308,7 @@ _RESERVED_EXAMPLE_DOMAINS = frozenset({"example.com", "example.net", "example.or
 # never which hosts are cleared.
 _PIPE_SHELL_RE = re.compile(
     r"(?:curl|wget)\b[^\n|]{0,256}?https?://([^\s/'\"|]+)[^\n|]{0,256}\|\s*(?:sudo\s+)?"
-    r"(?:(?:ba|z)?sh|xargs\b[^\n|]{0,128}?(?<![.\w~-])(?:ba|z|da|k)?sh\b"
+    r"(?:(?:ba|z)?sh|xargs\b[^\n|]{0,128}?(?<![.\w~=-])(?:ba|z|da|k)?sh\b"
     r"(?:[ \t]+[-+][^\s|]*){0,6}?[ \t]+[-+][A-Za-z]*c[A-Za-z]*\b)",
     re.I,
 )

