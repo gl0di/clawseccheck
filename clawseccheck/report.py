@@ -6520,6 +6520,30 @@ def render_advise_json(profile, *, version: str) -> str:
 # new verdict/scoring logic. The plain-language preamble (4 numbered steps + a consent
 # line) comes first for a reader who doesn't parse shell; the exact commands follow
 # underneath, reordered so --vet-source (the pre-download reputation gate) is step 1.
+def _git_clone_source(target: str, info: dict) -> "tuple[str | None, str | None]":
+    """B-1051: (what to hand ``git clone``, the ref to check out) for a git source, or
+    (None, None) when the host is unusable (empty, or option-shaped: a host starting with
+    ``-`` is how ``ssh://-oProxyCommand=...`` turned a clone into command execution)."""
+    host = info.get("host") or ""
+    if not host or host.startswith("-"):
+        return None, None
+    ref = info.get("ref")
+    low = target.lower()
+    if low.startswith("git:") and not low.startswith("git://"):
+        path = target[len("git:"):]
+        if ref:
+            path = path.rsplit("@", 1)[0]
+        return "https://" + path, ref
+    url = target[4:] if low.startswith("git+") else target
+    if "://" in url:  # a `#ref` / pip `#egg=...` fragment is never part of the remote
+        url = url.split("#", 1)[0]
+    if ref:  # pip's `...repo.git@<ref>` suffix is not part of the remote either
+        tail = url.rsplit("/", 1)
+        if len(tail) == 2 and tail[1].endswith("@" + ref):
+            url = url[: -len("@" + ref)]
+    return url, ref
+
+
 def render_vet_plan(target: str) -> str:
     from .checks import _parse_source_target  # noqa: PLC0415
 
@@ -6555,12 +6579,16 @@ def render_vet_plan(target: str) -> str:
         # reconstructing it from parsed fields (which would drop the owner segment).
         # C-745: `git clone --depth 1` without --recurse-submodules runs no repo code
         # (hooks are not cloned) and fetches no submodules, so it needs no extra flag.
-        path = target[len("git:"):]
-        ref = info.get("ref")
-        if ref:
-            path = path.rsplit("@", 1)[0]
-        branch_flag = f" --branch {_shq(ref)}" if ref else ""
-        fetch = f"git clone --depth 1{branch_flag} https://{_shq(path)} \"$QUARANTINE/repo\""
+        # B-1051: the other git-remote spellings (git+https://, ssh://, git://, scp-style
+        # git@host:path) now parse as git, so they are cloned from their own remote.
+        clone_url, ref = _git_clone_source(target, info)
+        if clone_url is None:
+            fetch = (f"# '{name}' has no host this plan can clone safely \u2014 fetch it "
+                     "yourself, without running any of its code, into \"$QUARANTINE\"")
+        else:
+            branch_flag = f" --branch {_shq(ref)}" if ref else ""
+            fetch = (f"git clone --depth 1{branch_flag} {_shq(clone_url)} "
+                     "\"$QUARANTINE/repo\"")
     elif eco == "clawhub":
         fetch = (f"# resolve '{name}' via your ClawHub client's normal pull/install path, "
                   "but redirect the output into \"$QUARANTINE\" instead of the live skills dir")
