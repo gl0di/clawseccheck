@@ -197,6 +197,9 @@ def test_a_rescan_that_cannot_run_is_announced_loudly_with_its_reason(tmp_path):
 def test_the_watch_keeps_watching_after_a_failed_rescan(tmp_path, monkeypatch):
     home = _copy_home(tmp_path)
     store = tmp_path / "store"
+    # B-1055: an empty store now takes a baseline at start; seed one so this test still
+    # exercises only the two change-triggered re-scans it scripts.
+    _seed_baseline(home, store)
     results = iter([(1, "boom: store is read-only\n"), (3, "ALERT tools.exec\n")])
     monkeypatch.setattr(watch, "_run_monitor_once", lambda *a, **k: next(results))
     buf = io.StringIO()

@@ -767,6 +767,11 @@ clawseccheck --watch --home ~/.openclaw
 clawseccheck --watch --home ~/.openclaw --data-dir ~/.clawseccheck --watch-debounce 5
 ```
 
+If the store holds no baseline yet, `--watch` records one as soon as it starts (one
+`--monitor` run, announced as "no baseline in this store yet"), so the first change it sees
+is compared against the state before that change and alerts, instead of silently becoming
+the baseline.
+
 It never returns until stopped (`Ctrl-C`, or `SIGTERM` from a process supervisor) and prints
 each triggered check in the exact same format as `clawseccheck --monitor --verbose` - because
 that is literally what it runs, as a subprocess, on every relevant change. Nothing about
