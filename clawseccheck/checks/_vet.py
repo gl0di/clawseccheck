@@ -94,7 +94,8 @@ from ._shared import (
     _custom,
     _finding,
     _is_own_source,
-    _is_public_ip,
+    _ip_reaches_nonlocal_host,
+    _ipv4_class,
     _mcp_servers,
     _own_source_symlinks,
     _skill_declares_telemetry_disclosure,
@@ -3259,8 +3260,8 @@ def _config_write_carries_dangerous_payload(blob: str) -> bool:
 
 # B-194: a URL whose host is loopback/localhost/a private-range IPv4 literal is never
 # real egress (case_04921: a local Ollama inference endpoint) - must never read as an
-# "external" fetch regardless of verb/noun. Gate _is_public_ip behind an IPv4-literal
-# shape test first: _is_public_ip("evil.com") would ALSO return False (it's not a
+# "external" fetch regardless of verb/noun. Gate _ip_reaches_nonlocal_host behind an IPv4-literal
+# shape test first: _ip_reaches_nonlocal_host("evil.com") would ALSO return False (it's not a
 # parseable IPv4), so applying it directly to every hostname would blind F-021 to
 # every real domain-name attack - only a literal-IP host may be excluded this way.
 _IPV4_LITERAL_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
@@ -3278,7 +3279,7 @@ def _url_host_is_local(url: str) -> bool:
     if host in _LOCAL_HOSTNAMES or host.endswith(".localhost"):
         return True
     if _IPV4_LITERAL_RE.match(host):
-        return not _is_public_ip(host)
+        return not _ip_reaches_nonlocal_host(host)
     return False
 
 
@@ -5170,19 +5171,21 @@ _IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::
 
 
 def _b13_ip_url_label(ip: str) -> str:
-    """B-1011: what to CALL a bare-IP URL `_is_public_ip` let through. That
-    helper treats the 100.64.0.0/10 shared address space (RFC 6598) as routable, so
-    Alibaba Cloud's instance-metadata address `100.100.100.200` used to be reported as a
-    "public-IP URL" -- wrong text for the one address in that range a skill most often
-    names. Wording only: the WARN itself is unchanged."""
+    """B-1011: what to CALL a bare-IP URL the B13 gate (`_ip_reaches_nonlocal_host`) let
+    through. That gate deliberately keeps the 100.64.0.0/10 shared address space (RFC 6598)
+    in, so Alibaba Cloud's instance-metadata address `100.100.100.200` used to be reported
+    as a "public-IP URL" -- wrong text for the one address in that range a skill most often
+    names. B-1017: the label now reads the strict classes; the set of addresses that
+    WARN is unchanged by it. Wording only."""
     if ip == "100.100.100.200":
         return "cloud instance-metadata URL"
-    try:
-        a, b = (int(x) for x in ip.split(".")[:2])
-    except ValueError:
-        return "public-IP URL"
-    if a == 100 and 64 <= b <= 127:
+    cls = _ipv4_class(ip)
+    if cls == "shared":
         return "shared-address-space (RFC 6598, not public) IP URL"
+    if cls == "special":
+        return "reserved-range (multicast / benchmarking / reserved, not public) IP URL"
+    if cls == "ambiguous":
+        return "numeric-IP URL (leading-zero / hex octets read differently by curl)"
     return "public-IP URL"
 
 
@@ -6862,7 +6865,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                         # WARN (same evidence, two notes that looked like they disagreed) -
                         # name the two questions as different ones instead of restating
                         # "not assessed" next to a WARN about the identical text.
-                        if _is_public_ip(host):
+                        if _ip_reaches_nonlocal_host(host):
                             coverage_fence.append(
                                 f"coverage: {name}: this fence's pipe-to-shell EXECUTION "
                                 f"(no marker we recognise) was not assessed \u2014 a different "
@@ -7138,7 +7141,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                     warns_content.append(f"{name}: references a Tor .onion address ({m.group(0)})")
                     break
             for m in _IOC_IPURL_RE.finditer(blob):
-                if _is_public_ip(m.group(1)) and not _is_code_example(
+                if _ip_reaches_nonlocal_host(m.group(1)) and not _is_code_example(
                     blob, m.start(), _fr, fence_needs_negation=True
                 ):
                     warns_content.append(
