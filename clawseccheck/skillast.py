@@ -3584,10 +3584,100 @@ def _single_str_binding(
 _SYSEXE_AS_PYTHON = ast.Constant(value="python3")
 
 
+_SYS_PRISTINE_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+# Attribute names of the `sys` module object that can rewrite its namespace.
+_SYS_NAMESPACE_ATTRS = frozenset({"__dict__", "__setattr__", "__delattr__", "modules"})
+
+
+def _sys_executable_is_pristine(tree: ast.AST) -> bool:
+    """B-1040 hardening: may `sys.executable` be read as the real current interpreter?
+
+    True only when (1) `sys` is bound solely by a plain module-level `import sys` -- no alias
+    (`import os as sys`), no `from x import sys`, no other store/del/parameter/def/class/
+    handler/global binding of that name anywhere in the module; (2) nothing writes or deletes
+    an attribute named `executable` on ANY object (`sys.executable = ...`, `del
+    sys.executable`, `+=`, annotated, `for`/`with` targets, an alias's write); and (3) `sys`
+    is only ever used as the base of an attribute read -- never passed or aliased bare
+    (`setattr(sys, ...)`, `vars(sys)`, `getattr(sys, ...)`, `s = sys`) -- and no
+    `sys.__dict__` / `sys.__setattr__` / `sys.__delattr__` / `sys.modules` is mentioned. Any
+    doubt -> False, which keeps the crit verdict (the carve-out stays a precision gain only)."""
+    cached = _SYS_PRISTINE_CACHE.get(tree)
+    if cached is not None:
+        return cached
+    result = _sys_executable_is_pristine_uncached(tree)
+    _SYS_PRISTINE_CACHE[tree] = result
+    return result
+
+
+def _sys_executable_is_pristine_uncached(tree: ast.AST) -> bool:
+    body = getattr(tree, "body", None)
+    if not isinstance(body, list):
+        return False
+    plain = [
+        st for st in body
+        if isinstance(st, ast.Import)
+        and any(a.name == "sys" and a.asname is None for a in st.names)
+    ]
+    if len(plain) != 1:
+        return False
+    bindings = 0
+    parents: dict = {}
+    for n in ast.walk(tree):
+        for child in ast.iter_child_nodes(n):
+            parents[child] = n
+        if isinstance(n, ast.Import):
+            bindings += sum(1 for a in n.names if (a.asname or a.name.split(".")[0]) == "sys")
+        elif isinstance(n, ast.ImportFrom):
+            if any((a.asname or a.name) == "sys" for a in n.names):
+                return False
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if n.name == "sys":
+                return False
+            if not isinstance(n, ast.ClassDef):
+                a = n.args
+                if any(x is not None and x.arg == "sys"
+                       for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]):
+                    return False
+        elif isinstance(n, ast.Lambda):
+            a = n.args
+            if any(x is not None and x.arg == "sys"
+                   for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]):
+                return False
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            if "sys" in n.names:
+                return False
+        elif isinstance(n, ast.ExceptHandler):
+            if n.name == "sys":
+                return False
+        elif n.__class__.__name__ in ("MatchAs", "MatchStar") and getattr(n, "name", None) == "sys":
+            return False
+        elif n.__class__.__name__ == "MatchMapping" and getattr(n, "rest", None) == "sys":
+            return False
+        elif isinstance(n, ast.Name) and n.id == "sys":
+            if isinstance(n.ctx, (ast.Store, ast.Del)):
+                return False
+            par = parents.get(n)  # parents are filled top-down: a Load's parent is known
+            if not (isinstance(par, ast.Attribute) and par.value is n):
+                return False  # `sys` passed / aliased bare
+            if par.attr in _SYS_NAMESPACE_ATTRS:
+                return False
+        elif (
+            isinstance(n, ast.Attribute)
+            and n.attr == "executable"
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            return False
+    return bindings == 1
+
+
 def _is_sys_executable(expr: ast.AST, scope: ast.AST, line: int, tree: ast.AST) -> bool:
-    """B-1040: is `expr` the current interpreter -- `sys.executable` (verified: `sys` not
-    rebound, `_b863_a0_is_verified_sys_executable`), or a bare Name bound exactly once, by a
-    plain top-level statement before `line`, to it (`_single_str_binding`'s proof)?"""
+    """B-1040: is `expr` the current interpreter -- `sys.executable` (verified: `sys` is only
+    the plain `import sys` and nothing rewrites it, `_sys_executable_is_pristine`), or a bare
+    Name bound exactly once, by a plain top-level statement before `line`, to it
+    (`_single_str_binding`'s proof)?"""
+    if not _sys_executable_is_pristine(tree):
+        return False
     if isinstance(expr, ast.Name):
         found = _single_str_binding(
             scope, expr.id, line, lambda v: _b863_a0_is_verified_sys_executable(v, tree)

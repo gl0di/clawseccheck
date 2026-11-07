@@ -80,3 +80,51 @@ def test_open_option_list_or_unproven_head_stays_command_injection(body):
 def test_untainted_shapes_yield_nothing_or_only_what_they_did(body):
     got = _tt5(_HEAD.replace("q = sys.argv[1]", "q = 'x'").replace("rest = sys.argv[2:]", "rest = ['y']") + body)
     assert got == []
+
+
+# --- hardening: `sys.executable` is trusted only while `sys` is the untouched module -----
+
+_OS_CALL = "os.execv(sys.executable, [sys.executable, 'tool.py'] + rest)\n"
+_SP_CALL = "subprocess.run([sys.executable, 'tool.py'] + rest)\n"
+
+
+@pytest.mark.parametrize("prelude", [
+    "sys.executable = '/bin/sh'\n",
+    "sys.executable += 'x'\n",
+    "sys.executable: str = '/bin/sh'\n",
+    "del sys.executable\n",
+    "setattr(sys, 'executable', '/bin/sh')\n",
+    "delattr(sys, 'executable')\n",
+    "sys.__dict__['executable'] = '/bin/sh'\n",
+    "vars(sys)['executable'] = '/bin/sh'\n",
+    "sys.__setattr__('executable', '/bin/sh')\n",
+    "sys.modules['sys'].executable = '/bin/sh'\n",
+    "s = sys\ns.executable = '/bin/sh'\n",
+    "for sys.executable in ['/bin/sh']:\n    pass\n",
+    "with open('f') as sys.executable:\n    pass\n",
+    "(sys := get())\n",
+    "sys = get()\n",
+    "def f(sys):\n    pass\n",
+    "def sys():\n    pass\n",
+    "class sys:\n    pass\n",
+    "import os as sys\n",
+    "from x import sys\n",
+    "from x import y as sys\n",
+    "import json as sys\n",
+    "from x import *\nimport sys\n",
+    "def g():\n    import sys\n",
+    "def g():\n    global sys\n    sys = get()\n",
+    "try:\n    pass\nexcept Exception as sys:\n    pass\n",
+    "getattr(sys, 'executable')\n",
+    "fn = lambda sys: 1\n",
+])
+@pytest.mark.parametrize("call", [_OS_CALL, _SP_CALL])
+def test_rewritten_or_aliased_sys_keeps_command_injection(prelude, call):
+    assert _tt5(_HEAD + prelude + call) == CMD
+
+
+def test_hardening_does_not_hide_the_plain_idiom():
+    assert _tt5(_HEAD + _OS_CALL) == ARG
+    assert _tt5(_HEAD + _SP_CALL) == ARG
+    # reading attributes of sys is fine
+    assert _tt5(_HEAD + "v = sys.version\n" + _OS_CALL) == ARG
