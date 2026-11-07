@@ -3899,8 +3899,12 @@ def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[st
     a scratch run's bare ``--pdf`` lands in the scratch store instead of the real
     ``~/.clawseccheck`` - the same "the store moves together" promise ``--data-dir``
     makes for history/state/events/coverage - and ``--purge`` (which looks in that same
-    directory) can reach it. ``None`` means the default store and keeps the home-relative
-    ``~/.clawseccheck/report.pdf`` spelling, which is what the attach note prints.
+    directory) can reach it. ``None`` means the default store: ``$HOME/.clawseccheck/report.pdf``,
+    returned EXPANDED (B-1056). The literal ``~/...`` string used to be returned here, and
+    the delivery renderer treats a path that does not start with ``/`` as cwd-relative, so
+    the attach note and the ``MEDIA:`` line named ``<cwd>/~/.clawseccheck/report.pdf`` - a
+    file that does not exist - while the write itself (which does expand ``~``) landed in
+    the real store. The host rendering still collapses it back to ``~/...``.
     """
     managed = pathprobe.expand_user(home) / "media" / "outbound"
     try:
@@ -3910,7 +3914,7 @@ def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[st
         pass
     if store_dir is not None:
         return str(store_dir / "report.pdf"), False
-    return "~/.clawseccheck/report.pdf", False
+    return str(pathprobe.expand_user("~/.clawseccheck/report.pdf")), False
 
 
 class _SuggestingParser(argparse.ArgumentParser):
