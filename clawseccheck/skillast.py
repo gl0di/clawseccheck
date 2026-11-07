@@ -1321,6 +1321,18 @@ _CRED_PATH_RE = re.compile(
     r"\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
     r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b|"
+    # B-1060: the OpenClaw config/credential store itself. `openclaw.json` holds the
+    # user's API keys and auth profiles and `credentials` is the flat credential file --
+    # the crown jewels on an OpenClaw box. The SHELL cred-path set already treats
+    # `.openclaw/` as a credential source (so `curl -F @openclaw.json` FAILs), but the
+    # Python critical path omitted it, so a read of openclaw.json -> network sink vetted
+    # INSTALL with no finding while the same shape reading ~/.ssh/id_rsa FAILed. Scoped
+    # to the two credential-bearing files, NOT all of `.openclaw/`: general agent-config
+    # reads stay on the info-level ENV_EXFIL_FLOW (_AGENT_CONFIG_PATH_RE), whose "skills
+    # legitimately send an API key to their own API" rationale does not hold for
+    # uploading the whole credential store -- the same reason .aws/credentials is
+    # critical regardless of destination.
+    r"\.openclaw/(?:openclaw\.json|credentials)|"
     # E-065/C-323: the HF-incident reproduction read a process's own environment
     # (which commonly carries API keys/tokens passed via env var) through procfs
     # rather than a dotfile. /var/run/secrets and /run/secrets (K8s service-account
@@ -7559,6 +7571,12 @@ _FOLDED_CRED_PATH_RE = re.compile(
     # string right after "gcloud" is sufficient to exclude "gcloud-helper" while still
     # matching the real ".config/gcloud/legacy_credentials/..." shape.
     r"|\.config/gcloud(?=/|$)"
+    # B-1060: the OpenClaw credential store, so a pathlib path-join
+    # (`Path.home()/".openclaw"/"openclaw.json"`) that never spells the path as one
+    # contiguous literal is caught the same way the literal scan (_CRED_PATH_RE) now is.
+    # Two fixed filenames, no bare-prefix collision risk, so no right-hand lookahead is
+    # needed here (unlike the gcloud directory above).
+    r"|\.openclaw/(?:openclaw\.json|credentials)"
     r"|/proc/(?:self|\d+)/environ",
     re.I,
 )
