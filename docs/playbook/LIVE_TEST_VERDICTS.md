@@ -16,7 +16,7 @@ rather than from here:
 {
   "judged": {
     "verdicts": [
-      {"finding_id": "B101", "target": "B101", "verdict": "SAFE", "reason": "why"}
+      {"finding_id": "B13", "target": "<the packet item's own target>", "verdict": "SAFE", "reason": "why"}
     ]
   },
   "liveTest": {

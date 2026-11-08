@@ -73,6 +73,7 @@ from ._shared import (
     _detail_path,
     _dir_replaceable_by_others,
     _DM_POLICY_NESTED_ONLY_CHANNELS,
+    _dm_policy_values,
     _enabled_tools,
     EXPOSED_BINDS,
     _external_input_channels,
@@ -2780,8 +2781,15 @@ def _b171_open_channels(cfg: dict) -> list[str]:
             # reasoning as the channel-level guard above.
             if node.get("enabled") is False:
                 continue
-            dm_open = node.get("dmPolicy") == "open" and not _b171_scoped_list(
-                node.get("allowFrom")
+            # B-1053: nested-aware dm read (matrix declares only `dm.policy`, B-619).
+            # A nested-only channel (matrix) keeps its DM allowlist beside the nested
+            # policy, at `dm.allowFrom` (vendor docs/channels/matrix.md), so a scoped list
+            # there scopes the open DM exactly as a flat `allowFrom` does elsewhere.
+            _dm_node = node.get("dm") if isinstance(node.get("dm"), dict) else {}
+            dm_open = "open" in _dm_policy_values(name, node) and not (
+                _b171_scoped_list(node.get("allowFrom"))
+                or (name in _DM_POLICY_NESTED_ONLY_CHANNELS
+                    and _b171_scoped_list(_dm_node.get("allowFrom")))
             )
             # B-283 (a): normalize a Feishu channel's "allowall" alias, which Feishu's
             # GroupPolicySchema transforms to "open" (channel-PR3XHV0V.js:89-93) - without

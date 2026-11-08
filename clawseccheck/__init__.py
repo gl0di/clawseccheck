@@ -74,6 +74,32 @@ def _installed_dist_version(binary_name="openclaw"):
     return _openclawdist._read_version(root) or None
 
 
+def _dist_applies_to_home(home) -> bool:
+    """Whether the OpenClaw build installed on THIS machine is evidence about *home* (B-1054).
+
+    ``ctx.installed_dist_version`` drives every version-gated check (B33, C4, B382, B350,
+    B363, B175, B9 and the dist-derived defaults read by B2/B48/B171). It used to be filled
+    in for ANY ``--home`` - a copied home, a backup, a fixture, another user's home - so
+    those verdicts described the auditing machine, not the audited config, and differed
+    from a ``--no-dist`` run of the same directory. USAGE and ``--help`` promise the
+    opposite: only this machine's own OpenClaw home is judged by the installed build; any
+    other home is judged as with ``--no-dist`` (the version the config records, else the
+    documented fallback). One predicate decides, the one B33 already used
+    (``_b33_is_this_machines_home``), so every consumer now agrees with B33.
+
+    A module-level seam on purpose, like `_installed_dist_version` above: a test that
+    drives the installed-build branch over a fixture home patches THIS name to say yes.
+    """
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    from .checks._lifecycle import _b33_is_this_machines_home  # noqa: PLC0415
+
+    try:
+        return bool(_b33_is_this_machines_home(_Path(home).expanduser()))
+    except Exception:  # noqa: BLE001 - fail to "not this machine's home" (stamp decides)
+        return False
+
+
 __version__ = "4.4.5"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
 __released__ = "2026-11-02"
@@ -118,7 +144,7 @@ def build_context(home: Path | str = "~/.openclaw",
     if include_deptree:
         ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
     ctx.include_dist = include_dist
-    if include_dist:
+    if include_dist and _dist_applies_to_home(ctx.home):
         ctx.installed_dist_version = _installed_dist_version()
     if attestation:
         # C-714: a library caller gets the same vetting the CLI applies (an unusable

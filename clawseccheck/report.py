@@ -16,6 +16,7 @@ import shlex
 import tempfile
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from . import pathprobe
@@ -6520,6 +6521,49 @@ def render_advise_json(profile, *, version: str) -> str:
 # new verdict/scoring logic. The plain-language preamble (4 numbered steps + a consent
 # line) comes first for a reader who doesn't parse shell; the exact commands follow
 # underneath, reordered so --vet-source (the pre-download reputation gate) is step 1.
+#: B-1052: forges whose ``https://HOST/OWNER/REPO`` URL is a git repository, so --vet-plan
+#: clones it instead of downloading the HTML landing page. A URL ending in ``.git`` is a
+#: repository on any host.
+_GIT_FORGE_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org", "codeberg.org"})
+
+
+def _is_repo_url(info: dict, target: str) -> bool:
+    """B-1052: an http(s) URL that names a git repository rather than a file to download."""
+    path = urlsplit(target).path.rstrip("/")
+    parts = [p for p in path.split("/") if p]
+    if path.endswith(".git") and parts:
+        return True
+    return (info.get("host") or "") in _GIT_FORGE_HOSTS and len(parts) == 2
+
+
+def _git_clone_source(target: str, info: dict) -> "tuple[str | None, str | None]":
+    """B-1052: (what to hand ``git clone``, the ref to check out) for a git source, or
+    (None, None) when the host is unusable (empty, or option-shaped: a host starting with
+    ``-`` is how ``ssh://-oProxyCommand=...`` turned a clone into command execution)."""
+    host = info.get("host") or ""
+    ref = info.get("ref")
+    # Option-shaped pieces never reach git: a '-'-leading host (`ssh://-oProxyCommand=..`),
+    # scp user (`-oProxyCommand=x@host:path` would make the whole argument an option) or
+    # ref. The emitted command also ends git's options with `--` before the remote.
+    if (not host or host.startswith("-") or target.lstrip().startswith("-")
+            or (ref or "").lstrip().startswith("-")):
+        return None, None
+    low = target.lower()
+    if low.startswith("git:") and not low.startswith("git://"):
+        path = target[len("git:"):]
+        if ref:
+            path = path.rsplit("@", 1)[0]
+        return "https://" + path, ref
+    url = target[4:] if low.startswith("git+") else target
+    if "://" in url:  # a `#ref` / pip `#egg=...` fragment is never part of the remote
+        url = url.split("#", 1)[0]
+    if ref:  # pip's `...repo.git@<ref>` suffix is not part of the remote either
+        tail = url.rsplit("/", 1)
+        if len(tail) == 2 and tail[1].endswith("@" + ref):
+            url = url[: -len("@" + ref)]
+    return url, ref
+
+
 def render_vet_plan(target: str) -> str:
     from .checks import _parse_source_target  # noqa: PLC0415
 
@@ -6549,18 +6593,24 @@ def render_vet_plan(target: str) -> str:
         # metadata, which is untrusted code with the user's permissions BEFORE the scan.
         fetch = (f"pip download --only-binary=:all: --no-deps -d \"$QUARANTINE\" "
                   f"{_shq(name + ('==' + version if version else ''))}")
-    elif eco == "git":
+    elif eco == "git" or (eco == "url" and _is_repo_url(info, target)):
         # info only keeps host + the repo-name tail, not the full owner/repo path - pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
         # reconstructing it from parsed fields (which would drop the owner segment).
         # C-745: `git clone --depth 1` without --recurse-submodules runs no repo code
         # (hooks are not cloned) and fetches no submodules, so it needs no extra flag.
-        path = target[len("git:"):]
-        ref = info.get("ref")
-        if ref:
-            path = path.rsplit("@", 1)[0]
-        branch_flag = f" --branch {_shq(ref)}" if ref else ""
-        fetch = f"git clone --depth 1{branch_flag} https://{_shq(path)} \"$QUARANTINE/repo\""
+        # B-1052: the other git-remote spellings (git+https://, ssh://, git://, scp-style
+        # git@host:path) and a forge repo URL (https://github.com/o/r[.git]) are cloned
+        # too - a plain curl of a repo URL saves its HTML landing page, and the plan's
+        # --advise step then has nothing to assess.
+        clone_url, ref = _git_clone_source(target, info)
+        if clone_url is None:
+            fetch = (f"# '{name}' has no host this plan can clone safely \u2014 fetch it "
+                     "yourself, without running any of its code, into \"$QUARANTINE\"")
+        else:
+            branch_flag = f" --branch {_shq(ref)}" if ref else ""
+            fetch = (f"git clone --depth 1{branch_flag} -- {_shq(clone_url)} "
+                     "\"$QUARANTINE/repo\"")
     elif eco == "clawhub":
         fetch = (f"# resolve '{name}' via your ClawHub client's normal pull/install path, "
                   "but redirect the output into \"$QUARANTINE\" instead of the live skills dir")
@@ -6572,7 +6622,7 @@ def render_vet_plan(target: str) -> str:
     # clawhub/unresolved branches above are already a full "#"-commented explanation, so
     # they are left as-is rather than doubly annotated.
     fetch_note = "   # (git clone / pip download / curl per ecosystem)" if eco in (
-        "npm", "pypi", "git", "url") else ""
+        "npm", "pypi", "git", "url") and not fetch.startswith("#") else ""
 
     pypi_note = (
         ["  # No wheel for this package? Stop and tell the user - do NOT retry without",
@@ -7024,7 +7074,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None,
-                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None) -> str:
+                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None,
+                risk=None, behavioral=None, adjudication=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes the brand mark + wordmark, a grade badge (colored via
@@ -7251,6 +7302,33 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         ) if _cov_lines else ""
     else:
         coverage_page_html = ""
+
+    # B-1068: the --full pipeline blocks the PDF of the same run carries (RISK chains,
+    # Behavioural, Second opinion with its per-item verdicts, surface coverage, Worth a
+    # glance) - rendered from the SAME line renderers `render_pdf` uses, so the two
+    # exports cannot drift again. Before this the HTML had no risk/behavioral/
+    # adjudication parameter at all, and an HTML built beside a PDF from one judged
+    # bundle silently lacked the second opinion. Shown only when the caller supplied a
+    # pipeline phase (the --dashboard --full path); every other caller's page is
+    # byte-identical. Home paths are redacted here exactly as the PDF's _pipeline_block
+    # redacts them (B-866).
+    pipeline_html = ""
+    if risk is not None or behavioral is not None or adjudication is not None:
+        _blocks = (
+            ("RISK chains", _risk_chain_lines(risk or [], ascii_only=False)),
+            ("Behavioural", _behavioral_block_lines(behavioral, ascii_only=False)),
+            (_SEC_SECOND_OPINION, _second_opinion_lines(adjudication, ascii_only=False)
+             + _second_opinion_item_lines(adjudication)),
+            ("Coverage of OpenClaw surfaces", _coverage_lines(findings, ascii_only=False)),
+            ("Worth a glance", _worth_a_glance_lines(findings, ascii_only=False)),
+        )
+        pipeline_html = "".join(
+            f'<section class="pipeline" aria-label="{esc(title)}">'
+            f'<h2 class="section-title">{esc(title)}</h2>'
+            f'<pre class="cov-page-body">'
+            f'{esc(chr(10).join(_redact_home_paths(str(ln)) for ln in lines))}</pre>'
+            '</section>'
+            for title, lines in _blocks if lines)
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
     # `score.capped` alone - see the matching comment in render_report for why
@@ -7685,6 +7763,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         {subject_inventory_html}
 
         {coverage_page_html}
+
+        {pipeline_html}
 
         <h2 class="section-title">{esc(section_findings)}</h2>
         {nav_html}

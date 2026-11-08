@@ -221,6 +221,8 @@ from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate - risk.py's ingress leg reaches it only
 # through this aggregator (CLAUDE.md §3.1-a), never by importing a topic module.
+# B-1053: the nested-aware dm-policy resolver, for risk.py's open-channel labels.
+from ._shared import (_declared_dm_policy, _dm_policy_values,)
 from ._shared import (_allow_from_is_present, _effective_group_allow_from, _is_wildcard_allow_entry, _open_wildcard_group_channels, _resolved_channel_nodes, _wildcard_group_gap, _wildcard_group_is_reachable,)
 from ._egress import (
     _EXT_SKILL_HINTS,

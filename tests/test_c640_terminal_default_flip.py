@@ -306,6 +306,8 @@ def test_include_dist_wiring_reaches_the_report_path(tmp_path, monkeypatch):
         json.dumps({"gateway": {"bind": "127.0.0.1:8080"},
                     "tools": {"profile": "minimal"}}), encoding="utf-8")
     monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: "2026.9.7")
+    # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+    monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
     _ctx_obj, findings, _score = clawseccheck.audit(tmp_path, include_dist=True)
     b350 = [f for f in findings if f.id == "B350"]
     assert len(b350) == 1

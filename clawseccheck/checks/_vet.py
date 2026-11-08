@@ -10918,6 +10918,53 @@ _SOURCE_GIT_RE = re.compile(r"^git:(?P<host>[^/\s]+)/(?P<path>[^@\s]+?)(?:@(?P<r
 
 _SOURCE_IP_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 
+# B-1051: the other ways a git remote is spelled. `git+<scheme>://` (pip/npm VCS form),
+# `ssh://` / `git://` URLs, and scp-style `[user@]host:path` (`git@github.com:o/r.git`).
+# All of them name a HOST that the known-bad-infrastructure check must see; before this
+# they fell through to the bare-registry branch with no host at all. The scp form needs a
+# dotted host or an IPv4 literal before the colon so `npm:x`/`pypi:x`-style prefixes and a
+# bare word never match it; a path starting with `/` after the colon is a URL, not scp.
+_SOURCE_GIT_URL_SCHEMES = ("git+https://", "git+http://", "git+ssh://", "git+git://",
+                           "git+file://", "ssh://", "git://")
+_SOURCE_SCP_RE = re.compile(
+    r"^(?:(?P<user>[^@/\s:]+)@)?(?P<host>[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+):"
+    r"(?P<path>[^/\s][^\s]*)$")
+
+
+def _parse_git_remote(t: str) -> "dict | None":
+    """B-1051: host/owner/name/ref/scheme for a git remote spelled as a URL with a git
+    scheme or in scp form, or None when *t* is neither. Never raises."""
+    low = t.lower()
+    ref = None
+    if low.startswith(_SOURCE_GIT_URL_SCHEMES):
+        body = t[4:] if low.startswith("git+") else t
+        try:
+            parsed = urlparse(body)
+            host = (parsed.hostname or "").lower()
+        except ValueError:
+            return None
+        path = parsed.path
+        scheme = parsed.scheme.lower()
+        if "@" in path.rsplit("/", 1)[-1]:  # pip's `...repo.git@<ref>`
+            path, _, ref = path.rpartition("@")
+        # A `#egg=name` / `#subdirectory=x` fragment is pip metadata, not a ref.
+        frag = parsed.fragment
+        ref = ref or (frag if frag and "=" not in frag else None)
+    else:
+        m = _SOURCE_SCP_RE.match(t)
+        # An explicit `user@`, a '/' in the path or a .git suffix makes it a git remote;
+        # without any of them `example.com:8080`, `org.x:lib:1.0`, `skill.md:readme` are
+        # not (C-135 on B-1051). `git@evil.example:repo` keeps its host - a known-bad host
+        # must never fall to a host-less parse because the repo path is short.
+        if not m or not (m.group("user") or "/" in m.group("path")
+                         or m.group("path").endswith(".git")):
+            return None
+        host, path, scheme = m.group("host").lower(), m.group("path"), "ssh"
+    parts = [p for p in path.split("/") if p]
+    return {"host": host, "scheme": scheme, "ref": ref,
+            "name": (parts[-1] if parts else host) or t,
+            "owner": parts[0].lower() if len(parts) >= 2 else None}
+
 
 # B-1015: the project name at the head of a PEP 508 requirement, and what may follow it.
 # pip resolves a requirement by its PEP 503-normalized name, so `skills_analyzer`,
@@ -10978,7 +11025,10 @@ def _parse_source_target(target: str) -> dict:
         "project": None,
         "npm_real": None,
     }
-    if low.startswith(("http://", "https://")):
+    git_remote = None if low.startswith(("http://", "https://")) else _parse_git_remote(t)
+    if git_remote is not None:
+        out.update(ecosystem="git", **git_remote)
+    elif low.startswith(("http://", "https://")):
         parsed = urlparse(t)
         path_parts = [p for p in parsed.path.split("/") if p]
         out.update(
@@ -11182,7 +11232,9 @@ def vet_source(
     host_l = (info.get("host") or "").lower()
     if host_l and not reasons_bad:
         if known_bad is not None:
-            for k in (eco, "any"):
+            # B-1051: the "url" pool IS the host list (see C-707 below), so a git
+            # remote's host is matched against it too, not only against its own pool.
+            for k in dict.fromkeys((eco, "url", "any")):
                 pool = bad.get(k) or frozenset()
                 if any(host_l == h or host_l.endswith("." + h) for h in pool):
                     reasons_bad.append(
@@ -11223,8 +11275,10 @@ def vet_source(
 
     # 3. Source heuristics.
     host = info.get("host") or ""
-    if eco == "url":
-        if info.get("scheme") == "http":
+    # B-1051: a git remote names a host too (git+https://, ssh://, scp `git@host:path`), so
+    # the same host heuristics apply; a git:// or git+http:// transport is plaintext.
+    if eco == "url" or (eco == "git" and host):
+        if info.get("scheme") in ("http", "git"):
             reasons_susp.append("plaintext http:// source \u2014 no transport integrity")
         if any(host == h or host.endswith("." + h) for h in _SOURCE_PASTE_HOSTS):
             reasons_susp.append(

@@ -174,6 +174,8 @@ def test_presentation_only_nothing_else_in_the_json_moves():
 
 def test_cli_json_carries_the_gap(monkeypatch, capsys):
     monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: _NEWER)
+    # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+    monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
     main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--no-history",
           "--no-sockets", "--no-deptree", "--no-host", "--json"])
     block = json.loads(capsys.readouterr().out)["grounding"]
@@ -185,6 +187,8 @@ def test_cli_json_carries_the_gap(monkeypatch, capsys):
 def test_cli_sarif_carries_the_gap_and_in_window_is_false(monkeypatch, tmp_path):
     for installed, expected in ((_NEWER, True), (_GROUNDED, False)):
         monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, _v=installed, **k: _v)
+        # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+        monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
         out = tmp_path / f"{installed}.sarif"
         main(["--home", str(FIXTURES / "home_safe"), "--no-native", "--no-history",
               "--no-sockets", "--no-deptree", "--no-host", "--sarif", str(out)])
