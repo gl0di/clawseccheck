@@ -19639,6 +19639,44 @@ _SH_CURL_BODY_FLAGS = frozenset({
 })
 
 
+def _sh_word_expands_cred_env(word, depth: int = 0) -> bool:
+    """B-1065: whether the shell would EXPAND a credential-shaped variable inside this
+    curl body word. Only a ``variable`` part (``$TOKEN``/``${TOKEN}``) or a variable
+    inside a ``$(...)``/backtick command substitution counts. ``$name`` inside a
+    single-quoted run (a ``jq '{password:$password}'`` filter template, an awk/sed
+    program) is text the shell never expands, so a bare regex over the word's raw text
+    mistook that jq variable for a secret.
+
+    Fail-closed: a substitution that cannot be re-scanned (unbalanced, arithmetic,
+    nesting past the bound) falls back to the raw-text match, i.e. the old, wider
+    behaviour -- so this narrowing can only clear a ``$name`` that sits inside a
+    single-quoted/literal run, never one the shell actually expands.
+    """
+    for part in word.parts:
+        if part.kind == "variable":
+            if _SH_CRED_ENV_RE.search(part.text):
+                return True
+        elif part.kind == "cmdsub":
+            if not _SH_CRED_ENV_RE.search(part.text):
+                continue
+            inner = None
+            txt = part.text
+            if txt.startswith("$(") and txt.endswith(")"):
+                inner = txt[2:-1]
+            elif txt.startswith("`") and txt.endswith("`") and len(txt) >= 2:
+                inner = txt[1:-1]
+            cmds = _shellwords.scan_line(inner) if inner is not None and depth < 4 else None
+            if cmds is None:
+                return True
+            for c in cmds:
+                if any(_sh_word_expands_cred_env(w, depth + 1) for w in c.words):
+                    return True
+        elif part.kind != "literal" and _SH_CRED_ENV_RE.search(part.text):
+            # glob/brace/unknown kinds: never silently clear a credential-shaped name.
+            return True
+    return False
+
+
 def _sh_cred_env_in_body_lines(masked: str) -> set:
     """B-1065: physical line numbers where a credential-shaped env var
     (``$...SECRET``/``$...TOKEN``/... per ``_SH_CRED_ENV_RE``) is the value of a curl
@@ -19685,6 +19723,10 @@ def _sh_cred_env_in_body_lines(masked: str) -> set:
                     t.long_name in _SH_CURL_BODY_FLAGS
                     and t.value_text
                     and _SH_CRED_ENV_RE.search(t.value_text)
+                    and (
+                        t.value_word is None
+                        or _sh_word_expands_cred_env(t.value_word)
+                    )
                 ):
                     hits.add(i)
                     break
