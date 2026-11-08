@@ -123,6 +123,16 @@ def test_single_quoted_jq_template_variable_is_not_a_credential_expansion():
     '"`echo $API_TOKEN`"',
     '"$(echo \\\'$API_TOKEN\\\')"',          # escaped quotes do NOT quote: $API_TOKEN expands
     '"$(echo $(echo ${SECRET}))"',
+    '"`echo \\$API_TOKEN`"',                 # backtick: \$ is unescaped by the shell -> expands
+    '"`echo \\\\\\$API_TOKEN`"',
+    "\"$(sh -c 'echo $API_TOKEN')\"",         # evaluators re-expand their quoted text
+    "\"$(bash -c 'echo $API_TOKEN')\"",
+    "\"$(eval 'echo $API_TOKEN')\"",
+    "\"$(envsubst <<<'$API_TOKEN')\"",
+    "\"$(xargs sh -c 'echo $API_TOKEN' <<<x)\"",
+    "\"$(awk 'BEGIN{system(\\\"echo $API_TOKEN\\\")}')\"",
+    "\"$(source /dev/stdin <<<'echo $API_TOKEN')\"",
+    "\"$(jq -n '1' | sh -c 'echo $API_TOKEN')\"",
     '"$(jq -nc --arg t \\"$API_TOKEN\\" \'{t:$t}\')"',   # the real expansion is outside the '...'
     '"$(($SECRET + 1))"',                        # unscannable substitution -> fail closed
 ])
