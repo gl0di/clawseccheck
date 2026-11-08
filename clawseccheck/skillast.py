@@ -13473,18 +13473,38 @@ def _persist_open_writes(call: ast.Call, mode_idx: int) -> bool:
 _PERSIST_SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9_.@:-]+\Z")
 
 
+# Options these two verbs are known to take WITHOUT a value; anything else with a leading
+# "-" (an unknown flag, a `--flag=value`, an option whose value is the next token) cannot be
+# told apart from a service name, so it is rendered "?" instead of being dropped.
+_PERSIST_KNOWN_FLAGS = frozenset({
+    "--user", "--system", "--global", "--now", "--runtime", "--force", "-f", "--quiet",
+    "-q", "--no-block", "--no-reload", "--no-ask-password", "--no-pager", "--no-warn",
+    "--plain", "--full",
+    "-w", "-F",  # launchctl load
+})
+
+
 def _persist_service_tokens(vals: list, start: int, truncated: bool) -> "list[str]":
-    """Every positional token after the verb, as a safe service name or "?". An
-    unresolved token (None), a name outside the plain unit-name alphabet, and any
-    tail this read did not cover are all "?": "?" never matches the reputable-daemon
-    set, so an unreadable argument can only keep a hit convicting, never down-rank it.
-    A flag (leading "-") is skipped; an unresolved token could be either a flag or a
-    service, so it is conservatively counted as a service."""
+    """Every token after the verb that could be a service, as a safe service name or "?".
+    An unresolved token (None), a name outside the plain unit-name alphabet, an unknown
+    "-"-prefixed token, and any tail this read did not cover are all "?": "?" never
+    matches the reputable-daemon set, so an unreadable argument can only keep a hit
+    convicting, never down-rank it. Only the known value-less options above are skipped;
+    after a literal `--` every later token is positional (and one with a leading "-" is
+    "?" too: a unit name never starts with one)."""
     out = []
+    after_dd = False
     for v in vals[start:]:
-        if v is not None and v.startswith("-"):
+        if v is None:
+            out.append("?")  # could be a flag or a service: count it as a service
+        elif not after_dd and v == "--":
+            after_dd = True
+        elif not after_dd and v in _PERSIST_KNOWN_FLAGS:
             continue
-        out.append(v if v is not None and _PERSIST_SERVICE_NAME_RE.match(v) else "?")
+        elif v.startswith("-") or not _PERSIST_SERVICE_NAME_RE.match(v):
+            out.append("?")
+        else:
+            out.append(v)
     if truncated:
         out.append("?")
     return out or ["?"]

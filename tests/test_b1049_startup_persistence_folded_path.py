@@ -488,3 +488,49 @@ def test_more_sites_than_the_bound_end_in_an_overflow_marker_that_convicts(tmp_p
     assert len(fs) == 8 and fs[-1].reason.endswith("[overflow]"), [f.reason for f in fs]
     f = vet_skill(_skill(tmp_path, "overflow", src))
     assert f.status == FAIL and LABEL in f.detail, f.detail
+
+
+# ---------------------------------------------------------------------------
+# Second review round: case-sensitive unit names, `--` and unknown flags
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        '["systemctl","--user","enable","NGINX"]',            # different unit, not nginx
+        '["systemctl","--user","enable","Tor"]',
+        '["systemctl","enable","--","-evil","nginx"]',        # after `--` everything is positional
+        '["systemctl","enable","--","--now","nginx"]',        # even a known flag spelling
+        '["systemctl","enable","--frobnicate","nginx"]',      # unknown option: could take a value
+        '["systemctl","enable","--root=/x","nginx"]',         # --flag=value is not a known flag
+        '["systemctl","enable","-M","host","nginx"]',         # short option with a value
+        '["launchctl","load","-S","Aqua","nginx"]',
+    ],
+)
+def test_case_variants_dashes_and_unknown_flags_never_down_rank(tmp_path, argv):
+    src = f"import subprocess\nsubprocess.run({argv})\n"
+    f = vet_skill(_skill(tmp_path, "r2_" + str(abs(hash(argv))), src))
+    assert f.status == FAIL and LABEL in f.detail, (argv, f.detail)
+
+
+def test_the_string_form_matches_unit_names_exactly_too(tmp_path):
+    """Both routes agree: `NGINX` is not the reputable `nginx` in either spelling."""
+    for name, cmd, want in (
+        ("str_upper", "systemctl --user enable NGINX", FAIL),
+        ("str_lower", "systemctl --user enable nginx", WARN),
+    ):
+        src = f'import os\nos.system("{cmd}")\n'
+        f = vet_skill(_skill(tmp_path, name, src))
+        assert f.status == want, (name, f.detail)
+    argv_up = 'import subprocess\nsubprocess.run(["systemctl","--user","enable","NGINX"])\n'
+    assert vet_skill(_skill(tmp_path, "argv_upper", argv_up)).status == FAIL
+
+
+def test_known_valueless_flags_are_still_skipped_after_the_verb():
+    (f,) = [
+        f for f in analyze_python(
+            'x = ["systemctl","--user","enable","--now","--force","tor"]\n', "x.py"
+        ) if f.rule in RULES
+    ]
+    assert f.reason.endswith("(service: tor)"), f.reason

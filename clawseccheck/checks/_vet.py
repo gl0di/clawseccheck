@@ -1567,7 +1567,7 @@ def _startup_persistence_ast_route(af, src: str, relpath: str) -> "tuple[str, st
         # set, so `enable tor $X` / `enable tor evil` stay HIGH.
         m = _STARTUP_AST_SERVICE_RE.search(af.reason)
         svcs = [t for t in m.group(1).split(", ")] if m else []
-        if svcs and all(t.lower() in _REPUTABLE_DAEMON_NAMES for t in svcs):
+        if svcs and all(t in _REPUTABLE_DAEMON_NAMES for t in svcs):  # exact: unit names are case-sensitive
             return "warn", _CRON_REPUTABLE_LABEL
     # Character offset of the statement's line (ast linenos split on \r\n, \r and \n).
     off = 0
@@ -1721,7 +1721,10 @@ def _cron_persistence_hits(
         # FAIL-capable signal at all; that gap is evidence-accumulation/E-038 work
         # (design doc §7), not this gate.
         svc = _CRON_SERVICE_TARGET_RE.match(blob, m.start())
-        if svc and svc.group(1).lower() in _REPUTABLE_DAEMON_NAMES:
+        # Exact match, not case-folded: systemd unit names are case-sensitive, so `NGINX` is
+        # a different unit from `nginx` and must not inherit its down-rank (B-1049 review;
+        # the AST route in `_startup_persistence_ast_route` matches the same way).
+        if svc and svc.group(1) in _REPUTABLE_DAEMON_NAMES:
             if reputable_label not in warn_hits:
                 warn_hits.append(reputable_label)
             continue  # B-203: was `break` - keep scanning; a reputable enable must not mask a later covert one
