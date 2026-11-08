@@ -299,6 +299,11 @@ The narrative version, in one paragraph per theme:
   contents (`~/.ssh/id_*`, `.aws/credentials`, keychain, wallet, ...) flowing into a network
   sink ("read a secret file -> send it out"). Sources are credential files only, not env vars,
   so the legit "read `OPENAI_API_KEY`, send as auth header" pattern is never flagged.
+  The trace follows the secret across helper functions in the same file (`upload(collect())`,
+  a method handing a value to another through `self.x`, a loop that fills a dict), however long
+  the chain of local helpers. It does not follow a call into another file, a function stored in
+  a variable or passed as a callback, a global written from a function, or a handoff through a
+  second method that only reads another `self.x` slot.
   (AST is Python-only; JS/shell stay on the regex engine.)
 - **Egress & trust boundaries:** where the agent can reach out (channels, external skills,
   tools), MCP server trust, untrusted-context exposure, sender identity strength,
