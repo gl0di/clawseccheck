@@ -51,6 +51,7 @@ from ..skillast import (
     analyze_shell,
     hardcoded_env_secret_is_inert as _b998_hardcoded_env_secret_is_inert,
 )
+from ..skillast import _PERSIST_OVERFLOW_TAG  # B-1049
 from ..skillast import _SH_VAR_ASSIGN_RE, _SH_VAR_REF_RE  # B-985 companion
 from ..skillast import _sh_candidate_destination_tokens as _sh_dest_tokens
 from ..skillast import _sh_line_destination_text as _sh_dest_text
@@ -1523,6 +1524,61 @@ _CRON_DISCLOSURE_WINDOW = 200  # chars around the cron/persistence match
 # or a reputable daemon name - an accepted false-negative gap, not a false-positive FAIL.
 
 
+# B-1049: the labels the AST route (skillast.py's STARTUP_PERSISTENCE_* rules, routed in
+# check_installed_skills) must share byte-for-byte with the regex route above, so one
+# persistence act reads the same whichever spelling convicted it.
+_CRON_LABEL = "cron/startup persistence: installs a scheduled or boot-time job"
+_CRON_REPUTABLE_LABEL = (
+    "cron/startup persistence (reputable service): enables a well-known system daemon"
+)
+_CRON_DISCLOSED_LABEL = (
+    "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
+)
+_CRON_FIXTURE_LABEL = (
+    "cron/startup persistence (test fixture): inside the skill's own test file"
+)
+_STARTUP_AST_SERVICE_RE = re.compile(r"\(service: ([^)]*)\)$")
+
+
+def _startup_persistence_ast_route(af, src: str, relpath: str) -> "tuple[str, str]":
+    """B-1049: `(band, label)` for a skillast STARTUP_PERSISTENCE_WRITE/_ENABLE finding,
+    band "high" or "warn", applying the discriminators `_cron_persistence_hits` applies to
+    the regex route's hits -- and only those, each in the direction it already goes:
+
+    * the skill's own test file (basename convention AND real test-code shape, both
+      required, as `_manifest_match_is_test_fixture`) -> WARN, not dropped;
+    * `enable` of a well-known system daemon (`_REPUTABLE_DAEMON_NAMES`) -> WARN;
+    * a documented watchdog/monitoring job within +-`_CRON_DISCLOSURE_WINDOW` chars of the
+      statement (`_CRON_DISCLOSURE_RE`) -> WARN;
+    * otherwise HIGH, the same label the inline-literal form gets.
+    No fence/link-label handling: this is a parsed Python file, not prose."""
+    for_test = _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name)
+    if for_test and sum(1 for rx in _PYTHON_TEST_SHAPE_SIGNALS if rx.search(src)) >= (
+        _PYTHON_TEST_SHAPE_MIN_SIGNALS
+    ):
+        return "warn", _CRON_FIXTURE_LABEL
+    if af.reason.endswith(_PERSIST_OVERFLOW_TAG):
+        # More sites than skillast lists: none can be individually assessed, so none may
+        # be down-ranked (fail closed). Only the test-file exemption above applies.
+        return "high", _CRON_LABEL
+    if af.rule == "STARTUP_PERSISTENCE_ENABLE":
+        # EVERY service token on the line must be resolved and a well-known daemon:
+        # skillast renders an unresolved or non-plain token as "?", which is never in the
+        # set, so `enable tor $X` / `enable tor evil` stay HIGH.
+        m = _STARTUP_AST_SERVICE_RE.search(af.reason)
+        svcs = [t for t in m.group(1).split(", ")] if m else []
+        if svcs and all(t in _REPUTABLE_DAEMON_NAMES for t in svcs):  # exact: unit names are case-sensitive
+            return "warn", _CRON_REPUTABLE_LABEL
+    # Character offset of the statement's line (ast linenos split on \r\n, \r and \n).
+    off = 0
+    for _ln, nl in zip(range(1, max(af.lineno, 1)), re.finditer(r"\r\n|\r|\n", src)):
+        off = nl.end()
+    window = src[max(0, off - _CRON_DISCLOSURE_WINDOW): off + _CRON_DISCLOSURE_WINDOW]
+    if _CRON_DISCLOSURE_RE.search(window):
+        return "warn", _CRON_DISCLOSED_LABEL
+    return "high", _CRON_LABEL
+
+
 def _cron_persistence_hits(
     blob: str,
     fence_ranges: list[tuple[int, int]],
@@ -1567,10 +1623,10 @@ def _cron_persistence_hits(
     """
     high_hits: list[str] = []
     warn_hits: list[str] = []
-    label = "cron/startup persistence: installs a scheduled or boot-time job"
-    reputable_label = "cron/startup persistence (reputable service): enables a well-known system daemon"
-    disclosed_label = "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
-    fixture_label = "cron/startup persistence (test fixture): inside the skill's own test file"
+    label = _CRON_LABEL
+    reputable_label = _CRON_REPUTABLE_LABEL
+    disclosed_label = _CRON_DISCLOSED_LABEL
+    fixture_label = _CRON_FIXTURE_LABEL
     link_label_label = (
         "cron/startup persistence (link text): crontab named inside a markdown "
         "link label, not an install command"
@@ -1665,7 +1721,10 @@ def _cron_persistence_hits(
         # FAIL-capable signal at all; that gap is evidence-accumulation/E-038 work
         # (design doc §7), not this gate.
         svc = _CRON_SERVICE_TARGET_RE.match(blob, m.start())
-        if svc and svc.group(1).lower() in _REPUTABLE_DAEMON_NAMES:
+        # Exact match, not case-folded: systemd unit names are case-sensitive, so `NGINX` is
+        # a different unit from `nginx` and must not inherit its down-rank (B-1049 review;
+        # the AST route in `_startup_persistence_ast_route` matches the same way).
+        if svc and svc.group(1) in _REPUTABLE_DAEMON_NAMES:
             if reputable_label not in warn_hits:
                 warn_hits.append(reputable_label)
             continue  # B-203: was `break` - keep scanning; a reputable enable must not mask a later covert one
@@ -7374,6 +7433,20 @@ def check_installed_skills(ctx: Context) -> Finding:
             _declared = (getattr(ctx, "installed_skill_declared", None) or {}).get(name, [])
             _py_files = [(r, s, False) for r, s in ctx.installed_skill_py.get(name, [])]
             _py_files += [(r, s, True) for r, lang, s in _declared if lang == "py"]
+            def _route_startup_ast(af, src, relpath, _name=name):
+                # B-1049: see the STARTUP_PERSISTENCE_* arms in the loop below.
+                _band, _label = _startup_persistence_ast_route(af, src, relpath)
+                _entry = f"{_name}: {_label}"
+                if _band == "high":
+                    if _entry not in high:
+                        high.append(_entry)
+                    # An AST-proven write/enable IS an install verb: a bare-path mention
+                    # elsewhere must not be told "no install/enable verb" (B-849's rule
+                    # for the regex route).
+                    _cron_verb_anchored_hits.append(af.reason)
+                elif _entry not in _persist_warn:
+                    _persist_warn.append(_entry)
+
             for relpath, src, _is_declared in _py_files:
                 # B-998 round 3: analyze_python(...) returns a plain list (not a
                 # generator), but is captured ONCE per file into `_afs` rather than
@@ -7616,6 +7689,21 @@ def check_installed_skills(ctx: Context) -> Finding:
                     # cred-exfil signal elsewhere in the same skill must not make a
                     # scan-completeness note read as more exfil evidence.
                     if af.rule == "AST_FINDINGS_TRUNCATED":
+                        continue
+                    # B-1049: a startup-persistence write / argv-list service enable whose
+                    # destination or verb is assembled in code -- the regex route's
+                    # `_CRON_PERSIST_RE` cannot see it (no contiguous path/command text).
+                    # Same B13 verdict, label and discriminators as that route
+                    # (`_startup_persistence_ast_route`); routed here BEFORE the generic
+                    # crit/cred-exfil fallthrough so the "info" label can neither be dropped
+                    # nor gated on an unrelated cred/exfil signal. Both rules are in
+                    # _AST_NEVER_FAIL_RULES: the plugin sweep (checks/_mcp.py), which has no
+                    # B13 persistence bucket, must not read them as a FAIL.
+                    if af.rule == "STARTUP_PERSISTENCE_WRITE":
+                        _route_startup_ast(af, src, relpath)
+                        continue
+                    if af.rule == "STARTUP_PERSISTENCE_ENABLE":
+                        _route_startup_ast(af, src, relpath)
                         continue
                     loc = f"{relpath}:{af.lineno}"
                     # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
@@ -10030,6 +10118,8 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "HARDCODED_PROVIDER_SECRET_ASSIGN",  # B-893 - explicitly not FAIL-capable
     "AST_FINDINGS_TRUNCATED",    # cap disclosure, not a verdict - see skillast.py's analyze_python
     "ARTIFACT_READ_UNPROVEN",    # B394 (B-850) - explicitly not FAIL-capable
+    "STARTUP_PERSISTENCE_WRITE",   # B-1049 - routed to B13's cron/startup-persistence bands
+    "STARTUP_PERSISTENCE_ENABLE",  # B-1049 - same
 })
 
 
