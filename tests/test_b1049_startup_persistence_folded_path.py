@@ -404,3 +404,87 @@ def test_residual_percent_and_format_templates_are_unseen():
         'open(p, "w").write("x")\n'
     )
     assert _rules(src) == []
+
+
+# ---------------------------------------------------------------------------
+# Security review of the wiring (dedup, reputable down-rank, per-file cap)
+# ---------------------------------------------------------------------------
+
+
+def test_reputable_and_covert_enable_on_one_line_keep_both_and_convict(tmp_path):
+    """The engine dedups on (rule, lineno): one line must carry EVERY service."""
+    src = (
+        'import subprocess\n'
+        'a, b = ["systemctl","enable","tor"], ["systemctl","enable","evil-backdoor"]\n'
+    )
+    fs = [f for f in analyze_python(src, "x.py") if f.rule in RULES]
+    assert len(fs) == 1 and "evil-backdoor" in fs[0].reason and "tor" in fs[0].reason, fs
+    f = vet_skill(_skill(tmp_path, "sameline", src))
+    assert f.status == FAIL and LABEL in f.detail, f.detail
+
+
+def test_two_unit_writes_on_one_line_are_both_assessed(tmp_path):
+    src = (
+        "from pathlib import Path\n"
+        'u = Path.home()/".config"/"systemd"/"user"\n'
+        '(u/"a.service").write_text("x"); (u/"b.service").write_text("y")\n'
+    )
+    assert _rules(src) == ["STARTUP_PERSISTENCE_WRITE"]  # one (rule, line) group, kept
+    assert vet_skill(_skill(tmp_path, "twowrites", src)).status == FAIL
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        '["systemctl","--user","enable",X,"nginx"]',        # unresolved before a reputable name
+        '["systemctl","--user","enable","nginx",X]',        # unresolved after it
+        '["systemctl","--user","enable","nginx","evil"]',   # two positionals, one covert
+        '["systemctl","enable","--root","/x","nginx"]',     # option value is not a plain name
+        '["systemctl","enable",*names,"nginx"]',            # starred tail
+        '["systemctl","enable","nginx\\nevil"]',            # non-plain name token
+    ],
+)
+def test_a_reputable_name_never_down_ranks_an_unresolved_or_extra_service(tmp_path, argv):
+    src = f"import subprocess, sys\nX = sys.argv[1]\nnames = sys.argv[2:]\nsubprocess.run({argv})\n"
+    f = vet_skill(_skill(tmp_path, "rep_" + str(abs(hash(argv))), src))
+    assert f.status == FAIL and LABEL in f.detail, (argv, f.detail)
+
+
+def test_every_positional_resolved_and_reputable_is_still_warn(tmp_path):
+    src = 'import subprocess\nsubprocess.run(["systemctl","--user","enable","--now","tor","nginx"])\n'
+    f = vet_skill(_skill(tmp_path, "allrep", src))
+    assert f.status == WARN and "reputable service" in f.detail, f.detail
+
+
+def test_service_tokens_are_listed_in_the_finding():
+    src = 'x = ["systemctl","--user","enable",y,"tor"]\ny = None\ny = 1\n'
+    (f,) = [f for f in analyze_python(src, "x.py") if f.rule in RULES]
+    assert f.reason.endswith("(service: ?, tor)"), f.reason  # unresolved -> "?"
+
+
+def test_padding_with_other_info_findings_cannot_evict_the_persistence_write(tmp_path):
+    pad = "".join(f'os.system("echo {i}")\n' for i in range(120))
+    src = "import os\n" + pad + SM2
+    findings = analyze_python(src, "x.py")
+    assert any(f.rule == "AST_FINDINGS_TRUNCATED" for f in findings), "non-vacuity: cap hit"
+    assert len(findings) <= 25
+    assert {f.rule for f in findings} >= set(RULES)
+    assert {f.severity for f in findings if f.rule not in RULES} <= {"info"}, "info padding only"
+    f = vet_skill(_skill(tmp_path, "padded", src))
+    assert f.status == FAIL and f"padded: {LABEL}" in f.detail, f.detail
+
+
+def test_padding_with_crit_findings_cannot_evict_it_either():
+    pad = "".join(f'K{i} = "sk-ant-api03-" + "{"a" * 40}"\n' for i in range(60))
+    findings = analyze_python(pad + SM2, "x.py")
+    assert len(findings) <= 25
+    assert {f.rule for f in findings} >= set(RULES)
+
+
+def test_more_sites_than_the_bound_end_in_an_overflow_marker_that_convicts(tmp_path):
+    lines = "".join(f'subprocess.run(["systemctl","enable","tor"]) # {i}\n' for i in range(12))
+    src = "import subprocess\n" + lines
+    fs = [f for f in analyze_python(src, "x.py") if f.rule in RULES]
+    assert len(fs) == 8 and fs[-1].reason.endswith("[overflow]"), [f.reason for f in fs]
+    f = vet_skill(_skill(tmp_path, "overflow", src))
+    assert f.status == FAIL and LABEL in f.detail, f.detail

@@ -13400,6 +13400,8 @@ _PERSIST_DST_ARG1_NAMES = frozenset(
 )
 _PERSIST_ARGV_WRAPPERS = frozenset({"sudo", "doas", "pkexec"})
 _PERSIST_ARGV_MAX = 16  # elements read per argv literal
+_PERSIST_MAX_SITES = 8  # findings per file; analyze_python reserves exactly this many slots
+_PERSIST_OVERFLOW_TAG = " [overflow]"  # checks/_vet.py convicts on it without down-ranking
 
 
 def _persist_joined_text(node: ast.AST) -> "str | None":
@@ -13468,12 +13470,32 @@ def _persist_open_writes(call: ast.Call, mode_idx: int) -> bool:
     return True
 
 
-def _persist_argv_kind(node: ast.AST, ctx: "_FsFoldCtx") -> "tuple[str, str] | None":
-    """`(program, service)` for an argv list/tuple literal `[systemctl, <--flags>, enable,
-    ...]` or `[launchctl, load, ...]` (optionally behind sudo/doas/pkexec) -- the two
-    verb-anchored alternatives of `_CRON_PERSIST_RE`, whose contiguous-text form cannot
-    match an argv split into separate string tokens. Elements are read only when they are
-    a string literal or a once-bound name; anything else is unknown and ends the read."""
+_PERSIST_SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9_.@:-]+\Z")
+
+
+def _persist_service_tokens(vals: list, start: int, truncated: bool) -> "list[str]":
+    """Every positional token after the verb, as a safe service name or "?". An
+    unresolved token (None), a name outside the plain unit-name alphabet, and any
+    tail this read did not cover are all "?": "?" never matches the reputable-daemon
+    set, so an unreadable argument can only keep a hit convicting, never down-rank it.
+    A flag (leading "-") is skipped; an unresolved token could be either a flag or a
+    service, so it is conservatively counted as a service."""
+    out = []
+    for v in vals[start:]:
+        if v is not None and v.startswith("-"):
+            continue
+        out.append(v if v is not None and _PERSIST_SERVICE_NAME_RE.match(v) else "?")
+    if truncated:
+        out.append("?")
+    return out or ["?"]
+
+
+def _persist_argv_kind(node: ast.AST, ctx: "_FsFoldCtx") -> "tuple[str, list[str]] | None":
+    """`(program, service_tokens)` for an argv list/tuple literal `[systemctl, <--flags>,
+    enable, ...]` or `[launchctl, load, ...]` (optionally behind sudo/doas/pkexec) -- the
+    two verb-anchored alternatives of `_CRON_PERSIST_RE`, whose contiguous-text form
+    cannot match an argv split into separate string tokens. Elements are read only when
+    they are a string literal or a once-bound name; anything else is unknown (None)."""
     if not isinstance(node, (ast.List, ast.Tuple)) or len(node.elts) < 2:
         return None
     vals: list = []
@@ -13483,6 +13505,7 @@ def _persist_argv_kind(node: ast.AST, ctx: "_FsFoldCtx") -> "tuple[str, str] | N
         else:
             v = None
         vals.append(v)
+    cut = len(node.elts) > _PERSIST_ARGV_MAX
     i = 0
     while i < len(vals) and vals[i] in _PERSIST_ARGV_WRAPPERS:
         i += 1
@@ -13494,16 +13517,10 @@ def _persist_argv_kind(node: ast.AST, ctx: "_FsFoldCtx") -> "tuple[str, str] | N
         while j < len(vals) and vals[j] is not None and vals[j].startswith("-"):
             j += 1
         if j < len(vals) and vals[j] is not None and vals[j].lower() == "enable":
-            svc = next(
-                (v for v in vals[j + 1:] if v is not None and not v.startswith("-")), ""
-            )
-            return "systemctl", svc
+            return "systemctl", _persist_service_tokens(vals, j + 1, cut)
     elif prog == "launchctl":
         if i + 1 < len(vals) and vals[i + 1] is not None and vals[i + 1].lower() == "load":
-            svc = next(
-                (v for v in vals[i + 2:] if v is not None and not v.startswith("-")), ""
-            )
-            return "launchctl", svc
+            return "launchctl", _persist_service_tokens(vals, i + 2, cut)
     return None
 
 
@@ -13514,18 +13531,19 @@ def _startup_persistence_sites(
     startup-persistence path, and every argv-list enable/load of a service. Read-only
     and verdict-free; check_installed_skills owns what a site means."""
     sites: list = []
+    enable_lines: dict = {}
+    enable_progs: dict = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.List, ast.Tuple)):
             kind = _persist_argv_kind(node, ctx)
             if kind is not None:
-                prog, svc = kind
-                verb = "enable" if prog == "systemctl" else "load"
-                sites.append((
-                    getattr(node, "lineno", 0),
-                    "STARTUP_PERSISTENCE_ENABLE",
-                    f"argv-list {prog} {verb} installs a boot-time service "
-                    f"(service: {svc or '?'})",
-                ))
+                prog, svcs = kind
+                ln = getattr(node, "lineno", 0)
+                # One finding per (rule, line) with EVERY service on that line: the
+                # engine's (rule, lineno) dedup would otherwise let a reputable enable
+                # on a line hide a covert one beside it.
+                enable_lines.setdefault(ln, []).extend(svcs)
+                enable_progs.setdefault(ln, prog)
             continue
         if not isinstance(node, ast.Call):
             continue
@@ -13573,7 +13591,31 @@ def _startup_persistence_sites(
                     f"writes into {what} through a path assembled in code",
                 ))
                 break
-    return sites
+    for ln, svcs in enable_lines.items():
+        prog = enable_progs[ln]
+        verb = "enable" if prog == "systemctl" else "load"
+        sites.append((
+            ln,
+            "STARTUP_PERSISTENCE_ENABLE",
+            f"argv-list {prog} {verb} installs a boot-time service "
+            f"(service: {', '.join(sorted(set(svcs)))})",
+        ))
+    # Distinct (rule, line) groups only, in line order, bounded: analyze_python reserves
+    # this many slots out of the per-file cap (see there). Past the bound the last entry
+    # is replaced by an overflow marker that the verdict side always convicts on.
+    seen_keys = set()
+    uniq = []
+    for site in sorted(sites, key=lambda t: (t[0], t[1])):
+        if (site[0], site[1]) not in seen_keys:
+            seen_keys.add((site[0], site[1]))
+            uniq.append(site)
+    if len(uniq) > _PERSIST_MAX_SITES:
+        ln, rule, _ = uniq[_PERSIST_MAX_SITES - 1]
+        uniq = uniq[: _PERSIST_MAX_SITES - 1] + [(
+            ln, rule,
+            f"further startup-persistence sites in this file are not listed{_PERSIST_OVERFLOW_TAG}",
+        )]
+    return uniq
 
 
 # -- B-917: loader sinks (runpy/importlib/zipimport execute a FILE by
@@ -15653,12 +15695,18 @@ def analyze_python(
     # B-1049: startup-persistence writes / argv-list service enables whose destination or
     # verb is assembled in code -- see the module comment above `_PERSIST_FOLDED_PATH_RE`.
     # "info": the verdict (and every discriminator the regex route already has) lives in
-    # checks/_vet.py's B13 loop, keyed on these two rule names.
-    for _sp_ln, _sp_rule, _sp_detail in _startup_persistence_sites(tree, _fsctx):
-        add(_sp_rule, "info", _sp_ln, _sp_detail)
+    # checks/_vet.py's B13 loop, keyed on these two rule names. Kept OUT of `out` until
+    # after the per-file cap: the cap sorts by severity, and an "info" verdict carrier
+    # would otherwise be evictable by padding the file with other info findings. At most
+    # _PERSIST_MAX_SITES of them exist (the last one an overflow marker), and exactly that
+    # many slots are reserved below.
+    persist_out = [
+        ASTFinding(_sp_rule, "info", _sp_ln, _sp_detail)
+        for _sp_ln, _sp_rule, _sp_detail in _startup_persistence_sites(tree, _fsctx)
+    ]
 
-    if len(out) <= _MAX_FINDINGS_PER_FILE:
-        return out
+    if len(out) + len(persist_out) <= _MAX_FINDINGS_PER_FILE:
+        return out + persist_out
 
     # More candidates survived the per-PASS budgets above than the
     # per-FILE cap allows overall. Truncate by SEVERITY, never by discovery order - a
@@ -15669,8 +15717,11 @@ def analyze_python(
     # for an explicit disclosure finding, so a capped file reads as visibly incomplete
     # (never silently "clean beyond what was reported") while the return value still
     # honors `len(out) <= _MAX_FINDINGS_PER_FILE` for every caller of this function.
-    kept = sorted(out, key=lambda f: -_ast_severity_rank(f.severity))[: _MAX_FINDINGS_PER_FILE - 1]
+    kept = sorted(out, key=lambda f: -_ast_severity_rank(f.severity))[
+        : _MAX_FINDINGS_PER_FILE - 1 - len(persist_out)
+    ]
     suppressed = len(out) - len(kept)
+    kept.extend(persist_out)
     kept.append(
         ASTFinding(
             "AST_FINDINGS_TRUNCATED",

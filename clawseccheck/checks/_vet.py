@@ -51,6 +51,7 @@ from ..skillast import (
     analyze_shell,
     hardcoded_env_secret_is_inert as _b998_hardcoded_env_secret_is_inert,
 )
+from ..skillast import _PERSIST_OVERFLOW_TAG  # B-1049
 from ..skillast import _SH_VAR_ASSIGN_RE, _SH_VAR_REF_RE  # B-985 companion
 from ..skillast import _sh_candidate_destination_tokens as _sh_dest_tokens
 from ..skillast import _sh_line_destination_text as _sh_dest_text
@@ -1556,9 +1557,17 @@ def _startup_persistence_ast_route(af, src: str, relpath: str) -> "tuple[str, st
         _PYTHON_TEST_SHAPE_MIN_SIGNALS
     ):
         return "warn", _CRON_FIXTURE_LABEL
+    if af.reason.endswith(_PERSIST_OVERFLOW_TAG):
+        # More sites than skillast lists: none can be individually assessed, so none may
+        # be down-ranked (fail closed). Only the test-file exemption above applies.
+        return "high", _CRON_LABEL
     if af.rule == "STARTUP_PERSISTENCE_ENABLE":
+        # EVERY service token on the line must be resolved and a well-known daemon:
+        # skillast renders an unresolved or non-plain token as "?", which is never in the
+        # set, so `enable tor $X` / `enable tor evil` stay HIGH.
         m = _STARTUP_AST_SERVICE_RE.search(af.reason)
-        if m and m.group(1).lower() in _REPUTABLE_DAEMON_NAMES:
+        svcs = [t for t in m.group(1).split(", ")] if m else []
+        if svcs and all(t.lower() in _REPUTABLE_DAEMON_NAMES for t in svcs):
             return "warn", _CRON_REPUTABLE_LABEL
     # Character offset of the statement's line (ast linenos split on \r\n, \r and \n).
     off = 0
