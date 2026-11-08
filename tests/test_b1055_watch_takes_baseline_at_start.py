@@ -53,8 +53,14 @@ def test_the_first_edit_after_start_alerts_against_a_start_baseline(tmp_path):
     t = threading.Thread(target=_runner, daemon=True)
     t.start()
     # The baseline is taken at start, before any change.
+    # state.json appears while the monitor subprocess is still running; the watcher only
+    # writes its header to the stream and records last_scan_at AFTER that subprocess
+    # returns, so wait for those (not for the state file) before asserting on them.
     assert _wait_for(lambda: (store / "state.json").is_file(), 120), buf.getvalue()
-    assert "no baseline in this store yet" in buf.getvalue()
+    assert _wait_for(
+        lambda: "no baseline in this store yet" in buf.getvalue()
+        and (watch.read_heartbeat(store / "watch_heartbeat.json") or {}).get("last_scan_at"),
+        120), buf.getvalue()
     hb = watch.read_heartbeat(store / "watch_heartbeat.json")
     assert hb["last_scan_at"] and hb["cycles"] == 0
 
