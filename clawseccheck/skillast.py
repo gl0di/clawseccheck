@@ -1089,6 +1089,31 @@ _CURL_WGET_PROGRAMS = {"curl", "wget"}
 _CURL_OUTPUT_FLAGS = {"-o", "--output"}
 _SCRIPT_LIKE_EXTS = (".sh", ".bash", ".py", ".ps1", ".rb", ".pl")
 
+# B-1059: a credential's value is the CONTENT of ~/.ssh/id_rsa etc. -- there is no benign
+# curl/wget position for it (not a header, not the body, not even the `-o` output name),
+# so the egress-sink test is simply "a credential-tainted name reaches a curl/wget argv
+# call at all" (in its argv list OR an `input=`/`stdin=`/`env=` kwarg -- `hit_names` is
+# computed over the whole Call, so a stdin-piped `curl --data @-` is covered without a
+# position list to keep complete). This path takes NO in-cluster carve-out, deliberately:
+# a carve-out that CLEARS a credential-exfil finding must be airtight (CLAUDE.md 2.5),
+# and proving a curl argv "reaches only the cluster API" is a full argv parse (routing
+# flags --proxy/--resolve/--connect-to/-K, clustered/glued options, schemeless
+# positional hosts) that a hand-rolled denylist cannot do soundly -- so sending even an
+# in-cluster service-account token through curl fails CLOSED here (that IS exfil when the
+# real destination is an attacker host). The measured B-415 in-cluster leniency still
+# applies to the Python net-sink path via `_is_incluster_auth_exempt`; no benign
+# curl-in-cluster shape has been observed on the real fleet, so none is carved out
+# speculatively -- the fleet FP gate surfaces one if it exists.
+#
+# SCOPE (inherited, not new): this reuses `_is_curl_wget_argv_call`, the SAME matcher
+# DROPPER_DOWNLOAD_TO_TMP (C-205) uses, so it inherits that matcher's resolution limits --
+# a literal `subprocess.<attr>(["curl"|"wget", ...])` only; a `curl.exe` basename, a
+# program/argv reached through a variable, a bare `run` from `from subprocess import run`,
+# or an `args=`-keyword argv are not recognised. Widening the matcher changes DROPPER too
+# and needs its own cross-consumer adversarial pass, so it is deliberately NOT done here;
+# the broad alternative ("any subprocess carrying a credential is egress") is unsound -- it
+# convicts local credential tools (gpg --encrypt, logger) that never leave the host.
+
 
 def _is_curl_wget_argv_call(node: ast.AST) -> bool:
     """subprocess.run/call/check_call/check_output/Popen(['curl', ...] | ['wget', ...])
@@ -1425,7 +1450,15 @@ _INCLUSTER_DEST_WORD_HTTPS_RE = re.compile(
 # were already gated. "post"/"urlopen" stay ungated: no comparably common
 # non-network false-positive shape for those two turned up during the same review.
 _NET_SINK_ATTRS_ANY = {"post", "urlopen"}
-_NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect", "put", "patch", "request"}
+# B-1058: `sendmail`/`send_message` are smtplib's data-bearing send methods -- email is a
+# network egress channel for a credential just as much as an HTTP POST. Base-gated like
+# the socket send family below, so they only count when the receiver resolves to a known
+# networking base/alias (a `smtplib.SMTP(...)` object registered by _net_sink_alias_names);
+# an unrelated object's own `.send_message(...)` never fires.
+_NET_SINK_ATTRS_BASED = {
+    "send", "sendall", "sendto", "connect", "put", "patch", "request",
+    "sendmail", "send_message",
+}
 _NET_SINK_BASES = {
     "requests",
     "httpx",
@@ -7909,6 +7942,28 @@ def _fold_fs_path_uncached(
             return None
         return _fold_pjoin(_FOLD_UNK if left is None else left, _FOLD_UNK if right is None else right)
 
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # B-1057: string concatenation of path parts -- `"id_" + "rsa"` -> "id_rsa", or
+        # `os.environ["HOME"] + "/.aws/credentials"` -> "\x00/.aws/credentials". An
+        # UNKNOWN side folds to the _FOLD_UNK sentinel (never a substring of any Gate-V
+        # pattern), so a credential filename spelled wholly in the KNOWN parts still
+        # completes a match while an unknown prefix/suffix can only WIDEN the span, never
+        # complete it -- the identical fail-closed discipline the `/` (Div) branch above
+        # uses (an earlier version returned None whenever EITHER side was unknown, which
+        # was fail-OPEN: a known `.aws/credentials` tail was dropped because an unrelated
+        # `os.environ[...]` prefix did not resolve). Arithmetic/list `+` stays excluded by
+        # bailing when a side is a NON-STRING constant (`1 + 2`, `b"x" + b"y"`, `[a]+[b]`,
+        # and the mixed `1 + "x"` which is a runtime TypeError, never a path) and when
+        # BOTH sides are unresolved (no path content at all to fold).
+        for side in (node.left, node.right):
+            if isinstance(side, ast.Constant) and not isinstance(side.value, str):
+                return None
+        left = _fold_seg(node.left, ctx, visiting, depth + 1)
+        right = _fold_seg(node.right, ctx, visiting, depth + 1)
+        if left is None and right is None:
+            return None
+        return (_FOLD_UNK if left is None else left) + (_FOLD_UNK if right is None else right)
+
     if not isinstance(node, ast.Call):
         return None
     f = node.func
@@ -8008,7 +8063,11 @@ def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool
 # constructor-shaped call (attr starts uppercase, or the literal "socket" module-level
 # factory) seeds an alias, so an unrelated `x = requests.get(url)` response object does
 # NOT retroactively make `x.put(...)` a sink for something that isn't request-shaped.
-_NET_SINK_CTOR_BASES = frozenset({"socket"})  # base.attr() ctor pairs beyond CapitalCase
+# base.attr() ctor pairs recognized beyond CapitalCase. B-1058: `socket.create_connection`
+# / `create_server` return a connected socket a later `s.sendall(...)` writes to; without
+# them `s = socket.create_connection(...)` never registered as a sink alias (only the
+# lowercase `socket.socket()` did), so a credential sent over that socket read INSTALL.
+_NET_SINK_CTOR_BASES = frozenset({"socket", "create_connection", "create_server"})
 # Full dotted-path spellings (via _dotted_path) recognized as networking constructor
 # MODULES, on top of the single-segment _NET_SINK_BASES lookup. Needed for a submodule
 # whose _attr_base last-segment alone isn't trustworthy as a bare base -- e.g.
@@ -8407,6 +8466,25 @@ def _socket_stdio_shell_findings(tree: ast.AST) -> list:
 
 
 def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) -> bool:
+    # B-1058: `getattr(X, "urlopen")(...)` with a CONSTANT attr name is deterministic --
+    # it is exactly `X.urlopen` -- so resolve it to the same (attr, base) test. A
+    # NON-constant attr name (`getattr(X, var)`) stays the declared dynamic-dispatch
+    # ceiling and is not resolved here.
+    if (
+        isinstance(func, ast.Call)
+        and isinstance(func.func, ast.Name)
+        and func.func.id == "getattr"
+        and len(func.args) >= 2
+        and isinstance(func.args[1], ast.Constant)
+        and isinstance(func.args[1].value, str)
+    ):
+        attr = func.args[1].value
+        if attr in _NET_SINK_ATTRS_ANY or attr == "urlopen":
+            return True
+        if attr in _NET_SINK_ATTRS_BASED:
+            base = _attr_base(func.args[0])
+            return base in _NET_SINK_BASES or base in net_sink_aliases
+        return False
     if isinstance(func, ast.Name):
         return func.id == "urlopen"
     if isinstance(func, ast.Attribute):
@@ -14413,23 +14491,45 @@ def analyze_python(
             incluster_pure = _incluster_pure_tainted_names(tree, _fsctx)
             str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
+                if not isinstance(node, ast.Call):
+                    continue
+                is_net = _is_net_sink(node.func, net_sink_aliases)
+                # B-1059: a curl/wget argv-list subprocess call is an egress sink too --
+                # the credential never touches a Python net library, it is handed to curl
+                # (`subprocess.run(["curl","--data-binary",d,url])`, `-H`, `--url-query`...).
+                is_curl = _is_curl_wget_argv_call(node)
+                if not (is_net or is_curl):
                     continue
                 hit_names = _names_in(node) & cred_tainted
                 if not hit_names:
                     continue
-                # Exemption applies ONLY when every hit name is in-cluster-pure (never
-                # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
-                # the position+destination checks in _is_incluster_auth_exempt hold.
-                if hit_names <= incluster_pure and _is_incluster_auth_exempt(
-                    node, hit_names, str_map
-                ):
-                    continue
+                if is_curl and not is_net:
+                    # a credential reaching a curl/wget call is exfil, fail-closed: NO
+                    # in-cluster carve-out here (see _is_curl_wget_argv_call's B-1059 note)
+                    # -- an SA token sent via curl to an attacker host is exfil, and a
+                    # sound "reaches only the cluster API" proof is a full argv parse this
+                    # does not attempt.
+                    _detail = (
+                        "credential-file contents flow into a curl/wget egress argv "
+                        "(read secret -> send out)"
+                    )
+                else:
+                    # Exemption applies ONLY when every hit name is in-cluster-pure (never
+                    # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
+                    # the position+destination checks in _is_incluster_auth_exempt hold.
+                    if hit_names <= incluster_pure and _is_incluster_auth_exempt(
+                        node, hit_names, str_map
+                    ):
+                        continue
+                    _detail = (
+                        "credential-file contents flow into a network sink "
+                        "(read secret -> send out)"
+                    )
                 add(
                     "CRED_EXFIL_FLOW",
                     "crit",
                     getattr(node, "lineno", 0),
-                    "credential-file contents flow into a network sink (read secret -> send out)",
+                    _detail,
                 )
 
     # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls

@@ -5269,8 +5269,47 @@ _RESERVED_EXAMPLE_DOMAINS = frozenset({"example.com", "example.net", "example.or
 # skill text could hang the scanner (B-006 ReDoS). Bounding the runs keeps the
 # match linear while still covering any real `curl URL | sh` one-liner (the URL
 # sits within 256 chars of curl and the pipe within 256 of the host).
+# B-1064: the pipe sink is a shell either directly (`| sh`) or via `xargs ... sh -c`
+# / `xargs ... bash -c` (`curl ... | xargs -I{} sh -c {}`), which spawns a shell on the
+# fetched content just the same. The command flag is matched as "an option word (`-`/`+`)
+# whose letters include `c`", reached over a run of ONLY option-shaped words after the
+# shell token, so a clustered or preceded `-c` (`sh -lc`, `bash -ec`, `sh --norc -c`,
+# `sh -e -c`, `sh +e -c`, `dash -c`, `/bin/sh -c`) does not evade it (the exact-token
+# `-c` form was an incomplete-fix parser differential caught by the commit security
+# review). The `(?<![.\w~=-])` left boundary stops the shell token matching a `.sh`
+# FILE EXTENSION (`xargs sh deploy.sh -config` is a script run, not a `-c` shell, and
+# stays unmatched) or an OPTION VALUE (`shellcheck --shell=sh -C` is a lint command,
+# where `sh` sits after `=` -- a C-135 FP), while still allowing a `/bin/sh` path.
+# Excluding `=` means a shell reached through an exec-wrapper's split option
+# (`xargs env --split-string=sh -c {}`) is NOT matched -- an inherited ceiling in the
+# same option-grammar class below, and a far rarer shape than the benign shellcheck FP
+# the exclusion prevents (`env sh -c {}`, the non-split form, is still caught since the
+# wrapper is skipped). An FP is a release blocker; this niche evasion is not. A
+# bare (non-option) word
+# between the shell and the `c`-flag breaks the run, so a script operand (`sh file ...`,
+# `sh -n f`), a non-shell child (`xargs shellcheck`), and a `--coverage` flag on a
+# script all stay unmatched. CEILING (same option-arity class the SHELL_REVERSE_SHELL
+# rule already declares for `sudo -u USER`): a `-c` reached only PAST an option that
+# takes a separate VALUE word (`sh -o pipefail -c`, `sh --rcfile f -c`) is not matched,
+# because telling that value apart from a script operand needs per-flag arity a regex
+# cannot have soundly. Command-NAME obfuscation (a quote-wrapped or backslash-escaped
+# shell word `"sh" -c` / `b\ash`, or an uncommon shell basename `mksh`/`yash`/`ash`/
+# `posh`) is the SAME ceiling the SHELL_REVERSE_SHELL rule already declares for its own
+# tool tokens (THREAT_COVERAGE "Reverse-shell payloads" items 4/5/9) and it applies
+# equally to the pre-existing `| sh` branch above -- this change inherits that ceiling,
+# it does not introduce it. Pulling a real shell lexer (shlex) into this regex-matched
+# hot path is an architectural change out of scope here and against the module's bounded
+# no-parser-on-blobs discipline. (`xargs busybox sh -c` IS caught -- the run only needs
+# the shell token at a word boundary, wrappers before it are skipped by `[^\n|]{0,128}?`.)
+# The bounded quantifiers keep the scan O(n) (measured linear,
+# sub-ms to 15 KB); the match stays inside one pipe stage (`[^\n|]`); and the captured
+# host (group 1) and the entire downstream FP filter (reputable host / fence /
+# install-heading / own-host) are unchanged, so this only widens WHICH sinks count,
+# never which hosts are cleared.
 _PIPE_SHELL_RE = re.compile(
-    r"(?:curl|wget)\b[^\n|]{0,256}?https?://([^\s/'\"|]+)[^\n|]{0,256}\|\s*(?:sudo\s+)?(?:ba|z)?sh",
+    r"(?:curl|wget)\b[^\n|]{0,256}?https?://([^\s/'\"|]+)[^\n|]{0,256}\|\s*(?:sudo\s+)?"
+    r"(?:(?:ba|z)?sh|xargs\b[^\n|]{0,128}?(?<![.\w~=-])(?:ba|z|da|k)?sh\b"
+    r"(?:[ \t]+[-+][^\s|]*){0,6}?[ \t]+[-+][A-Za-z]*c[A-Za-z]*\b)",
     re.I,
 )
 
