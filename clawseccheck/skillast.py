@@ -13362,6 +13362,220 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
     return hits
 
 
+# -- B-1049: startup-persistence writes whose destination is ASSEMBLED in code ----------
+#
+# checks/_vet.py's `_CRON_PERSIST_RE` is a text regex over contiguous path text, so
+# `Path.home()/".config/systemd/user/x.service"` convicts B13 ("cron/startup
+# persistence") while the identical write spelled `u = Path.home()/".config"/"systemd"/
+# "user"; (u/"c.service").write_text(...)` -- the path never appears as one literal --
+# was vetted INSTALL. The argv-list `["systemctl","--user","enable",...]` is the same
+# gap on the verb side: the regex needs `systemctl ... enable` as contiguous text.
+#
+# This pass feeds the SAME verdict (same label, same discriminators, in
+# check_installed_skills): it resolves a write call's destination with the path-fold
+# algebra above (`_fold_seg`: pathlib `/`, `.joinpath`, os.path.join, `+`, one level of
+# single-binding name hop) and matches the folded text against `_PERSIST_FOLDED_PATH_RE`,
+# which is by construction the three bare-path alternatives of `_CRON_PERSIST_RE`
+# (tests/test_b1049_* pins the two patterns equal -- a broader set is not this rule's
+# call to make). Fail-closed in the only direction that matters here: an unresolved
+# segment folds to the _FOLD_UNK sentinel, which never completes a match, so an
+# unresolvable path simply adds no hit; nothing is ever cleared by this pass.
+#
+# Deliberate limits: a fold that goes through a name bound more than once, a function
+# parameter, or a non-path expression (a `%`/`.format` template) is unresolved, so a
+# destination built that way is still unseen (disclosed in the B-1049 test file).
+_PERSIST_FOLDED_PATH_RE = re.compile(
+    r"(?:/etc/cron\.(?:d|daily|weekly|monthly|hourly)"
+    r"|Library/LaunchAgents"
+    r"|\.config/systemd/user/\S+\.(?:service|timer)\b)",
+    re.I,
+)
+# Receiver-is-the-destination write methods (pathlib), and call names whose DESTINATION
+# is the second positional argument (shutil / os; the bare imported names too).
+_PERSIST_RECEIVER_WRITE_ATTRS = frozenset(
+    {"write_text", "write_bytes", "symlink_to", "hardlink_to", "touch"}
+)
+_PERSIST_DST_ARG1_NAMES = frozenset(
+    {"copy", "copy2", "copyfile", "copytree", "move", "rename", "symlink", "link"}
+)
+_PERSIST_ARGV_WRAPPERS = frozenset({"sudo", "doas", "pkexec"})
+_PERSIST_ARGV_MAX = 16  # elements read per argv literal
+
+
+def _persist_joined_text(node: ast.AST) -> "str | None":
+    """An f-string's text with each `{...}` hole as the _FOLD_UNK sentinel (so the
+    known `.service` tail of `f"{name}.service"` survives); None for any other node."""
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    return "".join(
+        v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else _FOLD_UNK
+        for v in node.values
+    )
+
+
+def _persist_fold_dest(node: ast.AST, ctx: "_FsFoldCtx", _hop: int = 0) -> "str | None":
+    """The folded text of a write destination, or None. `_fold_seg` first; then the two
+    shapes it does not fold on purpose (it is shared with the credential-path fold, whose
+    verdicts must not move): an f-string as the LAST `/` component or `.joinpath` argument
+    (`u / f"{name}.service"`), and one name hop (`p = <that>; p.write_text(...)`)."""
+    got = _fold_seg(node, ctx, frozenset())
+    if got is not None and _PERSIST_FOLDED_PATH_RE.search(got):
+        return got
+    if isinstance(node, ast.Name) and _hop == 0 and node.id in ctx.single:
+        return _persist_fold_dest(ctx.single[node.id], ctx, 1)
+    head = last = None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        last = node.right
+        head = _fold_seg(node.left, ctx, frozenset())
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "joinpath"
+        and node.args
+        and not node.keywords
+        and not any(isinstance(a, ast.Starred) for a in node.args)
+    ):
+        # No synthetic nodes: the fold memo is keyed on id(node), and a temporary node's
+        # id can be reused after it is freed.
+        last = node.args[-1]
+        head = _fold_seg(node.func.value, ctx, frozenset())
+        for a in node.args[:-1]:
+            seg = _fold_seg(a, ctx, frozenset())
+            head = _fold_pjoin(_FOLD_UNK if head is None else head, _FOLD_UNK if seg is None else seg)
+    tail = _persist_joined_text(last) if last is not None else None
+    if tail is None or head is None:
+        return got
+    joined = _fold_pjoin(head, tail)
+    return joined if _PERSIST_FOLDED_PATH_RE.search(joined) else got
+
+
+def _persist_open_writes(call: ast.Call, mode_idx: int) -> bool:
+    """True when an `open`-style call's mode argument (keyword `mode`, else position
+    *mode_idx*) writes. No mode is a read. A mode that is not a string literal is
+    treated as a write: the destination already folded to a persistence path, and a
+    skill that reads a unit file through a computed mode is far rarer than one hiding
+    the write in a variable."""
+    mode = None
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode = kw.value
+    if mode is None and len(call.args) > mode_idx:
+        mode = call.args[mode_idx]
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+        return any(c in mode.value for c in "wax+")
+    return True
+
+
+def _persist_argv_kind(node: ast.AST, ctx: "_FsFoldCtx") -> "tuple[str, str] | None":
+    """`(program, service)` for an argv list/tuple literal `[systemctl, <--flags>, enable,
+    ...]` or `[launchctl, load, ...]` (optionally behind sudo/doas/pkexec) -- the two
+    verb-anchored alternatives of `_CRON_PERSIST_RE`, whose contiguous-text form cannot
+    match an argv split into separate string tokens. Elements are read only when they are
+    a string literal or a once-bound name; anything else is unknown and ends the read."""
+    if not isinstance(node, (ast.List, ast.Tuple)) or len(node.elts) < 2:
+        return None
+    vals: list = []
+    for e in node.elts[:_PERSIST_ARGV_MAX]:
+        if isinstance(e, (ast.Constant, ast.Name)):
+            v = _fold_seg(e, ctx, frozenset())
+        else:
+            v = None
+        vals.append(v)
+    i = 0
+    while i < len(vals) and vals[i] in _PERSIST_ARGV_WRAPPERS:
+        i += 1
+    if i >= len(vals) or vals[i] is None:
+        return None
+    prog = vals[i].rsplit("/", 1)[-1].lower()
+    if prog == "systemctl":
+        j = i + 1
+        while j < len(vals) and vals[j] is not None and vals[j].startswith("-"):
+            j += 1
+        if j < len(vals) and vals[j] is not None and vals[j].lower() == "enable":
+            svc = next(
+                (v for v in vals[j + 1:] if v is not None and not v.startswith("-")), ""
+            )
+            return "systemctl", svc
+    elif prog == "launchctl":
+        if i + 1 < len(vals) and vals[i + 1] is not None and vals[i + 1].lower() == "load":
+            svc = next(
+                (v for v in vals[i + 2:] if v is not None and not v.startswith("-")), ""
+            )
+            return "launchctl", svc
+    return None
+
+
+def _startup_persistence_sites(
+    tree: ast.AST, ctx: "_FsFoldCtx"
+) -> "list[tuple[int, str, str]]":
+    """B-1049: `(lineno, rule, detail)` for every write whose destination folds to a
+    startup-persistence path, and every argv-list enable/load of a service. Read-only
+    and verdict-free; check_installed_skills owns what a site means."""
+    sites: list = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            kind = _persist_argv_kind(node, ctx)
+            if kind is not None:
+                prog, svc = kind
+                verb = "enable" if prog == "systemctl" else "load"
+                sites.append((
+                    getattr(node, "lineno", 0),
+                    "STARTUP_PERSISTENCE_ENABLE",
+                    f"argv-list {prog} {verb} installs a boot-time service "
+                    f"(service: {svc or '?'})",
+                ))
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        cands: list = []  # destination nodes this call writes to
+        if isinstance(f, ast.Attribute):
+            if f.attr in _PERSIST_RECEIVER_WRITE_ATTRS:
+                cands.append(f.value)
+            elif f.attr == "open":
+                if _persist_open_writes(node, 0):
+                    cands.append(f.value)
+                if node.args and _persist_open_writes(node, 1):
+                    cands.append(node.args[0])
+            elif f.attr in ("rename", "replace") and len(node.args) == 1:
+                cands.append(node.args[0])  # Path.rename(target) / Path.replace(target)
+            elif f.attr in _PERSIST_DST_ARG1_NAMES or (
+                f.attr == "replace" and _attr_base(f.value) == "os"
+            ):
+                if len(node.args) >= 2:
+                    cands.append(node.args[1])
+        elif isinstance(f, ast.Name):
+            if f.id == "open" and node.args and _persist_open_writes(node, 1):
+                cands.append(node.args[0])
+            elif f.id in _PERSIST_DST_ARG1_NAMES and len(node.args) >= 2:
+                cands.append(node.args[1])
+        for kw in node.keywords:
+            if kw.arg == "dst" and (
+                (isinstance(f, ast.Attribute) and f.attr in _PERSIST_DST_ARG1_NAMES)
+                or (isinstance(f, ast.Name) and f.id in _PERSIST_DST_ARG1_NAMES)
+            ):
+                cands.append(kw.value)
+        for dest in cands:
+            folded = _persist_fold_dest(dest, ctx)
+            m = _PERSIST_FOLDED_PATH_RE.search(folded) if folded is not None else None
+            if m is not None:
+                where = m.group(0).lower()
+                what = (
+                    "a systemd user unit" if "systemd" in where
+                    else "a launchd launch agent" if "launchagents" in where
+                    else "a cron directory"
+                )
+                sites.append((
+                    getattr(node, "lineno", 0),
+                    "STARTUP_PERSISTENCE_WRITE",
+                    f"writes into {what} through a path assembled in code",
+                ))
+                break
+    return sites
+
+
 # -- B-917: loader sinks (runpy/importlib/zipimport execute a FILE by
 # PATH, not a name reference) and staged-import correlation (a write followed by an
 # import whose search path resolves to the same location). Both reuse shippedexec's
@@ -15435,6 +15649,13 @@ def analyze_python(
                 "while opening a file for write/append \u2014 PYTHONSTARTUP persistence "
                 "install (mechanism B)",
             )
+
+    # B-1049: startup-persistence writes / argv-list service enables whose destination or
+    # verb is assembled in code -- see the module comment above `_PERSIST_FOLDED_PATH_RE`.
+    # "info": the verdict (and every discriminator the regex route already has) lives in
+    # checks/_vet.py's B13 loop, keyed on these two rule names.
+    for _sp_ln, _sp_rule, _sp_detail in _startup_persistence_sites(tree, _fsctx):
+        add(_sp_rule, "info", _sp_ln, _sp_detail)
 
     if len(out) <= _MAX_FINDINGS_PER_FILE:
         return out
