@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import bisect
 import builtins
+import posixpath
 import re
 import weakref
 from collections import namedtuple
@@ -8800,6 +8801,687 @@ def _is_incluster_auth_exempt(node: ast.Call, hit_names: set, str_map: dict) -> 
     return _resolves_to_incluster_host(non_auth_subtrees, str_map)
 
 
+# B-1047: cross-function credential flow (one helper hop and beyond, linear-time).
+#
+# The same-scope CRED_EXFIL_FLOW pass above is name-based and file-wide, so a flow split
+# across a function boundary -- `def collect(): return open(".ssh/id_rsa").read()`,
+# `def upload(p): urlopen(Request(url, data=p.encode()))`, `upload(collect())` -- slipped
+# through it twice over: the credential leaves `collect` through a `return` (which no
+# Assign sees) and enters the sink through a PARAMETER (which `_cred_tainted_names`
+# deliberately never taints, or every `def f(x): requests.post(url, data=x)` would fire).
+# This pass answers both halves with one scoped origin-propagation per function:
+#   * origins: "#" (a credential-path read), "I" (the in-cluster service-account token
+#     only), "f:<k>" (the return value of local def k), "p:<name>" (a parameter).
+#   * a function is CRED-RETURNING when its return/yield carries "#" or an "f:" origin that
+#     is itself cred-returning (reverse-BFS over the call graph: linear, exact, no depth cap).
+#   * (def, param) is a SINK PARAM when that parameter reaches a recognised net sink, directly
+#     or through a call into another sink param (same BFS).
+#   * a conviction is a cred-derived value (a "#" origin, a cred-returning call, an inline
+#     credential read) reaching a net sink in the same scope, OR being passed to a sink param.
+# Scoped, not file-wide: the loop/with/container bindings added here (which the old pass
+# never modelled -- `for p in creds: data[str(p)] = p.read_text()` was missed even in ONE
+# function) must not leak a loop variable named `p` into every other function.
+# Mirrors the old pass's in-cluster carve-out: an "I"-only flow is exempt exactly when
+# `_is_incluster_auth_exempt` holds at the sink, and through a helper only when it holds at
+# EVERY sink call the parameter reaches.
+# Limits (declared, not silent): out-of-file callees, attribute calls other than
+# self./cls. on the enclosing class, a def stored in a variable/dict/Thread(target=...),
+# closures reading an enclosing function's local, `global X` writes, decorators that wrap.
+# A pair-count overflow (_XF_MAX_PAIRS) fails CLOSED: the scope is treated as returning a
+# credential and every parameter as reaching a sink.
+_XF_MAX_PAIRS = 200_000
+_XF_CONTAINER_ADD = frozenset(
+    {"append", "add", "extend", "update", "insert", "appendleft", "setdefault", "write", "writelines"}
+)
+_XF_READ_ATTRS = frozenset(
+    {"open", "read", "read_text", "read_bytes", "readlines", "readline", "load"}
+)
+
+
+def _xf_scope_nodes(body):
+    """Every node in *body* without entering a nested def/class (lambdas are folded into the enclosing scope) (its own scope)."""
+    stack = list(reversed(body))
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _xf_target_names(t: ast.AST):
+    if isinstance(t, ast.Name):
+        yield t.id
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for e in t.elts:
+            yield from _xf_target_names(e)
+    elif isinstance(t, ast.Starred):
+        yield from _xf_target_names(t.value)
+    elif isinstance(t, ast.Attribute):
+        # `self.x = v` / `cls.x = v`: a CLASS-wide slot, keyed "@x" (never the bare name
+        # `self` -- tainting that would taint every `self.y`). Other receivers
+        # (`obj.x = v`) are not followed.
+        if isinstance(t.value, ast.Name) and t.value.id in ("self", "cls"):
+            yield "@" + t.attr
+    elif isinstance(t, ast.Subscript):
+        # `d[k] = v` stores INTO d; `self.d[k] = v` into the slot "@d".
+        b = t.value
+        while isinstance(b, ast.Subscript):
+            b = b.value
+        if isinstance(b, ast.Name):
+            yield b.id
+        elif isinstance(b, ast.Attribute):
+            yield from _xf_target_names(b)
+
+
+def _xf_plain_names(t: ast.AST):
+    """Names a target statement REBINDS (not a subscript/attribute store into one)."""
+    if isinstance(t, ast.Name):
+        yield t.id
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for e in t.elts:
+            yield from _xf_plain_names(e)
+    elif isinstance(t, ast.Starred):
+        yield from _xf_plain_names(t.value)
+
+
+def _xf_refs(node: ast.AST) -> set:
+    """Names plus `self.x` / `cls.x` slots ("@x") read anywhere in *node*."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id in ("self", "cls")
+        ):
+            out.add("@" + n.attr)
+    return out
+
+
+_XF_MAX_PROSE_WORDS = 16
+
+
+def _xf_const_names_cred(value: str):
+    """'other' | 'incluster' | None for one string constant.
+
+    Anti-prose gate by WORD COUNT, not length: a prompt that merely says "secret"
+    (measured: security-guidance's 34 KB llm.py rubric matching `/secrets?\\b`) has
+    thousands of words, a path has a handful. The match is tested on every whitespace
+    token both raw and lexically normalised (repeated `/`, `./` and `x/../` collapsed), so
+    padding a real credential path with slashes or dot-segments -- however long -- still
+    reads as that path."""
+    toks = value.split()
+    if len(toks) > _XF_MAX_PROSE_WORDS:
+        return None
+    for t in toks or [value]:
+        for cand in (t, posixpath.normpath(t)):
+            if _INCLUSTER_TOKEN_PATH_RE.search(cand):
+                return "incluster"
+            if _CRED_PATH_RE.search(cand):
+                return "other"
+    return None
+
+
+def _xf_cred_class(node: ast.AST, ctx) -> str:
+    """`_cred_source_classification` restricted to PATH-SHAPED constants (see
+    `_xf_const_names_cred`). The same-scope pass tolerates a prose constant because a
+    tainted name must itself reach a sink call; across a call boundary it would carry an
+    800-line prompt constant into every helper that forwards it."""
+    has_incluster = False
+    has_other = False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            k = _xf_const_names_cred(n.value)
+            if k == "incluster":
+                has_incluster = True
+            elif k == "other":
+                has_other = True
+    if not has_other and ctx is not None and _has_folded_cred_path(node, ctx):
+        has_other = True
+    if has_other:
+        return "other"
+    return "incluster" if has_incluster else "none"
+
+
+def _xf_inline_cred_read(node: ast.AST, ctx) -> bool:
+    """A read call (open/read_text/...) whose own subtree names a credential path --
+    i.e. the secret's CONTENTS, not merely a URL string that mentions `.npmrc`."""
+    for c in ast.walk(node):
+        if not isinstance(c, ast.Call):
+            continue
+        f = c.func
+        if (isinstance(f, ast.Name) and f.id == "open") or (
+            isinstance(f, ast.Attribute) and f.attr in _XF_READ_ATTRS
+        ):
+            if _xf_cred_class(c, ctx) == "other":
+                return True
+    return False
+
+
+class _XfDef:
+    __slots__ = ("node", "cls", "params", "pos", "vararg", "kwarg", "kwonly", "idx")
+
+    def __init__(self, node, cls, idx):
+        self.node, self.cls, self.idx = node, cls, idx
+        a = node.args
+        pos = [x.arg for x in (*a.posonlyargs, *a.args)]
+        static = any(
+            isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list
+        )
+        if cls is not None and pos and not static:
+            pos = pos[1:]  # self / cls
+        self.pos = pos
+        self.kwonly = [x.arg for x in a.kwonlyargs]
+        self.vararg = a.vararg.arg if a.vararg else None
+        self.kwarg = a.kwarg.arg if a.kwarg else None
+        self.params = [*pos, *self.kwonly, *([self.vararg] if self.vararg else []),
+                       *([self.kwarg] if self.kwarg else [])]
+
+
+def _xf_collect_defs(tree: ast.AST):
+    defs: list = []
+    stack = [(tree, None)]
+    while stack:
+        node, cls = stack.pop()
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, ast.ClassDef):
+                stack.append((ch, ch))
+            elif isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs.append(_XfDef(ch, cls, len(defs)))
+                stack.append((ch, None))
+            else:
+                stack.append((ch, cls))
+    return defs
+
+
+def _xf_arg_targets(d: "_XfDef", args, keywords):
+    """[(param_name, arg_subtree)] -- which parameter of *d* each argument feeds. A
+    starred/double-starred argument feeds EVERY parameter (fail closed)."""
+    out = []
+    for i, a in enumerate(args):
+        if isinstance(a, ast.Starred):
+            out.extend((p, a.value) for p in d.params)
+        elif i < len(d.pos):
+            out.append((d.pos[i], a))
+        elif d.vararg:
+            out.append((d.vararg, a))
+    for kw in keywords:
+        if kw.arg is None:
+            out.extend((p, kw.value) for p in d.params)
+        elif kw.arg in d.pos or kw.arg in d.kwonly:
+            out.append((kw.arg, kw.value))
+        elif d.kwarg:
+            out.append((d.kwarg, kw.value))
+    return out
+
+
+_XF_THREADY = frozenset({"Thread", "Process", "Timer"})
+
+
+def _xf_star(expr: ast.AST) -> ast.AST:
+    return ast.Starred(value=expr, ctx=ast.Load())
+
+
+def _xf_call_views(call: ast.Call):
+    """[(callee_expr, args, keywords)] -- the call itself, plus the callee a dispatcher
+    forwards its arguments to: Thread/Process/Timer(target=F, args=(...)),
+    pool.submit(F, ...), loop.run_in_executor(ex, F, ...), asyncio.to_thread(F, ...),
+    functools.partial(F, ...), map(F, xs). A non-literal `args=`/`kwargs=` is passed as a
+    starred/double-starred expression, which feeds EVERY parameter (fail closed)."""
+    views = [(call.func, call.args, call.keywords)]
+    f = call.func
+    name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+    kw = {k.arg: k.value for k in call.keywords if k.arg}
+    if name in _XF_THREADY:
+        fn = kw.get("target") or kw.get("function")
+        if fn is None and name == "Timer" and len(call.args) > 1:
+            fn = call.args[1]
+        if fn is not None:
+            a = kw.get("args")
+            args = list(a.elts) if isinstance(a, (ast.Tuple, ast.List)) else (
+                [_xf_star(a)] if a is not None else []
+            )
+            k = kw.get("kwargs")
+            kws = (
+                [ast.keyword(arg=None, value=k)] if k is not None else []
+            )
+            views.append((fn, args, kws))
+    elif name in ("submit", "to_thread", "partial") and call.args:
+        views.append((call.args[0], call.args[1:], call.keywords))
+    elif name == "run_in_executor" and len(call.args) > 1:
+        views.append((call.args[1], call.args[2:], call.keywords))
+    elif name == "map" and len(call.args) > 1:
+        views.append((call.args[0], [_xf_star(x) for x in call.args[1:]], []))
+    return views
+
+
+class _XfScope:
+    """One scope's bindings, calls and returns, and its origin propagation result."""
+
+    def __init__(self, body, params, cls):
+        self.params = params
+        self.cls = cls
+        self.bindings: list = []  # (targets:list[str], value:ast)
+        self.calls: list = []
+        self.returns: list = []
+        self.plain: set = set()  # names this scope rebinds
+        self.stored: set = set()  # names this scope stores INTO (d[k] = v, d.append(v))
+        for n in _xf_scope_nodes(body):
+            if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for t in n.targets if isinstance(n, ast.Assign) else [n.target]:
+                    self.plain.update(_xf_plain_names(t))
+                    self.stored.update(set(_xf_target_names(t)) - set(_xf_plain_names(t)))
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                self.plain.update(_xf_plain_names(n.target))
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for it in n.items:
+                    if it.optional_vars is not None:
+                        self.plain.update(_xf_plain_names(it.optional_vars))
+            if isinstance(n, ast.Assign):
+                ts = [x for t in n.targets for x in _xf_target_names(t)]
+                self.bindings.append((ts, n.value))
+            elif isinstance(n, ast.AugAssign):
+                self.bindings.append((list(_xf_target_names(n.target)), n.value))
+            elif isinstance(n, ast.AnnAssign) and n.value is not None:
+                self.bindings.append((list(_xf_target_names(n.target)), n.value))
+            elif isinstance(n, ast.NamedExpr):
+                self.bindings.append((list(_xf_target_names(n.target)), n.value))
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                self.bindings.append((list(_xf_target_names(n.target)), n.iter))
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for it in n.items:
+                    if it.optional_vars is not None:
+                        self.bindings.append(
+                            (list(_xf_target_names(it.optional_vars)), it.context_expr)
+                        )
+            elif isinstance(n, ast.comprehension):
+                self.bindings.append((list(_xf_target_names(n.target)), n.iter))
+            elif isinstance(n, ast.Call):
+                self.calls.append(n)
+                f = n.func
+                if (
+                    isinstance(f, ast.Attribute)
+                    and f.attr in _XF_CONTAINER_ADD
+                    and isinstance(f.value, ast.Name)
+                ):
+                    self.stored.add(f.value.id)
+                    for v in (*n.args, *(k.value for k in n.keywords)):
+                        self.bindings.append(([f.value.id], v))
+            elif isinstance(n, ast.Return) and n.value is not None:
+                self.returns.append(n.value)
+            elif isinstance(n, (ast.Yield, ast.YieldFrom)) and n.value is not None:
+                self.returns.append(n.value)
+
+
+def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
+    """[(lineno, detail)] for cross-function / scoped credential-to-sink flows."""
+    ctx = source_ctx
+    defs = _xf_collect_defs(tree)
+    by_name: dict = {}
+    methods: dict = {}
+    for d in defs:
+        if d.cls is None:
+            by_name.setdefault(d.node.name, []).append(d.idx)
+        else:
+            methods.setdefault((id(d.cls), d.node.name), []).append(d.idx)
+
+    classes: dict = {}
+    for cn in ast.walk(tree):
+        if isinstance(cn, ast.ClassDef):
+            classes.setdefault(cn.name, []).append(cn)
+
+    def methods_of(cnode, attr, seen=None):
+        """Methods named *attr* on a local class, searching local bases (BFS, first
+        class that defines it)."""
+        order = [cnode]
+        visited = {id(cnode)}
+        i = 0
+        while i < len(order) and i < 64:
+            c = order[i]
+            i += 1
+            hit = methods.get((id(c), attr))
+            if hit:
+                return hit
+            for b in c.bases:
+                if isinstance(b, ast.Name):
+                    for bc in classes.get(b.id, ()):
+                        if id(bc) not in visited:
+                            visited.add(id(bc))
+                            order.append(bc)
+        return ()
+
+    # `x = Cls(...)` (file-wide, flow-insensitive) and `f = helper` aliases
+    var_class: dict = {}
+    alias_edges: list = []
+    for an in ast.walk(tree):
+        if isinstance(an, ast.Assign) and len(an.targets) == 1 and isinstance(an.targets[0], ast.Name):
+            tgt, rhs = an.targets[0].id, an.value
+            if isinstance(rhs, ast.Call) and isinstance(rhs.func, ast.Name) and rhs.func.id in classes:
+                var_class.setdefault(tgt, []).extend(classes[rhs.func.id])
+            elif isinstance(rhs, ast.Name):
+                alias_edges.append((tgt, rhs.id))
+    aliases: dict = {}  # name -> def idxs it may be bound to
+    changed_names = list(by_name)
+    by_alias_src: dict = {}
+    for tgt, src in alias_edges:
+        by_alias_src.setdefault(src, []).append(tgt)
+    stack = list(by_name)
+    cur: dict = {k: set(v) for k, v in by_name.items()}
+    while stack:
+        src = stack.pop()
+        for tgt in by_alias_src.get(src, ()):
+            add_set = cur.get(src, set()) - cur.get(tgt, set())
+            if add_set:
+                cur.setdefault(tgt, set()).update(add_set)
+                stack.append(tgt)
+    aliases = {k: sorted(v) for k, v in cur.items()}
+    del changed_names
+
+    def resolve_fn(f, cls):
+        if isinstance(f, ast.Name):
+            return aliases.get(f.id, ())
+        if isinstance(f, ast.Attribute):
+            b = f.value
+            if isinstance(b, ast.Name) and b.id in ("self", "cls") and cls is not None:
+                return methods_of(cls, f.attr)
+            if isinstance(b, ast.Name) and b.id in var_class:
+                out_ = []
+                for c in var_class[b.id]:
+                    out_.extend(methods_of(c, f.attr))
+                return out_
+            if isinstance(b, ast.Call) and isinstance(b.func, ast.Name) and b.func.id in classes:
+                out_ = []
+                for c in classes[b.func.id]:
+                    out_.extend(methods_of(c, f.attr))
+                return out_
+        return ()
+
+    def resolve(call, cls):
+        return resolve_fn(call.func, cls)
+
+    _sm: list = []
+
+    def get_str_map():
+        if not _sm:
+            _sm.append(_simple_str_const_assigns(tree))
+        return _sm[0]
+
+    tops = [n for n in getattr(tree, "body", [])]
+    mod = _XfScope(tops, [], None)
+    scopes = [(None, mod)]
+    for d in defs:
+        scopes.append((d, _XfScope(d.node.body, d.params, d.cls)))
+
+    # ---- per-scope origin propagation -------------------------------------------------
+    def classify_value(v, scope_cls):
+        seeds = set()
+        c = _xf_cred_class(v, ctx)
+        if c == "other":
+            seeds.add("#")
+        elif c == "incluster":
+            seeds.add("I")
+        for sub in ast.walk(v):
+            if isinstance(sub, ast.Call):
+                for k in resolve(sub, scope_cls):
+                    seeds.add(f"f:{k}")
+        return seeds
+
+    def propagate(scope, base, attr_base=None):
+        tainted: dict = {}
+        queue: list = []
+        pairs = 0
+        overflow = False
+
+        def add(name, origs):
+            nonlocal pairs, overflow
+            cur = tainted.setdefault(name, set())
+            new = origs - cur
+            if new:
+                pairs += len(new)
+                if pairs > _XF_MAX_PAIRS:
+                    overflow = True
+                    return
+                cur |= new
+                queue.append((name, new))
+
+        uses: dict = {}
+        bound = set(scope.params)
+        for ts, v in scope.bindings:
+            bound.update(ts)
+        for bi, (ts, v) in enumerate(scope.bindings):
+            for nm in _xf_refs(v):
+                uses.setdefault(nm, []).append(bi)
+        for nm, o in base.items():
+            if nm not in bound:
+                add(nm, set(o))
+        for nm, o in (attr_base or {}).items():
+            add(nm, set(o))
+        for p in scope.params:
+            add(p, {f"p:{p}"})
+        scope.seeded = False
+        for ts, v in scope.bindings:
+            seeds = classify_value(v, scope.cls)
+            if seeds & {"#", "I"}:
+                scope.seeded = True
+            if seeds:
+                for t in ts:
+                    add(t, seeds)
+        while queue and not overflow:
+            name, new = queue.pop()
+            for bi in uses.get(name, ()):
+                for t in scope.bindings[bi][0]:
+                    add(t, new)
+        scope.tainted = tainted
+        scope.overflow = overflow
+        return tainted
+
+    def strip(t):
+        return {
+            k: {o for o in v if not o.startswith("p:")}
+            for k, v in t.items()
+            if not k.startswith("@")
+        }
+
+    def with_overflow(b):
+        # fail closed: a module scope whose pair budget ran out has unknown taint, so
+        # every module-level name is treated as a credential read
+        if mod.overflow:
+            for nm in mod_names:
+                b.setdefault(nm, set()).add("#")
+        return b
+
+    mod_names = set()
+    mod_t = propagate(mod, {})
+    for ts, _v in mod.bindings:
+        mod_names.update(t for t in ts if not t.startswith("@"))
+    base = with_overflow(strip(mod_t))
+    for d, sc in scopes[1:]:
+        propagate(sc, base)
+    # Handoff slots, with ONE extra round (a slot filled by code that only reads another
+    # slot is the declared ceiling): `self.x = <cred>` in one method and read in another,
+    # and a module-level dict/list a function stores into (`S["k"] = <cred>`) that another
+    # function (or the module body) sends.
+    cslots: dict = {}
+    mslots: dict = {}
+    mod_bound = set()
+    for ts, _v in mod.bindings:
+        mod_bound.update(ts)
+    for d, sc in scopes[1:]:
+        for k, o in sc.tainted.items():
+            real = {x for x in o if not x.startswith("p:")}
+            if not real:
+                continue
+            if k.startswith("@") and d.cls is not None:
+                cslots.setdefault(id(d.cls), {}).setdefault(k, set()).update(real)
+            elif (
+                k in sc.stored
+                and k not in sc.plain
+                and k not in sc.params
+                and k in mod_bound
+            ):
+                mslots.setdefault(k, set()).update(real)
+    if cslots or mslots:
+        if mslots:
+            mod_t = propagate(mod, {}, mslots)
+        base = with_overflow(strip(mod_t))
+        for k, o in mslots.items():
+            base.setdefault(k, set()).update(o)
+        for d, sc in scopes[1:]:
+            if mslots or (d.cls is not None and id(d.cls) in cslots):
+                propagate(sc, base, cslots.get(id(d.cls)) if d.cls is not None else None)
+
+    def origins_of(node, scope):
+        """Origins carried by *node*: tainted names, local-call results, inline reads."""
+        o: set = set()
+        for nm in _xf_refs(node):
+            t = scope.tainted.get(nm)
+            if t:
+                o |= t
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                for k in resolve(sub, scope.cls):
+                    o.add(f"f:{k}")
+        if _xf_inline_cred_read(node, ctx):
+            o.add("#")
+        return o
+
+    # ---- cred-returning / in-cluster-returning functions (reverse BFS) ---------------
+    n = len(defs)
+    ret_o: list = [set() for _ in range(n)]
+    for d, sc in scopes[1:]:
+        o: set = set()
+        for r in sc.returns:
+            o |= origins_of(r, sc)
+        if sc.overflow:
+            o.add("#")
+        ret_o[d.idx] = o
+    callers: list = [[] for _ in range(n)]
+    for i in range(n):
+        for x in ret_o[i]:
+            if x.startswith("f:"):
+                callers[int(x[2:])].append(i)
+
+    def closure(seed_idx):
+        seen = set(seed_idx)
+        stack = list(seen)
+        while stack:
+            j = stack.pop()
+            for i in callers[j]:
+                if i not in seen:
+                    seen.add(i)
+                    stack.append(i)
+        return seen
+
+    impure_f = closure([i for i in range(n) if "#" in ret_o[i]])
+    incl_f = closure([i for i in range(n) if "I" in ret_o[i]]) - impure_f
+
+    def kind(origs):
+        """'impure' | 'incluster' | None for an origin set."""
+        if "#" in origs or any(
+            x.startswith("f:") and int(x[2:]) in impure_f for x in origs
+        ):
+            return "impure"
+        if "I" in origs or any(
+            x.startswith("f:") and int(x[2:]) in incl_f for x in origs
+        ):
+            return "incluster"
+        return None
+
+    # ---- sink params (reverse BFS over param -> param edges) -------------------------
+    sink_direct: set = set()
+    sink_nonexempt: set = set()
+    edges_in: dict = {}  # (j,q) -> list[(i,p)]  i.e. (i,p) feeds (j,q)
+    sink_calls: list = []  # (scope, call, is_net, is_curl)
+    for d, sc in scopes:
+        for call in sc.calls:
+            is_net = _is_net_sink(call.func, net_sink_aliases)
+            is_curl = _is_curl_wget_argv_call(call)
+            if is_net or is_curl:
+                sink_calls.append((d, sc, call, is_net))
+                if d is None:
+                    continue
+                o_call = origins_of(call, sc)
+                names = _names_in(call)
+                for p in d.params:
+                    tag = f"p:{p}"
+                    if tag not in o_call and not sc.overflow:
+                        continue
+                    sink_direct.add((d.idx, p))
+                    hit = {nm for nm in names if tag in sc.tainted.get(nm, ())}
+                    if not (is_net and hit and _is_incluster_auth_exempt(call, hit, get_str_map())):
+                        sink_nonexempt.add((d.idx, p))
+            if d is not None:
+                for fn_expr, v_args, v_kws in _xf_call_views(call):
+                    for k in resolve_fn(fn_expr, sc.cls):
+                        for q, arg in _xf_arg_targets(defs[k], v_args, v_kws):
+                            for x in origins_of(arg, sc):
+                                if x.startswith("p:"):
+                                    edges_in.setdefault((k, q), []).append((d.idx, x[2:]))
+
+    def back_closure(seed):
+        seen = set(seed)
+        stack = list(seen)
+        while stack:
+            node = stack.pop()
+            for pred in edges_in.get(node, ()):
+                if pred not in seen:
+                    seen.add(pred)
+                    stack.append(pred)
+        return seen
+
+    sink_params = back_closure(sink_direct)
+    nonexempt = back_closure(sink_nonexempt)
+
+    # ---- convictions -----------------------------------------------------------------
+    out: list = []
+    seen_ln: set = set()
+    for d, sc, call, is_net in sink_calls:
+        o = origins_of(call, sc)
+        kd = kind(o)
+        if kd is None and sc.overflow and (sc.seeded or mod.overflow or base):
+            # the scope's pair budget ran out: its taint map is incomplete, so a scope that
+            # reads a credential (or sees module-level taint) and has a sink is convicted
+            kd = "impure"
+        if kd is None:
+            continue
+        if kd == "incluster" and is_net:
+            hit = {nm for nm in _names_in(call) if "I" in sc.tainted.get(nm, ())}
+            if hit and _is_incluster_auth_exempt(call, hit, get_str_map()):
+                continue
+        detail = (
+            "credential-file contents flow into a network sink (read secret -> send out)"
+            if is_net
+            else "credential-file contents flow into a curl/wget egress argv (read secret -> send out)"
+        )
+        ln = getattr(call, "lineno", 0)
+        if ln not in seen_ln:
+            seen_ln.add(ln)
+            out.append((ln, detail))
+    for d, sc in scopes:
+        for call in sc.calls:
+            for fn_expr, v_args, v_kws in _xf_call_views(call):
+                for k in resolve_fn(fn_expr, sc.cls):
+                    for q, arg in _xf_arg_targets(defs[k], v_args, v_kws):
+                        if (k, q) not in sink_params:
+                            continue
+                        kd = kind(origins_of(arg, sc))
+                        if kd is None or (kd == "incluster" and (k, q) not in nonexempt):
+                            continue
+                        ln = getattr(call, "lineno", 0)
+                        if ln not in seen_ln:
+                            seen_ln.add(ln)
+                            out.append(
+                                (
+                                    ln,
+                                    "credential-file contents flow into a network sink "
+                                    "(read secret -> send out)",
+                                )
+                            )
+    return out
+
+
 def _is_decode_call(node: ast.AST) -> bool:
     if not isinstance(node, ast.Call):
         return False
@@ -14638,6 +15320,13 @@ def analyze_python(
                     getattr(node, "lineno", 0),
                     _detail,
                 )
+
+        # B-1047: the flow the name-based pass above cannot see -- the credential read
+        # and the network send split across local functions (return -> argument), and
+        # the loop / with / container bindings that pass never modelled. Scoped and
+        # linear; see the block comment above `_xf_cred_flow_findings`.
+        for _xf_ln, _xf_detail in _xf_cred_flow_findings(tree, _fsctx, net_sink_aliases):
+            add("CRED_EXFIL_FLOW", "crit", _xf_ln, _xf_detail)
 
     # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls
     # hit _FOLD_MAX_DEPTH and gave up on their own subtree -- round-3 added the counter
