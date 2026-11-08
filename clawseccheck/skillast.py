@@ -16197,10 +16197,12 @@ def _imported_sink_names(tree: ast.AST) -> tuple:
     Found by the adversarial pass on B-592: `from urllib.request import urlopen as u`
     then `u(url)` is an ORDINARY idiom, not evasion, and a bare-Name call carries no base
     for `_is_net_sink` to gate on - so the whole family went unreported. Deliberately
-    NOT extended to `getattr(requests, "post")(...)` or
-    `importlib.import_module("os").system(...)`: those are evasion shapes the engine's own
-    rules do not resolve either, and a presence scan that out-detects the finding engine
-    would put capabilities in a permission proposal that no check can corroborate.
+    NOT extended to `importlib.import_module("os").system(...)` or a getattr with a
+    non-constant attribute name: those are evasion shapes the engine's own rules do not
+    resolve either, and a presence scan that out-detects the finding engine would put
+    capabilities in a permission proposal that no check can corroborate. (A getattr with
+    a CONSTANT attribute name is resolved by `_is_net_sink` since B-1058, so presence
+    follows it there - it mirrors the engine rather than leading or trailing it.)
     """
     net_names: set = set()
     exec_names: set = set()
