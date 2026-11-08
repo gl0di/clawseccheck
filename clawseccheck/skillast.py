@@ -5099,12 +5099,21 @@ def _all_call_sites_bind_fixed_argv(
             binds = scope_bindings.get(owner_map.get(expr))
             if binds:
                 resolved = binds.get(expr.id, expr)  # resolve a var-bound command list
+        # B-1071: `run(["kubectl", "exec", pod] + ["ls"])` -- the call-site twin of
+        # B-1018's sink-side `["prog"] + rest`. `+` on a list never changes index 0, so
+        # argv[0] is the head literal's first element; every other operand is kept as
+        # one more argv element so the taint checks below still see it.
+        concat = _b1071_concat_with_literal_head(resolved)
+        if concat is not None:
+            resolved = concat
         if not isinstance(resolved, (ast.List, ast.Tuple)) or not resolved.elts:
             return False  # unresolvable or empty -- not provably a fixed command
         prog = resolved.elts[0]
         visible = _tainted_names_visible(expr, ext_taint_map, owner_map, parent_scope, shadow_cache)
         if (_names_in(prog) & visible) or (ref_res is not None and ref_res.source_in(prog)):
             return False  # tainted program name at THIS call site -> stays crit
+        if _b1071_inline_source_in(prog):
+            return False  # B-1071: inline argv/input() read as the program -> stays crit
         if _argv0_is_shell_indirect_exec(resolved.elts):
             rest_names = set()
             for elt in resolved.elts[1:]:
@@ -5113,7 +5122,72 @@ def _all_call_sites_bind_fixed_argv(
                 ref_res is not None and any(ref_res.source_in(e) for e in resolved.elts[1:])
             ):
                 return False  # tainted arg handed to a shell/interpreter -> stays crit
+            if any(_b1071_inline_source_in(e) for e in resolved.elts[1:]):
+                return False  # B-1071: inline argv/input() handed to a shell -> stays crit
     return True
+
+
+def _b1071_inline_source_in(node: "ast.AST | None") -> bool:
+    """B-1071 (fail-closed companion): True if `node` spells a process-input read
+    inline -- any `.argv` attribute or bare `argv` name (`sys.argv[1]`, `s.argv`,
+    `from sys import argv; argv[1]`) or a call to `input`/`raw_input`. Name-set taint
+    (`_names_in(...) & visible`) cannot see these: the read is an expression, not a
+    tainted variable. Used only to REFUSE a call-site argv[0] as "provably fixed"; it
+    can never clear anything."""
+    if node is None:
+        return False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute) and n.attr == "argv":
+            return True
+        if isinstance(n, ast.Name) and n.id == "argv":
+            return True
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("input", "raw_input")
+        ):
+            return True
+    return False
+
+
+def _b1071_concat_with_literal_head(expr: ast.AST) -> "ast.List | None":
+    """B-1071: flatten a left-leaning `+` chain whose leftmost operand is a non-empty
+    list/tuple LITERAL into one ast.List (head literal's elements, then each right
+    operand as one opaque element). Returns None for any other shape.
+
+    Fail-closed: the head's argv[0] must be a plain string constant that can never
+    become a shell / interpreter / re-exec wrapper (`_prog_name_could_become_shell_
+    indirect`, B-1018/B-1021) -- `["bash"] + rest` or `["env"] + rest` stay None, so
+    the caller keeps its crit default. A Starred head element, a non-literal head
+    (Name, Call, BinOp of something else) or a `*`/`-`/other operator is None too."""
+    chain = []
+    node = expr
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        chain.append(node.right)
+        node = node.left
+    if not chain or not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+        return None
+    # Every right operand must itself be a list/tuple DISPLAY: anything else (a Name,
+    # Call, Subscript, ...) could be an object whose `__radd__` (or a list subclass,
+    # whose reflected method runs first) returns an arbitrary argv, program included.
+    if not all(isinstance(r, (ast.List, ast.Tuple)) for r in chain):
+        return None
+    # C-135 (B-1071 round 1): the appended TAIL must be fully literal strings. A head
+    # such as `kubectl exec <pod>` / `docker exec <c>` / `git -c` / a versioned
+    # interpreter re-executes or interprets what follows it, so `[... "exec", c] +
+    # ["sh", "-c", tainted]` must stay crit; only the head display may carry taint,
+    # which is exactly the plain-list call-site policy this mirrors.
+    if not all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str)
+        for r in chain for e in r.elts
+    ):
+        return None
+    head = node.elts[0]
+    if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
+        return None
+    if _prog_name_could_become_shell_indirect(node.elts):
+        return None
+    return ast.List(elts=[*node.elts, *reversed(chain)], ctx=ast.Load())
 
 
 def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
@@ -6200,6 +6274,11 @@ def _b863_resolve_call_site(expr, tree, owner_map):
     elts) for a Name resolved this way, or ("unresolvable", None)."""
     if isinstance(expr, (ast.List, ast.Tuple)) and expr.elts and not isinstance(expr.elts[0], ast.Starred):
         return "literal", list(expr.elts)
+    # B-1071: `run(["kubectl", "exec", pod] + ["ls"])` -- a literal-headed `+` chain
+    # with a fixed, non-shell argv[0] (see `_b1071_concat_with_literal_head`).
+    concat = _b1071_concat_with_literal_head(expr)
+    if concat is not None:
+        return "literal", list(concat.elts)
     if isinstance(expr, ast.Name):
         owner = owner_map.get(expr)
         scope = owner if owner is not None else None
@@ -6524,6 +6603,16 @@ def _b863_tier1_tier2_verdict(
     resolved_sites = [_b863_resolve_call_site(expr, tree, owner_map) for expr in call_sites]
     if any(rkind == "unresolvable" for rkind, _ in resolved_sites):
         return True  # unresolvable call site -- crit, as today
+    # B-1071: an inline argv/input() read as a call site's program is crit, whatever
+    # the body does (name-set taint below cannot see an expression-level read).
+    if any(elts and _b1071_inline_source_in(elts[0]) for _, elts in resolved_sites):
+        return True
+    if any(
+        elts and _argv0_is_shell_indirect_exec(elts)
+        and any(_b1071_inline_source_in(e) for e in elts[1:])
+        for _, elts in resolved_sites
+    ):
+        return True
 
     if kind == "none":
         return None
