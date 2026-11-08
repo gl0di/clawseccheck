@@ -899,6 +899,23 @@ def _random_shell(rng: random.Random) -> str:
     return body + (nl if rng.random() < 0.7 else "")
 
 
+# Rules analyze_shell gained AFTER the frozen original above was snapshotted. They do not
+# touch the offset/line-number machinery C-651 rewrote (each numbers physical lines straight
+# off `masked.splitlines()`, like the SHELL_ENV_EXFIL loop the original already contains),
+# so the original cannot know them. The parity claim here is "every finding the original
+# can produce is reproduced bug for bug"; these rules are compared by their own tests
+# (test_b1065*, test_b1063*, test_b1066*), and are excluded from BOTH sides so a new
+# rule never silently widens or masks the comparison.
+_POST_SNAPSHOT_SHELL_RULES = frozenset({
+    "SHELL_ENV_BODY_EXFIL", "SHELL_DNS_EXFIL", "SHELL_STAGED_CRED_UPLOAD",
+})
+
+
+def _new_analyze_shell(src, filename="<skill>"):
+    return [f for f in skillast.analyze_shell(src, filename)
+            if f.rule not in _POST_SNAPSHOT_SHELL_RULES]
+
+
 def test_analyze_shell_matches_the_original_on_generated_scripts():
     rng = random.Random(6512)
     fired = 0
@@ -916,7 +933,7 @@ def test_analyze_shell_matches_the_original_on_generated_scripts():
     ]
     corpus += [_random_shell(rng) for _ in range(250)]
     for src in corpus:
-        old, new = _OLD_ANALYZE_SHELL(src), skillast.analyze_shell(src)
+        old, new = _OLD_ANALYZE_SHELL(src), _new_analyze_shell(src)
         assert new == old, src[:200]
         fired += bool(new)
     assert fired > 40  # positive control: findings actually fired, with their line numbers
@@ -933,7 +950,7 @@ def test_analyze_shell_matches_the_original_on_real_fixture_files():
     fired = 0
     for f in files:
         src = _text(f)
-        old, new = _OLD_ANALYZE_SHELL(src, f.name), skillast.analyze_shell(src, f.name)
+        old, new = _OLD_ANALYZE_SHELL(src, f.name), _new_analyze_shell(src, f.name)
         assert new == old, str(f.relative_to(_FIXTURES))
         fired += bool(new)
     assert fired >= 3  # positive control: the real shell fixtures do produce findings

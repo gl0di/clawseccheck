@@ -19830,6 +19830,56 @@ _SH_CURL_BODY_FLAGS = frozenset({
 })
 
 
+#: Programs whose single-quoted argument is THEIR OWN language, with no way to run a shell
+#: command or expand a shell variable: a ``$name`` there is a jq variable, not a secret.
+#: Deliberately just ``jq`` -- awk (``system()``), sed (``e``), perl, python, sh/bash/eval/
+#: envsubst/xargs all hand the quoted text to a shell or interpreter that DOES expand it.
+_SH_DOLLAR_IS_OWN_SYNTAX_PROGS = frozenset({"jq"})
+
+
+def _sh_word_expands_cred_env(word, depth: int = 0) -> bool:
+    """B-1065: whether the shell would EXPAND a credential-shaped variable inside this
+    curl body word. Only a ``variable`` part (``$TOKEN``/``${TOKEN}``) or a variable
+    inside a ``$(...)`` command substitution counts; ``$name`` inside a single-quoted run
+    of a ``jq '{password:$password}'`` filter template is jq's own variable, not a secret.
+
+    Fail-closed, the narrowing is deliberately tiny:
+      * the ONLY thing cleared is a ``$name`` in a literal (single-quoted) word of a
+        ``jq`` command inside a ``$(...)``; any other command's words (echo, sh -c,
+        eval, envsubst, xargs, awk, ...) keep the raw-text match, because those hand the
+        quoted text to something that expands it;
+      * backtick substitutions are never narrowed (their body is un-escaped by the shell
+        before it is parsed, so a re-scan would see different text);
+      * an unscannable ``$(...)`` (unbalanced, arithmetic, nesting past the bound) keeps
+        the raw-text match.
+    """
+    for part in word.parts:
+        if part.kind == "variable":
+            if _SH_CRED_ENV_RE.search(part.text):
+                return True
+        elif part.kind == "cmdsub":
+            if not _SH_CRED_ENV_RE.search(part.text):
+                continue
+            txt = part.text
+            cmds = None
+            if txt.startswith("$(") and txt.endswith(")") and not txt.startswith("$(("):
+                cmds = _shellwords.scan_line(txt[2:-1]) if depth < 4 else None
+            if cmds is None:
+                return True  # backtick / arithmetic / unscannable: raw match stands
+            for c in cmds:
+                if not c.words:
+                    continue
+                if c.words[0].text in _SH_DOLLAR_IS_OWN_SYNTAX_PROGS:
+                    if any(_sh_word_expands_cred_env(w, depth + 1) for w in c.words):
+                        return True
+                elif any(_SH_CRED_ENV_RE.search(w.text) for w in c.words):
+                    return True
+        elif part.kind != "literal" and _SH_CRED_ENV_RE.search(part.text):
+            # glob/brace/unknown kinds: never silently clear a credential-shaped name.
+            return True
+    return False
+
+
 def _sh_cred_env_in_body_lines(masked: str) -> set:
     """B-1065: physical line numbers where a credential-shaped env var
     (``$...SECRET``/``$...TOKEN``/... per ``_SH_CRED_ENV_RE``) is the value of a curl
@@ -19876,6 +19926,10 @@ def _sh_cred_env_in_body_lines(masked: str) -> set:
                     t.long_name in _SH_CURL_BODY_FLAGS
                     and t.value_text
                     and _SH_CRED_ENV_RE.search(t.value_text)
+                    and (
+                        t.value_word is None
+                        or _sh_word_expands_cred_env(t.value_word)
+                    )
                 ):
                     hits.add(i)
                     break
