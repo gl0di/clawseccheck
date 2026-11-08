@@ -18329,17 +18329,20 @@ def _sh_reverse_shell_lines(masked: str) -> list:
             open_fds.clear()
             open_fds.update(fds)
         for lit in () if shape else spill:
-            # over-budget references: judge the literal itself, once per (literal, fd state)
+            # over-budget references: judge the literal itself, once per (literal, fd state);
+            # the fd state it leaves behind is part of the memo, so a hit and a miss agree
             key = (lit, frozenset(open_fds))
             if key not in spill_memo:
                 b = _sh_rev_lex(lit, [])[1]
                 got = None
+                fds = set(open_fds)
                 for t, mask, oracle in widen([(b, *_sh_rev_prepare(b))]):
-                    got = _sh_rev_scan_text(t, set(open_fds), mask, oracle)
+                    got = _sh_rev_scan_text(t, fds, mask, oracle)
                     if got:
                         break
-                spill_memo[key] = got
-            shape = spill_memo[key]
+                spill_memo[key] = (got, frozenset(fds))
+            shape, fds_after = spill_memo[key]
+            open_fds.update(fds_after)
             if shape:
                 break
         if shape:

