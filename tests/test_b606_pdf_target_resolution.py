@@ -31,7 +31,9 @@ from clawseccheck.cli import _default_pdf_target  # noqa: E402
 # B-1056: the default-store fallback is returned EXPANDED, never as a literal "~/..." that
 # the delivery renderer would resolve against the cwd.
 def _fallback() -> str:
-    return str(Path("~/.clawseccheck/report.pdf").expanduser())
+    # Against the suite's REDIRECTED $HOME (the code under test expands "~" at call time
+    # against the same variable) - never the ambient one, which B-519 forbids reading.
+    return os.path.join(os.environ["HOME"], ".clawseccheck", "report.pdf")
 
 
 def _home_with_outbound(tmp_path: Path) -> Path:
