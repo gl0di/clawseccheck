@@ -90,12 +90,11 @@ def _dist_applies_to_home(home) -> bool:
     A module-level seam on purpose, like `_installed_dist_version` above: a test that
     drives the installed-build branch over a fixture home patches THIS name to say yes.
     """
-    from pathlib import Path as _Path  # noqa: PLC0415
-
+    from . import pathprobe as _pathprobe  # noqa: PLC0415
     from .checks._lifecycle import _b33_is_this_machines_home  # noqa: PLC0415
 
     try:
-        return bool(_b33_is_this_machines_home(_Path(home).expanduser()))
+        return bool(_b33_is_this_machines_home(_pathprobe.expand_user(home)))
     except Exception:  # noqa: BLE001 - fail to "not this machine's home" (stamp decides)
         return False
 

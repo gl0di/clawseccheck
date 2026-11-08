@@ -149,6 +149,16 @@ def test_clean_specs_still_render_a_plan(spec):
     assert "I will not build a fetch plan" not in plan
     assert _command_lines(plan), f"no fetch command rendered for {spec!r}"
     for line in _command_lines(plan):
+        if line.startswith("git clone"):
+            # git ends its OPTIONS with `--` and the remote + target follow as positionals
+            # (B-1052): there it is the injection guard, and nothing after it is an option
+            # of git's. Only npm pack / pip download / curl carry a flag (--pack-destination,
+            # -d, ...) that a `--` placed before it would demote to a positional.
+            tokens = shlex.split(line)
+            assert tokens.count("--") == 1, f"git clone must end its options once: {line!r}"
+            assert tokens.index("--") == len(tokens) - 3, (
+                f"`--` must directly precede the remote and the target: {line!r}")
+            continue
         assert "--" not in shlex.split(line)[1:], (
             f"standalone -- token in {line!r}; it would make --pack-destination positional")
 

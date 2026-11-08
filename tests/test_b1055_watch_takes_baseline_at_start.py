@@ -40,6 +40,7 @@ def test_the_first_edit_after_start_alerts_against_a_start_baseline(tmp_path):
     store.mkdir()
     buf = io.StringIO()
     result = {}
+    stop = threading.Event()
 
     def _runner():
         result["rc"] = watch.run_watch(
@@ -48,27 +49,40 @@ def test_the_first_edit_after_start_alerts_against_a_start_baseline(tmp_path):
             heartbeat_path=store / "watch_heartbeat.json",
             debounce_s=0.5, select_timeout_s=0.1, poll_interval_s=0.1,
             extra_monitor_args=OPT_OUT, max_cycles=1,
-            install_signal_handlers=False, stream=buf)
+            install_signal_handlers=False, stop_event=stop, stream=buf)
 
     t = threading.Thread(target=_runner, daemon=True)
     t.start()
-    # The baseline is taken at start, before any change.
-    assert _wait_for(lambda: (store / "state.json").is_file(), 120), buf.getvalue()
-    assert "no baseline in this store yet" in buf.getvalue()
-    hb = watch.read_heartbeat(store / "watch_heartbeat.json")
-    assert hb["last_scan_at"] and hb["cycles"] == 0
+    try:
+        # The baseline is taken at start, before any change.
+        # state.json appears while the monitor subprocess is still running; the watcher only
+        # writes its header to the stream and records last_scan_at AFTER that subprocess
+        # returns, so wait for those (not for the state file) before asserting on them.
+        assert _wait_for(lambda: (store / "state.json").is_file(), 120), buf.getvalue()
+        assert _wait_for(
+            lambda: "no baseline in this store yet" in buf.getvalue()
+            and (watch.read_heartbeat(store / "watch_heartbeat.json") or {}).get("last_scan_at"),
+            120), buf.getvalue()
+        hb = watch.read_heartbeat(store / "watch_heartbeat.json")
+        assert hb["last_scan_at"] and hb["cycles"] == 0
 
-    cfg = home / "openclaw.json"
-    time.sleep(1.0)
-    cfg.write_text(cfg.read_text(encoding="utf-8").replace(
-        '"127.0.0.1:8080"', '"0.0.0.0:8080"'), encoding="utf-8")
-    t.join(timeout=180)
-    assert not t.is_alive()
-    text = buf.getvalue()
-    rescan = text.split("change detected, re-scanned", 1)
-    assert len(rescan) == 2, text
-    assert "Baseline saved" not in rescan[1], "the first edit must not become the baseline"
-    assert "change(s) detected" in rescan[1], rescan[1]
+        cfg = home / "openclaw.json"
+        time.sleep(1.0)
+        cfg.write_text(cfg.read_text(encoding="utf-8").replace(
+            '"127.0.0.1:8080"', '"0.0.0.0:8080"'), encoding="utf-8")
+        t.join(timeout=180)
+        assert not t.is_alive()
+        text = buf.getvalue()
+        rescan = text.split("change detected, re-scanned", 1)
+        assert len(rescan) == 2, text
+        assert "Baseline saved" not in rescan[1], "the first edit must not become the baseline"
+        assert "change(s) detected" in rescan[1], rescan[1]
+    finally:
+        # A watcher thread left running past a failed assertion would keep consuming
+        # process-directed signals and break unrelated tests (a SIGALRM-owing test in
+        # test_scanbudget_reentrancy measured exactly that), so always stop and join it.
+        stop.set()
+        t.join(timeout=60)
 
 
 def test_an_existing_baseline_is_not_retaken_at_start(tmp_path, monkeypatch):
