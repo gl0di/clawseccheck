@@ -1346,6 +1346,18 @@ _CRED_PATH_RE = re.compile(
     r"\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
     r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b|"
+    # B-1060: the OpenClaw config/credential store itself. `openclaw.json` holds the
+    # user's API keys and auth profiles and `credentials` is the flat credential file --
+    # the crown jewels on an OpenClaw box. The SHELL cred-path set already treats
+    # `.openclaw/` as a credential source (so `curl -F @openclaw.json` FAILs), but the
+    # Python critical path omitted it, so a read of openclaw.json -> network sink vetted
+    # INSTALL with no finding while the same shape reading ~/.ssh/id_rsa FAILed. Scoped
+    # to the two credential-bearing files, NOT all of `.openclaw/`: general agent-config
+    # reads stay on the info-level ENV_EXFIL_FLOW (_AGENT_CONFIG_PATH_RE), whose "skills
+    # legitimately send an API key to their own API" rationale does not hold for
+    # uploading the whole credential store -- the same reason .aws/credentials is
+    # critical regardless of destination.
+    r"\.openclaw/(?:openclaw\.json|credentials)|"
     # E-065/C-323: the HF-incident reproduction read a process's own environment
     # (which commonly carries API keys/tokens passed via env var) through procfs
     # rather than a dotfile. /var/run/secrets and /run/secrets (K8s service-account
@@ -7592,6 +7604,12 @@ _FOLDED_CRED_PATH_RE = re.compile(
     # string right after "gcloud" is sufficient to exclude "gcloud-helper" while still
     # matching the real ".config/gcloud/legacy_credentials/..." shape.
     r"|\.config/gcloud(?=/|$)"
+    # B-1060: the OpenClaw credential store, so a pathlib path-join
+    # (`Path.home()/".openclaw"/"openclaw.json"`) that never spells the path as one
+    # contiguous literal is caught the same way the literal scan (_CRED_PATH_RE) now is.
+    # Two fixed filenames, no bare-prefix collision risk, so no right-hand lookahead is
+    # needed here (unlike the gcloud directory above).
+    r"|\.openclaw/(?:openclaw\.json|credentials)"
     r"|/proc/(?:self|\d+)/environ",
     re.I,
 )
@@ -19709,6 +19727,335 @@ def _sh_newline_offsets(text: str) -> list[int]:
     return offs
 
 
+# B-1065: curl flags whose VALUE is request BODY/FORM data the server receives -- the
+# data-exfil channel. Kept DISTINCT from -H/--header (curlgrammar role AUTH_HEADER): a
+# secret in an `Authorization: Bearer $TOKEN` header is ordinary authed-API traffic (a
+# skill talking to its OWN api), which is exactly why analyze_shell's raw-socket-only
+# SHELL_ENV_EXFIL deliberately left `$VAR` piped to curl out of scope. The BODY channel
+# is the different, exfil-shaped case: a raw secret placed in POST data to a host.
+_SH_CURL_BODY_FLAGS = frozenset({
+    "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+    "--form", "--form-string",
+})
+
+
+def _sh_cred_env_in_body_lines(masked: str) -> set:
+    """B-1065: physical line numbers where a credential-shaped env var
+    (``$...SECRET``/``$...TOKEN``/... per ``_SH_CRED_ENV_RE``) is the value of a curl
+    DATA/FORM body flag (``-d``/``--data*``/``-F``/``--form*``) -- a secret sent off-box
+    in the request body.
+
+    This is the shell twin of the Python ``ENV_EXFIL_FLOW`` rule, which the shell side
+    had no equivalent for: ``SHELL_ENV_EXFIL`` fires only on a RAW socket (nc//dev/tcp),
+    and curl bodies were deliberately excluded because a ``$VAR`` reaching curl is often
+    an authed-API script. The discriminator here is the curl option ROLE, parsed with
+    the real positional ``curlargv``: a secret in a body flag's value is flagged; a
+    secret in ``-H``/``--header`` (role AUTH_HEADER) is NOT -- that is the legitimate
+    auth channel, and the corpus confirms legit scripts put the credential in the header
+    (`Authorization: Bearer $KEY`) with only non-secret data in the body.
+
+    Emitted at ``info`` severity (WARN, never FAIL): a body credential is genuinely
+    ambiguous -- an OAuth token endpoint legitimately posts ``client_secret=$SECRET`` to
+    its OWN provider -- which is exactly the ``warns_env_exfil`` "confirm the destination
+    is a trusted first-party API" case. Scoped to curl: ``curlargv`` is curl-specific, so
+    wget's own ``--post-data``/``--body-data`` body channel is a known remaining gap.
+    """
+    hits: set = set()
+    for i, raw in enumerate(masked.splitlines(), 1):
+        if "curl" not in raw or not _SH_CRED_ENV_RE.search(raw):
+            continue
+        commands = _shellwords.scan_line(raw)
+        if commands is None:
+            continue
+        for cmd in commands:
+            words = cmd.words
+            if not words:
+                continue
+            idx = 0
+            if idx < len(words) and words[idx].text == "do" and idx + 1 < len(words):
+                idx += 1
+            while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx].text):
+                idx += 1
+            if idx < len(words) and words[idx].text == "sudo" and idx + 1 < len(words):
+                idx += 1
+            if idx >= len(words) or words[idx].text != "curl":
+                continue
+            for t in _curlargv.parse_argv(words[idx + 1:]):
+                if (
+                    t.long_name in _SH_CURL_BODY_FLAGS
+                    and t.value_text
+                    and _SH_CRED_ENV_RE.search(t.value_text)
+                ):
+                    hits.add(i)
+                    break
+    return hits
+
+
+# B-1063: DNS-label exfiltration. A DNS lookup tool (dig/drill/nslookup/host/getent) is
+# an outbound channel the HTTP-centric SHELL_CRED_EXFIL model never saw: a secret placed
+# in the QUERY NAME leaves the box over DNS. A credential FILE needs an ENCODER
+# (base64/hex) to fit a <=63-char label, so a bare config read beside a dig is NOT flagged
+# (a benign `dig $(jq -r .dns_server openclaw.json)` reads one field, never encodes it); a
+# credential-shaped ENV VAR is already short enough to ride a label verbatim, so it needs
+# no encoder. See `_sh_dns_cred_exfil_lines` for the full rule.
+# Tool match: the unambiguous tool names match as a whole word anywhere on the line,
+# tolerating a path prefix (`/usr/bin/dig`) and any wrapper (`timeout 5 dig`, `env dig`,
+# `xargs dig`). `host` is ALSO an ordinary word ($HOST, hostname, host:port), so it is
+# matched only in command position (line start / after a separator / after a common
+# wrapper) AND followed by an argument.
+_SH_DNS_TOOL_RE = re.compile(
+    r"(?:^|[\s;&|(`/])(?:dig|drill|nslookup|resolvectl)\b", re.I
+)
+# ReDoS-safe: no two space-quantifiers are adjacent over the same text. Branch 1 is a
+# line start or separator followed by optional spaces; branch 2 is a wrapper word followed
+# by required spaces. The original `...[ \t]+)[ \t]*host` had an adjacent `[ \t]+`/`[ \t]*`
+# pair -> catastrophic backtracking on a run of spaces before a non-`host` word.
+_SH_DNS_HOST_RE = re.compile(
+    r"(?:(?:^|[;&|(`])[ \t]*"
+    r"|\b(?:do|then|else|sudo|env|timeout|nice|xargs|exec|command|if|while|until|time)\b[ \t]+)"
+    r"host[ \t]+(?=\S)",
+    re.I,
+)
+_SH_GETENT_HOSTS_RE = re.compile(r"\bgetent[ \t]+(?:hosts|ahosts\w*)\b", re.I)
+# The encoder is the low-FP discriminator for a whole-file credential: real DNS exfil must
+# base64/hex a file to fit it into <=63-char labels, while a benign config-driven lookup
+# reads one field and never encodes it. Kept to the CLEAR encoders; `tr -d`/`cut`/`fold`
+# are deliberately excluded (ordinary whitespace/field trimming, too common to treat as
+# an exfil encoder).
+_SH_ENCODER_RE = re.compile(
+    r"\b(?:base64|base32|basenc|xxd|hexdump|uuencode|openssl|od)\b"
+    r"|printf\b[^|;&]*%0?2?[xX]",
+    re.I,
+)
+
+
+def _sh_dns_line(raw: str) -> bool:
+    return bool(
+        _SH_DNS_TOOL_RE.search(raw)
+        or _SH_DNS_HOST_RE.search(raw)
+        or _SH_GETENT_HOSTS_RE.search(raw)
+    )
+
+
+def _sh_dns_cred_exfil_lines(masked: str) -> set:
+    """B-1063: physical line numbers where a credential (a cred FILE read or a
+    credential-shaped env var) is encoded and placed into a DNS lookup's query name --
+    DNS-tunnel exfiltration.
+
+    A credential FILE needs an ENCODER (base64/hex/...) to fit into a <=63-char DNS
+    label, so a bare config read beside a dig is deliberately NOT flagged (a benign
+    config-driven lookup reads one field and never encodes it). A credential-shaped ENV
+    VAR is already short enough to ride a label verbatim, so it needs NO encoder -- it is
+    flagged whenever it reaches the DNS query directly or through a variable.
+
+    Taint is tracked to a fixpoint over plain AND declaration-keyword assignments
+    (`local`/`declare`/`export`/...), carrying three facts per variable: it references a
+    cred env var (env), it touches a cred file (file), and an encoder appears in its
+    derivation (enc). A variable reaches the DNS query as exfil material when it is
+    env-tainted, or file-tainted AND enc-tainted.
+
+    Line-based (a backslash-continued binding/lookup is a known gap, shared with the
+    sibling SHELL_ENV_EXFIL raw-socket check). Emitted at ``info`` severity -> WARN,
+    routed into the warns_env_exfil bucket, same as the Python ENV_EXFIL_FLOW and the
+    B-1065 body-exfil rule.
+    """
+    lines = masked.splitlines()
+    # Collect (var, rhs) for plain `VAR=...` and declaration-keyword assignments.
+    assigns: list = []
+    for raw in lines:
+        m = _SH_VAR_ASSIGN_RE.match(raw)
+        if m:
+            assigns.append((m.group("var"), m.group("val")))
+            continue
+        dm = _SH_VAR_DECL_ASSIGN_RE.match(raw)
+        if dm:
+            assigns.append((dm.group("var"), raw[dm.end():]))
+
+    def _refs(text: str) -> set:
+        return set(_SH_VAR_REF_RE.findall(text))
+
+    # Three taint sets propagated by a WORKLIST over the variable-dependency graph: linear
+    # in (assignments + reference edges), so it needs no pass cap (which would fail-OPEN by
+    # silently under-tainting) and cannot run away (the DoS the pass cap guarded against).
+    # Monotonic: a set only grows, and an item is re-queued only when a var it references
+    # gained taint, so it terminates. env = carries a credential-shaped ENV VAR (needs no
+    # encoder); file = touches a credential FILE; enc = an encoder in the derivation chain.
+    items = [(var, val, _refs(val)) for var, val in assigns]
+    dependents: dict = {}
+    for i, (_var, _val, refs) in enumerate(items):
+        for r in refs:
+            dependents.setdefault(r, set()).add(i)
+    env_t: set = set()
+    file_t: set = set()
+    enc_t: set = set()
+    work = set(range(len(items)))
+    while work:
+        i = work.pop()
+        var, val, refs = items[i]
+        grew = False
+        if var not in env_t and (_SH_CRED_ENV_RE.search(val) or (refs & env_t)):
+            env_t.add(var)
+            grew = True
+        if var not in file_t and (_SH_CRED_FILE_RE.search(val) or (refs & file_t)):
+            file_t.add(var)
+            grew = True
+        if var not in enc_t and (_SH_ENCODER_RE.search(val) or (refs & enc_t)):
+            enc_t.add(var)
+            grew = True
+        if grew:
+            work |= dependents.get(var, set())
+    ready = env_t | (file_t & enc_t)
+
+    def _dns_arg_texts(raw: str) -> list:
+        # The argument text of each DNS command on the line: from the tool name to the
+        # next top-level command separator (`;`/`&`). Sliced at `;`/`&` only, NOT `|`, so
+        # a `$(... | encoder)` substitution inside the query stays intact while a
+        # credential sitting on a SEPARATE command of the same line (`dig x; cat $TOKEN`)
+        # is not mis-attributed to the lookup.
+        spans: list = []
+        for rx in (_SH_DNS_TOOL_RE, _SH_DNS_HOST_RE, _SH_GETENT_HOSTS_RE):
+            for m in rx.finditer(raw):
+                tail = raw[m.end():]
+                sep = re.search(r"[;&]", tail)
+                spans.append(tail[: sep.start()] if sep else tail)
+        return spans
+
+    hits: set = set()
+    for i, raw in enumerate(lines, 1):
+        if not _sh_dns_line(raw):
+            continue
+        for arg in _dns_arg_texts(raw):
+            arg_refs = _refs(arg)
+            # A cred env var rides a DNS label verbatim (no encoder needed). A cred FILE
+            # must be encoded within the same query -- and a reference to a file-tainted
+            # variable counts as the credential file, an encoder-tainted variable as the
+            # encoder, so a mix of a literal and a variable on either side is still caught
+            # (`dig $(cat $F | base64)` with F a file-tainted var). A variable already
+            # fully resolved to exfil material (env-tainted, or file+encoder-tainted) also
+            # reaches the query.
+            has_cred_file = bool(_SH_CRED_FILE_RE.search(arg)) or bool(arg_refs & file_t)
+            has_encoder = bool(_SH_ENCODER_RE.search(arg)) or bool(arg_refs & enc_t)
+            if (
+                _SH_CRED_ENV_RE.search(arg)
+                or (arg_refs & env_t)
+                or (has_cred_file and has_encoder)
+                or (ready and (arg_refs & ready))
+            ):
+                hits.add(i)
+                break
+    return hits
+
+
+# B-1066: staged temp-file laundering. A credential file is copied/archived into an
+# intermediate file, then THAT file is uploaded -- the upload command references only the
+# temp path, so the credential->upload data flow is broken (`cp cred /tmp/x; tar czf
+# /tmp/a.tgz /tmp/x; curl -T /tmp/a.tgz host`). Taint flows across copy/archive commands:
+# a cp/mv/rsync/tar/zip/... that touches a credential file (or an already-tainted path)
+# taints its output paths, to a fixpoint; an outbound curl/wget that uploads a tainted
+# path is then flagged. Ambiguous (a config BACKUP to the user's own service has the same
+# shape) -> WARN, never FAIL. Redirect-based laundering (`cat cred > x`) is a known gap:
+# shellwords cannot parse a redirection, so that line is skipped.
+_SH_COPY_ARCHIVE_CMDS = frozenset({
+    "cp", "mv", "install", "rsync", "tar", "zip", "gzip", "bzip2", "xz", "zstd",
+    "7z", "7za", "cpio", "pax",
+})
+
+
+def _sh_cmd_name_index(words: list) -> "int | None":
+    """Index of the command NAME word, skipping a leading `do`/`then`, `VAR=val`
+    env-prefixes and one `sudo`. None if no name word remains."""
+    idx = 0
+    if idx < len(words) and words[idx] in ("do", "then") and idx + 1 < len(words):
+        idx += 1
+    while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx]):
+        idx += 1
+    if idx < len(words) and words[idx] == "sudo" and idx + 1 < len(words):
+        idx += 1
+    return idx if idx < len(words) else None
+
+
+def _sh_path_candidates(word: str) -> set:
+    """Candidate file-path strings inside one shell word, for taint matching: the bare
+    word, the piece after a `@` (curl `-F f=@PATH`, `-d @PATH`), and the piece after a `=`
+    (wget `--post-file=PATH`). Surrounding quote characters are stripped (shellwords keeps
+    them in `.text`). Flags and URLs are dropped."""
+    word = word.strip("\"'`")
+    cands = {word}
+    if "@" in word:
+        cands.add(word.rsplit("@", 1)[-1].strip("\"'`"))
+    if "=" in word:
+        cands.add(word.rsplit("=", 1)[-1].strip("\"'`"))
+    return {c for c in cands if c and not c.startswith("-") and "://" not in c}
+
+
+def _sh_staged_cred_upload_lines(masked: str) -> set:
+    """B-1066: physical line numbers where a curl/wget uploads a file whose content was
+    derived from a credential file through an intermediate copy/archive (temp-file
+    laundering). Emitted at ``info`` severity -> WARN (warns_env_exfil).
+
+    Taint is propagated by a WORKLIST over the copy/archive commands (linear in commands
+    plus path-reference edges): a command taints its path args when it has a literal
+    credential-file arg or any of its path args is already tainted. No pass cap -- a cap
+    would fail-OPEN by silently under-tainting a deep chain -- and the worklist is
+    monotonic, so it cannot run away."""
+    def _copy_paths(word: str) -> str:
+        w = word.strip("\"'`")
+        w = w[1:] if w.startswith("@") else w
+        if not w or w.startswith("-") or "://" in w:
+            return ""
+        return w
+
+    line_cmds = [_shellwords.scan_line(raw) for raw in masked.splitlines()]
+
+    # One record per copy/archive command: its path args and whether it reads a literal
+    # credential file. `dependents[path]` = command indices that name that path.
+    copy_cmds: list = []
+    dependents: dict = {}
+    for cmds in line_cmds:
+        if not cmds:
+            continue
+        for c in cmds:
+            words = [w.text for w in c.words]
+            ci = _sh_cmd_name_index(words)
+            if ci is None or words[ci].rsplit("/", 1)[-1] not in _SH_COPY_ARCHIVE_CMDS:
+                continue
+            args = words[ci + 1:]
+            paths = {p for p in (_copy_paths(a) for a in args) if p}
+            has_cred = any(_SH_CRED_FILE_RE.search(a) for a in args)
+            idx = len(copy_cmds)
+            copy_cmds.append((paths, has_cred))
+            for p in paths:
+                dependents.setdefault(p, set()).add(idx)
+
+    tainted: set = set()  # literal file-path strings holding cred-derived content
+    work = set(range(len(copy_cmds)))
+    while work:
+        idx = work.pop()
+        paths, has_cred = copy_cmds[idx]
+        if not (has_cred or (paths & tainted)):
+            continue
+        for p in paths:
+            if p not in tainted:
+                tainted.add(p)
+                work |= dependents.get(p, set())
+
+    hits: set = set()
+    if not tainted:
+        return hits
+    for i, (raw, cmds) in enumerate(zip(masked.splitlines(), line_cmds), 1):
+        if cmds is None or not _SH_OUTBOUND_RE.search(raw):
+            continue
+        for c in cmds:
+            words = [w.text for w in c.words]
+            ci = _sh_cmd_name_index(words)
+            if ci is None or words[ci].rsplit("/", 1)[-1] not in _CURL_WGET_PROGRAMS:
+                continue
+            if any(_sh_path_candidates(w) & tainted for w in words[ci + 1:]):
+                hits.add(i)
+                break
+    return hits
+
+
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
@@ -19794,6 +20141,45 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "a credential-shaped environment variable is sent over a raw socket "
                 "(nc//dev/tcp) \u2014 credential exfiltration",
             )
+
+    # B-1065: a credential-shaped env var in a curl request BODY (-d/--data/--form) --
+    # the shell twin of Python's ENV_EXFIL_FLOW. "info" severity -> WARN (routed into the
+    # warns_env_exfil bucket in checks/_vet.py, never FAIL): a body credential is
+    # ambiguous (an OAuth token endpoint legitimately posts client_secret to its own
+    # provider), exactly the warns_env_exfil "confirm the destination is first-party" case.
+    for i in sorted(_sh_cred_env_in_body_lines(masked)):
+        add(
+            "SHELL_ENV_BODY_EXFIL",
+            "info",
+            i,
+            "a credential-shaped environment variable is sent in a curl request body "
+            "(-d/--data/--form) \u2014 confirm the destination is a trusted first-party API, "
+            "not an attacker-controlled host",
+        )
+
+    # B-1063: a credential encoded into a DNS lookup's query name (dig/nslookup/host ...
+    # base64(secret).attacker) -- DNS-tunnel exfiltration. "info" -> WARN (warns_env_exfil).
+    for i in sorted(_sh_dns_cred_exfil_lines(masked)):
+        add(
+            "SHELL_DNS_EXFIL",
+            "info",
+            i,
+            "an encoded credential is placed in a DNS lookup's query name "
+            "(dig/nslookup/host) \u2014 possible DNS-tunnel exfiltration; confirm the queried "
+            "name is not carrying secret data off-box",
+        )
+
+    # B-1066: a credential file laundered through a temp copy/archive and then uploaded
+    # (cp cred /tmp/x; tar czf /tmp/a.tgz /tmp/x; curl -T /tmp/a.tgz host). "info" -> WARN.
+    for i in sorted(_sh_staged_cred_upload_lines(masked)):
+        add(
+            "SHELL_STAGED_CRED_UPLOAD",
+            "info",
+            i,
+            "uploads a file whose content was copied/archived from a credential file "
+            "earlier in this script \u2014 possible staged exfiltration; confirm the "
+            "destination is a trusted first-party backup, not an attacker-controlled host",
+        )
 
     # C-630: plaintext reverse shell (bash /dev/tcp, nc -e, socat exec:, fd-bound shell).
     for _rs_ln, _rs_shape in _sh_reverse_shell_lines(masked):
