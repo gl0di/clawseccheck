@@ -3386,7 +3386,7 @@ def _norm_dm_policy(channel_name, value):
 # nonetheless read from `extensions/<id>/src` at that tag, the others being out-of-tree npm
 # plugins (sources tagged [tag] below; [dist] = also read in the installed bundle). The vendor's own
 # policy extension keeps a static approximation of the same table
-# (`evaluation-CveYorUc.mjs` IMPLICIT_DEFAULT_ACCOUNT_FIELDS / IMPLICIT_ACCOUNT_REQUIREMENTS)
+# (`evaluation-DtDXMZsW.mjs` on 2026.11.2: IMPLICIT_DEFAULT_ACCOUNT_FIELDS / IMPLICIT_ACCOUNT_REQUIREMENTS)
 # - it was used as a cross-check only, never as the source: it omits x and reduces Slack
 # to "any of appToken/botToken/signingSecret", which is not the runtime rule.
 #
@@ -3401,7 +3401,7 @@ def _norm_dm_policy(channel_name, value):
 #   discord    token                         [tag] discord/src/accounts.ts:41
 #   googlechat serviceAccount / serviceAccountFile   [tag] googlechat/src/accounts.ts:53
 #              (+ serviceAccountRef: the legacy spelling Doctor still migrates to
-#              serviceAccount, dist legacy-DUnp574-.mjs:2869-2872 - a not-yet-migrated config
+#              serviceAccount, dist legacy-Cik5ObGU.mjs:2869-2872 (2026.11.2) - a not-yet-migrated config
 #              keeps it, so it stays in the trigger list)
 #   zalo       botToken / tokenFile          [tag] zalo/src/accounts.ts:17
 #   zalouser   profile                       [tag] zalouser/src/accounts.ts:19
@@ -3460,7 +3460,7 @@ _IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
 _SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "nostr"})
 
 # Top-level `channels.*` keys that are config blocks, not channels (dist
-# evaluation-CveYorUc.mjs:820 RESERVED_CHANNEL_CONFIG_KEYS).
+# evaluation-DtDXMZsW.mjs:820 on 2026.11.2, RESERVED_CHANNEL_CONFIG_KEYS).
 _RESERVED_CHANNEL_CONFIG_KEYS = frozenset({"defaults", "modelByChannel"})
 
 
@@ -3626,7 +3626,7 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict, cfg=None) -
     documented residual false negative. One part of it IS in the config file and is not
     read here yet: OpenClaw applies the config's own ``env`` block (``env.vars.<NAME>`` and
     the flat ``env.<NAME>``) to the process environment before channels start
-    (``applyConfigEnvVars``, dist config-env-vars-D-cSslPl.mjs:463; parsed in this package
+    (``applyConfigEnvVars``, dist config-env-vars-BHneg24Q.mjs:463 on 2026.11.2; parsed in this package
     by ``_config_env_block_entries``), so e.g. ``env.vars.SLACK_APP_TOKEN`` beside a base
     ``botToken`` makes the base account live. Consulting it needs each channel's env-var
     names and is a separate change; until then it is the same false-negative direction.
