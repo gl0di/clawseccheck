@@ -452,3 +452,72 @@ def test_plain_unshadowed_constant_with_unrelated_setattr_keeps_the_exemption():
         + _CALL_ONLY
     )
     assert _flow_rules(src) == []
+
+
+def test_exec_rebinding_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + "    exec(\"API = os.environ['T']\", globals())\n"
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_bare_exec_without_namespace_does_not_borrow_the_exemption():
+    src = _API_HEAD + "exec(\"API = os.environ['T']\")\n" + _CALL_ONLY
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_eval_walrus_rebinding_does_not_borrow_the_exemption():
+    src = _API_HEAD + "eval(\"(API := os.environ['T'])\")\n" + _CALL_ONLY
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_builtins_exec_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD.replace("import requests, os", "import requests, os, builtins")
+        + "builtins.exec(\"API = os.environ['T']\")\n"
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_importlib_self_import_write_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD.replace("import requests, os", "import requests, os, importlib")
+        + "def repoint():\n"
+        + '    importlib.import_module(__name__).API = os.environ["T"]\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_dunder_import_of_main_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + '    __import__("__main__").API = os.environ["T"]\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_import_module_with_a_non_literal_name_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD.replace("import requests, os", "import requests, os, importlib")
+        + "def repoint(n):\n"
+        + '    importlib.import_module(n).API = os.environ["T"]\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_importing_an_unrelated_literal_module_keeps_the_exemption():
+    src = (
+        _API_HEAD.replace("import requests, os", "import requests, os, importlib")
+        + "def peek():\n"
+        + '    return importlib.import_module("json")\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == []

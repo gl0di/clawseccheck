@@ -9018,7 +9018,8 @@ def _xf_has_dynamic_ns_write(tree: ast.AST) -> bool:
     """B-1086: True when the file can rebind a module-level name by a route no static name
     analysis follows -- `globals()[k] = v`, `vars()` / `locals()` writes, `globals().update`,
     `<obj>.__dict__[k] = v`, `setattr` / `delattr` on anything but `self` / `cls`,
-    `sys.modules[__name__]` / `sys.modules["__main__"]`, `import __main__`, an alias of
+    `sys.modules[__name__]` / `sys.modules["__main__"]`, `import __main__`, any `exec` / `eval`,
+    `importlib.import_module(x)` / `__import__(x)` unless x is a literal other than "__main__", an alias of
     `globals()` / `vars()` / `locals()` / `__dict__`. Fails closed: a read-only use
     (`globals().get(k)`, `k in globals()`, `**locals()`, `"..." % locals()`) is not a write."""
     parent: dict = {}
@@ -9048,6 +9049,23 @@ def _xf_has_dynamic_ns_write(tree: ast.AST) -> bool:
             if isinstance(f, ast.Name) and f.id in ("setattr", "delattr"):
                 first = n.args[0] if n.args else None
                 if not (isinstance(first, ast.Name) and first.id in ("self", "cls")):
+                    return True
+            fname = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
+            # exec/eval run code the static walk never sees (`exec("API = ...")`,
+            # `eval("(API := ...)")`), bare or via `builtins.exec`.
+            if fname in ("exec", "eval"):
+                return True
+            # a self-import hands back the live module object; any non-literal name could be
+            # this module too. A literal naming another module is not a route to this one.
+            if fname in ("import_module", "__import__"):
+                first = n.args[0] if n.args else None
+                if first is None:
+                    first = next((k.value for k in n.keywords if k.arg in ("name", "name_")), None)
+                if not (
+                    isinstance(first, ast.Constant)
+                    and isinstance(first.value, str)
+                    and first.value != "__main__"
+                ):
                     return True
         elif isinstance(n, ast.Attribute):
             if n.attr in ("__dict__", "f_globals") and not read_only(n):
