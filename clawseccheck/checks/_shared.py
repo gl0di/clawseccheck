@@ -3391,7 +3391,7 @@ def _norm_dm_policy(channel_name, value):
 # to "any of appToken/botToken/signingSecret", which is not the runtime rule.
 #
 # channelKeys form (any key present):
-#   telegram   botToken / tokenFile         [dist] account-selection-B6bGjjlD.mjs:58
+#   telegram   botToken / tokenFile         [dist] account-selection-BQ6BKlGA.mjs:53 on 2026.11.2
 #                                            (hasTelegramAccountConfig; also true when
 #                                            `accounts.default` exists, which is then a
 #                                            configured account, not an extra one)
