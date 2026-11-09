@@ -160,7 +160,18 @@ def _nested_if_source(depth: int) -> str:
 # Python file in a skill scanned within one check invocation, so a single file this
 # slow is not fully isolated from the rest of that check's budget — a further
 # regression here is a real risk, not just a test-tuning nuisance.
-_AST_BOUND_S = 10.0
+#
+# C-791: 10.0s turned out to have no margin on a loaded box. Measured 2026-11-09 on an
+# unloaded 8-core machine (5 runs each, analyze_python + simulate_effects): Python 3.12.3
+# median 5.39s (min 5.34, max 5.59), Python 3.14.4 median 4.41s (min 4.37, max 4.52).
+# Under load (load average 7-13) 3.12 took 12.4s, and older commits measured 7-10.6s on
+# the same load, so that failure was machine load, not a regression. The cost is linear in
+# (AST nodes x whole-tree passes): ~80k nodes walked by ~60 passes, ast.walk dominating
+# (cProfile), with no superlinear term. The bound is now 25.0s: ~2x the loaded worst case
+# and ~4.6x the unloaded 3.12 median. This test exists to catch a hang/blowup (the B-192
+# class: exponential dedup, OOM), which would be orders of magnitude over the bound, not
+# 2x; a plain 2x slowdown is caught by the production 15s per-check SIGALRM, not here.
+_AST_BOUND_S = 25.0
 
 
 def test_ast_analysis_of_adversarial_skill_stays_bounded():
