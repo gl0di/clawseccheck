@@ -8969,6 +8969,110 @@ def _xf_extra_bound(body) -> set:
     return out
 
 
+_XF_NS_FNS = frozenset({"globals", "vars", "locals"})
+_XF_NS_READ_METHODS = frozenset({"get", "keys", "values", "items", "copy", "__getitem__", "__contains__"})
+
+
+def _xf_decl_rebound_names(tree: ast.AST) -> set:
+    """B-1086: names ASSIGNED (assign/aug/ann/for/with/walrus/import/def/class/except/match/
+    del) from a scope that declares them `global` or `nonlocal`. Such a write rebinds the
+    OUTER binding, and the writing scope need not be on the lexical chain between a use and
+    the binding's owner (a sibling function with `global X`, a nested function with
+    `nonlocal X`), so the chain walk in `str_resolves` cannot see it. File-wide and
+    name-keyed on purpose: any such write makes the name unresolvable everywhere. A bare
+    declaration with no write (`global X; return X`) is not a rebinding."""
+    out: set = set()
+    scopes = [tree] + [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    for sc in scopes:
+        nodes = list(_xf_scope_nodes(getattr(sc, "body", [])))
+        declared: set = set()
+        for n in nodes:
+            if isinstance(n, (ast.Global, ast.Nonlocal)):
+                declared.update(n.names)
+        if not declared:
+            continue
+        written: set = set()
+        for n in nodes:
+            if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                written.add(n.id)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    written.add((a.asname or a.name).split(".")[0])
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                written.add(n.name)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                written.add(n.name)
+            elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
+                written.add(n.name)
+            elif isinstance(n, ast.MatchMapping) and n.rest:
+                written.add(n.rest)
+        out |= written & declared
+    return out
+
+
+def _xf_has_dynamic_ns_write(tree: ast.AST) -> bool:
+    """B-1086: True when the file can rebind a module-level name by a route no static name
+    analysis follows -- `globals()[k] = v`, `vars()` / `locals()` writes, `globals().update`,
+    `<obj>.__dict__[k] = v`, `setattr` / `delattr` on anything but `self` / `cls`,
+    `sys.modules[__name__]` / `sys.modules["__main__"]`, `import __main__`, an alias of
+    `globals()` / `vars()` / `locals()` / `__dict__`. Fails closed: a read-only use
+    (`globals().get(k)`, `k in globals()`, `**locals()`, `"..." % locals()`) is not a write."""
+    parent: dict = {}
+    for p in ast.walk(tree):
+        for ch in ast.iter_child_nodes(p):
+            parent[ch] = p
+
+    def read_only(n):
+        up = parent.get(n)
+        if isinstance(up, ast.Subscript) and up.value is n and isinstance(up.ctx, ast.Load):
+            return True
+        if isinstance(up, ast.Attribute) and up.value is n and up.attr in _XF_NS_READ_METHODS:
+            return True
+        if isinstance(up, ast.Compare):
+            return True
+        if isinstance(up, ast.keyword) and up.arg is None:  # `f(**locals())`
+            return True
+        if isinstance(up, ast.BinOp) and isinstance(up.op, ast.Mod):  # `"%(x)s" % locals()`
+            return True
+        return False
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Name) and f.id in _XF_NS_FNS and not read_only(n):
+                return True
+            if isinstance(f, ast.Name) and f.id in ("setattr", "delattr"):
+                first = n.args[0] if n.args else None
+                if not (isinstance(first, ast.Name) and first.id in ("self", "cls")):
+                    return True
+        elif isinstance(n, ast.Attribute):
+            if n.attr in ("__dict__", "f_globals") and not read_only(n):
+                return True
+        elif isinstance(n, ast.Subscript):
+            v = n.value
+            if (
+                isinstance(v, ast.Attribute)
+                and v.attr == "modules"
+                and isinstance(v.value, ast.Name)
+                and v.value.id == "sys"
+            ):
+                sl = n.slice
+                if (isinstance(sl, ast.Name) and sl.id == "__name__") or (
+                    isinstance(sl, ast.Constant) and sl.value == "__main__"
+                ):
+                    return True
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            if any(a.name == "__main__" for a in n.names) or (
+                isinstance(n, ast.ImportFrom) and n.module == "__main__"
+            ):
+                return True
+    return False
+
+
 def _xf_cred_class(node: ast.AST, ctx) -> str:
     """`_cred_source_classification` restricted to PATH-SHAPED constants (see
     `_xf_const_names_cred`). The same-scope pass tolerates a prose constant because a
@@ -9314,7 +9418,17 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
                     a.targets = t
         return _ob_cache[snode]
 
+    _ns_state: list = []
+
     def str_resolves(d, nm):
+        # B-1086: a rebinding from a scope OFF the lexical chain (a sibling's `global NAME`,
+        # a nested function's `nonlocal NAME`) or by a dynamic namespace write is invisible to
+        # the chain walk below, so it fails closed -- no exemption.
+        if not _ns_state:
+            _ns_state.append((_xf_decl_rebound_names(tree), _xf_has_dynamic_ns_write(tree)))
+        decl_rebound, dyn_write = _ns_state[0]
+        if dyn_write or nm in decl_rebound:
+            return False
         owner = lit_owner().get(nm)
         if owner is None:
             return False
