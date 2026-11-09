@@ -99,9 +99,9 @@ def _dist_applies_to_home(home) -> bool:
         return False
 
 
-__version__ = "4.4.5"
+__version__ = "4.5.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-11-02"
+__released__ = "2026-11-09"
 
 
 def build_context(home: Path | str = "~/.openclaw",

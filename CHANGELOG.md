@@ -3,6 +3,87 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.5.0] - 2026-11-09
+
+**This release closes a family of ways a skill could carry a credential or a command past
+`--vet`, makes the config checks read Matrix's nested DM policy, and re-grounds the audit on
+OpenClaw 2026.11.2.** No check is added. Several PASS or WARN results can now become FAIL on the
+shapes listed below; a config or skill that does not match one of them reads exactly as before.
+
+### Security
+- **`--vet` follows a credential across function boundaries in Python.** A skill that read a
+  credential file in one function and sent it from another (`upload(collect())`) vetted INSTALL
+  while the same flow in a single function failed. The taint pass now convicts the pair through
+  direct calls, variables, helpers, aliases, thread and executor dispatch, methods and a
+  module-level dict, and a pair budget that overflows fails closed. The in-cluster token
+  exemption for credential sends no longer survives a module constant rebound from another
+  function (`global`/`nonlocal`), a dynamic namespace write (`globals()`, `setattr` on the
+  module, `sys.modules[__name__]`), `exec`/`eval`, or a self-import, and a parameter that
+  shadows the constant no longer borrows it; the send then fails closed.
+- **The OpenClaw credential store is a credential source for Python and JavaScript skills.**
+  A skill that read `~/.openclaw/openclaw.json` or `~/.openclaw/credentials` and sent it to a
+  remote host vetted INSTALL, while the same flow reading `~/.ssh/id_rsa` failed. Both files now
+  count as critical credential reads, including a path assembled with `pathlib` joins or string
+  concatenation. Other agent-config reads stay on the lower-severity path.
+- **More ways to send a credential out are recognised.** Python sinks now include a bound raw
+  socket, `smtplib`, a `getattr(x, "post")(...)` call with a constant name, and a `curl`/`wget`
+  argv list that receives a credential (no in-cluster exemption applies). Shell skills that copy
+  a credential to a temp file and upload it, put a credential env var in a `curl` body, or place
+  an encoded credential in a DNS lookup now WARN. A credential in a header is not flagged, and a
+  config backup to the user's own service has the same shape, so these never FAIL on their own.
+- **Startup persistence assembled in code is convicted like the inline form.** A systemd, cron or
+  launchd unit written through a `pathlib` join, or enabled with an argv-list `systemctl` or
+  `launchctl` call, vetted INSTALL while the literal was DO-NOT-INSTALL. Unit names are matched
+  exactly and case-sensitively, so `systemctl enable NGINX` is not the reputable `nginx` and now
+  FAILs instead of warning. A reverse shell kept in a shell variable and run through `eval`,
+  `sh -c` or a bare word is convicted too.
+- **Command-injection classification (TT5) fails closed in more shapes.** `os.exec*`,
+  `os.spawn*` and `os.posix_spawn*` get the shell and re-exec-wrapper rules; `sh.exe`, `timeout`,
+  `nice`, `xargs` and a list extended by `append`, `extend` or `+=` read as command position. A
+  literal-headed list that cannot become a shell is read as argument injection, not CRITICAL.
+- **Host classification no longer reads off-host addresses as local.** An IPv6 literal embedding
+  a public IPv4, and octal, hex, short or single-integer IPv4 spellings (`010.8.8.8`,
+  `0x08080808`), are classified as curl reads them, which reaches B13 and B103. Loopback
+  shorthand such as `127.1` is correctly local, so it no longer raises a false WARN or FAIL.
+- **`--vet` convicts more exfiltration and pipe-to-shell shapes.** `curl ... | xargs sh -c` is
+  pipe-to-shell, and a cloud-metadata response sent out in a request URL is convicted. B339 was
+  reworked so a status-only probe no longer reads as a fetched response. B58 no longer convicts a
+  plaintext quote of an injection phrase because an unrelated comment sits in another file, and
+  fails closed on hiding it cannot place. B398 warns on any compiled `.pyc` a vetted skill ships.
+- **`--vet-source` checks the host of every git form.** `git+https://`, `ssh://` and scp-style
+  remotes reach the known-bad host check, PyPI names match PEP 503-normalized, npm aliases match
+  their real package, and a known-bad IP also matches wildcard DNS names such as `<ip>.nip.io`.
+  `--vet-plan` clones a repository URL with `git clone --depth 1 -- <remote>` instead of curling
+  its web page. `--vet-judged` no longer softens an UNKNOWN danger axis to PASS.
+- **Config checks read Matrix's nested `dm.policy`.** B2, B55, B171 and the attack-chain labels
+  read only the flat key, so `channels.matrix.dm.policy: "open"` got a clean B2 PASS. B2 and B39
+  now count that channel as open; `dm.enabled: false` keeps a stale nested `open` closed. An
+  empty config is graded as OpenClaw's grant-all default, like any config without a tools block.
+- **B1 reports a plaintext password in `database.postgres.connection`.** URL userinfo,
+  `?password=`, `sslpassword` and the keyword form count; a DSN without a password, an
+  environment reference and a SecretRef stay clean.
+
+### Fixed
+- B191 no longer reports sessions held in SQLite trajectory stores as audit-trail divergence.
+  A PostgreSQL engine anchor reads UNKNOWN in every state reader instead of an empty, clean
+  store. B4 names the container image a `non-main` sandbox needs, A1 hedges when an auth-profile
+  store cannot be read, and `msteams` is read as multi-account from 2026.10.10.
+- A copied, backed-up or fixture home is no longer judged by the auditing machine's installed
+  OpenClaw build. Skill copies in OpenClaw's hidden update-backup folders are not counted as
+  installed, and the coverage page says why a skill was not fully swept.
+- `--watch` records its baseline at start, so the first change alerts. A read-only
+  `~/.clawseccheck` reports each dropped write on stderr, and a long run announces itself there.
+  The interactive audit budget is back to 150 s (`--exhaustive` is the long one).
+- The dashboard's HTML report carries the `--full` blocks the PDF already had, a bare `--pdf`
+  names the real default path, and the judge packet gains a panel plan a chat panel can finish.
+
+### Changed
+- Grounded against OpenClaw 2026.11.2: the harness and retired-format windows and the schema
+  snapshots are regenerated (the config schema is unchanged), and the tool-grant port models the
+  `tool_call` to `dispatch_action` alias from 2026.10.10. Indicator data adds the
+  `@ifasn/*-doc-mcp` campaign, `persona-ai-sdk` and the PyPI `is-it-ai` and `skills-analyzer`
+  packages. Docs map the OWASP MCP Top 10 to the checks and state new blind spots.
+
 ## [4.4.5] - 2026-11-02
 
 **This release closes several ways a skill could slip past `--vet`, corrects which channel
