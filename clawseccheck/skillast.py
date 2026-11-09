@@ -8901,6 +8901,22 @@ def _xf_refs(node: ast.AST) -> set:
 
 
 _XF_MAX_PROSE_WORDS = 16
+# B-1085: the generic alternatives of `_CRED_PATH_RE` that are plain words, not paths: a bare
+# `id_rsa`/`id_ed25519`/`Cookies`, and `/secret(s)` / `/.secret(s)` as one prose segment.
+_XF_BARE_WORD_HIT_RE = re.compile(r"id_rsa|id_ed25519|cookies|/\.?secrets?", re.I)
+
+
+def _xf_path_shaped_cred_hit(token: str, m) -> bool:
+    """B-1085: *m* (a `_CRED_PATH_RE` match inside *token*) is a real credential PATH, not a
+    bare credential word that happens to sit in a long sentence. The token must carry a path
+    separator, and a generic word-shaped alternative only counts when the token itself is an
+    anchored multi-segment path (`/run/secrets/x`, `~/.secrets/x`) -- never
+    `the token/secret/key/...` prose, nor a lone `/secrets`."""
+    if "/" not in token:
+        return False
+    if _XF_BARE_WORD_HIT_RE.fullmatch(m.group(0)):
+        return token.startswith(("/", "~")) and token.count("/") >= 2
+    return True
 
 
 def _xf_const_names_cred(value: str):
@@ -8911,15 +8927,22 @@ def _xf_const_names_cred(value: str):
     thousands of words, a path has a handful. The match is tested on every whitespace
     token both raw and lexically normalised (repeated `/`, `./` and `x/../` collapsed), so
     padding a real credential path with slashes or dot-segments -- however long -- still
-    reads as that path."""
+    reads as that path.
+
+    B-1085: the word gate only silences BARE-WORD matches. In a constant over the word
+    limit a token that is itself a path to a credential file (`~/.ssh/id_rsa`, see
+    `_xf_path_shaped_cred_hit`) still classifies, so a long sentence-like constant
+    embedding a real credential path is not laundered by its own length."""
     toks = value.split()
-    if len(toks) > _XF_MAX_PROSE_WORDS:
-        return None
+    long_ = len(toks) > _XF_MAX_PROSE_WORDS
     for t in toks or [value]:
+        if long_ and "/" not in t:
+            continue
         for cand in (t, posixpath.normpath(t)):
             if _INCLUSTER_TOKEN_PATH_RE.search(cand):
                 return "incluster"
-            if _CRED_PATH_RE.search(cand):
+            m = _CRED_PATH_RE.search(cand)
+            if m and (not long_ or _xf_path_shaped_cred_hit(cand, m)):
                 return "other"
     return None
 
