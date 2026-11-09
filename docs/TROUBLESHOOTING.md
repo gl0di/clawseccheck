@@ -110,7 +110,7 @@ whether the problem is ClawSecCheck or the surrounding OpenClaw session.
 
 ClawSecCheck bounds its own runtime so a pathological input (a hostile skill, or just an
 unlucky regex) degrades to an honest `UNKNOWN` instead of hanging forever: a generous
-15-second budget per individual check, and a 120-second budget for a whole plain audit.
+60-second budget per individual check, and a 150-second budget for a whole plain audit.
 Deeper modes (`--vet` on a single target, a full `--vet-all` sweep, `--full`) carry their
 own larger budgets for the same reason, since they read much more content.
 
@@ -123,6 +123,16 @@ mechanism** - the fix is to re-run narrower:
 - Target a single skill or plugin with `--vet <path>` instead of a full sweep.
 - Point `--home` at a smaller or more specific config location if you were scanning
   something unusually large.
+
+A plain audit on a very large installed-skill fleet can reach the 150-second whole-audit
+budget. The checks it did not reach then read `UNKNOWN` ("the overall audit time budget was
+exhausted") - they are never reported as passing - and the score is capped accordingly.
+Re-run with `--exhaustive` for a complete run: it raises the budgets to 120 seconds per
+check and 900 seconds for the whole audit (and also widens the log and trajectory scan
+caps, so it is slower). A host agent running the audit should expect a plain run on such a
+fleet to take a few minutes (up to about 4), with no output until it finishes, and should not
+report it as hung or silent while the process is still running - an early return or a
+"still running" status from the tool runner means keep waiting, not failure.
 
 If a *plain* audit (no flags) still hits its budget, that's unusual enough to be worth
 reporting - see "Filing a good bug report" below, and include `--debug` output.
@@ -143,6 +153,33 @@ What to do: open the file named in the advice text and look at it. ClawSecCheck 
 it and changes nothing. If it is a pipe, a device or padded with nesting you did not write,
 treat the plugin or skill as suspect and remove or replace the file; once it is an ordinary
 file with sensible nesting, re-run to get a verdict.
+
+## `NOT SAVED` - the local store `~/.clawseccheck` is read-only
+
+An agent host that sandboxes writes to its workspace (for example OpenClaw's Codex harness)
+can make `~/.clawseccheck` read-only. The audit still runs to the end and its grade,
+findings and exit code are exactly what a writable store would give. What cannot happen is
+anything that is saved afterwards, and the tool says so once, on stderr, instead of failing
+or staying quiet:
+
+```text
+note: NOT SAVED - score history could not be written to ~/.clawseccheck (Read-only file system). ...
+```
+
+It names what was lost - the score history (`--trend`, `--percentile` and the menu's "last
+check" line read it), the coverage dates, a `--save-run` / `--save-sbom-run` snapshot - and
+why. A PDF is reported on its own line: `(could not write PDF report: ... showing the full
+report inline.)` with `--dashboard --pdf`, or exit code 1 for a bare `--pdf`, because there
+the file is the whole deliverable. `--monitor` exits 1 with `MONITORING NOT ESTABLISHED`,
+since no baseline was stored.
+
+ClawSecCheck never writes somewhere else on its own. To keep these results, choose a
+location yourself:
+
+- `--data-dir <a writable directory>` moves history, baseline, events, coverage dates, saved
+  runs and a bare `--pdf` together;
+- `--pdf <path>` names the PDF alone (a directory inside your workspace is the usual choice);
+- `--no-history` stops the history and coverage writes, so there is nothing to report.
 
 ## Where the diagnostics live
 

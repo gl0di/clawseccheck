@@ -78,6 +78,16 @@ section.
    decide, submit `ABSTAIN` for it directly, with no `votes` and no subagents (25 such items
    are not 75 judge tasks). Run the 3-lens panel only for an item where something in the
    packet bears on the answer.
+   **A packet too large to judge (B-1070).** The `--judge-packet` envelope carries a
+   `panelPlan`: `evidenceLess` (items offering `abstain` - skip them: an ABSTAIN entry is
+   treated exactly like no entry),
+   `toJudge`, `judgeFirst` (every other item, most important first) and `chatBudget`. Judge
+   the `judgeFirst` items in that order, each one read and reasoned (3 lenses, or the inline
+   fallback in step 5). When `toJudge` exceeds `chatBudget`, stop after `chatBudget` items,
+   submit nothing for the rest (they render as awaiting adjudication) and tell the user
+   "the panel judged N of M items". **Never generate verdicts by a script or a template**
+   (one reason applied to many items is not a panel) - an honest partial panel is a result;
+   a fabricated full one is the one response that is never right.
 3. **Majority vote** per item across its 3 lens verdicts. A tie (no single verdict has
    at least 2 of the 3 votes - e.g. one SAFE, one SUSPICIOUS, one DANGEROUS) escalates
    to the **worst** of the three rather than picking arbitrarily - the same fail-safe

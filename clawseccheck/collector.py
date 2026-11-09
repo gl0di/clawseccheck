@@ -161,7 +161,7 @@ _MAX_SKILL_FRONTIER_NAMES = 5_000
 # single file over _MAX_FILE_BYTES is dropped whole by collect_skill_files before the
 # per-skill budget logic ever sees it, so raising only the per-skill cap has no effect
 # on a skill with one large file. Regex/entropy scanning 1MB is still low-single-digit
-# milliseconds per check (DEFAULT_CHECK_BUDGET_S is 15s); the cross-file reassembly
+# milliseconds per check (DEFAULT_CHECK_BUDGET_S, 15s then, 60s since B-1020); the cross-file reassembly
 # checks (B90/B154) are independently bounded by their own fragment/window caps
 # regardless of blob size. Confirmed on a real config: a legitimate ~152KB skill
 # (clawstealth) was hitting the old 60KB cap and reading as UNKNOWN purely from asymmetry
@@ -212,8 +212,8 @@ _MAX_OWN_SOURCE_BYTES = 2_000_000
 # NO ceiling is claimed -- see the C-616 RESIDUAL in `_is_own_source`'s docstring before
 # relying on any figure quoted here.
 #   * _MAX_OWN_SOURCE_FILES: the real engine has 11 files, so 32 is ~2.9x headroom.
-#   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.6 MB in all,
-#     largest about 0.95 MB, so 8 MB is ~1.7x headroom, in line with the ~2x the per-file
+#   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.8 MB in all,
+#     largest about 1.0 MB, so 8 MB is ~1.7x headroom, in line with the ~2x the per-file
 #     cap keeps over the largest real file. Only files under the per-file cap count
 #     toward it. (The engine figures are rounded; a test fails if they drift over 3%.)
 # Do NOT lower any of the three without re-measuring: a cap the real install exceeds loses
@@ -884,6 +884,11 @@ class Context:
     # themselves. See `_collect_auth_profile_store_presence`.
     auth_profile_store_read: bool = False
     auth_profile_store_length: int | None = None
+    # B-1014: True when a state DB was FOUND but the presence read failed -- a corrupt
+    # file, a PostgreSQL engine anchor (B-1010), a non-table `config_machine_state`, a
+    # capped walk. `_read` alone cannot tell this apart from "no DB" / "DB predates the
+    # table", and A1 read both as a clean leg. Set only beside a `ctx.errors` entry.
+    auth_profile_store_unreadable: bool = False
     # B-845: the SAME presence-only signal, for the PER-AGENT database
     # (`agents/<agent-id>/agent/openclaw-agent.sqlite`, table `auth_profile_store`) --
     # grounded against the installed dist (2026.9.5: sqlite-Cp6HSWY4.mjs) to be a
@@ -900,6 +905,9 @@ class Context:
     # to know which agent. See `_collect_agent_auth_profile_store_presence`.
     agent_auth_profile_store_read: bool = False
     agent_auth_profile_store_length: int | None = None
+    # B-1014: True when at least one per-agent database existed but could not be read
+    # (same meaning as `auth_profile_store_unreadable`, for the per-agent sweep).
+    agent_auth_profile_store_unreadable: bool = False
     # B-845 (follow-up, 2026-09-23): True when more per-agent trajectory
     # databases exist under `agents/*/agent/openclaw-agent.sqlite` than
     # `trajectorystore._MAX_SQLITE_DBS` allows -- i.e. `sqlite_db_paths` returned a
@@ -1165,6 +1173,12 @@ class Context:
     # labels these "bundled" rather than folding them into a plain "(N installed)" count
     # that implies the user chose each one.
     installed_skill_bundled: set = field(default_factory=set)
+    # Keys (into installed_skills) of skill copies found inside a dot-directory below a skills
+    # root, e.g. the installer's `.openclaw-install-backups/<name>-<uuid>`. OpenClaw's loaders
+    # skip such folders, so these are NOT installed/loaded skills; they are still read and
+    # graded (C-707 item 4, Dave: a missed hostile copy is the worse error). report.py uses
+    # this set only to keep them out of the "N installed" count and to label them.
+    installed_skill_hidden: set = field(default_factory=set)
     attestation: dict = field(default_factory=dict)  # agent self-report (--attest); see attest.py
     _collected_skill_files: dict[str, list[dict]] = field(default_factory=dict)
 
@@ -1232,6 +1246,13 @@ class Context:
     # The ordinary skill walk prunes __pycache__, so these are gathered by `_scan_skill_pycs`.
     skill_unchecked_pycs: dict = field(default_factory=dict)
     skill_pyc_gaps: dict = field(default_factory=dict)
+    # B-1003 / B398: every OTHER loadable .pyc (timestamp / checked-hash / reserved flags), per
+    # skill dir. A forged timestamp pyc whose header matches the shipped .py, or a checked-hash
+    # pyc run under `--check-hash-based-pycs never`, is imported INSTEAD of the source, and a
+    # matching header proves nothing. `pre_install` is True only on the `--vet` path, where it
+    # turns into B398's WARN; an installed skill legitimately carries runtime pycs.
+    skill_compiled_pycs: dict = field(default_factory=dict)
+    pre_install: bool = False
     # B-461: skill names whose SKILL.md itself could not be read. Without this, B88 sees an
     # empty text blob and reports the manifest as ABSENT ("no SKILL.md frontmatter block
     # found - this skill will not appear to the agent"), which is a false statement about a
@@ -2615,6 +2636,11 @@ def _note_archive_member_pyc(
         if member_rel not in lst:
             lst.append(member_rel)
             lst.sort()
+    elif len(data) >= _PYC_MIN_LOADABLE:
+        lst = ctx.skill_compiled_pycs.setdefault(key, [])
+        if member_rel not in lst:
+            lst.append(member_rel)
+            lst.sort()
 
 
 def _scan_skill_pycs(base_dir: Path, ctx) -> None:
@@ -2630,6 +2656,7 @@ def _scan_skill_pycs(base_dir: Path, ctx) -> None:
     so they are classified the same way, and the suffix match is case-insensitive.
     """
     found: list[str] = []
+    compiled: list[str] = []
 
     def _rel(p: str) -> str:
         try:
@@ -2685,12 +2712,16 @@ def _scan_skill_pycs(base_dir: Path, ctx) -> None:
                 _gap(f"{_rel(full)}: .pyc header could not be read")
             elif flags == PYC_UNCHECKED_HASH_FLAGS:
                 found.append(_rel(full).replace(os.sep, "/"))
+            else:
+                compiled.append(_rel(full).replace(os.sep, "/"))
         if capped:
             break
     if capped:
         _gap(f"pyc scan stopped at its {capped}; the rest of the skill was not looked at")
     if found:
         ctx.skill_unchecked_pycs[str(base_dir)] = sorted(found)
+    if compiled:
+        ctx.skill_compiled_pycs[str(base_dir)] = sorted(compiled)
 
 
 def collect_skill_files(skill_dir: Path, ctx: Context | None = None) -> list[dict]:
@@ -4573,7 +4604,7 @@ def _is_own_source(p: Path) -> bool:
     is 0) each answer False -- "not our source, scan the tree", the safe direction -- and
     nothing is read once a bound has tripped. A file over `_MAX_OWN_SOURCE_BYTES` is still
     skipped whole and is NOT counted toward the total, so the total bounds the admitted
-    bytes only. The real engine is 11 files, about 4.6 MB in all, largest about 0.95 MB
+    bytes only. The real engine is 11 files, about 4.8 MB in all, largest about 1.0 MB
     (rounded; measured 2026-10-05); `tests/test_c616_own_source_directory_bounds.py` pins
     that headroom and goes red if these quoted figures drift over 3%.
 
@@ -4686,7 +4717,7 @@ def _is_own_source(p: Path) -> bool:
     # source that lexes differently from how it parses) can forge one.
     #
     # PERFORMANCE: `ast.parse` is real parsing, not a cheap scan, and the real engine
-    # is 11 files, about 4.6 MB in all, largest about 0.95 MB. The short-circuit below skips
+    # is 11 files, about 4.8 MB in all, largest about 1.0 MB. The short-circuit below skips
     # parsing a file outright when none of the still-missing markers' bare IDENTIFIERS appear
     # anywhere in that file's raw text - sound, not a heuristic: an `ast.FunctionDef`
     # or `ast.Name` node's identifier is always spelled EXACTLY as it appears in the
@@ -4948,7 +4979,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
     # Skill folders inside a dot-directory under a root (an installer's backup folder). The
     # loaders in the OpenClaw dist skip every entry whose name starts with "." (the skill-root
     # discovery, the workspace refresh and the resource loader), so these are on disk but not
-    # loaded. They are still read below: a hostile copy missed is the worse error.
+    # loaded. They are still read and graded below (a hostile copy missed is the worse error),
+    # but kept out of the "installed" count (`ctx.installed_skill_hidden`) and labelled.
+    # Grounding (openclaw 2026.11.1 dist): skill-root-discovery-*.mjs:44 (`listChildDirectories`
+    # drops any child whose name starts with "."), settings-manager-*.mjs:3364
+    # (`loadSkillsFromDirInternal`), and install-package-dir-*.mjs:472 (an update moves the old
+    # copy into `<install base>/.openclaw-install-backups/<name>-<uuid>`).
     dot_dir_skills: set[str] = set()
     for base, allow_symlink in roots:
         # B-303: a load root that exists but is not traversable (most commonly the whole
@@ -4973,10 +5009,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
         # discovery engine confirm and walk" - see the field's docstring on Context.
         ctx.installed_skill_roots.append(base)
         for sd, target in _iter_skill_dirs_guarded(base, allow_symlink, ctx):
+            in_dot_dir = False
             if base != plugin_skills:
                 try:
                     if any(part.startswith(".") for part in sd.relative_to(base).parts):
                         dot_dir_skills.add(str(target))
+                        in_dot_dir = True
                 except ValueError:
                     pass
             if len(ctx.installed_skills) >= _MAX_SKILLS:
@@ -5006,6 +5044,12 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             # must be judged by what it points at. A malicious skill renamed to an own-skill
             # name now enters the inventory and is audited like any other.
             if _is_own_source(target):
+                if in_dot_dir:
+                    # An update backup of ClawSecCheck's own skill: not an installed copy, so
+                    # it is not "self-excluded" either (that list reads as "your install, left
+                    # out" and would also mark the BOM incomplete). It is still counted by the
+                    # dot-directory disclosure below.
+                    continue
                 # B-507: excluded, but no longer SILENTLY excluded -- record the name so
                 # report.py can disclose it instead of the inventory count just quietly
                 # shrinking by one with no trace anywhere in the output. Deduped: the
@@ -5026,6 +5070,8 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
                     key = f"{original}#{suffix}"
                     suffix += 1
             seen.add(key)
+            if in_dot_dir:
+                ctx.installed_skill_hidden.add(key)
             if base == plugin_skills:
                 # B-507: this root is DELIBERATELY symlinks into a plugin's own bundled
                 # skills/ dir (see the B-161 comment above `plugin_skills = ...`) -- e.g.
@@ -5059,7 +5105,8 @@ def _read_installed_skills(home: Path, ctx: Context) -> None:
             f"{n_dot} skill {'folder sits' if n_dot == 1 else 'folders sit'} inside a "
             "dot-directory (a folder whose name starts with '.', such as an installer backup) "
             "under a skills root. They are present on disk but not loaded by OpenClaw, whose "
-            "skill loader skips such folders; this audit still reads them.",
+            "skill loader skips such folders; this audit still reads and grades them, and does "
+            "not count them as installed.",
         )
     # The default bundled tier, gated like the personal ~/.agents/skills root so a fixture or
     # custom --home stays hermetic; a persistent relocation replaces that tier.
@@ -5806,7 +5853,12 @@ def _connect_state_db(db_path: Path):
     if os.path.islink(db_path):
         raise sqlite3.OperationalError(
             "the state database path is a symbolic link; this audit does not follow links")
-    return sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    # B-1010: a PostgreSQL engine anchor is not the store's data -- refuse it with the same
+    # error type (see `trajectorystore.refuse_engine_anchor`), so every caller reports its
+    # own "could not read" outcome instead of reading an empty file as "nothing there".
+    _trajectorystore.refuse_engine_anchor(conn)
+    return conn
 
 
 def _walk_named(directory: Path, name: str, max_files: int, capped: "list | None" = None) -> "list[Path]":
@@ -6171,6 +6223,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         # Same disclosure discipline as `_collect_config_machine_state`: a capped walk
         # that never reached the DB is not the same fact as "no state store" (GR#4).
         if capped:
+            ctx.auth_profile_store_unreadable = True
             ctx.errors.append(
                 f"stopped listing '{state_dir}' after 100 entries without finding "
                 "openclaw.sqlite; the auth-profile store presence was not read"
@@ -6198,6 +6251,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
                 # docstring for the demonstrated shapes). Refuse to query it. Disclosed,
                 # never silently trusted: NOT the same outcome as "absent" above, and
                 # NOT read as if it were a genuine row.
+                ctx.auth_profile_store_unreadable = True
                 ctx.errors.append(
                     f"'config_machine_state' in {db_path} did not resolve to a real "
                     "table (found a view, virtual table, or other schema object "
@@ -6229,6 +6283,7 @@ def _collect_auth_profile_store_presence(home: Path, ctx: Context) -> None:
         # A state DB predating the table is not a corrupt store -- same honest
         # UNDETERMINED as every sibling reader here.
         if "no such table" not in str(exc).lower():
+            ctx.auth_profile_store_unreadable = True
             ctx.errors.append(
                 f"could not read auth-profile store presence from {db_path}: {exc}"
             )
@@ -6562,7 +6617,21 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
     below is a bounded sample, not an exhaustive one.
     """
     ctx.agent_auth_profile_store_capped = _trajectorystore.sqlite_db_paths_capped(home)
-    for db_path in _trajectorystore.sqlite_db_paths(home):
+    # B-1014: an `agents/` tree that could not be listed returns no paths at all -- the
+    # same empty list as "no agents" -- so a store behind it read as a clean leg in A1.
+    # The stat is the walk's own disclosure; surface it instead of dropping it.
+    walk_stats: dict = {}
+    db_paths = (
+        _trajectorystore._sqlite_dbs(home, stats=walk_stats)
+        if isinstance(home, Path) else []
+    )
+    if walk_stats.get("dbs_unlistable"):
+        ctx.agent_auth_profile_store_unreadable = True
+        ctx.errors.append(
+            f"could not list every per-agent directory under '{home / 'agents'}'; "
+            "the agent auth-profile store presence was not fully read"
+        )
+    for db_path in db_paths:
         conn, _kind, unreadable = _trajectorystore._open_and_verify_table(
             db_path, table_name="auth_profile_store"
         )
@@ -6578,6 +6647,7 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
             # false for a plain open failure or a lock timeout). Either way this db is
             # skipped, other agents' own databases are still tried below.
             if unreadable:
+                ctx.agent_auth_profile_store_unreadable = True
                 ctx.errors.append(
                     f"could not read agent auth-profile store presence from {db_path}: "
                     "the database could not be read"
@@ -6590,6 +6660,7 @@ def _collect_agent_auth_profile_store_presence(home: Path, ctx: Context) -> None
                 (_AGENT_AUTH_PROFILE_STORE_ROW_KEY,),
             ).fetchone()
         except sqlite3.Error as exc:
+            ctx.agent_auth_profile_store_unreadable = True
             ctx.errors.append(
                 f"could not read agent auth-profile store presence from {db_path}: {exc}"
             )

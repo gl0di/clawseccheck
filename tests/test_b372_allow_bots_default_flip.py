@@ -553,6 +553,8 @@ class TestWiring:
 
     def _b372(self, home, monkeypatch, version):
         monkeypatch.setattr(clawseccheck, "_installed_dist_version", lambda *a, **k: version)
+        # B-1054: the installed build only applies to this machine's own home; say yes for the fixture.
+        monkeypatch.setattr(clawseccheck, "_dist_applies_to_home", lambda *a, **k: True)
         _ctx_, findings, _score = clawseccheck.audit(home, include_dist=True)
         return next(f for f in findings if f.id == "B372")
 

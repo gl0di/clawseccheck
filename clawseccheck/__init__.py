@@ -74,9 +74,34 @@ def _installed_dist_version(binary_name="openclaw"):
     return _openclawdist._read_version(root) or None
 
 
-__version__ = "4.4.5"
+def _dist_applies_to_home(home) -> bool:
+    """Whether the OpenClaw build installed on THIS machine is evidence about *home* (B-1054).
+
+    ``ctx.installed_dist_version`` drives every version-gated check (B33, C4, B382, B350,
+    B363, B175, B9 and the dist-derived defaults read by B2/B48/B171). It used to be filled
+    in for ANY ``--home`` - a copied home, a backup, a fixture, another user's home - so
+    those verdicts described the auditing machine, not the audited config, and differed
+    from a ``--no-dist`` run of the same directory. USAGE and ``--help`` promise the
+    opposite: only this machine's own OpenClaw home is judged by the installed build; any
+    other home is judged as with ``--no-dist`` (the version the config records, else the
+    documented fallback). One predicate decides, the one B33 already used
+    (``_b33_is_this_machines_home``), so every consumer now agrees with B33.
+
+    A module-level seam on purpose, like `_installed_dist_version` above: a test that
+    drives the installed-build branch over a fixture home patches THIS name to say yes.
+    """
+    from . import pathprobe as _pathprobe  # noqa: PLC0415
+    from .checks._lifecycle import _b33_is_this_machines_home  # noqa: PLC0415
+
+    try:
+        return bool(_b33_is_this_machines_home(_pathprobe.expand_user(home)))
+    except Exception:  # noqa: BLE001 - fail to "not this machine's home" (stamp decides)
+        return False
+
+
+__version__ = "4.5.0"
 # Build/release date, baked in at release time (offline staleness nudge reads this; no network).
-__released__ = "2026-11-02"
+__released__ = "2026-11-09"
 
 
 def build_context(home: Path | str = "~/.openclaw",
@@ -118,7 +143,7 @@ def build_context(home: Path | str = "~/.openclaw",
     if include_deptree:
         ctx.dep_tree = _deptree_scan(openclaw_pkg_root)
     ctx.include_dist = include_dist
-    if include_dist:
+    if include_dist and _dist_applies_to_home(ctx.home):
         ctx.installed_dist_version = _installed_dist_version()
     if attestation:
         # C-714: a library caller gets the same vetting the CLI applies (an unusable
@@ -138,7 +163,9 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
           include_deptree: bool = False, openclaw_pkg_root=None,
           include_dist: bool = False,
           exhaustive: bool = False,
-          progress_cb=None):
+          progress_cb=None,
+          check_budget_s: float | None = None,
+          audit_budget_s: float | None = None):
     """Run the full audit. Returns (ctx, findings, ScoreResult).
 
     `include_native=False` and `include_host=False` keep the engine fully offline
@@ -193,6 +220,13 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
     `progress_cb` (C-510 item 2, default None) is passed straight through
     to `run_all` as `on_check_done` -- see its docstring. A no-op for every existing
     caller; only the CLI's interactive default-audit path supplies one.
+
+    `check_budget_s` / `audit_budget_s` (default None = the profile `limits_for(ctx)` picks:
+    the interactive 60s / 150s, or 120s / 900s under `exhaustive`) override ONLY the two
+    wall-clock ceilings, never a scan cap, so the audited surface and every finding
+    fingerprint stay those of a plain run. `scanbudget.LONG_CHECK_BUDGET_S` /
+    `LONG_AUDIT_BUDGET_S` is the pair for a caller that wants completeness over latency
+    (scripts/fleet_fp_gate.py).
     """
     ctx = build_context(home, include_host=include_host, host_root=host_root,
                        attestation=attestation, include_sockets=include_sockets,
@@ -200,8 +234,11 @@ def audit(home: Path | str = "~/.openclaw", include_native: bool = False,
                        openclaw_pkg_root=openclaw_pkg_root, include_dist=include_dist,
                        exhaustive=exhaustive)
     lim = limits_for(ctx)
-    findings = run_all(ctx, check_budget_s=lim.check_budget_s, audit_budget_s=lim.audit_budget_s,
-                        on_check_done=progress_cb)
+    findings = run_all(
+        ctx,
+        check_budget_s=lim.check_budget_s if check_budget_s is None else check_budget_s,
+        audit_budget_s=lim.audit_budget_s if audit_budget_s is None else audit_budget_s,
+        on_check_done=progress_cb)
     ignore = _baseline.load_ignore(home)
     _baseline.apply(findings, ignore)
     # B-769: a fingerprint entry that matched nothing this run is either a repaired

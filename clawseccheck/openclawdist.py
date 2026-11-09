@@ -442,7 +442,12 @@ def self_reported_version(config: "dict | None") -> str:
 # with 0 flipped (both controls run); the B391 default worker image is unchanged (node:24.22.1-slim,
 # rows added for 10.7-10.9); the state-DB drift gate is satisfied for all 16 readers; the
 # repository advisory endpoint lists nothing newer than 2026-09-11.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 10, 9)
+# Raised to 2026.11.1 on 2026-11-06 (C-785), a hop over 2026.10.10: the schema and state snapshots,
+# the dist citation baseline, the DM-policy manifest, the harness and retired-format oracles and the
+# B391 default worker image row (node:24.22.1-slim) were all re-grounded on the installed 11.1 dist.
+# Raised to 2026.11.2 on 2026-11-09 (C-789): the same set of snapshots, baselines, oracles and the
+# B391 image row (unchanged, node:24.22.1-slim) were re-grounded on the installed 11.2 dist.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 2)
 
 
 def grounding_gap(installed_version: "str | None"):

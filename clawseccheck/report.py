@@ -16,6 +16,7 @@ import shlex
 import tempfile
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from pathlib import Path
 
 from . import pathprobe
@@ -1759,6 +1760,7 @@ def _capability_graph(ctx) -> dict:
         _B55_FS_WRITE_TOOLS,
         _agent_legs,
         _b55_resolved_write_grant,
+        _config_was_read,
         _b351_resolvable_agents,
         _canon_tool,
         _credential_store_state,
@@ -1801,7 +1803,9 @@ def _capability_graph(ctx) -> dict:
     # second, divergent model here or calling only the G1 half B55 itself no longer
     # stops at. `_enabled_tools` itself is untouched: every OTHER caller (exec/input/
     # egress hints) keeps reading exactly what it read before.
-    write_tools, write_enumerable, _view, _legacy_write, _scope_grants = _b55_resolved_write_grant(cfg)
+    write_tools, write_enumerable, _view, _legacy_write, _scope_grants = _b55_resolved_write_grant(
+        cfg, config_read=_config_was_read(ctx),
+    )
     main_tools = sorted({t for t in _enabled_tools(cfg)} | set(write_tools))
     # B-730: the credential term read `(ctx.home / "credentials").is_dir()` -- the
     # directory-existence test B-666 disproved and replaced in A1's leg. The store is
@@ -2348,6 +2352,13 @@ def _subject_count_text(n_issues: int, n_unassessed: int, n_not_applicable: int 
     return "clear"
 
 
+# One phrase for skill copies sitting in dot-directories (e.g. `.openclaw-install-backups`),
+# shared by the roster header and the per-skill lines. OpenClaw's loaders skip dot-named
+# child directories (dist skill-root-discovery:44, settings-manager loadSkillsFromDirInternal),
+# and the installer parks the previous copy of an updated skill there (install-package-dir:472).
+_HIDDEN_FOLDER_PHRASE = "hidden folders OpenClaw does not load (scanned anyway)"
+
+
 def _skills_roster_text(inv: dict, ctx) -> str:
     """How a skill ROSTER's population is described - the one phrase, in one place.
 
@@ -2371,7 +2382,12 @@ def _skills_roster_text(inv: dict, ctx) -> str:
     ONLY skill is ClawSecCheck itself has an empty roster, and "none installed" there is
     exactly the sentence B-507 was filed against - true of the list, false about the user.
     """
-    skills = inv["skills"]
+    # Copies in a dot-directory (an installer backup) are scanned but are NOT installed or
+    # loaded (collector.installed_skill_hidden): kept out of every "installed" figure below
+    # and named in their own phrase at the end.
+    hidden_names = getattr(ctx, "installed_skill_hidden", None) or set()
+    skills = [s for s in inv["skills"] if s.get("name") not in hidden_names]
+    n_hidden = len(inv["skills"]) - len(skills)
     n_skills = len(skills)
     self_excluded = getattr(ctx, "self_excluded_skills", None) or []
     bundled_names = getattr(ctx, "installed_skill_bundled", None) or set()
@@ -2407,6 +2423,8 @@ def _skills_roster_text(inv: dict, ctx) -> str:
         text = f"{n_skills} installed"
     if self_excluded:
         text += f" · {len(self_excluded)} self-excluded"
+    if n_hidden:
+        text += f" · {n_hidden} in {_HIDDEN_FOLDER_PHRASE}"
     return text
 
 
@@ -3116,7 +3134,7 @@ def _skill_inventory(ctx) -> list[dict]:
         # deadline fired - the exception unwinds the list the ring was building - so the
         # claim is "the base verdict survives", not "nothing is lost". The two deadlines
         # run in sequence, never nested, and the second gets only what the first left, so
-        # the per-skill ceiling stays ~15 s total rather than 15 s each (exactly, where
+        # the per-skill ceiling stays one DEFAULT_CHECK_BUDGET_S total rather than one each (exactly, where
         # the POSIX hard timer is available; cooperatively elsewhere).
         _started = time.monotonic()
         try:
@@ -3457,6 +3475,7 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     icon = _ICON_ASCII if ascii_only else _ICON
     skills = inv["skills"]
     n_skills = len(skills)
+    hidden_names = getattr(ctx, "installed_skill_hidden", None) or set()
     # B-507: self-excluded names (ClawSecCheck's own content-verified install, B-265) and
     # the bundled-vs-user-installed split -- see the Context field docstrings in
     # collector.py for what each signal means and why it is scoped the way it is.
@@ -3530,16 +3549,29 @@ def _skills_inventory_lines(inv: dict, ctx, *, ascii_only: bool = False,
     # blow the budget with a name list. The count stays exact either way, and the overflow
     # is disclosed, never silently cut. `None` (the full report, `--dashboard --full`)
     # lists them all, exactly as before.
-    clean = [_sanitize(s["name"]) for s in skills if s["name"] not in flagged_names]
+    clean = [_sanitize(s["name"]) for s in skills
+             if s["name"] not in flagged_names and s["name"] not in hidden_names]
+    clean_hidden = [_sanitize(s["name"]) for s in skills
+                    if s["name"] not in flagged_names and s["name"] in hidden_names]
     if clean:
         shown = clean if clean_roster_limit is None else clean[:clean_roster_limit]
         roster = ", ".join(shown)
         if len(shown) < len(clean):
             roster += f", +{len(clean) - len(shown)} more"
         lines.append(f"   {icon.get(PASS, '?')} {len(clean)} clean: " + roster)
+    if clean_hidden:
+        lines.append(
+            f"   {icon.get(PASS, '?')} {len(clean_hidden)} clean in {_HIDDEN_FOLDER_PHRASE}: "
+            + ", ".join(clean_hidden if clean_roster_limit is None
+                        else clean_hidden[:clean_roster_limit])
+            + ("" if clean_roster_limit is None or len(clean_hidden) <= clean_roster_limit
+               else f", +{len(clean_hidden) - clean_roster_limit} more"))
     for s in flagged:
         reason_text = "; ".join(s.get("reasons") or []) or s["verdict"]
-        lines.append(f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}  {s['verdict']} - {reason_text}")
+        where = f" [in {_HIDDEN_FOLDER_PHRASE}]" if s["name"] in hidden_names else ""
+        lines.append(
+            f"   {icon.get(s['status'], '?')} {_sanitize(s['name'])}{where}  "
+            f"{s['verdict']} - {reason_text}")
     return lines
 
 
@@ -6489,6 +6521,49 @@ def render_advise_json(profile, *, version: str) -> str:
 # new verdict/scoring logic. The plain-language preamble (4 numbered steps + a consent
 # line) comes first for a reader who doesn't parse shell; the exact commands follow
 # underneath, reordered so --vet-source (the pre-download reputation gate) is step 1.
+#: B-1052: forges whose ``https://HOST/OWNER/REPO`` URL is a git repository, so --vet-plan
+#: clones it instead of downloading the HTML landing page. A URL ending in ``.git`` is a
+#: repository on any host.
+_GIT_FORGE_HOSTS = frozenset({"github.com", "gitlab.com", "bitbucket.org", "codeberg.org"})
+
+
+def _is_repo_url(info: dict, target: str) -> bool:
+    """B-1052: an http(s) URL that names a git repository rather than a file to download."""
+    path = urlsplit(target).path.rstrip("/")
+    parts = [p for p in path.split("/") if p]
+    if path.endswith(".git") and parts:
+        return True
+    return (info.get("host") or "") in _GIT_FORGE_HOSTS and len(parts) == 2
+
+
+def _git_clone_source(target: str, info: dict) -> "tuple[str | None, str | None]":
+    """B-1052: (what to hand ``git clone``, the ref to check out) for a git source, or
+    (None, None) when the host is unusable (empty, or option-shaped: a host starting with
+    ``-`` is how ``ssh://-oProxyCommand=...`` turned a clone into command execution)."""
+    host = info.get("host") or ""
+    ref = info.get("ref")
+    # Option-shaped pieces never reach git: a '-'-leading host (`ssh://-oProxyCommand=..`),
+    # scp user (`-oProxyCommand=x@host:path` would make the whole argument an option) or
+    # ref. The emitted command also ends git's options with `--` before the remote.
+    if (not host or host.startswith("-") or target.lstrip().startswith("-")
+            or (ref or "").lstrip().startswith("-")):
+        return None, None
+    low = target.lower()
+    if low.startswith("git:") and not low.startswith("git://"):
+        path = target[len("git:"):]
+        if ref:
+            path = path.rsplit("@", 1)[0]
+        return "https://" + path, ref
+    url = target[4:] if low.startswith("git+") else target
+    if "://" in url:  # a `#ref` / pip `#egg=...` fragment is never part of the remote
+        url = url.split("#", 1)[0]
+    if ref:  # pip's `...repo.git@<ref>` suffix is not part of the remote either
+        tail = url.rsplit("/", 1)
+        if len(tail) == 2 and tail[1].endswith("@" + ref):
+            url = url[: -len("@" + ref)]
+    return url, ref
+
+
 def render_vet_plan(target: str) -> str:
     from .checks import _parse_source_target  # noqa: PLC0415
 
@@ -6518,18 +6593,24 @@ def render_vet_plan(target: str) -> str:
         # metadata, which is untrusted code with the user's permissions BEFORE the scan.
         fetch = (f"pip download --only-binary=:all: --no-deps -d \"$QUARANTINE\" "
                   f"{_shq(name + ('==' + version if version else ''))}")
-    elif eco == "git":
+    elif eco == "git" or (eco == "url" and _is_repo_url(info, target)):
         # info only keeps host + the repo-name tail, not the full owner/repo path - pull
         # host/path back out of the raw "git:<host>/<path>[@ref]" target instead of
         # reconstructing it from parsed fields (which would drop the owner segment).
         # C-745: `git clone --depth 1` without --recurse-submodules runs no repo code
         # (hooks are not cloned) and fetches no submodules, so it needs no extra flag.
-        path = target[len("git:"):]
-        ref = info.get("ref")
-        if ref:
-            path = path.rsplit("@", 1)[0]
-        branch_flag = f" --branch {_shq(ref)}" if ref else ""
-        fetch = f"git clone --depth 1{branch_flag} https://{_shq(path)} \"$QUARANTINE/repo\""
+        # B-1052: the other git-remote spellings (git+https://, ssh://, git://, scp-style
+        # git@host:path) and a forge repo URL (https://github.com/o/r[.git]) are cloned
+        # too - a plain curl of a repo URL saves its HTML landing page, and the plan's
+        # --advise step then has nothing to assess.
+        clone_url, ref = _git_clone_source(target, info)
+        if clone_url is None:
+            fetch = (f"# '{name}' has no host this plan can clone safely \u2014 fetch it "
+                     "yourself, without running any of its code, into \"$QUARANTINE\"")
+        else:
+            branch_flag = f" --branch {_shq(ref)}" if ref else ""
+            fetch = (f"git clone --depth 1{branch_flag} -- {_shq(clone_url)} "
+                     "\"$QUARANTINE/repo\"")
     elif eco == "clawhub":
         fetch = (f"# resolve '{name}' via your ClawHub client's normal pull/install path, "
                   "but redirect the output into \"$QUARANTINE\" instead of the live skills dir")
@@ -6541,7 +6622,7 @@ def render_vet_plan(target: str) -> str:
     # clawhub/unresolved branches above are already a full "#"-commented explanation, so
     # they are left as-is rather than doubly annotated.
     fetch_note = "   # (git clone / pip download / curl per ecosystem)" if eco in (
-        "npm", "pypi", "git", "url") else ""
+        "npm", "pypi", "git", "url") and not fetch.startswith("#") else ""
 
     pypi_note = (
         ["  # No wheel for this package? Stop and tell the user - do NOT retry without",
@@ -6993,7 +7074,8 @@ def render_json(findings: list[Finding], score: ScoreResult, *, risk=None,
 
 
 def render_html(findings: list[Finding], score: ScoreResult, native=None,
-                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None) -> str:
+                *, ctx=None, plugin_sweep=None, coverage_page: dict | None = None,
+                risk=None, behavioral=None, adjudication=None) -> str:
     """Standalone self-contained HTML report (inline CSS, no external assets).
 
     Includes the brand mark + wordmark, a grade badge (colored via
@@ -7220,6 +7302,33 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         ) if _cov_lines else ""
     else:
         coverage_page_html = ""
+
+    # B-1068: the --full pipeline blocks the PDF of the same run carries (RISK chains,
+    # Behavioural, Second opinion with its per-item verdicts, surface coverage, Worth a
+    # glance) - rendered from the SAME line renderers `render_pdf` uses, so the two
+    # exports cannot drift again. Before this the HTML had no risk/behavioral/
+    # adjudication parameter at all, and an HTML built beside a PDF from one judged
+    # bundle silently lacked the second opinion. Shown only when the caller supplied a
+    # pipeline phase (the --dashboard --full path); every other caller's page is
+    # byte-identical. Home paths are redacted here exactly as the PDF's _pipeline_block
+    # redacts them (B-866).
+    pipeline_html = ""
+    if risk is not None or behavioral is not None or adjudication is not None:
+        _blocks = (
+            ("RISK chains", _risk_chain_lines(risk or [], ascii_only=False)),
+            ("Behavioural", _behavioral_block_lines(behavioral, ascii_only=False)),
+            (_SEC_SECOND_OPINION, _second_opinion_lines(adjudication, ascii_only=False)
+             + _second_opinion_item_lines(adjudication)),
+            ("Coverage of OpenClaw surfaces", _coverage_lines(findings, ascii_only=False)),
+            ("Worth a glance", _worth_a_glance_lines(findings, ascii_only=False)),
+        )
+        pipeline_html = "".join(
+            f'<section class="pipeline" aria-label="{esc(title)}">'
+            f'<h2 class="section-title">{esc(title)}</h2>'
+            f'<pre class="cov-page-body">'
+            f'{esc(chr(10).join(_redact_home_paths(str(ln)) for ln in lines))}</pre>'
+            '</section>'
+            for title, lines in _blocks if lines)
 
     # B-306 (C-135 follow-up #3, 2026-07-21): gate on the granular cap signals, not
     # `score.capped` alone - see the matching comment in render_report for why
@@ -7654,6 +7763,8 @@ def render_html(findings: list[Finding], score: ScoreResult, native=None,
         {subject_inventory_html}
 
         {coverage_page_html}
+
+        {pipeline_html}
 
         <h2 class="section-title">{esc(section_findings)}</h2>
         {nav_html}

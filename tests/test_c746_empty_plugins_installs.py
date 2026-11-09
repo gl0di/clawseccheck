@@ -42,5 +42,5 @@ def test_every_other_present_value_is_still_named(value, build):
 
 
 def test_past_the_validated_window_the_finder_is_not_applied_at_all():
-    f = _run({}, "2026.10.10")
+    f = _run({}, "2026.11.3")
     assert f.status == PASS and "was NOT checked" in f.detail

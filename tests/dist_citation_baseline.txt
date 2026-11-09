@@ -8,9 +8,9 @@
 # grow: `compare` fails on any pair NOT in this file. Fixing an entry and
 # re-recording removes it here; that is progress, never a failure.
 #
-# openclaw-version: 2026.10.9
-# generated: 2026-10-30
-# violations: 300
+# openclaw-version: 2026.11.2
+# generated: 2026-11-09
+# violations: 294
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js
 clawseccheck/behavioral.py	tool-catalog-C8xbUFNe.js
@@ -172,11 +172,7 @@ clawseccheck/checks/_mcp.py	selection-JInn13lc.js
 clawseccheck/checks/_mcp.py	slots-kpL659LX.js
 clawseccheck/checks/_mcp.py	zod-schema-O9ml_nmo.js
 clawseccheck/checks/_shared.py	account-helpers-BAtt8fRD.js
-clawseccheck/checks/_shared.py	account-selection-CccGNkkz.js
 clawseccheck/checks/_shared.py	accounts-B2tNBeEr.js
-clawseccheck/checks/_shared.py	accounts-C-ZPmqpb.js
-clawseccheck/checks/_shared.py	accounts-CwNpKTEr.js
-clawseccheck/checks/_shared.py	accounts-DzM4R0Z8.js
 clawseccheck/checks/_shared.py	allow-from-o-cfFFcK.js
 clawseccheck/checks/_shared.py	audit.nondeep.runtime-C3y1Q5Fi.js
 clawseccheck/checks/_shared.py	bash-tools-DHyGpWCr.js
@@ -210,8 +206,6 @@ clawseccheck/checks/_shared.py	provider-DNXfDOia.js
 clawseccheck/checks/_shared.py	register-CvPzWKo8.js
 clawseccheck/checks/_shared.py	reply-payload-transform-Ce9ZfUxA.js
 clawseccheck/checks/_shared.py	server-runtime-config-r5ejxORO.js
-clawseccheck/checks/_shared.py	setup-DWCfQpXL.js
-clawseccheck/checks/_shared.py	setup-core-YieAw3pa.js
 clawseccheck/checks/_shared.py	tool-policy-BHUGxE3p.js
 clawseccheck/checks/_shared.py	tool-policy-match-CgU98OQh.js
 clawseccheck/checks/_shared.py	tool-policy-pipeline-C3edOW1F.js

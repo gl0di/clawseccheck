@@ -21,8 +21,16 @@ governs this case, not just the welcome screen. Any CI/artifact/work flag (`--js
 are always honored. (A home that *exists* but can't be read is a different case - a plain
 "Cannot read the OpenClaw home" error, exit code 1.)
 
-**The command errors, hangs, or produces nothing at all?** That means ClawSecCheck *itself* has a
-problem - not the audited OpenClaw setup. Tell the user plainly that the tool hit a snag (not their
+**A silent audit is not a broken one.** A full audit usually takes one to a few minutes (up to
+about 4 on a large home) and prints NOTHING until it finishes. Many tool runners return after a few
+seconds, move the command to the background, or show "still running" or an empty partial output.
+That is not "no output": keep waiting and polling the SAME process until it EXITS, and do not start
+a second copy while the first is running. Only an exited process with empty stdout, or a crash with
+a traceback, counts as "produces nothing". `--brief --exit-code` exits non-zero by design when
+findings are open - that is a result, not a failure. The audit prints one "still running" line to stderr at start; that line is not the result.
+
+**The command errors, or exited having produced nothing at all?** That means ClawSecCheck *itself*
+has a problem - not the audited OpenClaw setup. Tell the user plainly that the tool hit a snag (not their
 config), then ask them to run one diagnostic command and share what it prints:
 
 ```

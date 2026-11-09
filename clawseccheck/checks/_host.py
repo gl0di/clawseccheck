@@ -1680,11 +1680,38 @@ def _b191_audit_enabled(cfg) -> "bool | None":
     return dig(cfg, "audit.enabled")
 
 
+def _b191_trajectory_store_note(divergent: frozenset, in_sqlite: int,
+                                uncompared: frozenset) -> str:
+    """B-1013: the ``fix`` sentence(s) saying which trajectory store the session
+    comparison actually covered. Empty when the SQLite store played no part."""
+    parts = []
+    if in_sqlite:
+        parts.append(
+            f" {in_sqlite} other audit_events session(s) have their trajectory in the "
+            "per-agent SQLite store (agents/<id>/agent/openclaw-agent.sqlite, where current "
+            "OpenClaw releases record trajectories) and are not counted as divergent.")
+    if divergent and in_sqlite:
+        parts.append(
+            " The divergent session(s) named here were found neither in a trajectory "
+            "sidecar nor in that store; besides tracing being off or rotated, they may "
+            "be cron or subagent runs, or older than the trajectory retention.")
+    if uncompared:
+        parts.append(
+            f" {len(uncompared)} audit_events session(s) could not be compared: no "
+            "trajectory sidecar holds them and a per-agent SQLite trajectory store could "
+            "not be read in full (unreadable, kept in PostgreSQL, or over this audit's "
+            "read caps), so they are not reported as divergent. Make "
+            "agents/<id>/agent/openclaw-agent.sqlite readable and re-run to compare them.")
+    return "".join(parts)
+
+
 def check_audit_trail_signals(
     ctx: Context,
     *,
     divergent_sessions: frozenset = frozenset(),
     trajectory_compared: bool = False,
+    sessions_in_sqlite: int = 0,
+    uncompared_sessions: frozenset = frozenset(),
 ) -> Finding:
     """B191 (F-134, DISK-1) - OpenClaw's OWN runtime audit trail: coverage, plus two
     narrow, near-zero-FP runtime signals nothing else in ClawSecCheck sees.
@@ -1708,6 +1735,12 @@ def check_audit_trail_signals(
        that session out past its own 60-file cap, while this INDEPENDENT, differently
        -bounded store still has it. This function never reads the trajectory sidecar
        itself; it only reports what its caller already computed.
+       B-1013: the caller subtracts sessions whose trajectory lives in the per-agent
+       SQLite store before passing ``divergent_sessions`` (``sessions_in_sqlite`` counts
+       them), and passes ``uncompared_sessions`` instead when that store could not be
+       read in full - those are neither divergent nor clean, so they never set the
+       ``divergence`` sub-signal and never earn the "no session divergence" PASS clause.
+       Both are explained in ``fix`` only: ``detail`` feeds ``baseline.fingerprint()``.
     3. TWO NARROW SIGNALS:
        - ``status=='blocked'`` and ``error_code=='tool_blocked'`` - the policy engine
          actually DENIED a tool at runtime (``projectToolExecutionEventToAudit``,
@@ -1870,7 +1903,9 @@ def check_audit_trail_signals(
             "Review the named run_id(s)/session_id(s) directly in "
             "~/.openclaw/state/openclaw.sqlite (audit_events table) and, for a session "
             "divergence, confirm whether OPENCLAW_TRAJECTORY was intentionally disabled "
-            "or the trajectory sidecar has simply rotated past its 60-file cap.",
+            "or the trajectory sidecar has simply rotated past its 60-file cap."
+            + _b191_trajectory_store_note(divergent_sessions, sessions_in_sqlite,
+                                          uncompared_sessions),
             evidence=evidence,
             sub_signals=frozenset(sub_signals),
         )
@@ -1882,7 +1917,7 @@ def check_audit_trail_signals(
             f"{_fmt_epoch_ms(ctx.audit_events_newest_ms)}"
         )
     clean_signals = ["no blocked tool call", "no evasive tool name"]
-    if trajectory_compared:
+    if trajectory_compared and not uncompared_sessions:
         clean_signals.append("no session divergence from the trajectory sidecar")
     # C-135 round 2 (F-134/B191): "none of the three signals fired" is a claim about the
     # SAMPLED window, and ctx.audit_events_truncated means that window is not the whole
@@ -1906,7 +1941,11 @@ def check_audit_trail_signals(
         f"OpenClaw's runtime audit trail (audit_events) is present and readable: "
         f"{ctx.audit_events_total_rows} row(s){span}. "
         + ", ".join(clean_signals) + " observed in the sampled window." + caveat,
-        "No action needed. This table is pruned by OpenClaw itself (30 days / 100,000 "
-        "rows), so its coverage will always be partial on a long-lived install.",
-        pass_confidence=pass_confidence,
+        (_b191_trajectory_store_note(frozenset(), 0, uncompared_sessions).lstrip()
+         + " " if uncompared_sessions else "")
+        + "No action needed. This table is pruned by OpenClaw itself (30 days / 100,000 "
+        "rows), so its coverage will always be partial on a long-lived install."
+        + _b191_trajectory_store_note(frozenset(), sessions_in_sqlite, frozenset()),
+        # B-1013: sessions that could not be compared are not a clean comparison.
+        pass_confidence="no_signal" if uncompared_sessions else pass_confidence,
     )

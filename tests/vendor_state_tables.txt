@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.10.9
-# state-schema-version: 20
-# generated: 2026-10-30
-# tables: 133
+# openclaw-version: 2026.11.2
+# state-schema-version: 22
+# generated: 2026-11-09
+# tables: 134
 #
-# source-bundle: openclaw-state-db-BxR_sRr1.mjs
+# source-bundle: native-hook-relay-client.worker.js
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -13,9 +13,10 @@
 # ------------
 # Every table name the installed OpenClaw declares for its STATE SQLite database
 # (state/openclaw.sqlite) -- the vendor's whole state-SQLite surface, NOT the part this tree
-# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the allowlisted
-# satellite constants below, each applied to the same database through the state-database
-# write path (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
+# models. That is the whole `OPENCLAW_STATE_SCHEMA_SQL` constant PLUS the tables in
+# `featureLocalSql` of `getOpenClawStateFeatureSchemaSql` (the helper serves them to the
+# state-database write path) PLUS any allowlisted satellite constants below, each applied to the
+# same database (runOpenClawStateWriteTransaction / openOpenClawStateDatabase). Its sibling
 # state_schema_snapshot.sql is deliberately the opposite: full DDL, projected to the few
 # tables we read.
 #
@@ -24,11 +25,10 @@
 # tests/test_state_schema_grounding.py). A name here means the vendor DECLARES a table, not
 # that a given database has it yet: many are created on first use.
 #
-# Satellite constants read (bundle it came from, tables it adds beyond the main constant):
-#   WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL  [store-row-codec-l38X6-mv.mjs, 1 copy]
-#     adds: worker_environment_session_attachments
-#   ensureUserProfileTables  [user-profiles-internal-B_G1rF82.mjs, 1 copy]
-#     adds: user_profile_emails, user_profiles
+# Satellite sources read (bundle it came from, tables it adds beyond the main constant; the
+# featureLocalSql entry lists the tables every value in that object declares):
+#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-CYc16G0w.mjs, 7 copies]
+#     adds: user_profile_emails, user_profiles, worker_environment_session_attachments
 #
 # Why it exists
 # -------------
@@ -149,6 +149,7 @@ subagent_runs
 task_delivery_state
 task_runs
 update_runs
+user_background_images
 user_preferences
 user_profile_emails
 user_profile_identities

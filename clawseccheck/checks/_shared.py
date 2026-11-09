@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Hashable
 from pathlib import Path
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import unquote_plus, urlparse, urlsplit
 from .. import pathprobe
 from ..catalog import (
     BY_ID,
@@ -42,6 +42,7 @@ from ..collector import (  # noqa: F401
     _is_own_source,
     _own_source_symlinks,
 )
+from ..iocdb import ip_record_pattern as _iocdb_ip_record_pattern
 from ..iocdb import known_bad_host_records as _iocdb_known_bad_host_records
 from ..safeio import walk_dir_safely
 from .. import toolpolicy as _toolpolicy
@@ -1330,9 +1331,12 @@ def _iocdb_host_fragment(value: str, type_: str) -> str:
     (the left boundary additionally allows a "." so a real subdomain like
     "cdn.<host>" still matches, but a hyphen/letter/digit directly before it --
     "evil-<host>" -- does not)."""
+    if type_ != "domain":
+        # B-1012: the ip leg (bare, or carried inside a wildcard-DNS name) comes from the
+        # one definition iocdb.is_known_bad_host() also uses, so the two cannot drift.
+        return _iocdb_ip_record_pattern(value)
     esc = re.escape(value)
-    left = _HOST_CHARS if type_ == "ip" else _DOMAIN_LEFT_CHARS
-    return rf"(?<![{left}]){esc}(?![{_HOST_CHARS}])"
+    return rf"(?<![{_DOMAIN_LEFT_CHARS}]){esc}(?![{_HOST_CHARS}])"
 
 
 def _build_known_exfil_host_re() -> re.Pattern:
@@ -3362,7 +3366,7 @@ def _norm_dm_policy(channel_name, value):
 # governing traffic once `accounts` is added - OpenClaw runs it as an extra IMPLICIT
 # default account alongside the explicitly configured ones. The shared helper every
 # multi-account channel plugin builds its account list with is `createAccountListHelpers`
-# (installed 2026.10.9 dist `account-helpers-ATUS5rKM.mjs:8-11`), and it honours TWO
+# (installed 2026.10.10 dist `account-helpers-Bj9HVUkM.mjs:8-11`), and it honours TWO
 # registration forms, ORed: a predicate option `hasImplicitDefaultAccount(cfg)`, and a
 # key list `implicitDefaultAccount.channelKeys` (any one key present, by
 # `hasConfiguredAccountValue`). A few plugins build the list some other way (their own
@@ -3382,22 +3386,22 @@ def _norm_dm_policy(channel_name, value):
 # nonetheless read from `extensions/<id>/src` at that tag, the others being out-of-tree npm
 # plugins (sources tagged [tag] below; [dist] = also read in the installed bundle). The vendor's own
 # policy extension keeps a static approximation of the same table
-# (`evaluation-Cxe0aZKk.mjs` IMPLICIT_DEFAULT_ACCOUNT_FIELDS / IMPLICIT_ACCOUNT_REQUIREMENTS)
+# (`evaluation-DtDXMZsW.mjs` on 2026.11.2: IMPLICIT_DEFAULT_ACCOUNT_FIELDS / IMPLICIT_ACCOUNT_REQUIREMENTS)
 # - it was used as a cross-check only, never as the source: it omits x and reduces Slack
 # to "any of appToken/botToken/signingSecret", which is not the runtime rule.
 #
 # channelKeys form (any key present):
-#   telegram   botToken / tokenFile         [dist] account-selection-B6bGjjlD.mjs:58
+#   telegram   botToken / tokenFile         [dist] account-selection-BQ6BKlGA.mjs:53 on 2026.11.2
 #                                            (hasTelegramAccountConfig; also true when
 #                                            `accounts.default` exists, which is then a
 #                                            configured account, not an extra one)
-#   x          userId / clientId / refreshToken   [dist] accounts-DgZqMZQn.mjs:26
+#   x          userId / clientId / refreshToken   [dist] accounts-n2C-ky3w.mjs:26-30
 #   whatsapp   authDir                       [dist] config-doctor/whatsapp.js:17;
 #                                            [tag] whatsapp/src/account-ids.ts:8
 #   discord    token                         [tag] discord/src/accounts.ts:41
 #   googlechat serviceAccount / serviceAccountFile   [tag] googlechat/src/accounts.ts:53
 #              (+ serviceAccountRef: the legacy spelling Doctor still migrates to
-#              serviceAccount, dist legacy-DRcorE1g.mjs:2887 - a not-yet-migrated config
+#              serviceAccount, dist legacy-Cik5ObGU.mjs:2869-2872 (2026.11.2) - a not-yet-migrated config
 #              keeps it, so it stays in the trigger list)
 #   zalo       botToken / tokenFile          [tag] zalo/src/accounts.ts:17
 #   zalouser   profile                       [tag] zalouser/src/accounts.ts:19
@@ -3410,11 +3414,22 @@ def _norm_dm_policy(channel_name, value):
 # Predicate form - see `_IMPLICIT_DEFAULT_ACCOUNT_PREDICATES` below for each rule.
 # Single-account channels (the vendor never reads an account's own config from `accounts`,
 # so the base node IS what every running account reads, whatever `accounts` holds): a2a
-# ([tag] a2a/src/accounts.ts:6), reef ([tag] reef/src/channel.ts:126), msteams
-# ([tag] msteams/src/channel-config.ts:49, createTopLevelChannelConfigAdapter with no
-# listAccountIds -> ["default"], dist channel-config-helpers-Bi1bDD1D.mjs:219), nostr
+# ([tag] a2a/src/accounts.ts:6), reef ([tag] reef/src/channel.ts:126), nostr
 # ([tag] nostr/src/accounts.ts:27-42: resolveNostrAccountBase builds every account from the
 # channel node alone; its config schema is additionalProperties:false with no `accounts`).
+#
+# msteams left this list with @openclaw/msteams 2026.10.10 (read and executed from the npm
+# package; it ships outside the core dist). Up to 2026.10.9 it was single-account
+# (createTopLevelChannelConfigAdapter, no listAccountIds -> ["default"]) and its zod schema
+# was `.strict()` with no `accounts` / `defaultAccount`: executed, `{accounts: {...}}` fails
+# with "Unrecognized key". So a config that HAS `channels.msteams.accounts` can only load on
+# 2026.10.10+, and a base-only node reads the same on every build (`_resolved_channel_nodes`
+# returns it alone) - no build gate is needed. From 2026.10.10 the plugin lists accounts
+# with createAccountListHelpers("msteams", {normalizeAccountId, hasImplicitDefaultAccount:
+# hasConfiguredMSTeamsCredentials(channels.msteams)}) and resolves each with
+# resolveMergedAccountConfig (base + account, `defaultAccount` omitted), which is the merge
+# `_resolved_channel_nodes` models; inbound handling runs on that merged node
+# (withAccountScopedMSTeamsConfig). Its predicate is below.
 #
 # Any channel NOT in these three tables (a third-party channel plugin, or a channel
 # added after 2026.10.9) is UNGROUNDED, and its base node is KEPT: dropping it is the
@@ -3442,16 +3457,16 @@ _IMPLICIT_DEFAULT_ACCOUNT_KEYS = {
 }
 
 # Channels whose vendor account list never names an account from `accounts`.
-_SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "msteams", "nostr"})
+_SINGLE_ACCOUNT_CHANNELS = frozenset({"a2a", "reef", "nostr"})
 
 # Top-level `channels.*` keys that are config blocks, not channels (dist
-# evaluation-Cxe0aZKk.mjs:795 RESERVED_CHANNEL_CONFIG_KEYS).
+# evaluation-DtDXMZsW.mjs:820 on 2026.11.2, RESERVED_CHANNEL_CONFIG_KEYS).
 _RESERVED_CHANNEL_CONFIG_KEYS = frozenset({"defaults", "modelByChannel"})
 
 
 def _has_configured_account_value(value) -> bool:
     """The vendor's ``hasConfiguredAccountValue``: a string counts only after ``.strip()``;
-    any other non-``None`` value counts as-is (dist account-helpers-ATUS5rKM.mjs:58-61)."""
+    any other non-``None`` value counts as-is (dist account-helpers-Bj9HVUkM.mjs:58-61)."""
     if isinstance(value, str):
         return bool(value.strip())
     return value is not None
@@ -3477,7 +3492,7 @@ def _js_truthy(value) -> bool:
 
 def _has_configured_secret_input(value) -> bool:
     """The vendor's ``hasConfiguredSecretInput``: a non-blank string, or a well-formed
-    SecretRef object (dist types.secrets-DD-Q2SS_.mjs:68-71)."""
+    SecretRef object (dist types.secrets-Dgbd2kyP.mjs:68-71)."""
     if isinstance(value, str):
         return bool(value.strip())
     return _is_secret_ref_object(value)
@@ -3526,6 +3541,19 @@ def _matrix_implicit_default(node: dict) -> bool:
     return _text(node.get("userId")) and _has_configured_secret_input(node.get("password"))
 
 
+_MSTEAMS_IDENTITY_KEYS = (
+    "appId", "tenantId", "appPassword", "authType", "certificatePath",
+    "certificateThumbprint", "useManagedIdentity", "managedIdentityClientId",
+)
+# The env fallbacks of those keys (@openclaw/msteams 2026.10.10 token-config:
+# resolveAuthType / resolveMSTeamsAppId / resolveMSTeamsTenantId / inspectMSTeamsCredentials),
+# read for the implicit default account only (allowEnvFallback is true for `default`).
+_MSTEAMS_IDENTITY_ENV = (
+    "MSTEAMS_APP_ID", "MSTEAMS_TENANT_ID", "MSTEAMS_APP_PASSWORD", "MSTEAMS_AUTH_TYPE",
+    "MSTEAMS_CERTIFICATE_PATH", "MSTEAMS_CERTIFICATE_THUMBPRINT",
+    "MSTEAMS_USE_MANAGED_IDENTITY", "MSTEAMS_MANAGED_IDENTITY_CLIENT_ID",
+)
+
 _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES = {
     "slack": _slack_implicit_default,
     "matrix": _matrix_implicit_default,
@@ -3567,11 +3595,24 @@ _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES = {
         )
         or _has_configured_secret_input(n.get("authToken"))
     ),
+    # @openclaw/msteams 2026.10.10 hasConfiguredMSTeamsCredentials (token-config): appId AND
+    # tenantId, then appPassword (secret auth) or certificatePath / useManagedIdentity
+    # (federated) - but EVERY one of those falls back to an MSTEAMS_* env var
+    # (allowEnvFallback defaults to true for this call). A base that sets only part of the
+    # identity is therefore commonly completed by the environment (appId in the file, the
+    # password in MSTEAMS_APP_PASSWORD), so ANY configured identity key keeps the base live.
+    # A base with no identity key at all is dropped only when the config's own `env` block
+    # sets no MSTEAMS_* identity variable either (see `_channel_has_implicit_default_account`,
+    # which reads that block for msteams); the host's real environment stays the env-only
+    # residual every channel here has.
+    "msteams": lambda n: any(
+        _has_configured_account_value(n.get(key)) for key in _MSTEAMS_IDENTITY_KEYS
+    ),
     # nostr is a single-account channel (`_SINGLE_ACCOUNT_CHANNELS`), not a predicate.
 }
 
 
-def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
+def _channel_has_implicit_default_account(name: str, raw_node: dict, cfg=None) -> bool:
     """True when *raw_node* (the UNMERGED base channel node) still runs as an account
     alongside any explicitly configured ``accounts`` - see the grounding above
     ``_IMPLICIT_DEFAULT_ACCOUNT_KEYS``. Also True for a channel whose registration is not
@@ -3585,10 +3626,14 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
     documented residual false negative. One part of it IS in the config file and is not
     read here yet: OpenClaw applies the config's own ``env`` block (``env.vars.<NAME>`` and
     the flat ``env.<NAME>``) to the process environment before channels start
-    (``applyConfigEnvVars``, dist config-env-vars-BzUE_dOh.mjs:492; parsed in this package
+    (``applyConfigEnvVars``, dist config-env-vars-BHneg24Q.mjs:463 on 2026.11.2; parsed in this package
     by ``_config_env_block_entries``), so e.g. ``env.vars.SLACK_APP_TOKEN`` beside a base
     ``botToken`` makes the base account live. Consulting it needs each channel's env-var
     names and is a separate change; until then it is the same false-negative direction.
+
+    msteams is the exception: its whole identity can come from MSTEAMS_* variables, so its
+    base is also live when *cfg* (the whole config) has an ``env`` block setting one of
+    ``_MSTEAMS_IDENTITY_ENV``. Without *cfg* that block is unknown and the base is kept.
     """
     if not isinstance(raw_node, dict) or name in _RESERVED_CHANNEL_CONFIG_KEYS:
         return False
@@ -3596,7 +3641,14 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
         return True
     predicate = _IMPLICIT_DEFAULT_ACCOUNT_PREDICATES.get(name)
     if predicate is not None:
-        return bool(predicate(raw_node))
+        if predicate(raw_node):
+            return True
+        if name == "msteams":
+            if cfg is None:
+                return True
+            entries = _config_env_block_entries(cfg)
+            return any(_canonical_env_name(env) in entries for env in _MSTEAMS_IDENTITY_ENV)
+        return False
     keys = _IMPLICIT_DEFAULT_ACCOUNT_KEYS.get(name)
     if keys is None:
         return True
@@ -3605,14 +3657,14 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 
 # B-1002 (C-135): when a configured account's id IS the default account id, the implicit
 # default account and that configured account are ONE account - the vendor's
-# `listCombinedAccountIds` collects ids in a Set (dist account-helpers-ATUS5rKM.mjs:62-69) -
+# `listCombinedAccountIds` collects ids in a Set (dist account-helpers-Bj9HVUkM.mjs:62-69) -
 # and its config is the MERGE of the base node under that entry
-# (`resolveMergedAccountConfig`, dist channel-account-config-CtrJSs33.mjs:39-46), which
+# (`resolveMergedAccountConfig`, dist channel-account-config-BTy7yQJw.mjs:39-46), which
 # `_resolved_channel_nodes` already yields. The raw base node then never runs unmerged, so
 # adding it back would read a base policy the entry overrides: a spurious FAIL.
 #
 # Which keys are that entry: the vendor finds the default account's entry with
-# `resolveAccountKey` (dist account-lookup-BAaS-Jak.mjs:26-51). The exact key `default`
+# `resolveAccountKey` (dist account-lookup-Dm5zJglt.mjs:26-52). The exact key `default`
 # always wins. Otherwise a key matches when `normalize(key) == "default"`, where `normalize`
 # is - per channel, read at the tag - one of:
 #   trim + lowercase (the SDK default, `normalizeLowercaseStringOrEmpty`) for every channel
@@ -3643,7 +3695,9 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 # Channels where the raw base is the default account whatever `accounts` holds:
 #   tlon      the default account's config is the RAW channel node, never merged with
 #             `accounts.default` (resolveMergedTlonAccountConfig, tlon/src/types.ts:54-60).
-#   a2a / reef / msteams / nostr  single-account channels (see above).
+#   a2a / reef / nostr  single-account channels (see above).
+# msteams (2026.10.10+) finds the default entry with resolveMSTeamsAccountEntryKey: the
+# first key whose normalizeAccountId equals the id - the canonical class below.
 # twitch is NOT special-cased: with no default entry the raw base is added, and with one it is
 # not. The vendor's default account there is `accounts.default` overlaid with a fixed subset
 # of base fields (getAccountConfig, twitch/src/config.ts:36-90) - in neither case the raw base
@@ -3651,6 +3705,7 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict) -> bool:
 _BASE_IS_THE_DEFAULT_ACCOUNT = frozenset({"tlon"}) | _SINGLE_ACCOUNT_CHANNELS
 _DEFAULT_KEY_CANONICAL_CHANNELS = frozenset({
     "clickclack", "irc", "raft", "qa-channel", "telegram", "matrix", "nextcloud-talk", "twitch",
+    "msteams",
 })
 _DEFAULT_KEY_EXACT_CHANNELS = frozenset({"buzz"})
 _DEFAULT_KEY_OWN_FIELD = {"signal": "account"}
@@ -3709,7 +3764,7 @@ def _is_default_account_entry(name: str, key, entry) -> bool:
     return lowered_match
 
 
-def _base_node_runs_unmerged(name: str, c: dict) -> bool:
+def _base_node_runs_unmerged(name: str, c: dict, cfg=None) -> bool:
     """True when channel *c*'s RAW base node runs as an account of its own beside its
     configured ``accounts``: a non-empty ``accounts`` block, a base node that spawns the
     implicit default account (``_channel_has_implicit_default_account``), and no
@@ -3721,7 +3776,7 @@ def _base_node_runs_unmerged(name: str, c: dict) -> bool:
     accounts = c.get("accounts")
     if not (isinstance(accounts, dict) and accounts):
         return False
-    if not _channel_has_implicit_default_account(name, c):
+    if not _channel_has_implicit_default_account(name, c, cfg):
         return False
     if name in _BASE_IS_THE_DEFAULT_ACCOUNT:
         return True
@@ -3790,7 +3845,7 @@ def _resolved_account_nodes(name: str, c: dict) -> list:
     return out or [c]
 
 
-def _live_channel_nodes(name: str, c: dict) -> list:
+def _live_channel_nodes(name: str, c: dict, cfg=None) -> list:
     """``_resolved_channel_nodes(c)`` plus the raw base node when it runs unmerged
     (``_base_node_runs_unmerged``) - every node a running account of channel *name* reads.
 
@@ -3800,6 +3855,9 @@ def _live_channel_nodes(name: str, c: dict) -> list:
     ``_allow_bots_account_nodes`` (the gate directly), B140, B371,
     ``risk._open_group_channels``, ``risk._open_channel_entries``' mention reading and A1's
     ``_unpolicied_open_wildcard_group_channels``.
+
+    *cfg* is the whole config; pass it whenever it is at hand (only msteams reads it, for
+    its ``env`` block). ``None`` keeps an msteams base with no identity of its own.
 
     NOT every walk does. Known remaining raw ``[c] + accounts.values()`` walks, which count
     the base node always (the false-positive direction; pre-existing, none produces a FAIL):
@@ -3811,7 +3869,7 @@ def _live_channel_nodes(name: str, c: dict) -> list:
     ``_config.check_dangerous_overrides`` and ``_agents.check_sender_identity``.
     """
     nodes = list(_resolved_account_nodes(name, c))
-    if _base_node_runs_unmerged(name, c):
+    if _base_node_runs_unmerged(name, c, cfg):
         nodes.append(c)
     return nodes
 
@@ -3843,7 +3901,7 @@ def _open_channels(cfg: dict) -> list[str]:
         # entry IS the default account, B-1002); unconditionally adding it back would
         # reintroduce the exact bug this fix exists to close (a vestigial base policy with
         # no live account behind it at all).
-        nodes = _live_channel_nodes(name, c)
+        nodes = _live_channel_nodes(name, c, cfg)
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -3855,8 +3913,12 @@ def _open_channels(cfg: dict) -> list[str]:
             # this is a plain per-node read, not a new merge rule.
             if node.get("enabled") is False:
                 continue
+            # B-1053: a raw `node.get("dmPolicy")` read a world-open matrix DM channel
+            # (matrix declares ONLY the nested `dm.policy`, B-619) as "not open", and B2
+            # printed a clean PASS on it while A1 already counted the leg. Read the union
+            # of the nested-aware resolution and the flat key (_dm_policy_values).
             if (
-                node.get("dmPolicy") == "open"
+                "open" in _dm_policy_values(name, node)
                 or _norm_group_policy(name, node.get("groupPolicy")) == "open"
             ):
                 out.append(name)
@@ -4091,7 +4153,7 @@ def _open_wildcard_group_channels(cfg: dict) -> dict:
         # invisible even though the implicit default account still ingests - a false
         # NEGATIVE, and this helper feeds the behavioral arming and the RISK chains.
         # Same gate (`_live_channel_nodes`) `_open_channels` and `_b171_open_channels` use.
-        nodes = _live_channel_nodes(name, c)
+        nodes = _live_channel_nodes(name, c, cfg)
         for node in nodes:
             if not isinstance(node, dict) or node.get("enabled") is False:
                 continue
@@ -4135,12 +4197,14 @@ def _external_input_channels(cfg: dict) -> list[str]:
         for node in nodes:
             if not isinstance(node, dict):
                 continue
-            dm_policy = node.get("dmPolicy")
+            # B-1053: nested-aware (matrix declares only `dm.policy`, B-619), unioned
+            # with the flat key so nothing previously counted drops out.
+            dm_values = _dm_policy_values(name, node)
             group_policy = _norm_group_policy(name, node.get("groupPolicy"))
             # B-378: an unmodeled dmPolicy/groupPolicy (e.g. a list) is never a
             # genuine policy member - only a hashable value even needs the `in` test.
             if (
-                (isinstance(dm_policy, Hashable) and dm_policy in _UNTRUSTED_INPUT_POLICIES)
+                bool(dm_values & _UNTRUSTED_INPUT_POLICIES)
                 or (
                     isinstance(group_policy, Hashable)
                     and group_policy in _UNTRUSTED_INPUT_POLICIES
@@ -4285,6 +4349,27 @@ _CREDENTIAL_HEADER_NAMES = frozenset({
 # A vendor-sensitive path that holds a URL which MAY carry credentials: only a password in
 # the userinfo of the AUTHORITY is a plaintext secret.
 _VENDOR_SECRET_URL_PATH_RE = re.compile(r"^proxy\.proxyUrl$")
+# OpenClaw 2026.10.10's PostgreSQL DSN: a vendor `SecretInput` (`SecretInputSchema`, registered
+# `sensitive`, resolved by `resolveCanonicalConfiguredSecretInputString` and handed to node-pg as
+# `new Client({ connectionString })`). A DSN with no password is ordinary (peer / trust auth, a
+# pgpass file, PGPASSWORD), so only a password IN the string counts: the forms node-pg's own
+# parser (pg-connection-string 2.14.1, executed) reads - URL userinfo and a `?password=` query
+# parameter, for `postgres://`, `postgresql://` and `socket://` alike, and `sslpassword` (the
+# client-key passphrase) the same two ways - plus the libpq keyword form `password=...`, which
+# that parser ignores but which still puts the credential in the file.
+_VENDOR_SECRET_DSN_PATH_RE = re.compile(r"^database\.postgres\.connection$")
+# The authority of a DSN read as a URL: optional scheme, then `//`, up to the path/query/fragment.
+# Two readings of the authority, both kept in the union: the plain one (a `\\` is an ordinary
+# character, as for `postgres://`), and the WHATWG special-scheme one, where `\\` is a slash.
+_DSN_AUTHORITY_RES = (
+    re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?//([^/?#]*)", re.I),
+    re.compile(r"^(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}([^/\\?#]*)", re.I),
+)
+# One libpq `key=value` pair; a quoted value is consumed whole, so a `password=` INSIDE a
+# quoted `options` / `application_name` value is not a pair of its own.
+_DSN_KEYWORD_PAIR_RE = re.compile(r"(?:^|(?<=\s))(\w+)\s*=\s*('(?:[^'\\]|\\.)*'|\S*)")
+# `sslpassword` is the passphrase of the client key node-pg also reads from the DSN.
+_DSN_PASSWORD_KEYS = frozenset({"password", "sslpassword"})
 # Vendor-sensitive paths that are deliberately NOT secrets (path regex -> reason). The drift
 # test requires each vendor path to be covered above or to match one of these.
 _VENDOR_NOT_SECRET_PATHS = (
@@ -4321,6 +4406,66 @@ def _url_inline_password(value) -> "str | None":
         return None
     left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
     return password if left else None
+
+
+def _dsn_inline_password(value) -> "str | None":
+    """The password a PostgreSQL DSN carries in the string itself, or None (see
+    ``_VENDOR_SECRET_DSN_PATH_RE``). A password that is only an env reference is not one.
+
+    A UNION of three readings, not one parser, so a shape one reading misses cannot hide a
+    credential from the others: the authority's userinfo password (any scheme, or a bare
+    ``//``), every ``password`` / ``sslpassword`` query key (decoded, as node-pg decodes keys;
+    the query is read with or without a scheme, as node-pg reads it), and the libpq keyword
+    pairs. node-pg (pg-connection-string 2.14.1) reads the first two from a WHATWG URL resolved
+    against ``postgres://base``; it treats a value that starts with ``/`` - ``//`` included - as
+    a socket path with no password, and it ignores the keyword form. The union deliberately
+    reports those shapes anyway when they hold literal password text: the credential is in the
+    file whether or not node-pg would send it - including a socket-form value
+    (``/var/run/postgresql db``), which none of the three readings matches unless it carries
+    password text.
+    Differentially pinned against the executed parser in
+    ``tests/test_b1008_postgres_dsn_secret.py``: every DSN node-pg would send a literal password
+    for is reported, and nothing is reported that holds no literal password text.
+    """
+    if not isinstance(value, str):
+        return None
+    # WHATWG URL parsing drops ASCII tab and newline anywhere in the input
+    # WHATWG URL parsing strips C0 controls and spaces at both ends, and drops tab / CR / LF
+    # anywhere in the input
+    text = value.strip("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
+                       "\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20")
+    text = text.strip().replace("\t", "").replace("\n", "").replace("\r", "")
+
+    def literal(password: str) -> "str | None":
+        left = _ENV_REF_TOKEN_RE.sub("", _ENV_DEFAULT_TOKEN_RE.sub(r"\1", password)).strip()
+        return password if left and password else None
+
+    found = []
+    for authority_re in _DSN_AUTHORITY_RES:
+        authority = authority_re.match(text)
+        if authority and "@" in authority.group(1):
+            userinfo = authority.group(1).rsplit("@", 1)[0]
+            if ":" in userinfo:
+                found.append(userinfo.split(":", 1)[1])
+    if "?" in text:  # node-pg reads the query of any non-socket value, scheme or not
+        # Raw VALUES: a percent-encoded `%24%7BX%7D` is a literal to node-pg (env substitution
+        # runs on the config text before it), not a reference. KEYS are decoded, as node-pg does
+        # (`pass%77ord` is `password`).
+        query = text.split("?", 1)[1].split("#", 1)[0]
+        for pair in query.split("&"):
+            key, _, val = pair.partition("=")
+            if unquote_plus(key) in _DSN_PASSWORD_KEYS:
+                found.append(val)
+    for match in _DSN_KEYWORD_PAIR_RE.finditer(text):
+        if match.group(1).lower() in _DSN_PASSWORD_KEYS:
+            password = match.group(2)
+            if password.startswith("'") and password.endswith("'") and len(password) >= 2:
+                password = password[1:-1]
+            found.append(password)
+    for password in found:
+        if literal(password) is not None:
+            return password
+    return None
 
 
 def _concrete_secret_literal(value: str) -> bool:
@@ -4369,6 +4514,10 @@ def _vendor_slot_hit(path: str, value, min_len: int) -> bool:
         # a URL password is a credential at any length: `socks5://u:p@h` is 14 characters
         if _url_inline_password(rest) is not None:
             return True
+    if _VENDOR_SECRET_DSN_PATH_RE.search(norm):
+        # the raw value, not `rest`: an embedded `${PG_PASSWORD}` must stay in place for
+        # `_dsn_inline_password` to see that the password is a reference
+        return _dsn_inline_password(value) is not None
     if len(rest) < min_len:
         return False
     if any(rx.search(norm) for rx in _VENDOR_SECRET_VALUE_PATHS):
@@ -4394,7 +4543,11 @@ def _vendor_slot_covers(path: str) -> "str | None":
     leaf = norm.rsplit(".", 1)[-1]
     if SECRET_KEY_RE.search(leaf) or _CONFIG_SECRET_LEAF_RE.fullmatch(leaf):
         return "name"
-    for group in (_VENDOR_SECRET_VALUE_PATHS, _VENDOR_SECRET_MAP_PATHS, (_VENDOR_SECRET_URL_PATH_RE,)):
+    for group in (
+        _VENDOR_SECRET_VALUE_PATHS,
+        _VENDOR_SECRET_MAP_PATHS,
+        (_VENDOR_SECRET_URL_PATH_RE, _VENDOR_SECRET_DSN_PATH_RE),
+    ):
         if any(rx.search(norm) for rx in group):
             return "path"
     return None
@@ -5047,6 +5200,41 @@ def _declared_dm_policy(channel_name: str, node) -> str | None:
     return flat
 
 
+def _dm_policy_values(channel_name: str, node) -> set:
+    """B-1053: every dm-policy value *node* could be running with, for an "is it open /
+    is it external input?" membership test.
+
+    The union of what ``_declared_dm_policy`` resolves (the nested ``dm.policy`` matrix
+    declares, the discord/slack precedence) and the raw flat ``dmPolicy`` the open-ingress
+    predicates read before this fix. A UNION on purpose: it only ever ADDS a channel to an
+    open/untrusted set - the nested matrix form those predicates were blind to - and never
+    removes one they already reported, so no FAIL/WARN is cleared by this change (rule:
+    a change that can clear a finding must be fail-closed; this one cannot). Values that
+    are not non-empty strings are dropped (B-378 idiom).
+    """
+    out = set()
+    if not isinstance(node, dict):
+        return out
+    declared = _declared_dm_policy(channel_name, node)
+    # C-135 on this fix: matrix with `dm.enabled: false` ignores every DM whatever
+    # `dm.policy` says (vendor docs, docs/channels/matrix.md "dm.enabled ... When false,
+    # Matrix ignores all DMs"; docs/channels/matrix/access-control.md recommends it to
+    # silence DMs). Matrix is an external plugin in 2026.11.1, so the runtime gate could not
+    # be executed - the docs are the grounding, and they are used here ONLY to keep the
+    # NEW nested contribution from opening a channel the operator closed. The flat key
+    # below is unaffected, so nothing reported before this fix is cleared.
+    dm = node.get("dm")
+    if (channel_name in _DM_POLICY_NESTED_ONLY_CHANNELS and isinstance(dm, dict)
+            and dm.get("enabled") is False):
+        declared = None
+    if declared:
+        out.add(declared)
+    flat = node.get("dmPolicy")
+    if isinstance(flat, str) and flat:
+        out.add(flat)
+    return out
+
+
 def _untrusted_input_channels(cfg: dict) -> list[str]:
     """Enabled channels that can receive non-owner (untrusted) input.
 
@@ -5158,7 +5346,7 @@ def _resolved_default_input_channels(cfg: dict) -> list[str]:
                     continue
                 own = _declared_dm_policy(name, a)
                 live_declared.append(own if own is not None else channel_declared)
-            if _base_node_runs_unmerged(name, c):
+            if _base_node_runs_unmerged(name, c, cfg):
                 live_declared.append(channel_declared)
         else:
             live_declared.append(channel_declared)
@@ -5608,23 +5796,141 @@ def _agents_without_exec_gate(cfg: dict) -> "list[str]":
     return ungated
 
 
+# B-1017: IPv4 address classes, as explicit CIDR tables (NOT `ipaddress.is_global` /
+# `is_private`: those answers moved between Python releases - 3.12.4 / 3.13 changed which
+# special-purpose blocks count as private - and this classifier must give one verdict on
+# every supported interpreter). Each table row cites the RFC that reserves it.
+#
+# "local": the operator's own machine / LAN. Never a third-party destination.
+_IPV4_LOCAL_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8",       # RFC 1122 3.2.1.3 "this network"
+    "10.0.0.0/8",      # RFC 1918
+    "127.0.0.0/8",     # RFC 1122 loopback
+    "169.254.0.0/16",  # RFC 3927 link-local
+    "172.16.0.0/12",   # RFC 1918
+    "192.0.0.0/24",    # RFC 6890 IETF protocol assignments (DS-Lite / NAT64 discovery,
+                       # mostly on-link); was swallowed by the old whole-/16 TEST-NET test.
+                       # Exception: the two globally-reachable /32s in _IPV4_PUBLIC_EXCEPTIONS
+    "192.168.0.0/16",  # RFC 1918
+))
+# Globally-reachable /32s inside the otherwise on-link 192.0.0.0/24 (IANA IPv4 Special-Purpose
+# Address Registry): 192.0.0.9 PCP anycast (RFC 7723), 192.0.0.10 TURN anycast (RFC 8155).
+# Checked BEFORE the local table.
+_IPV4_PUBLIC_EXCEPTIONS = tuple(ipaddress.ip_network(n) for n in (
+    "192.0.0.9/32", "192.0.0.10/32",
+))
+# "documentation": example addresses (RFC 5737). Exactly the three /24s - the old test
+# excluded whole /16s ((192,0), (198,51), (203,0)), which hid ~65k real public addresses
+# per block (192.0.3.1, 198.51.0.1, 203.0.114.1 ...).
+_IPV4_DOC_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "192.0.2.0/24",     # TEST-NET-1
+    "198.51.100.0/24",  # TEST-NET-2
+    "203.0.113.0/24",   # TEST-NET-3
+))
+# "shared": RFC 6598 shared address space (carrier-grade NAT; Tailscale's CGNAT range).
+# NOT globally routable, but not the operator's LAN either - a tailnet peer or a cloud
+# provider's metadata address (Alibaba 100.100.100.200) is a destination OFF this host.
+_IPV4_SHARED_NET = ipaddress.ip_network("100.64.0.0/10")
+# "special": reserved, not globally routable, not a LAN. RFC 2544 benchmarking (198.18/15),
+# RFC 5771 multicast (224/4), RFC 1112 reserved + limited broadcast (240/4).
+_IPV4_SPECIAL_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "198.18.0.0/15", "224.0.0.0/4", "240.0.0.0/4",
+))
+
+
+_IPV4_DEC_PART_RE = re.compile(r"\d+")
+_IPV4_HEX_PART_RE = re.compile(r"0[xX][0-9a-fA-F]*")
+
+# B-1039: the SHAPE of a numeric-IP URL host - one to four dot-separated parts, each decimal
+# or 0x-hex (`8.8.8.8`, `0x8.8.8.8`, `0x08080808`, `2130706433`, `8.8`, `1.2.3`, `010.8.8.8`).
+# It only says "this host is spelled as numbers"; `_ipv4_class` decides what it means
+# (everything but a plain dotted quad is "ambiguous", i.e. off-host - never local). Callers
+# MUST anchor it to a whole URL host (`^...$` on a parsed hostname, or the lookahead in
+# `_IOC_IPURL_RE`): bare it matches the `1.2.3` of a version string.
+_NUMERIC_IP_HOST_PATTERN = r"(?:0[xX][0-9a-fA-F]+|\d+)(?:\.(?:0[xX][0-9a-fA-F]+|\d+)){0,3}"
+
+
+def _ipv4_class(ip: str):
+    """B-1017: 'local' | 'documentation' | 'shared' | 'special' | 'public' | 'ambiguous', or
+    None when *ip* is not an IPv4 literal at all (a DNS name, an out-of-range octet, ...).
+
+    'ambiguous' is a numeric host whose meaning depends on the reader: curl and the inet_aton
+    family read a leading-zero octet as OCTAL and a 0x octet as HEX, so `010.8.8.8` is sent to
+    8.8.8.8 while a decimal reading says 10.8.8.8 (LAN). Emulating those readings is a drift
+    surface, so the class never clears anything: `_ip_reaches_nonlocal_host` counts it as
+    off-host and no other predicate calls it local, documentation or public.
+
+    The one exception (B-1039) is a pure-decimal, no-leading-zero short form (`127.1`, `127`,
+    `2130706433`, `8.8`): every inet_aton-family reader gives it exactly one meaning, so it is
+    decoded and classified like the dotted quad it stands for. A short form that does not
+    decode (out of range) is "ambiguous", never None, so it can only raise a finding. So is any
+    other numeric-shaped host that does not validate (`999.1.1.1`): None means "not numeric at
+    all" (a DNS name, five parts), never "numeric but invalid"."""
+    parts = ip.split(".")
+    if not 1 <= len(parts) <= 4:
+        return None
+    numeric = all(_IPV4_DEC_PART_RE.fullmatch(x) or _IPV4_HEX_PART_RE.fullmatch(x) for x in parts)
+    if not numeric:
+        return None
+    if any(x[0] == "0" and len(x) > 1 for x in parts):  # leading zero -> octal; 0x -> hex
+        return "ambiguous"
+    if len(parts) != 4:
+        # B-1039: a pure-decimal short form has exactly ONE meaning under inet_aton (curl,
+        # getaddrinfo and the WHATWG URL parser all follow it): a.b -> a.0.0.b (b < 2^24),
+        # a.b.c -> a.b.0.c (c < 2^16), N -> the 32-bit integer (N < 2^32). Decode exactly that
+        # so `127.1` / `127` / `2130706433` read as loopback and `8.8` as 8.0.0.8. Anything
+        # that does not decode (out of range, non-ASCII digits) stays "ambiguous": it can
+        # only ever RAISE a finding, never clear one.
+        if not all(x.isascii() and x.isdigit() for x in parts):
+            return "ambiguous"
+        nums = [int(x) for x in parts]
+        if any(o > 255 for o in nums[:-1]) or nums[-1] >= 256 ** (5 - len(parts)):
+            return "ambiguous"
+        # the last part fills every remaining byte, big-endian (`127.1` -> 127.0.0.1)
+        octs = nums[:-1] + list(nums[-1].to_bytes(5 - len(parts), "big"))
+    else:
+        octs = [int(x) for x in parts]
+        if any(o > 255 for o in octs):
+            # numeric-shaped but not a valid address (`999.1.1.1`): fail closed. None would
+            # read as "not an IP" and let a stand-down predicate treat the host as local.
+            return "ambiguous"
+    addr = ipaddress.IPv4Address(bytes(octs))
+    if any(addr in n for n in _IPV4_PUBLIC_EXCEPTIONS):
+        return "public"
+    if any(addr in n for n in _IPV4_LOCAL_NETS):
+        return "local"
+    if any(addr in n for n in _IPV4_DOC_NETS):
+        return "documentation"
+    if addr in _IPV4_SHARED_NET:
+        return "shared"
+    if any(addr in n for n in _IPV4_SPECIAL_NETS):
+        return "special"
+    return "public"
+
+
 def _is_public_ip(ip: str) -> bool:
-    """True for a routable IPv4 - excludes private / loopback / link-local / TEST-NET doc
-    ranges so example addresses in documentation don't fire."""
-    try:
-        octs = [int(x) for x in ip.split(".")]
-    except ValueError:
-        return False
-    if len(octs) != 4 or any(o > 255 for o in octs):
-        return False
-    a, b = octs[0], octs[1]
-    if a in (0, 10, 127) or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31):
-        return False
-    if a == 169 and b == 254:  # link-local
-        return False
-    if (a, b) in ((192, 0), (198, 51), (203, 0)):  # TEST-NET-1/2/3 documentation ranges
-        return False
-    return True
+    """True only for a globally-routable unicast IPv4 literal. Private / loopback /
+    link-local / RFC 6598 shared (CGNAT, Tailscale) / documentation / benchmarking /
+    multicast / reserved all read False, and so does anything that is not an IPv4 literal.
+
+    STRICT: use it where the question is literally "is this address public" (a LABEL).
+    Do NOT use `not _is_public_ip(x)` as a "this is local, stand down" test - CGNAT and
+    multicast are non-public yet still off-host, so that reading CLEARS a finding for
+    them (B-1017). A caller that raises or clears a finding wants
+    `_ip_reaches_nonlocal_host` instead."""
+    return _ipv4_class(ip) == "public"
+
+
+def _ip_reaches_nonlocal_host(ip: str) -> bool:
+    """B-1017: True when the IPv4 literal *ip* names a host OFF the operator's own machine /
+    LAN - i.e. anything except local (RFC 1918 / loopback / link-local / this-network) and
+    the RFC 5737 documentation /24s. Unlike `_is_public_ip` this keeps RFC 6598 shared space
+    (a Tailscale exfil peer, Alibaba IMDS 100.100.100.200), multicast, benchmarking and
+    reserved space IN: those used to count as 'public' to every caller and still must, since
+    clearing a finding for them would be fail-open. 'ambiguous' numeric forms (leading-zero /
+    hex octets, fewer than four parts) are IN too: curl reads `010.8.8.8` as 8.8.8.8. False
+    for a non-IPv4 string."""
+    return _ipv4_class(ip) in ("public", "shared", "special", "ambiguous")
 
 
 # `_OWN_ENGINE_MARKERS` / `_is_own_source` used to be DEFINED here. B-265 relocated them
@@ -6143,7 +6449,7 @@ def _unpolicied_open_wildcard_group_channels(cfg: dict) -> dict:
         if name == "defaults" or not isinstance(c, dict) or c.get("enabled") is False:
             continue
         # B-1002: the live implicit default account too (`_live_channel_nodes`).
-        for node in _live_channel_nodes(name, c):
+        for node in _live_channel_nodes(name, c, cfg):
             # B-438 (C-135 adversarial review): mirror the per-resolved-node
             # `enabled: false` skip `_open_wildcard_group_channels` already carries - a
             # retired/disabled account left with its old open wildcard-group policy still

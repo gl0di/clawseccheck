@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import fields as dc_fields
 from dataclasses import replace as dc_replace
 from pathlib import Path
 
@@ -735,6 +736,31 @@ def render_vet_judge_packet_json(engine_output, *, target: str, version: str) ->
     return _emit_json(payload)
 
 
+def _carry_instance_attrs(src, dst):
+    """Copy every non-dataclass-field instance attribute from *src* onto *dst*.
+
+    B-1067: ``vet_skill``/``vet_plugin`` attach several bare instance attributes that
+    are NOT declared Finding fields -- ``.ctx``, ``.lexical_loose_code``,
+    ``.unanalysed_code``, ``.analysed_loose_code``, ``.bundled_contexts``,
+    ``.gyp_build_code``. ``dataclasses.replace`` only reconstructs DECLARED fields, so
+    every ``dc_replace`` in the escalate path silently dropped them. ``build_profile``
+    reads exactly these attributes off each pooled finding to decide a plugin's
+    danger / connections / persistence coverage, so dropping them re-rendered an
+    UNKNOWN axis as PASS on EVERY ``--vet-judged`` call -- even a no-op one with an
+    empty or fingerprint-mismatched payload, where nothing was escalated at all. The
+    earlier C-135 note restored only ``.ctx`` by name; a later attribute
+    (``lexical_loose_code``, the plugin partial-read signal) was added without this
+    line and silently reopened the hole. Carry ALL of them generically so a new bare
+    attribute cannot regress this again. Nothing is read from ``dst`` -- it is a fresh
+    ``dc_replace`` copy with no extras of its own -- so no legitimate value is clobbered.
+    """
+    field_names = {fl.name for fl in dc_fields(type(dst))}
+    for key, value in vars(src).items():
+        if key not in field_names:
+            setattr(dst, key, value)
+    return dst
+
+
 def _escalate_finding(f, verdicts_map: dict):
     """Return *f* unchanged, or a NEW copy (``dataclasses.replace``) with its
     status escalated per ``_escalated_status``. Nothing is mutated in place.
@@ -768,10 +794,13 @@ def _escalate_finding(f, verdicts_map: dict):
     if new_status is None:
         return f
     split = _panel_split_text(verdict, entry.get("votes"))
-    return dc_replace(
+    # B-1067: carry the bare (non-field) instance attributes across the replace -- an
+    # escalated finding that itself carried .ctx / loose-code coverage signals must not
+    # lose them, for the same reason the primary must not (see _carry_instance_attrs).
+    return _carry_instance_attrs(f, dc_replace(
         f, status=new_status,
         detail=f"[escalated by host-agent judge: {verdict}{split}] {f.detail}",
-    )
+    ))
 
 
 def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
@@ -822,14 +851,17 @@ def escalate_vet_output(engine_output, verdicts_raw: str, *, target: str):
         for f in getattr(engine_output, "ring_findings", [])
     ] + new_attest_findings
     result = dc_replace(escalated_primary, ring_findings=escalated_ring)
-    # C-135: dataclasses.replace only reconstructs DECLARED fields -- vet_skill/
-    # vet_plugin attach `.ctx` as a bare instance attribute (not a Finding field),
-    # so both the replace above and _escalate_finding's own replace silently drop
-    # it. build_profile reads engine_output.ctx to decide PASS-vs-UNKNOWN for the
-    # connections/persistence axes, so losing it corrupted that axis-level
-    # assessment on EVERY --vet-judged call, even a pure no-op one with no
-    # matching verdicts at all. Propagate it explicitly.
-    result.ctx = getattr(engine_output, "ctx", None)
+    # C-135 / B-1067: dataclasses.replace only reconstructs DECLARED fields -- vet_skill/
+    # vet_plugin attach `.ctx` AND several loose-code coverage signals
+    # (`lexical_loose_code`, `unanalysed_code`, `analysed_loose_code`,
+    # `bundled_contexts`, ...) as bare instance attributes (not Finding fields), so both
+    # the replace above and _escalate_finding's own replace silently drop them.
+    # build_profile reads them to decide PASS-vs-UNKNOWN for the danger / connections /
+    # persistence axes, so losing them corrupted that axis-level assessment on EVERY
+    # --vet-judged call, even a pure no-op one with no matching verdicts at all -- the
+    # original C-135 fix restored only `.ctx` by name and a later `lexical_loose_code`
+    # signal reopened the hole (B-1067). Carry every bare attribute generically.
+    _carry_instance_attrs(engine_output, result)
     return result
 
 

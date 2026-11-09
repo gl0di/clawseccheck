@@ -123,14 +123,16 @@ def test_battery_catches_a_short_retired_value_list(monkeypatch):
 # --- the window ---
 
 def test_window_is_the_validated_builds_only():
-    assert DATA["build"] == "2026.10.9"
+    assert DATA["build"] == "2026.11.2"
     assert rf.in_window((2026, 10, 1)) and rf.in_window((2026, 10, 2))
     assert rf.in_window((2026, 10, 3)) and rf.in_window((2026, 10, 4))
     assert rf.in_window((2026, 10, 5)) and rf.in_window((2026, 10, 6))
     assert rf.in_window((2026, 10, 7)) and rf.in_window((2026, 10, 8))
-    assert rf.in_window((2026, 10, 9))
+    assert rf.in_window((2026, 10, 9)) and rf.in_window((2026, 10, 10))
+    assert rf.in_window((2026, 10, 11)) and rf.in_window((2026, 11, 1))
+    assert rf.in_window((2026, 11, 2))
     assert rf.in_window((2026, 10, 2, 1))  # a correction release stays inside
-    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 10, 10))
+    assert not rf.in_window((2026, 9, 9)) and not rf.in_window((2026, 11, 3))
     assert not rf.in_window((2027, 1, 1))
     assert not rf.in_window(None) and not rf.in_window(()) and not rf.in_window((2026, 10))
     assert not rf.in_window("2026.10.2")
@@ -184,7 +186,8 @@ def test_2026_10_5_names_an_empty_plugins_installs_and_2026_10_6_does_not():
     empty = {"plugins": {"installs": {}}}
     assert _paths(rf.find_retired(empty, (2026, 10, 5))) == ["plugins.installs"]
     assert _paths(rf.find_retired(empty, (2026, 10, 4))) == ["plugins.installs"]
-    for newer in (None, (2026, 10, 6), (2026, 10, 6, 1), (2026, 11, 1)):
+    for newer in (None, (2026, 10, 6), (2026, 10, 6, 1), (2026, 11, 1),
+                  (2026, 11, 2)):
         assert rf.find_retired(empty, newer) is None, newer
     for value in ({"a": 1}, [], [1], None, "x", "", 0, False, True, 7):
         cfg = {"plugins": {"installs": value}}

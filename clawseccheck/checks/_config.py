@@ -73,6 +73,7 @@ from ._shared import (
     _detail_path,
     _dir_replaceable_by_others,
     _DM_POLICY_NESTED_ONLY_CHANNELS,
+    _dm_policy_values,
     _enabled_tools,
     EXPOSED_BINDS,
     _external_input_channels,
@@ -2770,7 +2771,7 @@ def _b171_open_channels(cfg: dict) -> list[str]:
     for name, c in _channels(cfg).items():
         if not isinstance(c, dict) or c.get("enabled") is False:
             continue
-        nodes = _live_channel_nodes(name, c)
+        nodes = _live_channel_nodes(name, c, cfg)
         for node in nodes:
             if not isinstance(node, dict):
                 continue
@@ -2780,8 +2781,15 @@ def _b171_open_channels(cfg: dict) -> list[str]:
             # reasoning as the channel-level guard above.
             if node.get("enabled") is False:
                 continue
-            dm_open = node.get("dmPolicy") == "open" and not _b171_scoped_list(
-                node.get("allowFrom")
+            # B-1053: nested-aware dm read (matrix declares only `dm.policy`, B-619).
+            # A nested-only channel (matrix) keeps its DM allowlist beside the nested
+            # policy, at `dm.allowFrom` (vendor docs/channels/matrix.md), so a scoped list
+            # there scopes the open DM exactly as a flat `allowFrom` does elsewhere.
+            _dm_node = node.get("dm") if isinstance(node.get("dm"), dict) else {}
+            dm_open = "open" in _dm_policy_values(name, node) and not (
+                _b171_scoped_list(node.get("allowFrom"))
+                or (name in _DM_POLICY_NESTED_ONLY_CHANNELS
+                    and _b171_scoped_list(_dm_node.get("allowFrom")))
             )
             # B-283 (a): normalize a Feishu channel's "allowall" alias, which Feishu's
             # GroupPolicySchema transforms to "open" (channel-PR3XHV0V.js:89-93) - without
@@ -4795,6 +4803,57 @@ def check_proxy_header_forging(ctx: Context) -> Finding:
     )
 
 
+_DEFAULT_SANDBOX_IMAGE = "openclaw-sandbox:bookworm-slim"
+
+
+def _sandbox_image_advice(sandbox: dict) -> str:
+    """Advice-only sentence for B4's `fix`: a sandboxed session also needs its container image.
+
+    Grounded against the installed openclaw@2026.11.1 (cite the strings, not the rotating
+    bundle names): the docker backend runs `image inspect <image>` before it creates a
+    container and, when the image is absent, throws "Sandbox image not found: <image>."
+    (for the default image it adds "Build it with scripts/sandbox-setup.sh before enabling
+    Docker sandboxing"; for any other "Build or pull it first."); the sandbox context wraps
+    that as a `SandboxProvisioningError`, so the session never starts. The image is
+    `agents.defaults.sandbox.docker.image` (a string) and defaults to
+    `openclaw-sandbox:bookworm-slim`; the backend is `agents.defaults.sandbox.backend`
+    (default "docker"). Both are read by plain dict traversal, like `_sandbox_docker_binds`.
+
+    We cannot see the container engine's image store (root-only, and no subprocess in a
+    check), so this NEVER changes the verdict - it only tells the user the dependency
+    exists. It lives in `fix`, never `detail`: `baseline.fingerprint()` hashes `detail`.
+    A non-docker backend (ssh, a plugin backend) does not read the image, so it gets no
+    sentence rather than a wrong one. Only the two WARN branches (defaults / per-agent
+    'non-main') carry it: the PASS text is pinned byte-identical (C-641/C-641b) and a PASS
+    finding is not rendered with its advice anyway.
+    """
+    backend = sandbox.get("backend") if isinstance(sandbox, dict) else None
+    if isinstance(backend, str) and backend.strip() and backend.strip() != "docker":
+        return ""
+    docker = sandbox.get("docker") if isinstance(sandbox, dict) else None
+    image = docker.get("image") if isinstance(docker, dict) else None
+    shown = None
+    if isinstance(image, str):
+        # printable-only and length-capped: the value is operator config but ends up on a terminal
+        shown = "".join(ch for ch in image.strip() if ch.isprintable())[:200] or None
+    if shown is None and image is not None:
+        subject = "its configured container image (agents.defaults.sandbox.docker.image)"
+        how = "Build or pull that image first."
+    elif shown is None or shown == _DEFAULT_SANDBOX_IMAGE:
+        subject = f"the container image {_DEFAULT_SANDBOX_IMAGE} (the default)"
+        how = "OpenClaw's own error text says to build it with scripts/sandbox-setup.sh."
+    else:
+        subject = f"the container image {shown} (agents.defaults.sandbox.docker.image)"
+        how = "Build or pull that image first."
+    return (
+        f" A sandboxed session also needs {subject} to exist on the host that runs the "
+        "gateway: when it is missing, OpenClaw cannot start the session and fails it with "
+        "a SandboxProvisioningError ('Sandbox image not found'). clawseccheck cannot see "
+        "the container engine, so it did not verify this - confirm with your container "
+        f"engine's image-inspect command. {how}"
+    )
+
+
 def check_sandbox(ctx: Context) -> Finding:
     cfg = ctx.config
     # Real path: agents.defaults.sandbox.mode (values: "off", "non-main", "all")
@@ -4964,7 +5023,8 @@ def check_sandbox(ctx: Context) -> Finding:
             "Set agents.defaults.sandbox.mode to 'all' so the main session is sandboxed "
             "too, and configure agents.defaults.sandbox.docker for network isolation. "
             "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
-            "this WARN does not by itself open that chain.",
+            "this WARN does not by itself open that chain."
+            + _sandbox_image_advice(default_sandbox),
             evidence=["agents.defaults.sandbox.mode=non-main"],
             config_field_paths={"agents.defaults.sandbox.mode"},
         )
@@ -4987,7 +5047,8 @@ def check_sandbox(ctx: Context) -> Finding:
             "Set sandbox.mode to 'all' on each agent named in the evidence, or remove that "
             "per-agent sandbox.mode so the agent inherits agents.defaults.sandbox.mode. "
             "The RISK-03 attack chain treats only mode 'off' or absent as no sandbox, so "
-            "this WARN does not by itself open that chain.",
+            "this WARN does not by itself open that chain."
+            + _sandbox_image_advice(default_sandbox),
             non_main_agents,
         )
     return _finding("B4", PASS, "Execution is sandboxed.", "Keep sandbox mode enabled.")
@@ -5119,6 +5180,9 @@ _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
     (2026, 10, 7): "node:24.22.1-slim",
     (2026, 10, 8): "node:24.22.1-slim",
     (2026, 10, 9): "node:24.22.1-slim",
+    (2026, 10, 10): "node:24.22.1-slim",
+    (2026, 11, 1): "node:24.22.1-slim",
+    (2026, 11, 2): "node:24.22.1-slim",
 }
 
 
@@ -6293,6 +6357,15 @@ def check_trifecta(ctx: Context) -> Finding:
         # True -- the same "a partial sweep is not the same fact as an exhaustive
         # one" discipline `store["incomplete"]` already gets above.
         agent_auth_capped = getattr(ctx, "agent_auth_profile_store_capped", False)
+        # B-1014: a state database that EXISTS but could not be read (corrupt bytes, a
+        # PostgreSQL engine anchor, a non-table `config_machine_state`, a per-agent DB
+        # that would not open) left `*_read` False -- the same value as "no database"
+        # -- so the hedge above never fired and A1 read PASS on missing evidence (GR#4).
+        # Same disclosure as `store["incomplete"]`: a WARN hedge, never a leg, so no
+        # new FAIL and no RISK chain change (risk.py's `_has_sensitive_data` asserts
+        # legs and deliberately ignores unread stores, see its B-730 note).
+        auth_store_unread = getattr(ctx, "auth_profile_store_unreadable", False)
+        agent_auth_unread = getattr(ctx, "agent_auth_profile_store_unreadable", False)
         if (
             reach
             or store["incomplete"]
@@ -6300,6 +6373,8 @@ def check_trifecta(ctx: Context) -> Finding:
             or auth_store_present
             or agent_auth_store_present
             or agent_auth_capped
+            or auth_store_unread
+            or agent_auth_unread
         ):
             why = []
             if reach:
@@ -6355,6 +6430,20 @@ def check_trifecta(ctx: Context) -> Finding:
                     " allows, so not every agent's own auth-profile store could be"
                     " checked"
                 )
+            if auth_store_unread or agent_auth_unread:
+                why.append(
+                    "OpenClaw's "
+                    + (
+                        "shared and per-agent auth-profile stores"
+                        if auth_store_unread and agent_auth_unread
+                        else "shared auth-profile store (state/openclaw.sqlite)"
+                        if auth_store_unread
+                        else "per-agent auth-profile store"
+                        " (agents/<agent-id>/agent/openclaw-agent.sqlite)"
+                    )
+                    + " exists but could not be read, so whether it holds credentials"
+                    " is unknown, not 'none'"
+                )
             if config_blind:
                 why.append(
                     "no OpenClaw config was found on this host at all, so nothing about"
@@ -6390,6 +6479,18 @@ def check_trifecta(ctx: Context) -> Finding:
                     " holds a real, usable credential (this audit only sees its byte"
                     " length, never its value) and treat this leg as ON if it does."
                     if agent_auth_store_present
+                    else "This audit could not read OpenClaw's auth-profile store"
+                    " (see the scan errors for the file and reason: a corrupt"
+                    " database, or one whose data OpenClaw keeps in PostgreSQL)."
+                    " Check by hand whether it holds a real, usable credential and"
+                    " treat this leg as ON if it does."
+                    + (
+                        " More per-agent databases also exist than this scan's cap"
+                        " allows, so check the remaining agents' stores too."
+                        if agent_auth_capped
+                        else ""
+                    )
+                    if auth_store_unread or agent_auth_unread
                     else "This host has more per-agent databases under"
                     " agents/*/agent/openclaw-agent.sqlite than this scan's cap"
                     " allows, so its per-agent auth-profile store sweep did not cover"
@@ -8705,9 +8806,9 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     owner-only core tool list on both builds. In 2026.9.7 the non-sandboxed tool list
     spreads ``...createAvailablePortalTools(options)`` instead (call site
     ``openclaw-tools-DCQphGzC.mjs:17666-17675``; defined in
-    ``sessions-spawn-tool-B5tfhM3J.mjs:143-145``), which returns no tool when
-    ``senderIsOwner === false`` and there is no ``sessionPortalTarget``, and otherwise
-    returns the portal tool (``sandboxed: Boolean(sandbox)``,
+    ``sessions-spawn-tool-B5tfhM3J.mjs:143-145``), which on 2026.9.7 returned no tool
+    when ``senderIsOwner === false`` and there is no ``sessionPortalTarget``, and
+    otherwise returns the portal tool (``sandboxed: Boolean(sandbox)``,
     ``agent-tools-D5UK6LHM.mjs:656``), which can open a portal to any local port 1-65535
     (``PortalOpenParamsSchema``, ``src-BvzgK7Oj.mjs:5856-5865``) and whose tool result
     text contains the tokenized URL (``formatPortalResult``,
@@ -8715,6 +8816,12 @@ def check_gateway_portal_reach(ctx: Context) -> Finding:
     an internal service, and its model context holds the bearer URL. This check does not
     model 9.7's session-bound portal tool for a non-owner sender with an attached worker
     environment (``prepareSessionPortalToolAccess``, ``agent-tools-D5UK6LHM.mjs:309-317``).
+    On 2026.11.1 the non-owner case changed shape: ``createAvailablePortalTools``
+    (``sessions-spawn-tool-DyTpSYwQ.mjs:288-300``) always returns the portal tool, and
+    when ``senderIsOwner === false`` with no ``sessionPortalTarget`` (``ownerUnavailable``)
+    its ``execute`` throws ``ToolInputError`` ("portal needs the owner's authority")
+    instead. So the tool is offered to a non-owner and the call is refused; this check
+    reads no per-sender state and its verdict is unchanged.
 
     THREE TRANSPORTS, evaluated in this order because that is the vendor's own
     precedence (``createGatewayPortalService.open``, ``server-start-BkBmUb8t.mjs:

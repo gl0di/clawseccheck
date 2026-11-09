@@ -299,6 +299,11 @@ The narrative version, in one paragraph per theme:
   contents (`~/.ssh/id_*`, `.aws/credentials`, keychain, wallet, ...) flowing into a network
   sink ("read a secret file -> send it out"). Sources are credential files only, not env vars,
   so the legit "read `OPENAI_API_KEY`, send as auth header" pattern is never flagged.
+  The trace follows the secret across helper functions in the same file (`upload(collect())`,
+  a method handing a value to another through `self.x`, a loop that fills a dict), however long
+  the chain of local helpers. It does not follow a call into another file, a function stored in
+  a variable or passed as a callback, a global written from a function, or a handoff through a
+  second method that only reads another `self.x` slot.
   (AST is Python-only; JS/shell stay on the regex engine.)
 - **Egress & trust boundaries:** where the agent can reach out (channels, external skills,
   tools), MCP server trust, untrusted-context exposure, sender identity strength,
@@ -597,6 +602,11 @@ actual "is there a newer version?" lookup belongs to your package tooling or you
 the notice with `--no-update-notice` or `CLAWSECCHECK_NO_UPDATE_NOTICE=1`; after any update, verify
 the engine with `--verify-self`.
 
+A long run (the audit and every mode that runs the check engine or a long scan) prints one line to
+stderr as it starts - `ClawSecCheck: auditing <home> - this usually takes 1-4 minutes ... the audit is
+still running: wait for it to exit.` - because it prints nothing else until it finishes. stdout is
+unchanged; silence the line with `CLAWSECCHECK_NO_PROGRESS=1`.
+
 ## Threat monitoring
 
 Two complementary things:
@@ -761,6 +771,11 @@ changes:
 clawseccheck --watch --home ~/.openclaw
 clawseccheck --watch --home ~/.openclaw --data-dir ~/.clawseccheck --watch-debounce 5
 ```
+
+If the store holds no baseline yet, `--watch` records one as soon as it starts (one
+`--monitor` run, announced as "no baseline in this store yet"), so the first change it sees
+is compared against the state before that change and alerts, instead of silently becoming
+the baseline.
 
 It never returns until stopped (`Ctrl-C`, or `SIGTERM` from a process supervisor) and prints
 each triggered check in the exact same format as `clawseccheck --monitor --verbose` - because
@@ -2235,8 +2250,11 @@ python3 audit.py --log audit.log            # also write log to a local file
   silently dropped); plus the full byte range of an over-length log line (via overlapping
   windows) instead of only its head and tail. It applies
   to B164/B180, which run on **every** audit, so it has effect with or without `--full`. The
-  per-check and whole-audit wall-clock budgets are unchanged - the byte plan, not the clock,
-  is what widened, so a bigger scan cannot degrade a check into a capped `UNKNOWN`. Slower, and
+  per-check and whole-audit wall-clock budgets are raised in the same step (120 s per check and
+  900 s for the whole audit, against 60 s and 150 s for a plain run), so a bigger scan cannot
+  degrade a check into a capped `UNKNOWN`. That makes `--exhaustive` the way to a complete run
+  on a very large fleet, where a plain run can reach its 150 s whole-audit budget and mark the
+  checks it did not reach `UNKNOWN` (a plain message in the finding names this flag). Slower, and
   it still does not guarantee the whole corpus on a large fleet - a normal run already
   discloses exactly what it skipped, and `--exhaustive` states its own coverage the same way
   when it, too, has to leave sinks out; it narrows that gap substantially rather than closing
@@ -2588,7 +2606,7 @@ why a local, read-only vetting tool exists. Browse more, but **vet before you tr
 
 ## Tests
 
-A security tool should be heavily tested - so it is: 1,117 test files and 39,923
+A security tool should be heavily tested - so it is: 1,188 test files and 42,191
 tests, run in CI on **Linux (Python 3.12 and 3.14) and macOS (Python 3.12)** alongside `ruff`. Tests are **offline and
 read-only** (no network, nothing written outside the test's temp dir); every check ships a
 **clean fixture** (no finding) *and* a **bad fixture** (the finding fires) plus explicit

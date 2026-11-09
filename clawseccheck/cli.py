@@ -196,7 +196,7 @@ def _unicode_ok() -> bool:
         return False
 
 
-# C-510 item 2: a plain audit can spend up to ~3 minutes on hostile
+# C-510 item 2: a plain audit can spend up to ~3.5 minutes on hostile
 # content (checks/__init__.py's own per-check budget allows several slow checks in a
 # row) with nothing printed the whole time -- indistinguishable from a hang to a user
 # watching the terminal, and killing what looks like a stuck process mid-write is
@@ -244,6 +244,66 @@ def _default_audit_progress_cb(args):
             print(line, end="", file=sys.stderr, flush=True)
 
     return _cb
+
+
+#: Modes that run the check engine or a long scan and so stay silent for a long while.
+#: Every mode that reaches the shared ``audit()`` call is here (so ``--trend``,
+#: ``--percentile``, ``--next``, ``--dashboard``, ``--monitor`` ... all count), plus the
+#: vet family and ``--show-suppressed``, which dispatch before it. Deliberately absent:
+#: the fast, engine-free modes (``--menu``, ``--brief``, ``--explain``, ``--retest``,
+#: ``--verify-*``, ``--diff``, ``--watch-log``, the self-test family, ...). The default
+#: audit (no primary mode: text, ``--json``, ``--card``, ``--full`` ...) is announced
+#: separately, after the first-run onboarding screen has had its chance to answer.
+_LONG_RUN_MODES = frozenset({
+    "vet", "vet_skill", "vet_plugin", "vet_all", "vet_mcp", "vet_source", "advise",
+    "show_suppressed", "risk_paths", "badge", "html", "sarif", "pdf", "trend",
+    "percentile", "next", "dashboard", "dashboard_findings", "sbom", "incident",
+    "incident_open", "judge_packet", "judged", "propose_ignore", "analyze_trajectory",
+    "behavioral", "monitor",
+})
+
+#: Vet-family modes: the subject is a target, not the OpenClaw home.
+_VET_RUN_MODES = frozenset({"vet", "vet_skill", "vet_plugin", "vet_all", "vet_mcp",
+                            "vet_source", "advise"})
+
+
+def _announce_long_run(args, mode) -> None:
+    """One plain-ASCII line on STDERR, printed before collection begins.
+
+    Why: a tool-calling agent that runs the audit through an exec tool with a yield
+    window (Codex ``exec_command``) gets an empty result at the window's end - the audit
+    prints nothing until it finishes - and has been seen reporting "it produced no
+    output" about a process that was still running. Hosts that merge stderr into the
+    output show this line at that point, so the early return carries its own
+    explanation. STDERR only: stdout (the report / the JSON) is never touched.
+
+    ``CLAWSECCHECK_NO_PROGRESS`` (any non-empty value, like the other
+    ``CLAWSECCHECK_NO_*`` switches) silences it. ``--quiet`` is deliberately NOT the
+    escape: it is a ``--full`` modifier, and ``--full --quiet`` is exactly a long run.
+    """
+    if os.environ.get("CLAWSECCHECK_NO_PROGRESS"):
+        return
+    if mode in _VET_RUN_MODES:
+        what = "vetting"
+        usually = "this can take a while"
+    else:
+        try:
+            shown = _redact_home_paths(_sanitize(str(args.home)))
+        except Exception:
+            shown = "the OpenClaw home"
+        what = f"auditing {shown}"
+        usually = "this usually takes 1-4 minutes"
+    try:
+        # A plain note, not a header: the product name comes from brand.WORDMARK and
+        # is a separate print() argument (joined by print's own space), so no
+        # "<wordmark>: <text>" string is ever assembled by hand here - the
+        # test_brand_consistency header guard reads that shape as a hand-rolled header.
+        print(f"{WORDMARK}:",
+              f"{what} - {usually} and prints nothing else until it "
+              "finishes. If your tool returns early with no output, the audit is still "
+              "running: wait for it to exit.", file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 # B-351: when set, every _emit() line is also appended here. The appended --full
@@ -527,6 +587,72 @@ def _watch_extra_monitor_args(args) -> "tuple[str, ...]":
     return tuple(extra)
 
 
+#: Local-store writes that FAILED during this run, as ``(what, path, os-error text)``.
+#: A read-only ``~/.clawseccheck`` is the ordinary state of a sandboxed agent host (the
+#: Codex harness's sandbox only lets a run write inside its workspace): the audit is
+#: complete, but history, coverage dates and any saved run silently went nowhere, and
+#: the user was never told. Every best-effort writer already catches its own OSError so
+#: the run never crashes; this is where they report it, and ``main`` prints ONE note at
+#: the end (``_flush_state_write_problems``) - no fallback location is ever invented.
+_STATE_WRITE_PROBLEMS: "list[tuple[str, str, str]]" = []
+
+
+def _note_state_write_problem(what: str, path, err: str) -> None:
+    """Remember that *what* could not be written to *path* (reported once, at exit)."""
+    _STATE_WRITE_PROBLEMS.append((what, str(path), str(err)))
+
+
+def _state_write_reason(err: str) -> str:
+    """The short reason out of an ``OSError`` text, never its (path-bearing) tail."""
+    m = re.match(r"\[Errno \d+\] ([^:]+)", err)
+    return _sanitize(m.group(1).strip() if m else (err.strip()[:80] or "the write failed"))
+
+
+def _flush_state_write_problems() -> None:
+    """Print one stderr note per store directory that could not be written, then reset.
+
+    Names what was not saved, why, and how to fix it. The audit's verdict, score and exit
+    code are deliberately untouched - a store that cannot be written never changes what
+    was found. Never raises: this runs on the way out of ``main``.
+    """
+    problems = list(_STATE_WRITE_PROBLEMS)
+    _STATE_WRITE_PROBLEMS.clear()
+    if not problems:
+        return
+    by_dir: "dict[str, list[tuple[str, str]]]" = {}
+    try:
+        _home = os.path.expanduser("~")
+    except (OSError, RuntimeError):
+        _home = ""
+    for what, path, err in problems:
+        store = os.path.dirname(path) or "."
+        # One spelling per directory ("~/.clawseccheck", not the expanded absolute form that
+        # names the OS user), so two writers into the same store share one note.
+        if _home and _home != os.sep and (store == _home or store.startswith(_home + os.sep)):
+            store = "~" + store[len(_home):]
+        by_dir.setdefault(store, []).append((what, err))
+    try:
+        for store, items in by_dir.items():
+            whats = list(dict.fromkeys(w for w, _ in items))
+            reason = _state_write_reason(items[0][1])
+            shown = _redact_home_paths(_sanitize(store))
+            tail = ("--no-history skips the score-history and coverage writes. "
+                    if any(w in ("score history", "coverage dates") for w in whats) else "")
+            print(f"note: NOT SAVED - {', '.join(whats)} could not be written to {shown} "
+                  f"({reason}). The audit itself finished; its verdict, score and exit "
+                  "code are unaffected, and nothing was written anywhere else. To keep "
+                  f"these, re-run with --data-dir <a writable directory> (or make {shown} "
+                  f"writable). {tail}".rstrip(), file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
+#: What to do when a PDF could not be written. Offers an explicit, user-chosen path - the
+#: tool never falls back to some other location on its own (local-only, least surprise).
+_PDF_WRITE_FIX = ("To save it, re-run with --pdf <path> in a directory you can write to "
+                  "(for example your workspace), or --data-dir <a writable directory>.")
+
+
 def _record_run(capability: str, args) -> None:
     """Coverage-ledger write, gated by --no-history (B-156).
 
@@ -542,7 +668,10 @@ def _record_run(capability: str, args) -> None:
     """
     if getattr(args, "no_history", False):
         return
-    record_run(capability, path=_coverage_path(args))
+    _path = _coverage_path(args)
+    _err = record_run(capability, path=_path)
+    if _err is not None:
+        _note_state_write_problem("coverage dates", _path, _err)
 
 
 def _record_history_point(score, args, live_signal, findings) -> None:
@@ -605,8 +734,10 @@ def _record_history_point(score, args, live_signal, findings) -> None:
     # would compare them. `--home` defaults to the string "~/.openclaw", so this is
     # a real value on every run, and `_sanitize_home` keeps it the user-typed
     # `~/...` form rather than an absolute path naming the operator (§8/B-381).
-    history_record(score, args.history, home=args.home, findings=findings,
-                   version=__version__)
+    _err = history_record(score, args.history, home=args.home, findings=findings,
+                          version=__version__)
+    if _err is not None:
+        _note_state_write_problem("score history", args.history, _err)
 
 
 # Vet-MCP icon / verdict constants - shared by the standalone --vet-mcp path
@@ -882,6 +1013,43 @@ class SkillSweep:
         UNKNOWN row fell through every named exclusion.
         """
         return [n for n, s, _e in self.rows if s in ("SKIPPED", "TRUNCATED", "UNKNOWN")]
+
+    def not_scanned_reasons(self) -> dict[str, str]:
+        """``{name: why}`` for every name :meth:`not_scanned` returns - the coverage
+        page used to print ``skills not swept: pptx`` with the name and nothing else,
+        so the reader could not tell a crashed scan from a budget stop from a
+        size-capped one. Three different facts, one bare word.
+
+        The reason is the engine's own, never invented: SKIPPED and UNKNOWN rows have a
+        fixed meaning (see ``counts()``); a TRUNCATED row carries the producer's
+        sentence from its finding (the part after "coverage is incomplete: "), or - when
+        the scan was cut by raising :class:`ScanBudgetExceeded`, so no finding exists -
+        says exactly that. Sanitized, because the sentence embeds the attacker-chosen
+        skill name. Same-named targets share one entry (the first non-empty reason),
+        matching how the page already keys its list by display name.
+        """
+        by_name: dict[str, Finding] = {}
+        for name, _path, f in self.findings:
+            by_name.setdefault(name, f)
+        out: dict[str, str] = {}
+        for name, status, _ev in self.rows:
+            if status not in ("SKIPPED", "TRUNCATED", "UNKNOWN") or name in out:
+                continue
+            if status == "SKIPPED":
+                why = "never reached: the whole-sweep time budget ran out first"
+            elif status == "UNKNOWN":
+                why = "the scan raised an engine error, so no verdict was reached"
+            else:
+                f = by_name.get(name)
+                detail = " ".join(_sanitize(f.detail).split()) if f is not None else ""
+                marker = _VET_COVERAGE_GAP_SUBSTRING + ": "
+                if marker in detail:
+                    detail = detail.split(marker, 1)[1]
+                why = detail or (
+                    "its own scan budget ran out, so only part of it was read"
+                )
+            out[name] = why if len(why) <= 220 else why[:217].rstrip() + "..."
+        return out
 
 
 def _discovery_gap_note(reasons: list[str]) -> str:
@@ -2456,7 +2624,8 @@ _MODE_FLAG = {attr: flag for attr, flag, _kind in _PRIMARY_MODES}
 
 def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit, *,
                                   coverage_page: dict | None = None,
-                                  plugin_sweep=None) -> None:
+                                  plugin_sweep=None, risk=None, behavioral=None,
+                                  adjudication=None) -> None:
     """B-586: write `--badge`/`--html`/`--sarif` as side outputs of a `--dashboard` run.
 
     These three used to WIN the mode race against `--dashboard`, run their own bare
@@ -2488,7 +2657,8 @@ def _write_dashboard_side_outputs(args, findings, score, ctx, report_dest, emit,
         (getattr(args, "badge", None), "badge", lambda: render_svg(score, findings)),
         (getattr(args, "html", None), "HTML report",
          lambda: render_html(findings, score, native=ctx.native, ctx=ctx,
-                             coverage_page=coverage_page, plugin_sweep=plugin_sweep)),
+                             coverage_page=coverage_page, plugin_sweep=plugin_sweep,
+                             risk=risk, behavioral=behavioral, adjudication=adjudication)),
         (getattr(args, "sarif", None), "SARIF",
          lambda: render_sarif(findings, score, __version__, ctx=ctx)),
     ):
@@ -3398,8 +3568,11 @@ def _guarded_main(argv=None) -> int:
             file=sys.stderr,
         )
         return 1
+    _STATE_WRITE_PROBLEMS.clear()
     try:
-        return _main(argv)
+        _rc = _main(argv)
+        _flush_state_write_problems()
+        return _rc
     except KeyboardInterrupt:
         # C-509: Ctrl+C mid-scan is a normal, expected user action on a
         # `--full` run that can take minutes -- not a bug -- but this docstring's own
@@ -3728,8 +3901,12 @@ def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[st
     a scratch run's bare ``--pdf`` lands in the scratch store instead of the real
     ``~/.clawseccheck`` - the same "the store moves together" promise ``--data-dir``
     makes for history/state/events/coverage - and ``--purge`` (which looks in that same
-    directory) can reach it. ``None`` means the default store and keeps the home-relative
-    ``~/.clawseccheck/report.pdf`` spelling, which is what the attach note prints.
+    directory) can reach it. ``None`` means the default store: ``$HOME/.clawseccheck/report.pdf``,
+    returned EXPANDED (B-1056). The literal ``~/...`` string used to be returned here, and
+    the delivery renderer treats a path that does not start with ``/`` as cwd-relative, so
+    the attach note and the ``MEDIA:`` line named ``<cwd>/~/.clawseccheck/report.pdf`` - a
+    file that does not exist - while the write itself (which does expand ``~``) landed in
+    the real store. The host rendering still collapses it back to ``~/...``.
     """
     managed = pathprobe.expand_user(home) / "media" / "outbound"
     try:
@@ -3739,7 +3916,7 @@ def _default_pdf_target(home: str, store_dir: "Path | None" = None) -> "tuple[st
         pass
     if store_dir is not None:
         return str(store_dir / "report.pdf"), False
-    return "~/.clawseccheck/report.pdf", False
+    return str(pathprobe.expand_user("~/.clawseccheck/report.pdf")), False
 
 
 class _SuggestingParser(argparse.ArgumentParser):
@@ -4938,6 +5115,9 @@ def _main(argv=None) -> int:
     # dispatches (see _empty_mode_target), so it covers every mode flag that takes a
     # required value instead of only this family.
 
+    if _mode in _LONG_RUN_MODES:
+        _announce_long_run(args, _mode)
+
     _vet_route = None  # (kind, target) with kind in {"skill", "plugin", "mcp"}
     _detect_undetermined = None  # B-682: why the classification is less than it looks
     if _mode == "vet":
@@ -5405,6 +5585,8 @@ def _main(argv=None) -> int:
                                     sandboxed=sandbox_sync_marker_present()))
             return 0
 
+    if _mode is None:
+        _announce_long_run(args, _mode)
     logger.info("auditing home=%s", args.home)
     # A home that exists but can't be read at all must be a controlled, honest outcome
     # for a security tool - a plain-language error, never a raw traceback (B-076).
@@ -5832,10 +6014,13 @@ def _main(argv=None) -> int:
                 # branch below is untouched: rc 0 there is B-459's own deliberate fix,
                 # and its stdout placement is part of that fix (see its own comment).
                 print(f"(could not write PDF report: "
-                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')})",
+                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')} "
+                      f"\u2014 nothing was written. {_PDF_WRITE_FIX})",
                       file=sys.stderr)
                 return 1
-            _emit(f"(could not write PDF report: {exc} \u2014 showing the full report inline)")
+            _emit(f"(could not write PDF report: "
+                  f"{_path_problem_text(args.pdf, exc, what='PDF report file')} "
+                  f"\u2014 showing the full report inline. {_PDF_WRITE_FIX})")
         if not args.dashboard:
             # C-726: docs/USAGE.md promises a `MEDIA:~/...` line for a bare --pdf; the
             # message used to carry the absolute path and no MEDIA line at all.
@@ -6164,10 +6349,6 @@ def _main(argv=None) -> int:
             extra_findings=_dashboard_off_check_findings,
             sweep_skip_reason=("not scanned this run (--fast drops the sweep phases)"
                                if args.fast else None))
-        # B-586 + B-723: written only now, against the score the completed phases earned.
-        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
-                                      coverage_page=_dashboard_coverage_page,
-                                      plugin_sweep=plugin_sweep)
         # P9 (adjudication) is deliberately NOT gated on --fast or the budget, same as
         # --full's own P9: it re-runs no check, so there is no expense to skip.
         _dashboard_vet_targets = (
@@ -6179,6 +6360,14 @@ def _main(argv=None) -> int:
             ctx, findings,
             vet_targets=_dashboard_vet_targets,
             version=__version__, bundle=judged_bundle, score=score)
+        # B-586 + B-723: written only now, against the score the completed phases earned.
+        # B-1068: and only after P9, so the HTML carries the same RISK / Behavioural /
+        # Second opinion blocks the PDF of this run carries.
+        _write_dashboard_side_outputs(args, findings, score, ctx, _report_dest, _emit,
+                                      coverage_page=_dashboard_coverage_page,
+                                      plugin_sweep=plugin_sweep, risk=paths,
+                                      behavioral=behavioral_phase,
+                                      adjudication=adjudication_phase)
         if _defer_pdf:
             try:
                 _pdf_dest = _report_dest(args.pdf)
@@ -6193,7 +6382,9 @@ def _main(argv=None) -> int:
                 # write it must never destroy the analysis: fall through with
                 # pdf_written=None so render_dashboard renders every section inline
                 # instead of collapsing to a card that points at a file we never wrote.
-                _emit(f"(could not write PDF report: {exc} \u2014 showing the full report inline)")
+                _emit(f"(could not write PDF report: "
+                      f"{_path_problem_text(args.pdf, exc, what='PDF report file')} "
+                      f"\u2014 showing the full report inline. {_PDF_WRITE_FIX})")
         _card = _with_next_actions(
             render_dashboard(
                 findings, score, ascii_only=ascii_only, ctx=ctx, full=True,
@@ -6246,11 +6437,14 @@ def _main(argv=None) -> int:
         }[args.format]
         _emit(_sbom_renderer(ctx))
         if getattr(args, "save_sbom_run", False):
+            _sbom_errs: "list[str]" = []
             _saved_sbom_id = _save_sbom_run_snapshot(build_sbom(ctx), _sbom_runs_path(args),
-                                                      version=__version__)
+                                                      version=__version__,
+                                                      error_sink=_sbom_errs)
             if _saved_sbom_id is None:
-                _emit_trailer(args, "\n(could not save SBOM run \u2014 see --data-dir's "
-                                    "directory for write access)", machine_output=True)
+                _note_state_write_problem("saved SBOM run (--save-sbom-run)",
+                                          _sbom_runs_path(args),
+                                          _sbom_errs[0] if _sbom_errs else "")
             else:
                 _emit_trailer(args, f"\n(SBOM run saved as {_saved_sbom_id} \u2014 diff it "
                                     f"later with --sbom-diff {_saved_sbom_id} <OTHER_RUN_ID>)",
@@ -6867,8 +7061,10 @@ def _main(argv=None) -> int:
         # state. A frequent poll would have quietly padded the score trend with a row per
         # poll while claiming to write nothing.
         if not _skip_live_test_persist and not _probe:
-            history_record(score, args.history, home=args.home,
-                           findings=findings, version=__version__)
+            _hist_err = history_record(score, args.history, home=args.home,
+                                       findings=findings, version=__version__)
+            if _hist_err is not None:
+                _note_state_write_problem("score history", args.history, _hist_err)
         # F-180: a probe must SAY it did not record, or the user reads the alert as filed
         # and then sees the identical alert on the next ordinary run with no explanation.
         # With nothing to report it must not promise a repeat alert that will never come.
@@ -6885,17 +7081,21 @@ def _main(argv=None) -> int:
         # returning 0 forever while persisting nothing, so cron saw a healthy job.
         if journal_err is not None:
             print(f"MONITORING NOT ESTABLISHED \u2014 could not record drift events to "
-                  f"{args.events}: {journal_err}\n"
+                  f"{_redact_home_paths(_sanitize(str(args.events)))}: "
+                  f"{_state_write_reason(str(journal_err))}\n"
                   "The drift above was NOT written to the journal, so the baseline was "
                   "deliberately left unchanged and this run's changes will be re-reported "
-                  "next time. Fix the journal path's permissions and re-run.",
+                  "next time. Fix the journal path's permissions, or re-run with "
+                  "--data-dir <a writable directory>.",
                   file=sys.stderr)
             return 1
         if state_err is not None:
             print(f"MONITORING NOT ESTABLISHED \u2014 could not write monitor state to "
-                  f"{args.state}: {state_err}\n"
+                  f"{_redact_home_paths(_sanitize(str(args.state)))}: "
+                  f"{_state_write_reason(str(state_err))}\n"
                   "No baseline was saved, so this run cannot detect future changes. Fix "
-                  "the state path's permissions and re-run.", file=sys.stderr)
+                  "the state path's permissions, or re-run with --data-dir <a writable "
+                  "directory>.", file=sys.stderr)
             return 1
         # C-419: opt-in machine channel. `rc=1` above is RESERVED for "monitoring is not
         # established" - a cron job has to be able to tell "drift was found" from "the
@@ -7395,11 +7595,14 @@ def _main(argv=None) -> int:
     # _flag_coherence_notes, which mirrors "save"'s own entry rather than a separate
     # allowlist).
     if getattr(args, "save_run", False):
+        _run_errs: "list[str]" = []
         _saved_run_id = _save_run_snapshot(findings, _runs_path(args), home=args.home,
-                                            version=__version__)
+                                            version=__version__, error_sink=_run_errs)
         if _saved_run_id is None:
-            _emit_trailer(args, "\n(could not save run \u2014 see --data-dir/--history's "
-                                "directory for write access)")
+            # Reported once, at exit, with the reason and the fix (see
+            # _flush_state_write_problems) - not a bare "see --data-dir".
+            _note_state_write_problem("saved run (--save-run)", _runs_path(args),
+                                      _run_errs[0] if _run_errs else "")
         else:
             _emit_trailer(args, f"\n(run saved as {_saved_run_id} \u2014 diff it later with "
                                 f"--diff {_saved_run_id} <OTHER_RUN_ID>)")

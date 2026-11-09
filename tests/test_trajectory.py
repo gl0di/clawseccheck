@@ -797,19 +797,24 @@ def test_safe_trajectory_session_file_name_matches_the_installed_dist():
             break
     if root is None:
         pytest.skip("could not locate the OpenClaw dist root")
+    # 2026.11.1 retired TRAJECTORY_POINTER_FILE_MAX_BYTES, so the bundle is located by the
+    # function this test actually executes, declared as ``function safeTrajectorySessionFileName(``.
+    decl = "function safeTrajectorySessionFileName("
     bundles = list((root / "dist").glob("paths-*.mjs")) + list((root / "dist").glob("paths-*.js"))
-    matches = [p for p in bundles if "TRAJECTORY_POINTER_FILE_MAX_BYTES" in
-               p.read_text(encoding="utf-8", errors="replace")]
+    matches = [p for p in bundles if decl in p.read_text(encoding="utf-8", errors="replace")]
     if not matches:
-        pytest.skip("no paths-*.mjs bundle declares TRAJECTORY_POINTER_FILE_MAX_BYTES "
-                     "— renamed, re-locate before trusting this citation")
+        pytest.skip("no paths-*.mjs bundle declares safeTrajectorySessionFileName "
+                    "-- renamed, re-locate before trusting this citation")
     cases = [
         "02258d00-eaa3-4586-b23b-885df1e714ba", "", "!!!", "a" * 200,
         "héllo wörld", "../../etc/passwd", "session with spaces", "UPPER_lower-123",
     ]
     script = """
 const mod = await import(process.env.OC_MOD);
-const fn = mod.s ?? mod.safeTrajectorySessionFileName;
+// the export alias is minified and changes per build (s, i, ...): find it by function name
+const fn = Object.values(mod).find(
+  (v) => typeof v === "function" && v.name === "safeTrajectorySessionFileName");
+if (!fn) { console.error("safeTrajectorySessionFileName is not exported"); process.exit(3); }
 const cases = JSON.parse(process.env.OC_CASES);
 console.log(JSON.stringify(cases.map(fn)));
 """

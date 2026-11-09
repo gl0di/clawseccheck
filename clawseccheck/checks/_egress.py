@@ -2776,10 +2776,10 @@ def _b78_judge_entries(entries: dict, scope: str = "", unread_note: str = "") ->
             [],
         )
     if scope:
-        # The vendor sets the signature only for four structural anomalies (size drop, missing
-        # meta, missing gatewayMode, update-channel-only root) and clears it on any healthy
-        # observation, so a clean row says "the latest observation was healthy" - not that the
-        # config's history is clean. The legacy-file wording below predates this and is
+        # The vendor sets the signature only for three structural anomalies (size drop, missing
+        # gatewayMode, update-channel-only root; OpenClaw 2026.11.1 removed the fourth, missing
+        # meta) and clears it on any healthy observation, so a clean row says "the latest
+        # observation was healthy" - not that the config's history is clean. The legacy-file wording below predates this and is
         # byte-identical (a fingerprint hashes it).
         return (
             PASS,
@@ -4156,6 +4156,14 @@ def check_leak(ctx: Context) -> Finding:
     described the union as universal, which it is not. An empty list falls through to
     the defaults on every path. No env var disables it either -- the only
     `OPENCLAW_REDACT*` symbol in the dist is the `OPENCLAW_REDACTED__` output marker.
+
+    OpenClaw 2026.11.1 (`resolvePatterns`, `dist/redact-BcXJu5HP.mjs:2657-2680`, read
+    2026-11-06) adds a case to the REPLACE rule above: a list with an invalid entry (a
+    pattern that does not parse), or a value that is not an array at all, KEEPS the
+    built-in patterns -- the valid entries are merged with the built-ins and the vendor
+    logs a one-time "Ignoring invalid logging.redactPatterns entries" warning. An all-valid
+    non-empty list still REPLACES the built-ins, exactly as before, so the advice in the
+    PASS fix text below stays true.
 
     That made this check actively harmful on a current build: the field is always absent,
     so it emitted WARN on EVERY 2026.8.1 config, telling the user to "pin

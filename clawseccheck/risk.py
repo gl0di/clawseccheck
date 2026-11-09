@@ -44,6 +44,7 @@ from .checks import (
     _empty_fallback_template,
     _env_default_operator,
     _credential_store_state,
+    _dm_policy_values,
     _enabled_tools,
     _EVENT_HOOK_PATH_RE,
     _external_input_channels,
@@ -265,7 +266,7 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
                 isinstance(node.get("groups"), dict)
                 and isinstance(node["groups"].get("*"), dict)
                 and node["groups"]["*"].get("requireMention") is True
-                for node in _live_channel_nodes(name, c)
+                for node in _live_channel_nodes(name, c, cfg)
             )
             suffix = ", any group, mention-gated" if mention else ", any group"
             reason = (
@@ -285,7 +286,9 @@ def _open_channel_entries(cfg: dict) -> list[tuple[str, str, bool, str]]:
                 continue
             parts = []
             reason_bits = []
-            if node.get("dmPolicy") == "open":
+            # B-1053: nested-aware (matrix declares only `dm.policy`, B-619) - the same
+            # resolver B2's _open_channels now reads, through the checks aggregator.
+            if "open" in _dm_policy_values(name, node):
                 parts.append("open DM")
                 reason_bits.append("dmPolicy is 'open'")
             # B-283 (a), GROUNDING CORRECTION (C-135 review): Feishu's GroupPolicySchema
@@ -2169,7 +2172,7 @@ def _open_group_channels(cfg: dict) -> dict:
         if name in out:
             continue
         # B-1002: the live implicit default account too (`_live_channel_nodes`).
-        for node in _live_channel_nodes(name, c):
+        for node in _live_channel_nodes(name, c, cfg):
             # a disabled account ingests nothing (the B-391 per-node skip its siblings carry)
             if not isinstance(node, dict) or node.get("enabled") is False:
                 continue

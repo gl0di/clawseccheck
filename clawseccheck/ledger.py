@@ -99,12 +99,15 @@ def load_ledger(home: str | None = None, *, path: str | None = None) -> dict[str
 
 
 def record_run(capability: str, *, home: str | None = None,
-               today: date | None = None, path: str | None = None) -> None:
+               today: date | None = None, path: str | None = None) -> "str | None":
     """Record that *capability* was run today in the coverage ledger.
 
-    Silently drops write errors (same "never crash the caller" contract as
-    ``history.record``).  Reads the existing ledger first so other capabilities
-    are preserved across writes.
+    Never raises (same "never crash the caller" contract as ``history.record``).
+    Returns None on success, the OSError text when the write FAILED - the same
+    shape ``history.record`` has returned since B-581 - so the CLI can say once that
+    nothing was saved instead of dropping the failure on the floor (a read-only
+    ``~/.clawseccheck``, e.g. a sandboxed agent host).  Reads the existing ledger
+    first so other capabilities are preserved across writes.
 
     Parameters
     ----------
@@ -146,8 +149,9 @@ def record_run(capability: str, *, home: str | None = None,
             # filters it back out.
             ledger["_schema"] = str(SCHEMA_VERSION)
             secure_write_text(p, json.dumps(ledger, indent=2, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def freshness_notice(ledger: dict[str, str], *, today: date | None = None,

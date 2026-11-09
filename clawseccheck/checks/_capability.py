@@ -1338,7 +1338,21 @@ class _FsScopeGrants(NamedTuple):
     fully_resolved: bool
 
 
-def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsScopeGrants | None":
+def _config_was_read(ctx) -> bool:
+    """False only when ``ctx.config`` is empty because nothing was read. The collector
+    leaves ``ctx.config == {}`` both for a real empty ``openclaw.json`` and for no config /
+    an unparseable one, and ``toolgrant`` answers ``{}`` as the vendor does (every tool
+    granted), so a caller that would turn that answer into a finding asks this first: a
+    config that was never read is not evidence of a grant. A non-empty config was read,
+    whatever the flags say (in-memory callers build a ``Context`` without them)."""
+    if getattr(ctx, "config", None):
+        return True
+    return bool(getattr(ctx, "config_found", False)) and not getattr(ctx, "config_parse_error", False)
+
+
+def _fs_scope_grants(
+    cfg: dict, family, *, confinement: bool = False, config_read: bool = True,
+) -> "_FsScopeGrants | None":
     """B-737: resolves ``family``'s per-scope grant over every scope ``toolgrant.
     resolved_scopes`` says the vendor actually resolves, for B55/B68's NOT-ENUMERABLE branch
     ONLY -- ``_b68_fs_tools_granted`` (G1, above) already resolves every shape it covers, and
@@ -1379,6 +1393,8 @@ def _fs_scope_grants(cfg: dict, family, *, confinement: bool = False) -> "_FsSco
     ``audit.nondeep.runtime``), asked PER SCOPE instead of only at the global scope B68's own
     G1 path (and the global short-circuit above it) already read.
     """
+    if not config_read:
+        return None
     scopes = _toolgrant.resolved_scopes(cfg)
     if scopes is None:
         return None
@@ -1538,7 +1554,7 @@ def _b55_write_tools_granted(
 
 
 def _b55_resolved_write_grant(
-    cfg: dict,
+    cfg: dict, *, config_read: bool = True,
 ) -> "tuple[list[str], bool, _ToolPolicyView, frozenset, _FsScopeGrants | None]":
     """B-904: `_b55_write_tools_granted` PLUS the B-737 not-enumerable fallback
     (`_fs_scope_grants`), factored into one shared resolver so a non-check consumer
@@ -1579,7 +1595,9 @@ def _b55_resolved_write_grant(
     write_tools, enumerable, view, legacy_write = _b55_write_tools_granted(cfg)
     scope_grants = None
     if not enumerable:
-        scope_grants = _fs_scope_grants(cfg, _B55_FS_WRITE_TOOLS & set(_B68_FS_TOOLS))
+        scope_grants = _fs_scope_grants(
+            cfg, _B55_FS_WRITE_TOOLS & set(_B68_FS_TOOLS), config_read=config_read,
+        )
         if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
             write_tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
             enumerable = True
@@ -1710,7 +1728,9 @@ def check_exec_applypatch_workspace(ctx: Context) -> Finding:
         # (`tools.fs.workspaceOnly` / `sandbox.mode="all"`, own value or falling back
         # to the global/defaults one) -- the same composite the global short-circuit
         # above this function already reads at global scope only.
-        scope_grants = _fs_scope_grants(cfg, _B68_FS_TOOLS, confinement=True)
+        scope_grants = _fs_scope_grants(
+            cfg, _B68_FS_TOOLS, confinement=True, config_read=_config_was_read(ctx),
+        )
         if scope_grants is not None and (scope_grants.default_tools or scope_grants.declared_tools):
             tools = sorted(scope_grants.default_tools | scope_grants.declared_tools)
             provenance = _b737_provenance(scope_grants)
@@ -2290,7 +2310,9 @@ def check_fs_write_exposure(ctx: Context) -> Finding:
     # `write_tools`, so every later branch can tell whether it is reasoning about a G1
     # grant (unchanged) or a B-737 per-scope one (needs provenance wording) purely from
     # `scope_grants is not None`.
-    write_tools, enumerable, view, legacy_write, scope_grants = _b55_resolved_write_grant(cfg)
+    write_tools, enumerable, view, legacy_write, scope_grants = _b55_resolved_write_grant(
+        cfg, config_read=_config_was_read(ctx),
+    )
     widenings = _agent_profile_widenings(cfg)
 
     if scope_grants is not None and not write_tools:

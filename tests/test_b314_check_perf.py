@@ -48,7 +48,10 @@ from clawseccheck.scanbudget import DEFAULT_CHECK_BUDGET_S
 from clawseccheck.textnorm import _norm_memo_clear, _normalize_uncached, normalize_for_scan
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
-_BUDGET_HALF = DEFAULT_CHECK_BUDGET_S * 0.5
+# B-1020 raised DEFAULT_CHECK_BUDGET_S from 15s to 60s for a large real fleet. These
+# guards measure small fixtures, so they stay pinned to half of the OLD 15s cap: a
+# perf regression must not get 4x more room just because the hang ceiling moved.
+_BUDGET_HALF = min(DEFAULT_CHECK_BUDGET_S, 15.0) * 0.5
 
 
 class TestHomeVulnStaysWellUnderBudget:

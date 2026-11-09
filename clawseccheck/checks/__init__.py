@@ -43,6 +43,7 @@ from ..catalog import (
 from ..scanbudget import (
     DEFAULT_AUDIT_BUDGET_S,
     DEFAULT_CHECK_BUDGET_S,
+    EXHAUSTIVE_LIMITS,
     ScanBudgetExceeded,
     audit_budget_exceeded,
     audit_deadline,
@@ -120,11 +121,15 @@ from ._shared import (
     _live_channel_nodes,
     _resolved_account_nodes,
     _SINGLE_ACCOUNT_CHANNELS,
+    _MSTEAMS_IDENTITY_KEYS,
     _slack_implicit_default,
     _matrix_implicit_default,
     INPUT_TOOL_HINTS,
     _is_own_source,
     _is_posix,
+    _ip_reaches_nonlocal_host,
+    _ipv4_class,
+    _NUMERIC_IP_HOST_PATTERN,
     _is_public_ip,
     _is_secret_reference,
     _KNOWN_EXFIL_HOST_RE,
@@ -158,6 +163,7 @@ from ._shared import (
     _vendor_slot_covers,
     _vendor_slot_hit,
     _url_inline_password,
+    _dsn_inline_password,
     _concrete_secret_literal,
     _header_name_is_credential,
     _map_entry_is_indirection,
@@ -215,6 +221,8 @@ from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate - risk.py's ingress leg reaches it only
 # through this aggregator (CLAUDE.md §3.1-a), never by importing a topic module.
+# B-1053: the nested-aware dm-policy resolver, for risk.py's open-channel labels.
+from ._shared import (_declared_dm_policy, _dm_policy_values,)
 from ._shared import (_allow_from_is_present, _effective_group_allow_from, _is_wildcard_allow_entry, _open_wildcard_group_channels, _resolved_channel_nodes, _wildcard_group_gap, _wildcard_group_is_reachable,)
 from ._egress import (
     _EXT_SKILL_HINTS,
@@ -356,6 +364,7 @@ from ._capability import (
     _approval_bypass_actors,
     _b31_collect_deny_lists,
     _b55_resolved_write_grant,
+    _config_was_read,
     _b55_write_tools_granted,
     _b68_fs_tools_granted,
     _b737_provenance,
@@ -703,6 +712,10 @@ from ._content import (
     _b58_decode_percent,
     _b58_decode_variants,
     _b58_extract_actionable,
+    _b58_comment_spans,
+    _b58_section_needs_old_rule,
+    _b58_unresolved_hit,
+    _b58_visible_text,
     _b58_hidden_segments,
     _b59_markdown_url,
     _b59_split_srcset,
@@ -1902,7 +1915,13 @@ def _check_budget_finding(chk, kind: str, seconds: float | None = None) -> Findi
             "passed nor failed). The rest of the audit ran normally. This only bounds a "
             "pathological / hostile input; it is not itself a finding."
         ),
-        fix="Re-run on a quieter machine; report the check name if it recurs on a normal config.",
+        fix=(
+            "Re-run on a quieter machine. For a complete run on a large fleet, re-run with "
+            f"--exhaustive: it raises the time budget to {EXHAUSTIVE_LIMITS.audit_budget_s:g}s "
+            f"for the whole audit and {EXHAUSTIVE_LIMITS.check_budget_s:g}s per check (slower, "
+            "and it also widens the log and trajectory scan caps). "
+            "Report the check name if it recurs on a normal config."
+        ),
         framework="Engine robustness",
         scored=False,
         evidence=[f"scan budget: {kind}"],
@@ -1915,9 +1934,9 @@ def run_all(ctx: Context, check_budget_s: float = DEFAULT_CHECK_BUDGET_S,
             audit_budget_s: float = DEFAULT_AUDIT_BUDGET_S,
             on_check_done=None) -> list[Finding]:
     # C-510 item 2: a plain audit gives no progress feedback while it can
-    # spend up to ~3 minutes on hostile content (a slow check, or several, chewing
-    # through their own check_budget_s) -- a silent terminal for that long is
-    # indistinguishable from a hang, and a user who kills what they believe is a stuck
+    # spend up to ~3.5 minutes (the 150s audit cap plus one 60s check) on hostile
+    # content (a slow check, or several, chewing through their own check_budget_s) -- a
+    # silent terminal for that long is indistinguishable from a hang, and a user who kills what they believe is a stuck
     # process is exactly the mid-write condition that produces corrupt monitor/baseline
     # state elsewhere in this tool. `on_check_done`, when given, is called as
     # `on_check_done(done_count, total_count)` after EVERY check completes -- normally,

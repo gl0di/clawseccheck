@@ -65,7 +65,7 @@ def test_vendor_treats_unset_and_npx_mcp_command_as_the_bundled_copy():
 
 def test_vendor_refuses_each_pre_10_1_exec_approvals_entry_shape():
     require_dist()
-    bundle = dist_file("exec-approvals-migration-gate-*.mjs", symbol="parsePersistedExecApprovals",
+    bundle = dist_file("exec-approvals-config-*.mjs", symbol="parsePersistedExecApprovals",
                        contains="function parsePersistedExecApprovals")
     gid = "3f1c9d5e-8a4b-4c2d-9e61-7b0a5d2c4e18"
     grant = {"id": gid, "pattern": "/usr/bin/git", "source": "allow-always"}

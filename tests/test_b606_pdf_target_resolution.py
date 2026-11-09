@@ -28,7 +28,12 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from clawseccheck.cli import _default_pdf_target  # noqa: E402
 
-FALLBACK = "~/.clawseccheck/report.pdf"
+# B-1056: the default-store fallback is returned EXPANDED, never as a literal "~/..." that
+# the delivery renderer would resolve against the cwd.
+def _fallback() -> str:
+    # Against the suite's REDIRECTED $HOME (the code under test expands "~" at call time
+    # against the same variable) - never the ambient one, which B-519 forbids reading.
+    return os.path.join(os.environ["HOME"], ".clawseccheck", "report.pdf")
 
 
 def _home_with_outbound(tmp_path: Path) -> Path:
@@ -51,7 +56,7 @@ def test_an_absent_managed_dir_falls_back_and_says_so(tmp_path):
     home.mkdir()
     target, managed = _default_pdf_target(str(home))
     assert managed is False
-    assert target == FALLBACK
+    assert target == _fallback()
 
 
 def test_a_present_but_unwritable_managed_dir_falls_back(tmp_path):
@@ -63,7 +68,7 @@ def test_a_present_but_unwritable_managed_dir_falls_back(tmp_path):
             pytest.skip("running with rights that ignore the mode (root?)")
         target, managed = _default_pdf_target(str(home))
         assert managed is False, "an unwritable dir must not be reported as the managed root"
-        assert target == FALLBACK
+        assert target == _fallback()
     finally:
         outbound.chmod(0o700)
 

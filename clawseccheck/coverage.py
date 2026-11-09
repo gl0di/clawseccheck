@@ -322,8 +322,16 @@ def _sweep_coverage(sweep, *, skip_reason: str | None = None) -> dict:
     c = sweep.counts()
     not_scanned = [str(t) for t in sweep.not_scanned()]  # already sanitized by the sweep
     total = c["total"] + c["skipped"]
-    return {"total": total, "scanned": total - len(not_scanned),
-            "not_scanned": not_scanned, "note": None}
+    out = {"total": total, "scanned": total - len(not_scanned),
+           "not_scanned": not_scanned, "note": None}
+    # A sweep that can say WHY a target was not finished (``SkillSweep``) is asked to;
+    # the plugin sweep has no such method and keeps the bare names. getattr, not an
+    # isinstance, for the same duck-typing reason as the docstring above.
+    reasons_of = getattr(sweep, "not_scanned_reasons", None)
+    if callable(reasons_of):
+        reasons = reasons_of()
+        out["not_scanned_reasons"] = {n: reasons[n] for n in not_scanned if n in reasons}
+    return out
 
 
 def build_coverage_page(ctx, findings: list[Finding], *, skill_sweep=None,
@@ -493,11 +501,9 @@ def _not_scanned_lines(not_scanned: list, label: str, *,
     ``reasons`` (C-566), when given, names WHY each shown id is absent - ``id
     (reason)`` instead of a bare id. Only the CHECK-granularity lists carry one
     (`subject_coverage`'s own `not_scanned_reasons`, see `_not_scanned_reason`);
-    the instance lists (skills/plugins target names, from the duck-typed sweep's
-    own `not_scanned()`) do not, because that surface is deliberately narrow -
-    see `_sweep_coverage`'s docstring - and reaching into a sweep's per-target
-    row status for a reason is left as a follow-up rather than widening that
-    contract here."""
+    the skills instance list carries one too since a sweep that can name its reason
+    (`SkillSweep.not_scanned_reasons`) is asked for it in `_sweep_coverage`; a sweep
+    without that method (plugins) still renders bare names."""
     if not not_scanned:
         return []
     def _fmt(x: str) -> str:

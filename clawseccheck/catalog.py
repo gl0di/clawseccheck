@@ -3746,7 +3746,9 @@ CATALOG: list[CheckMeta] = [
     # comparing it to the sibling source, so a skill with clean .py text could ship
     # different compiled code. No ordinary build writes that flag (default py_compile and
     # import write timestamp pycs), so a hit is a FAIL; an unreadable or symlinked cache is
-    # UNKNOWN. Scored: it is a deterministic FAIL-capable check.
+    # UNKNOWN. Scored: it is a deterministic FAIL-capable check. B-1003: on the pre-install
+    # `--vet` path ONLY, any other shipped .pyc (forged timestamp pyc, or a checked-hash pyc
+    # run under --check-hash-based-pycs never) is a WARN disclosure, never a FAIL.
     CheckMeta(
         "B398",
         "Skill ships a hash-unchecked compiled .pyc (PEP 552) that Python runs without checking the source",

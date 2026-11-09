@@ -51,6 +51,7 @@ from ..skillast import (
     analyze_shell,
     hardcoded_env_secret_is_inert as _b998_hardcoded_env_secret_is_inert,
 )
+from ..skillast import _PERSIST_OVERFLOW_TAG  # B-1049
 from ..skillast import _SH_VAR_ASSIGN_RE, _SH_VAR_REF_RE  # B-985 companion
 from ..skillast import _sh_candidate_destination_tokens as _sh_dest_tokens
 from ..skillast import _sh_line_destination_text as _sh_dest_text
@@ -94,7 +95,9 @@ from ._shared import (
     _custom,
     _finding,
     _is_own_source,
-    _is_public_ip,
+    _ip_reaches_nonlocal_host,
+    _ipv4_class,
+    _NUMERIC_IP_HOST_PATTERN,
     _mcp_servers,
     _own_source_symlinks,
     _skill_declares_telemetry_disclosure,
@@ -1521,6 +1524,61 @@ _CRON_DISCLOSURE_WINDOW = 200  # chars around the cron/persistence match
 # or a reputable daemon name - an accepted false-negative gap, not a false-positive FAIL.
 
 
+# B-1049: the labels the AST route (skillast.py's STARTUP_PERSISTENCE_* rules, routed in
+# check_installed_skills) must share byte-for-byte with the regex route above, so one
+# persistence act reads the same whichever spelling convicted it.
+_CRON_LABEL = "cron/startup persistence: installs a scheduled or boot-time job"
+_CRON_REPUTABLE_LABEL = (
+    "cron/startup persistence (reputable service): enables a well-known system daemon"
+)
+_CRON_DISCLOSED_LABEL = (
+    "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
+)
+_CRON_FIXTURE_LABEL = (
+    "cron/startup persistence (test fixture): inside the skill's own test file"
+)
+_STARTUP_AST_SERVICE_RE = re.compile(r"\(service: ([^)]*)\)$")
+
+
+def _startup_persistence_ast_route(af, src: str, relpath: str) -> "tuple[str, str]":
+    """B-1049: `(band, label)` for a skillast STARTUP_PERSISTENCE_WRITE/_ENABLE finding,
+    band "high" or "warn", applying the discriminators `_cron_persistence_hits` applies to
+    the regex route's hits -- and only those, each in the direction it already goes:
+
+    * the skill's own test file (basename convention AND real test-code shape, both
+      required, as `_manifest_match_is_test_fixture`) -> WARN, not dropped;
+    * `enable` of a well-known system daemon (`_REPUTABLE_DAEMON_NAMES`) -> WARN;
+    * a documented watchdog/monitoring job within +-`_CRON_DISCLOSURE_WINDOW` chars of the
+      statement (`_CRON_DISCLOSURE_RE`) -> WARN;
+    * otherwise HIGH, the same label the inline-literal form gets.
+    No fence/link-label handling: this is a parsed Python file, not prose."""
+    for_test = _TEST_FIXTURE_BASENAME_RE.match(Path(relpath).name)
+    if for_test and sum(1 for rx in _PYTHON_TEST_SHAPE_SIGNALS if rx.search(src)) >= (
+        _PYTHON_TEST_SHAPE_MIN_SIGNALS
+    ):
+        return "warn", _CRON_FIXTURE_LABEL
+    if af.reason.endswith(_PERSIST_OVERFLOW_TAG):
+        # More sites than skillast lists: none can be individually assessed, so none may
+        # be down-ranked (fail closed). Only the test-file exemption above applies.
+        return "high", _CRON_LABEL
+    if af.rule == "STARTUP_PERSISTENCE_ENABLE":
+        # EVERY service token on the line must be resolved and a well-known daemon:
+        # skillast renders an unresolved or non-plain token as "?", which is never in the
+        # set, so `enable tor $X` / `enable tor evil` stay HIGH.
+        m = _STARTUP_AST_SERVICE_RE.search(af.reason)
+        svcs = [t for t in m.group(1).split(", ")] if m else []
+        if svcs and all(t in _REPUTABLE_DAEMON_NAMES for t in svcs):  # exact: unit names are case-sensitive
+            return "warn", _CRON_REPUTABLE_LABEL
+    # Character offset of the statement's line (ast linenos split on \r\n, \r and \n).
+    off = 0
+    for _ln, nl in zip(range(1, max(af.lineno, 1)), re.finditer(r"\r\n|\r|\n", src)):
+        off = nl.end()
+    window = src[max(0, off - _CRON_DISCLOSURE_WINDOW): off + _CRON_DISCLOSURE_WINDOW]
+    if _CRON_DISCLOSURE_RE.search(window):
+        return "warn", _CRON_DISCLOSED_LABEL
+    return "high", _CRON_LABEL
+
+
 def _cron_persistence_hits(
     blob: str,
     fence_ranges: list[tuple[int, int]],
@@ -1565,10 +1623,10 @@ def _cron_persistence_hits(
     """
     high_hits: list[str] = []
     warn_hits: list[str] = []
-    label = "cron/startup persistence: installs a scheduled or boot-time job"
-    reputable_label = "cron/startup persistence (reputable service): enables a well-known system daemon"
-    disclosed_label = "cron/startup persistence (disclosed): a documented watchdog/monitoring job"
-    fixture_label = "cron/startup persistence (test fixture): inside the skill's own test file"
+    label = _CRON_LABEL
+    reputable_label = _CRON_REPUTABLE_LABEL
+    disclosed_label = _CRON_DISCLOSED_LABEL
+    fixture_label = _CRON_FIXTURE_LABEL
     link_label_label = (
         "cron/startup persistence (link text): crontab named inside a markdown "
         "link label, not an install command"
@@ -1663,7 +1721,10 @@ def _cron_persistence_hits(
         # FAIL-capable signal at all; that gap is evidence-accumulation/E-038 work
         # (design doc §7), not this gate.
         svc = _CRON_SERVICE_TARGET_RE.match(blob, m.start())
-        if svc and svc.group(1).lower() in _REPUTABLE_DAEMON_NAMES:
+        # Exact match, not case-folded: systemd unit names are case-sensitive, so `NGINX` is
+        # a different unit from `nginx` and must not inherit its down-rank (B-1049 review;
+        # the AST route in `_startup_persistence_ast_route` matches the same way).
+        if svc and svc.group(1) in _REPUTABLE_DAEMON_NAMES:
             if reputable_label not in warn_hits:
                 warn_hits.append(reputable_label)
             continue  # B-203: was `break` - keep scanning; a reputable enable must not mask a later covert one
@@ -3259,11 +3320,11 @@ def _config_write_carries_dangerous_payload(blob: str) -> bool:
 
 # B-194: a URL whose host is loopback/localhost/a private-range IPv4 literal is never
 # real egress (case_04921: a local Ollama inference endpoint) - must never read as an
-# "external" fetch regardless of verb/noun. Gate _is_public_ip behind an IPv4-literal
-# shape test first: _is_public_ip("evil.com") would ALSO return False (it's not a
+# "external" fetch regardless of verb/noun. Gate _ip_reaches_nonlocal_host behind an IPv4-literal
+# shape test first: _ip_reaches_nonlocal_host("evil.com") would ALSO return False (it's not a
 # parseable IPv4), so applying it directly to every hostname would blind F-021 to
 # every real domain-name attack - only a literal-IP host may be excluded this way.
-_IPV4_LITERAL_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_IPV4_LITERAL_RE = re.compile(r"^" + _NUMERIC_IP_HOST_PATTERN + r"\Z")
 
 
 _LOCAL_HOSTNAMES = frozenset({"localhost", "0.0.0.0", "::1"})
@@ -3278,7 +3339,9 @@ def _url_host_is_local(url: str) -> bool:
     if host in _LOCAL_HOSTNAMES or host.endswith(".localhost"):
         return True
     if _IPV4_LITERAL_RE.match(host):
-        return not _is_public_ip(host)
+        # B-1039: POSITIVE-only. `not _ip_reaches_nonlocal_host(h)` also read a numeric host
+        # that `_ipv4_class` could not classify as local, and that cleared the finding.
+        return _ipv4_class(host) in ("local", "documentation")
     return False
 
 
@@ -5166,7 +5229,34 @@ _SKILL_LOCAL_CHAIN_RE = re.compile(
 )
 
 
-_IOC_IPURL_RE = re.compile(r"\bhttps?://(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\d{2,5})?\b")
+# B-1039: the first alternative is the historical dotted quad (unchanged, incl. its loose tail);
+# the second takes the other numeric spellings of a host (`0x8.8.8.8`, `0x08080808`,
+# `2130706433`, `8.8`, `1.2.3`, `010.8.8.8`) and, unlike the first, must END the host - a
+# trailing word char / `@` / `%` / `-` or `.word` means a DNS label (`http://1.example.com`).
+_IOC_IPURL_RE = re.compile(
+    r"\bhttps?://(\d{1,3}(?:\.\d{1,3}){3}|"
+    + _NUMERIC_IP_HOST_PATTERN
+    + r"(?![\w@%-])(?!\.[\w@%-]))(?::\d{2,5})?\b"
+)
+
+
+def _b13_ip_url_label(ip: str) -> str:
+    """B-1011: what to CALL a bare-IP URL the B13 gate (`_ip_reaches_nonlocal_host`) let
+    through. That gate deliberately keeps the 100.64.0.0/10 shared address space (RFC 6598)
+    in, so Alibaba Cloud's instance-metadata address `100.100.100.200` used to be reported
+    as a "public-IP URL" -- wrong text for the one address in that range a skill most often
+    names. B-1017: the label now reads the strict classes; the set of addresses that
+    WARN is unchanged by it. Wording only."""
+    if ip == "100.100.100.200":
+        return "cloud instance-metadata URL"
+    cls = _ipv4_class(ip)
+    if cls == "shared":
+        return "shared-address-space (RFC 6598, not public) IP URL"
+    if cls == "special":
+        return "reserved-range (multicast / benchmarking / reserved, not public) IP URL"
+    if cls == "ambiguous":
+        return "numeric-IP URL (leading-zero / hex octets read differently by curl)"
+    return "public-IP URL"
 
 
 # `curl URL | sh` is how uv/rustup/brew/deno legitimately install - only suspicious when the
@@ -5238,8 +5328,47 @@ _RESERVED_EXAMPLE_DOMAINS = frozenset({"example.com", "example.net", "example.or
 # skill text could hang the scanner (B-006 ReDoS). Bounding the runs keeps the
 # match linear while still covering any real `curl URL | sh` one-liner (the URL
 # sits within 256 chars of curl and the pipe within 256 of the host).
+# B-1064: the pipe sink is a shell either directly (`| sh`) or via `xargs ... sh -c`
+# / `xargs ... bash -c` (`curl ... | xargs -I{} sh -c {}`), which spawns a shell on the
+# fetched content just the same. The command flag is matched as "an option word (`-`/`+`)
+# whose letters include `c`", reached over a run of ONLY option-shaped words after the
+# shell token, so a clustered or preceded `-c` (`sh -lc`, `bash -ec`, `sh --norc -c`,
+# `sh -e -c`, `sh +e -c`, `dash -c`, `/bin/sh -c`) does not evade it (the exact-token
+# `-c` form was an incomplete-fix parser differential caught by the commit security
+# review). The `(?<![.\w~=-])` left boundary stops the shell token matching a `.sh`
+# FILE EXTENSION (`xargs sh deploy.sh -config` is a script run, not a `-c` shell, and
+# stays unmatched) or an OPTION VALUE (`shellcheck --shell=sh -C` is a lint command,
+# where `sh` sits after `=` -- a C-135 FP), while still allowing a `/bin/sh` path.
+# Excluding `=` means a shell reached through an exec-wrapper's split option
+# (`xargs env --split-string=sh -c {}`) is NOT matched -- an inherited ceiling in the
+# same option-grammar class below, and a far rarer shape than the benign shellcheck FP
+# the exclusion prevents (`env sh -c {}`, the non-split form, is still caught since the
+# wrapper is skipped). An FP is a release blocker; this niche evasion is not. A
+# bare (non-option) word
+# between the shell and the `c`-flag breaks the run, so a script operand (`sh file ...`,
+# `sh -n f`), a non-shell child (`xargs shellcheck`), and a `--coverage` flag on a
+# script all stay unmatched. CEILING (same option-arity class the SHELL_REVERSE_SHELL
+# rule already declares for `sudo -u USER`): a `-c` reached only PAST an option that
+# takes a separate VALUE word (`sh -o pipefail -c`, `sh --rcfile f -c`) is not matched,
+# because telling that value apart from a script operand needs per-flag arity a regex
+# cannot have soundly. Command-NAME obfuscation (a quote-wrapped or backslash-escaped
+# shell word `"sh" -c` / `b\ash`, or an uncommon shell basename `mksh`/`yash`/`ash`/
+# `posh`) is the SAME ceiling the SHELL_REVERSE_SHELL rule already declares for its own
+# tool tokens (THREAT_COVERAGE "Reverse-shell payloads" items 4/5/9) and it applies
+# equally to the pre-existing `| sh` branch above -- this change inherits that ceiling,
+# it does not introduce it. Pulling a real shell lexer (shlex) into this regex-matched
+# hot path is an architectural change out of scope here and against the module's bounded
+# no-parser-on-blobs discipline. (`xargs busybox sh -c` IS caught -- the run only needs
+# the shell token at a word boundary, wrappers before it are skipped by `[^\n|]{0,128}?`.)
+# The bounded quantifiers keep the scan O(n) (measured linear,
+# sub-ms to 15 KB); the match stays inside one pipe stage (`[^\n|]`); and the captured
+# host (group 1) and the entire downstream FP filter (reputable host / fence /
+# install-heading / own-host) are unchanged, so this only widens WHICH sinks count,
+# never which hosts are cleared.
 _PIPE_SHELL_RE = re.compile(
-    r"(?:curl|wget)\b[^\n|]{0,256}?https?://([^\s/'\"|]+)[^\n|]{0,256}\|\s*(?:sudo\s+)?(?:ba|z)?sh",
+    r"(?:curl|wget)\b[^\n|]{0,256}?https?://([^\s/'\"|]+)[^\n|]{0,256}\|\s*(?:sudo\s+)?"
+    r"(?:(?:ba|z)?sh|xargs\b[^\n|]{0,128}?(?<![.\w~=-])(?:ba|z|da|k)?sh\b"
+    r"(?:[ \t]+[-+][^\s|]*){0,6}?[ \t]+[-+][A-Za-z]*c[A-Za-z]*\b)",
     re.I,
 )
 
@@ -6845,7 +6974,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                         # WARN (same evidence, two notes that looked like they disagreed) -
                         # name the two questions as different ones instead of restating
                         # "not assessed" next to a WARN about the identical text.
-                        if _is_public_ip(host):
+                        if _ip_reaches_nonlocal_host(host):
                             coverage_fence.append(
                                 f"coverage: {name}: this fence's pipe-to-shell EXECUTION "
                                 f"(no marker we recognise) was not assessed \u2014 a different "
@@ -7121,12 +7250,12 @@ def check_installed_skills(ctx: Context) -> Finding:
                     warns_content.append(f"{name}: references a Tor .onion address ({m.group(0)})")
                     break
             for m in _IOC_IPURL_RE.finditer(blob):
-                if _is_public_ip(m.group(1)) and not _is_code_example(
+                if _ip_reaches_nonlocal_host(m.group(1)) and not _is_code_example(
                     blob, m.start(), _fr, fence_needs_negation=True
                 ):
                     warns_content.append(
-                        f"{name}: hardcoded public-IP URL ({m.group(0)}) \u2014 "
-                        "unusual for a legitimate skill"
+                        f"{name}: hardcoded {_b13_ip_url_label(m.group(1))} ({m.group(0)}) "
+                        "\u2014 unusual for a legitimate skill"
                     )
                     break
             # F-059: skill-manifest least-privilege - allowed-tools grant vs declared purpose.
@@ -7304,6 +7433,20 @@ def check_installed_skills(ctx: Context) -> Finding:
             _declared = (getattr(ctx, "installed_skill_declared", None) or {}).get(name, [])
             _py_files = [(r, s, False) for r, s in ctx.installed_skill_py.get(name, [])]
             _py_files += [(r, s, True) for r, lang, s in _declared if lang == "py"]
+            def _route_startup_ast(af, src, relpath, _name=name):
+                # B-1049: see the STARTUP_PERSISTENCE_* arms in the loop below.
+                _band, _label = _startup_persistence_ast_route(af, src, relpath)
+                _entry = f"{_name}: {_label}"
+                if _band == "high":
+                    if _entry not in high:
+                        high.append(_entry)
+                    # An AST-proven write/enable IS an install verb: a bare-path mention
+                    # elsewhere must not be told "no install/enable verb" (B-849's rule
+                    # for the regex route).
+                    _cron_verb_anchored_hits.append(af.reason)
+                elif _entry not in _persist_warn:
+                    _persist_warn.append(_entry)
+
             for relpath, src, _is_declared in _py_files:
                 # B-998 round 3: analyze_python(...) returns a plain list (not a
                 # generator), but is captured ONCE per file into `_afs` rather than
@@ -7547,6 +7690,21 @@ def check_installed_skills(ctx: Context) -> Finding:
                     # scan-completeness note read as more exfil evidence.
                     if af.rule == "AST_FINDINGS_TRUNCATED":
                         continue
+                    # B-1049: a startup-persistence write / argv-list service enable whose
+                    # destination or verb is assembled in code -- the regex route's
+                    # `_CRON_PERSIST_RE` cannot see it (no contiguous path/command text).
+                    # Same B13 verdict, label and discriminators as that route
+                    # (`_startup_persistence_ast_route`); routed here BEFORE the generic
+                    # crit/cred-exfil fallthrough so the "info" label can neither be dropped
+                    # nor gated on an unrelated cred/exfil signal. Both rules are in
+                    # _AST_NEVER_FAIL_RULES: the plugin sweep (checks/_mcp.py), which has no
+                    # B13 persistence bucket, must not read them as a FAIL.
+                    if af.rule == "STARTUP_PERSISTENCE_WRITE":
+                        _route_startup_ast(af, src, relpath)
+                        continue
+                    if af.rule == "STARTUP_PERSISTENCE_ENABLE":
+                        _route_startup_ast(af, src, relpath)
+                        continue
                     loc = f"{relpath}:{af.lineno}"
                     # B-636: the same predicate checks/_mcp.py asks. Equivalent here by
                     # construction - every rule in _AST_NEVER_FAIL_RULES has already
@@ -7609,7 +7767,19 @@ def check_installed_skills(ctx: Context) -> Finding:
             for relpath, src, _verified in _sh_files:
                 for af in analyze_shell(src, relpath):
                     msg = f"{name}: {af.reason} ({relpath}:{af.lineno})"
-                    if _verified:
+                    if af.severity != "crit":
+                        # B-1065: a non-crit shell signal (today only SHELL_ENV_BODY_EXFIL
+                        # -- a credential-shaped env var in a curl request body) is
+                        # ambiguous the same way the Python ENV_EXFIL_FLOW is: an
+                        # authed-API/OAuth script legitimately posts a secret to its OWN
+                        # endpoint. So it WARNs, into the SAME warns_env_exfil bucket the
+                        # Python rule uses ("Possible secret exfiltration ... confirm the
+                        # destination is a trusted first-party API"), never FAIL. This is
+                        # the shell twin of the severity `else` the JS pass below already
+                        # has; every existing analyze_shell rule is "crit" and so is
+                        # unaffected (comment at _signal_buckets' warns_env_exfil note).
+                        warns_env_exfil.append(msg)
+                    elif _verified:
                         crit.append(msg)
                     else:
                         warns_declared_unverified.append(msg)
@@ -7958,8 +8128,15 @@ def check_installed_skills(ctx: Context) -> Finding:
                 "flowing into subprocess/exec). If you authored this skill or "
                 "already trust its source, review whether that configuration "
                 "input, table, or helper can be influenced by untrusted content "
-                "before installing."
+                "before installing. The same limit applies when a command list is "
+                "rebound only on some branches behind a wrapper program (for "
+                "example `cmd = [\"timeout\", \"5\"] + cmd` on Linux only): static "
+                "analysis cannot follow which program finally runs, so read the "
+                "flagged call and every assignment that reaches it."
             )
+            # Accepted §2.5 residual (B-1018 row 4, conditional wrapper rebind),
+            # Dave ruling 2026-11-04 - see the note above the `conditional_out`
+            # loop in skillast.py's `_single_list_bindings_local`.
         if js_cred_flow_skills:
             # B-1005: the JS credential-flow rule cannot tell a signing client from an
             # exfiltrator - a crypto-reducer exemption was retracted after five review
@@ -9941,6 +10118,8 @@ _AST_NEVER_FAIL_RULES = frozenset({
     "HARDCODED_PROVIDER_SECRET_ASSIGN",  # B-893 - explicitly not FAIL-capable
     "AST_FINDINGS_TRUNCATED",    # cap disclosure, not a verdict - see skillast.py's analyze_python
     "ARTIFACT_READ_UNPROVEN",    # B394 (B-850) - explicitly not FAIL-capable
+    "STARTUP_PERSISTENCE_WRITE",   # B-1049 - routed to B13's cron/startup-persistence bands
+    "STARTUP_PERSISTENCE_ENABLE",  # B-1049 - same
 })
 
 
@@ -10137,6 +10316,7 @@ def _merge_narrowed_scope_gap(finding: Finding, root: Path) -> Finding:
 def _vet_resolved_skill(p: Path) -> Finding:
     """The B13 scan itself, over an ALREADY-RESOLVED target (see ``vet_skill``)."""
     ctx = Context(home=p)
+    ctx.pre_install = True  # B-1003: B398 warns on ANY shipped .pyc here (not on an installed skill)
     if pathprobe.is_dir(p):
         if _is_own_source(p):
             # B-786: record the same way collector.py's sweep-level self-exclusion does
@@ -10828,6 +11008,86 @@ _SOURCE_GIT_RE = re.compile(r"^git:(?P<host>[^/\s]+)/(?P<path>[^@\s]+?)(?:@(?P<r
 
 _SOURCE_IP_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 
+# B-1051: the other ways a git remote is spelled. `git+<scheme>://` (pip/npm VCS form),
+# `ssh://` / `git://` URLs, and scp-style `[user@]host:path` (`git@github.com:o/r.git`).
+# All of them name a HOST that the known-bad-infrastructure check must see; before this
+# they fell through to the bare-registry branch with no host at all. The scp form needs a
+# dotted host or an IPv4 literal before the colon so `npm:x`/`pypi:x`-style prefixes and a
+# bare word never match it; a path starting with `/` after the colon is a URL, not scp.
+_SOURCE_GIT_URL_SCHEMES = ("git+https://", "git+http://", "git+ssh://", "git+git://",
+                           "git+file://", "ssh://", "git://")
+_SOURCE_SCP_RE = re.compile(
+    r"^(?:(?P<user>[^@/\s:]+)@)?(?P<host>[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+):"
+    r"(?P<path>[^/\s][^\s]*)$")
+
+
+def _parse_git_remote(t: str) -> "dict | None":
+    """B-1051: host/owner/name/ref/scheme for a git remote spelled as a URL with a git
+    scheme or in scp form, or None when *t* is neither. Never raises."""
+    low = t.lower()
+    ref = None
+    if low.startswith(_SOURCE_GIT_URL_SCHEMES):
+        body = t[4:] if low.startswith("git+") else t
+        try:
+            parsed = urlparse(body)
+            host = (parsed.hostname or "").lower()
+        except ValueError:
+            return None
+        path = parsed.path
+        scheme = parsed.scheme.lower()
+        if "@" in path.rsplit("/", 1)[-1]:  # pip's `...repo.git@<ref>`
+            path, _, ref = path.rpartition("@")
+        # A `#egg=name` / `#subdirectory=x` fragment is pip metadata, not a ref.
+        frag = parsed.fragment
+        ref = ref or (frag if frag and "=" not in frag else None)
+    else:
+        m = _SOURCE_SCP_RE.match(t)
+        # An explicit `user@`, a '/' in the path or a .git suffix makes it a git remote;
+        # without any of them `example.com:8080`, `org.x:lib:1.0`, `skill.md:readme` are
+        # not (C-135 on B-1051). `git@evil.example:repo` keeps its host - a known-bad host
+        # must never fall to a host-less parse because the repo path is short.
+        if not m or not (m.group("user") or "/" in m.group("path")
+                         or m.group("path").endswith(".git")):
+            return None
+        host, path, scheme = m.group("host").lower(), m.group("path"), "ssh"
+    parts = [p for p in path.split("/") if p]
+    return {"host": host, "scheme": scheme, "ref": ref,
+            "name": (parts[-1] if parts else host) or t,
+            "owner": parts[0].lower() if len(parts) >= 2 else None}
+
+
+# B-1015: the project name at the head of a PEP 508 requirement, and what may follow it.
+# pip resolves a requirement by its PEP 503-normalized name, so `skills_analyzer`,
+# `Skills.Analyzer` and `is-it-ai[cli]>=0.1` all install the project a record names as
+# `skills-analyzer` / `is-it-ai`. The name ends at whitespace, an extras bracket, a version
+# operator, a marker `;`, a direct-reference `@` or a clause comma. Anything else right
+# after the name (`is-it-ai.`, `is-it-ai/x`) is not a requirement pip would accept, so no
+# project name is taken from it and only the raw-string match applies, as before.
+_PEP508_NAME_RE = re.compile(
+    r"\s*(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?=\s|[\[<>=!~;@,(]|\Z)")
+_PEP503_SEP_RE = re.compile(r"[-_.]+")
+
+
+def _pep503(name: str) -> str:
+    """PEP 503 normalized form of a Python project name."""
+    return _PEP503_SEP_RE.sub("-", str(name)).lower()
+
+
+def _pypi_project(spec: str):
+    """B-1015: the PEP 503-normalized project name of a pip requirement, or None."""
+    m = _PEP508_NAME_RE.match(spec)
+    return _pep503(m.group("name")) if m else None
+
+
+def _npm_split(spec: str):
+    """(name, version) of an npm spec `[@scope/]name[@version]`, whitespace-trimmed."""
+    spec = spec.strip()
+    if spec.startswith("@"):
+        scope_name, _, ver = spec[1:].partition("@")
+        return "@" + scope_name.strip(), ver.strip() or None
+    name, _, ver = spec.partition("@")
+    return name.strip(), ver.strip() or None
+
 
 def _parse_source_target(target: str) -> dict:
     """Parse a --vet-source target into identity facts (never raises).
@@ -10849,8 +11109,16 @@ def _parse_source_target(target: str) -> dict:
         "scheme": None,
         "owner": None,
         "option_shaped": False,
+        # B-1015: names the package manager would actually resolve, for the known-bad
+        # match only (never rendered, never fed to a command). pypi: the PEP 503 project
+        # name. npm: the real package behind an `alias@npm:real` spec.
+        "project": None,
+        "npm_real": None,
     }
-    if low.startswith(("http://", "https://")):
+    git_remote = None if low.startswith(("http://", "https://")) else _parse_git_remote(t)
+    if git_remote is not None:
+        out.update(ecosystem="git", **git_remote)
+    elif low.startswith(("http://", "https://")):
         parsed = urlparse(t)
         path_parts = [p for p in parsed.path.split("/") if p]
         out.update(
@@ -10890,9 +11158,18 @@ def _parse_source_target(target: str) -> dict:
             else:
                 name, _, ver = spec.partition("@")
                 out.update(ecosystem="npm", name=name, version=ver or None)
+            # B-1015: `alias@npm:real[@ver]` installs `real` under the name `alias`, so the
+            # known-bad match must also see `real`. Followed a bounded number of times.
+            real, rver = None, out["version"]
+            for _ in range(4):
+                if not (rver and rver.strip().lower().startswith("npm:")):
+                    break
+                real, rver = _npm_split(rver.strip()[4:])
+            out["npm_real"] = real
         elif low.startswith("pypi:"):
             name, _, ver = t[5:].partition("==")
-            out.update(ecosystem="pypi", name=name, version=ver or None)
+            out.update(ecosystem="pypi", name=name, version=ver or None,
+                       project=_pypi_project(t[5:]))
         elif low.startswith("clawhub:"):
             out.update(ecosystem="clawhub", name=t[8:])
     # C-628: an npm/pypi spec whose name or version starts with '-' is argv text, not a
@@ -10986,13 +11263,37 @@ def vet_source(
     eco_keys = [eco, "any"] if eco != "registry" else list(bad.keys())
     if eco == "url":
         eco_keys = [k for k in eco_keys if k != "url"]
+    # B-1015: also match the names the package manager would resolve. A pip requirement
+    # is matched by its PEP 503 project name against PEP 503-normalized pypi entries
+    # (normalized here, at compare time, so a record stored as `is_it_ai` still matches);
+    # an npm alias is matched by the real package it installs. Whitespace around the
+    # spec is not part of the name.
+    cands = {name.lower(), plain, name.strip().lower(), plain.strip()}
+    if info.get("npm_real"):
+        real = str(info["npm_real"]).lower()
+        cands |= {real, real.lstrip("@").rsplit("/", 1)[-1]}
+    cands.discard("")
+    # A bare registry name is not convicted by normalization: OpenClaw resolves it through
+    # npm, which does not fold separators, so a bare `skills_analyzer` is a different npm
+    # package from a pypi record `skills-analyzer` (its exact spelling still matches every
+    # pool, as before). But a bare name may also be handed to pip ("your package manager's
+    # normal lookup"), where it IS that project - so a normalized-only pypi hit is a WARN.
+    proj = info.get("project")
     for k in eco_keys:
         pool = bad.get(k) or frozenset()
-        if name.lower() in pool or plain in pool:
+        hit = any(c in pool for c in cands)
+        if not hit and proj and (k == "pypi" or (k == "any" and eco == "pypi")):
+            hit = proj in {_pep503(e) for e in pool}
+        if hit:
             reasons_bad.append(
                 f"'{name}' is a known-compromised source (exact IOC match, catalog: {k})"
             )
             break
+    bare_pypi_alias = None
+    if eco == "registry" and not reasons_bad:
+        bare_proj = _pypi_project(name)
+        if bare_proj and bare_proj in {_pep503(e) for e in (bad.get("pypi") or ())}:
+            bare_pypi_alias = bare_proj
 
     # 1b. Known-bad HOST - a URL/git source whose host is, or is a subdomain of, a
     #     known-bad domain/IP. The name check above matches slugs/packages; this
@@ -11021,7 +11322,9 @@ def vet_source(
     host_l = (info.get("host") or "").lower()
     if host_l and not reasons_bad:
         if known_bad is not None:
-            for k in (eco, "any"):
+            # B-1051: the "url" pool IS the host list (see C-707 below), so a git
+            # remote's host is matched against it too, not only against its own pool.
+            for k in dict.fromkeys((eco, "url", "any")):
                 pool = bad.get(k) or frozenset()
                 if any(host_l == h or host_l.endswith("." + h) for h in pool):
                     reasons_bad.append(
@@ -11062,8 +11365,10 @@ def vet_source(
 
     # 3. Source heuristics.
     host = info.get("host") or ""
-    if eco == "url":
-        if info.get("scheme") == "http":
+    # B-1051: a git remote names a host too (git+https://, ssh://, scp `git@host:path`), so
+    # the same host heuristics apply; a git:// or git+http:// transport is plaintext.
+    if eco == "url" or (eco == "git" and host):
+        if info.get("scheme") in ("http", "git"):
             reasons_susp.append("plaintext http:// source \u2014 no transport integrity")
         if any(host == h or host.endswith("." + h) for h in _SOURCE_PASTE_HOSTS):
             reasons_susp.append(
@@ -11077,6 +11382,13 @@ def vet_source(
         reasons_susp.append(
             "git source without a pinned @ref (tag/sha) \u2014 content "
             "can change between this check and the fetch"
+        )
+    if bare_pypi_alias:
+        reasons_susp.insert(
+            0,
+            f"'{name}' is not a known-bad npm package, but pip would install it as the "
+            f"known-compromised Python project '{bare_pypi_alias}'; name the ecosystem "
+            "(npm:... or pypi:...) and do not install it with pip",
         )
     if info.get("option_shaped"):
         # insert(0): this becomes the headline in `detail`, ahead of any typosquat reason

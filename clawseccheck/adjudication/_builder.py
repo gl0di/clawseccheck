@@ -1476,6 +1476,12 @@ def build_judge_packet(ctx, findings) -> list[dict]:
             continue
         if _abstain_offered(f, item):
             item["verdict_schema"] = _VERDICT_SCHEMA_EMPTY_UNKNOWN
+            # B-1070: the generic question sends the judge to "the full report", which a
+            # chat judge does not have; say plainly what this item is.
+            item["question"] = redact(
+                f"Check {f.id} could not be determined and recorded no evidence, so this "
+                "packet holds nothing to assess. Answer ABSTAIN unless you have your own "
+                "evidence about it. [ABSTAIN / SAFE / SUSPICIOUS / DANGEROUS + reason]")
         items.append(item)
 
     items.extend(_b62_items(ctx))
@@ -1783,12 +1789,62 @@ def _emit_json(payload, *, sort_keys: bool = True) -> str:
                       sort_keys=sort_keys)
 
 
+#: B-1070: how many evidence-bearing items a chat host is asked to judge in one panel. A
+#: real home's packet measured 123 items (121 UNKNOWN) - 370 judge calls under the 3-lens
+#: protocol, which no chat completes; the agent then scripted 109 identical verdicts. A
+#: bounded, ordered slice is a path an honest agent can actually finish.
+PANEL_CHAT_BUDGET = 20
+
+_SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+
+
+def build_panel_plan(items: list) -> dict:
+    """B-1070: the run-level plan a judge panel works from, beside the items.
+
+    ``evidenceLess`` counts the items whose own ``verdict_schema`` offers ``abstain`` (an
+    audit UNKNOWN with no evidence, no subject and no destination - there is nothing in
+    the packet to judge; an ABSTAIN entry is treated exactly like no entry, so a panel
+    simply skips them). ``judgeFirst`` orders every other item - WARN before UNKNOWN, then the
+    check's catalogued severity, then the packet's own order - so a panel that cannot
+    finish judges the items that matter first. ``chatBudget`` is how many of them a chat
+    panel is asked to judge; the rest are left unanswered and render as awaiting
+    adjudication, which is the honest outcome - never a scripted verdict.
+    """
+    abstain = [it for it in items if "abstain" in (it.get("verdict_schema") or {})]
+    rest = [(i, it) for i, it in enumerate(items)
+            if "abstain" not in (it.get("verdict_schema") or {})]
+
+    def _rank(pair):
+        i, it = pair
+        meta = BY_ID.get(it.get("finding_id"))
+        sev = getattr(meta, "severity", None) if meta is not None else None
+        return (0 if it.get("engine_disposition") == WARN else 1,
+                _SEV_RANK.get(str(sev).upper(), 5), i)
+
+    order = [{"finding_id": it.get("finding_id"), "target": it.get("target")}
+             for _i, it in sorted(rest, key=_rank)]
+    return {
+        "items": len(items),
+        "evidenceLess": len(abstain),
+        "toJudge": len(order),
+        "chatBudget": PANEL_CHAT_BUDGET,
+        "judgeFirst": order,
+        "note": ("Skip the evidenceLess items: there is nothing to judge, and an ABSTAIN entry "
+                 "is treated exactly like no entry, so submit none for them. Judge "
+                 "the judgeFirst items in order, each one read and reasoned; when toJudge "
+                 "exceeds chatBudget, stop after chatBudget items, leave the rest unanswered "
+                 "and tell the user how many were judged. Never generate verdicts by script."),
+    }
+
+
 def render_judge_packet_json(ctx, findings, *, version: str, score=None) -> str:
     """Return the standalone ``--judge-packet`` JSON artifact as a string."""
+    packet = build_judge_packet(ctx, findings)
     payload = {
         "tool": "clawseccheck",
         "version": version,
-        "judgePacket": build_judge_packet(ctx, findings),
+        "judgePacket": packet,
+        "panelPlan": build_panel_plan(packet),
         "runState": run_state(score),
         "bundleTemplate": build_bundle_template(),
     }

@@ -196,7 +196,9 @@ _EXEMPT = {
                             "self-modification / supply-chain topic (18 checks + "
                             "helpers); topic-faithful and over budget by design. A finer "
                             "split is a later cycle.",
-    "checks/_content.py": "~17,895 lines (restated 2026-10-14, C-730 — was ~17,155; the "
+    "checks/_content.py": "~18,420 lines (restated 2026-11-04, B-1011 — B339's URL-query "
+                          "exfil leg and its bare-listing match; was ~17,895. "
+                          "Restated 2026-10-14, C-730 — was ~17,155; the "
                           "one-pass scanners that replaced five quadratic patterns, each kept "
                           "beside its scanner as the definition it is tested against. "
                           "Restated 2026-09-26 on integration/4.3.0 after the "
@@ -528,7 +530,7 @@ _EXEMPT = {
                "predicates they share would separate a chain from its own evidence. A finer "
                "split (one module per severity tier, or rules/ + predicates.py) is a later "
                "cycle.",
-    "skillast.py": "~20,141 lines (restated 2026-10-30 for B-1005, +~1117: the JS "
+    "skillast.py": "~23,400 lines (restated 2026-11-09 for B-1086, +~115: names rebound from a global/nonlocal scope off the lexical chain and dynamic namespace writes fail the in-cluster string resolution closed; before that 2026-11-09 for the B-1083/B-1084/B-1085 cross-function flow follow-ups, +~190: overflow fail-closed through helper-call seeds, scope-aware string-map resolution, long-constant credential paths; before that 2026-11-08 for B-1047, +~690: the scoped cross-function credential-flow pass `_xf_cred_flow_findings` (return -> sink-parameter origin propagation, linear); before that for the 2026-11-07 fix round, +~700: B-1057/B-1058/B-1059 cred-exfil sinks and path folding, B-1060 OpenClaw cred store, B-1063/B-1065/B-1066 shell body/DNS/staged-upload rules with linear taint worklists; before that 2026-11-07 for B-1040/B-1041/B-1042, +~600: sys.executable closed-option-list, fixed-head command lists, append-built heads, flag resolution and posix_spawn, all in the TT5 classifier; before that 2026-11-07 for B-1022/B-1023/B-1024, +~550 over the 2026-10-30 claim: TT5 argv-mutation, Windows-suffix and os.exec/os.spawn rules next to the existing TT5 classifier, which they reuse; before that 2026-10-30 for B-1005, +~1117: the JS "
                    "credential-read-to-sink flow pass in `analyze_javascript` -- "
                    "JS_CRED_EXFIL_FLOW / JS_SECRET_FILE_FLOW / JS_ENV_EXFIL_FLOW, with its "
                    "frame scanner and bounded LHS/RHS parsing. A new detector family, so the "
@@ -766,7 +768,7 @@ _EXEMPT = {
                   "CheckMeta CATALOG (one entry per check) + BY_ID + "
                   "the additive FAMILY_OF/SUBJECT_OF roll-up metadata; reference data / a "
                   "manifest, not branching logic.",
-    "collector.py": "~10,350 lines (restated 2026-10-05, C-616 - was ~8,787; C-616 bounds the "
+    "collector.py": "~10,870 lines (restated 2026-11-07, B-1003 - was ~10,350 at C-616, ~8,787 before; C-616 bounds the "
                     "own-source engine directory by file count, total bytes and file type, "
                     "+94 lines, and its residual disclosure is most of the prose) - the read-only "
                     "collection layer (config / bootstrap / skill "
@@ -811,7 +813,7 @@ _EXEMPT = {
                     "identical B-811 DoS class), and an allowlist-not-denylist tightening of "
                     "the token sub-key filter — all of it belongs in the SAME state-DB-readers "
                     "seam, reinforcing that boundary rather than arguing for a fifth.",
-    "cli.py": "~7,009 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
+    "cli.py": "~7,514 lines — the Layer-4 shell (all flags + the dispatch cascade); every new "
               "primary mode adds a few lines here by design. Crossed the budget with F-113 "
               "(--judge-packet). Grew ~520 lines over B-584/B-586/B-598/B-601, all of it in "
               "the dispatch cascade: each `_mode` branch that returns early has to repeat "

@@ -1045,8 +1045,19 @@ def _run_watch_locked(home, state_path, events_path, history_path, heartbeat_pat
         return stop_requested["flag"] or (stop_event is not None and stop_event.is_set())
 
     cycles = 0
-    last_scan_at = None
-    last_scan_rc = None
+    last_scan_at = last_scan_rc = None
+
+    def _scan(header: str) -> "tuple[int, str]":
+        rc, text = _run_monitor_once(home, state_path, events_path, history_path, extra_monitor_args)
+        at = _now_iso()
+        out.write(f"\n=== {cmd('--watch')}: {header} {at} (rc={rc}) ===\n" + text
+                  if rc in _RESCAN_RAN_RC else _failed_rescan_report(rc, text, at))
+        getattr(out, "flush", lambda: None)()
+        return rc, at
+
+    if not _should_stop() and not pathprobe.is_file(Path(state_path)):  # B-1055 (USAGE --watch)
+        last_scan_rc, last_scan_at = _scan("no baseline in this store yet - recorded one at start,")
+        _heartbeat("running", cycles, last_scan_at, last_scan_rc)
     last_heartbeat_at = time.monotonic()
     try:
         while not _should_stop():
@@ -1070,19 +1081,8 @@ def _run_watch_locked(home, state_path, events_path, history_path, heartbeat_pat
                     deadline = time.monotonic() + debounce_s
             if _should_stop():
                 break
-            rc, output = _run_monitor_once(home, state_path, events_path, history_path,
-                                           extra_monitor_args)
+            last_scan_rc, last_scan_at = _scan("change detected, re-scanned at")
             cycles += 1
-            last_scan_at = _now_iso()
-            last_scan_rc = rc
-            if rc in _RESCAN_RAN_RC:
-                out.write(f"\n=== {cmd('--watch')}: change detected, re-scanned at "
-                          f"{last_scan_at} (rc={rc}) ===\n")
-                out.write(output)
-            else:
-                out.write(_failed_rescan_report(rc, output, last_scan_at))
-            if hasattr(out, "flush"):
-                out.flush()
             _heartbeat("running", cycles, last_scan_at, last_scan_rc)
     finally:
         for sig, prev in prev_handlers.items():

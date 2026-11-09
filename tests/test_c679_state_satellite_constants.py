@@ -4,8 +4,11 @@
 OpenClaw 2026.9.9 creates three more tables in the same state database from satellite
 constants (`USER_PROFILES_SCHEMA_SQL`, `WORKER_ENVIRONMENT_SESSION_ATTACHMENTS_SCHEMA_SQL`).
 The generator now reads an explicit allowlist, names its exclusions, and stops on any
-`*_SCHEMA_SQL` constant it has not been told about. These tests drive that machinery on
-synthetic dists; the live-database backstop at the bottom is local-only.
+`*_SCHEMA_SQL` constant it has not been told about. Since 2026.10.10 (C-762) those tables are
+served by the `featureLocalSql` helper instead; the literal-satellite machinery stays and is
+driven here on synthetic dists (the helper itself is covered by
+test_c762_state_feature_schema_helper.py). The live-database backstop at the bottom is
+local-only.
 """
 from __future__ import annotations
 
@@ -19,7 +22,9 @@ from test_state_schema_grounding import (
     OPENCLAW_DIST,
     _CREATE_TABLE_NAMED_RE,
     _STATE_DERIVED_CONSTANTS,
+    _FEATURE_PROVENANCE_KEY,
     _STATE_EXCLUDED_CONSTANTS,
+    _STATE_FEATURE_HELPER_CONSTANTS,
     _STATE_REDECLARING_CONSTANTS,
     _STATE_SATELLITE_CONSTANTS,
     _read_vendor_table_baseline,
@@ -36,7 +41,7 @@ _EXCLUDED = "BAR_SCHEMA_SQL"
 _REDECL = "BAZ_SCHEMA_SQL"
 _DERIVED = "QUX_SCHEMA_SQL"
 _LISTS = {"satellites": {_SAT: "test"}, "excluded": {_EXCLUDED: "test"}, "redeclaring": {},
-          "derived": {}}
+          "derived": {}, "feature_constants": {}}
 _WITH_REDECL = {**_LISTS, "redeclaring": {_REDECL: "test"}}
 _WITH_DERIVED = {**_LISTS, "derived": {_DERIVED: "test"}}
 
@@ -256,7 +261,7 @@ def test_the_header_block_carries_provenance_without_touching_the_data_lines():
 
 def test_every_allowlisted_name_is_absent_from_the_exclusions():
     lists = (_STATE_SATELLITE_CONSTANTS, _STATE_REDECLARING_CONSTANTS, _STATE_DERIVED_CONSTANTS,
-             _STATE_EXCLUDED_CONSTANTS)
+             _STATE_FEATURE_HELPER_CONSTANTS, _STATE_EXCLUDED_CONSTANTS)
     names = [n for lst in lists for n in lst]
     assert len(names) == len(set(names)), "a constant is classified twice"
     assert all(v for lst in lists for v in lst.values()), "every entry needs its evidence/reason"
@@ -341,5 +346,5 @@ def test_the_installed_dist_classifies_every_schema_constant_and_matches_the_bas
         pytest.skip("OpenClaw dist not installed -- local-only")
     surface, provenance, _ = _vendor_state_table_surface(OPENCLAW_DIST)
     _, names = _read_vendor_table_baseline()
-    assert set(provenance) == set(_STATE_SATELLITE_CONSTANTS)
+    assert set(provenance) == set(_STATE_SATELLITE_CONSTANTS) | {_FEATURE_PROVENANCE_KEY}
     assert _table_set_delta(surface, names) == ([], [])

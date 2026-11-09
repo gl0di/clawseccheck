@@ -70,8 +70,11 @@ kept here so the always-loaded playbook stays lean.
   sink (not cut off by the cumulative time budget), and the FULL byte range of an over-length
   log line via overlapping sliding windows (not only its head/tail). Applies to B164/B180,
   which run on every audit - has effect with or without `--full`. The per-check and
-  whole-audit wall-clock budgets are raised in the same step, so scanning more cannot degrade
-  a check into a timed-out UNKNOWN. Slower; offer it after a normal run flags something
+  whole-audit wall-clock budgets are raised in the same step (120 s per check and 900 s for the
+  audit, against 60 s and 150 s for a plain run), so scanning more cannot degrade a check into a
+  timed-out UNKNOWN. It is also the way to a complete run on a very large fleet: a plain run
+  stops at its 150 s whole-audit budget and reports the checks it did not reach as UNKNOWN
+  ("the overall audit time budget was exhausted"), and that finding names this flag. Slower; offer it after a normal run flags something
   suspicious and the user wants maximum coverage, not as a default.
 - `--judged-bundle PATH` (`-` for stdin): feed back a host-agent judge's answers to a
   prior `--full --json` packet in one file (`attestation` / `judged` / `vetJudged`
@@ -109,6 +112,11 @@ kept here so the always-loaded playbook stays lean.
   stamp decides B33). Read-only `PATH` lookup, no subprocess.
 - `--no-update-notice` - suppress the offline "your build may be stale" reminder
   (also via `CLAWSECCHECK_NO_UPDATE_NOTICE=1`). The reminder is offline-only - never a network call.
+- `CLAWSECCHECK_NO_PROGRESS=1` (environment variable, no flag) - suppress the one-line "still running"
+  notice that every long run (the audit and every mode that runs the check engine or a long scan:
+  `--json`, `--full`, `--dashboard`, `--vet*`, `--monitor`, ...) prints to stderr before it starts
+  collecting. stdout is never touched. `--quiet` does not silence it. Fast modes (`--version`,
+  `--menu`, `--brief`, `--explain`, `--verify-*`, ...) never print it.
 - `--no-freshness-notice` - suppress the report's advisory freshness lines (also via
   `CLAWSECCHECK_NO_FRESHNESS_NOTICE=1`). On a normal audit that is three advisories: the
   coverage-freshness reminder for the opt-in capabilities (`--self-test` / `--redteam` /

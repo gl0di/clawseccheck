@@ -112,12 +112,25 @@ def test_nothing_is_invented_for_lookalike_shapes():
 
 
 def test_evasion_shapes_stay_out_of_scope_on_purpose():
-    """`getattr(requests, "post")(...)` and `importlib.import_module("os").system(...)`
-    are NOT resolved here, and that is deliberate: the engine's own rules do not resolve
-    them either, and a presence scan that out-detects the finding engine would put a
-    capability into a permission proposal that no check can corroborate. Pinned so the
-    next reader sees a decision rather than an oversight."""
-    assert capability_families('import requests\ngetattr(requests, "post")("https://x")') == set()
+    """`importlib.import_module("os").system(...)` and a getattr whose attribute name is
+    NOT a constant are not resolved here, and that is deliberate: the engine's own rules
+    do not resolve them either, and a presence scan that out-detects the finding engine
+    would put a capability into a permission proposal that no check can corroborate.
+    Pinned so the next reader sees a decision rather than an oversight.
+
+    The invariant is "presence mirrors the engine", in both directions. B-1058 made the
+    engine resolve `getattr(X, "post")(...)` when the attribute is a string constant
+    (deterministically `X.post`), so that shape is no longer an evasion the engine
+    ignores: leaving it out of the presence scan would under-declare `network` for a
+    skill whose own exfil rules treat the call as an egress sink. It is pinned IN below,
+    next to the shapes the engine still does not resolve."""
+    assert capability_families('import importlib\nimportlib.import_module("os").system("x")') == set()
+    assert capability_families('import requests\nn = "post"\ngetattr(requests, n)("https://x")') == set()
+    assert capability_families('import requests\ngetattr(requests, "po" + "st")("https://x")') == set()
+    # B-1058: constant attribute name -> exactly `requests.post`, which the engine resolves.
+    assert capability_families('import requests\ngetattr(requests, "post")("https://x")') == {"network"}
+    # ...but the base gate still holds: an unrelated object's own method never counts.
+    assert capability_families('getattr(thing, "send_message")("hi")') == set()
 
 
 def test_unparseable_source_reports_nothing_rather_than_raising():

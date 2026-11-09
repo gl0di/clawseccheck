@@ -229,7 +229,14 @@ def test_phantom_homes_add_no_collector_error_and_no_b185_sentence(tmp_path, mod
     (tmp_path / "agents/main/agent").mkdir(parents=True)
     with _mode(tmp_path / "agents/main/agent", mode):
         ctx = collect(tmp_path)
-    assert not [e for e in ctx.errors if "auth-profile store presence" in e]
+    # No invented store: nothing may claim it tried to READ a database at a path that
+    # does not exist. B-1014: an unlistable `agent` directory (0o000) is a real listing
+    # gap -- the walk itself counts it in `dbs_unlistable` above -- and is now disclosed
+    # as one; a listable-but-unsearchable one (0o444) answers "not there" and adds nothing.
+    assert not [e for e in ctx.errors if "could not read agent auth-profile store" in e]
+    gaps = [e for e in ctx.errors if "could not list every per-agent directory" in e]
+    assert len(gaps) == (1 if mode == 0o000 else 0)
+    assert ctx.agent_auth_profile_store_unreadable is (mode == 0o000)
 
 
 def test_b85_unknown_says_how_many_directories_could_not_be_listed(tmp_path):
