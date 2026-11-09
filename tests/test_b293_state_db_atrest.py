@@ -862,3 +862,39 @@ def test_c629_no_live_db_and_a_cut_walk_stays_the_plain_unknown(tmp_path, reacha
     f = check_state_db_atrest(ctx)
     assert f.status == UNKNOWN
     assert f.detail == _NO_DB_DETAIL
+
+
+# --------------------------------------------------------------------------------------
+# C-788 item 1: OpenClaw 2026.11.2's Doctor writes a full state-DB copy
+# ``state/openclaw.sqlite.doctor-cron-<ts>-<uuid>.bak`` before its cron inference-binding
+# migration (dist ``store-repair-*.mjs``), next to the older
+# ``state/openclaw.sqlite.pre-startup-migration-<uuid>.bak``. Both sit at the top of
+# ``state/`` and match the retained-copy walk's ``*.sqlite*`` glob, so they are already
+# judged as retained copies. These pins keep it that way.
+# --------------------------------------------------------------------------------------
+
+_C788_BAK_NAMES = (
+    "openclaw.sqlite.doctor-cron-1794196646387-1b2c3d4e-0000-4000-8000-000000000001.bak",
+    "openclaw.sqlite.pre-startup-migration-1b2c3d4e-0000-4000-8000-000000000002.bak",
+)
+
+
+@pytest.mark.parametrize("name", _C788_BAK_NAMES)
+def test_c788_world_readable_state_db_bak_sibling_is_warn(tmp_path, reachable_ancestors, name):
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    bak = ctx.home / "state" / name
+    bak.write_bytes(b"not-a-real-sqlite-file")
+    os.chmod(bak, 0o644)
+    f = check_state_db_atrest(ctx)
+    assert f.status == WARN
+    assert "retained copy" in f.detail.lower()
+    assert any(name in e for e in f.evidence)
+
+
+@pytest.mark.parametrize("name", _C788_BAK_NAMES)
+def test_c788_owner_only_state_db_bak_sibling_passes(tmp_path, reachable_ancestors, name):
+    ctx = _home(tmp_path, home_mode=0o755, state_mode=0o755, db_mode=0o600)
+    bak = ctx.home / "state" / name
+    bak.write_bytes(b"not-a-real-sqlite-file")
+    os.chmod(bak, 0o600)
+    assert check_state_db_atrest(ctx).status == PASS
