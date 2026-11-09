@@ -58,7 +58,7 @@ JS FIDELITY, each measured against the vendor and pinned by the battery:
   ``byChannel.*`` entry against ``queue`` / ``steer-backlog`` / ``steer+backlog``.
 
 THE BUILD WINDOW is ``ORACLE_MIN..ORACLE_MAX``. 2026.9.9's finder is a different, smaller
-function (about 17 families); 2026.10.1 to 2026.10.9 are the builds this port is validated on.
+function (about 17 families); 2026.10.1 to 2026.11.2 are the builds this port is validated on.
 The finder bundle (``retired-config-formats-dWNTYZjK.mjs``) is byte-identical in the 2026.10.6, 2026.10.7,
 2026.10.8 and 2026.10.9 packages (sha256 2192176bb6624d69...), and the battery regenerated on 2026.10.9 equals the
 2026.10.6 one on all 1,063 rows, so the window rests on the 2026.10.6 differential for those builds.
@@ -85,7 +85,7 @@ from dataclasses import dataclass
 #: The window of builds this port was differentially validated on (first three components
 #: compared, so a correction release of a validated build stays inside it).
 ORACLE_MIN = (2026, 10, 1)
-ORACLE_MAX = (2026, 11, 1)
+ORACLE_MAX = (2026, 11, 2)
 
 #: The vendor's two ``bridgeVersion`` values, verbatim.
 BRIDGE_DEFAULT = "2026.9.5"

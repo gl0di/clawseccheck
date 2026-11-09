@@ -150,7 +150,7 @@ def test_benign_near_misses_stay_pass_and_say_what_was_checked(cfg):
 _FINDER_ONLY = {"agents": {"entries": {"main": {"agentRuntime": {"id": "codex"}}}}}
 
 
-@pytest.mark.parametrize("build", ["2026.11.2", "2026.10.0", "2026.9.9", "2027.1.1"])
+@pytest.mark.parametrize("build", ["2026.11.3", "2026.10.0", "2026.9.9", "2027.1.1"])
 def test_outside_the_window_the_pass_carries_the_caveat_in_detail(build):
     """The vendor's list was not consulted: the PASS must not read like the in-window one,
     and the caveat is in `detail` because the list renderer never shows `fix`."""
@@ -159,7 +159,7 @@ def test_outside_the_window_the_pass_carries_the_caveat_in_detail(build):
     assert f.detail == (
         "The file audited holds none of the 20 retired config keys this check tracks. "
         "OpenClaw's own retired-format list was NOT checked: it is ported only for "
-        f"2026.10.1-2026.11.1 and this build is {build}.")
+        f"2026.10.1-2026.11.2 and this build is {build}.")
     assert "retired-format finder names nothing" not in f.detail
     assert "not applied" not in f.fix
 
