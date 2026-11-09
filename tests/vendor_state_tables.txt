@@ -1,8 +1,8 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.11.1
+# openclaw-version: 2026.11.2
 # state-schema-version: 22
-# generated: 2026-11-06
+# generated: 2026-11-09
 # tables: 134
 #
 # source-bundle: native-hook-relay-client.worker.js
@@ -27,7 +27,7 @@
 #
 # Satellite sources read (bundle it came from, tables it adds beyond the main constant; the
 # featureLocalSql entry lists the tables every value in that object declares):
-#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-ByvSX9zp.mjs, 7 copies]
+#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-CYc16G0w.mjs, 7 copies]
 #     adds: user_profile_emails, user_profiles, worker_environment_session_attachments
 #
 # Why it exists
