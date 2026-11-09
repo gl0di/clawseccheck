@@ -9260,11 +9260,17 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             add(nm, set(o))
         for p in scope.params:
             add(p, {f"p:{p}"})
-        scope.seeded = False
+        # B-1083: `seeded` = this scope can hold a credential at all. A handoff slot
+        # (attr_base) is one; so is a direct '#'/'I' read; a helper-call origin ("f:k") is
+        # one only once `k` resolves as cred-returning (impure_f / incl_f, known after this
+        # pass), so the call indices are recorded in `seed_fs` for `maybe_cred`.
+        scope.seeded = bool(attr_base)
+        scope.seed_fs = set()
         for ts, v in scope.bindings:
             seeds = classify_value(v, scope.cls)
             if seeds & {"#", "I"}:
                 scope.seeded = True
+            scope.seed_fs.update(int(x[2:]) for x in seeds if x.startswith("f:"))
             if seeds:
                 for t in ts:
                     add(t, seeds)
@@ -9389,6 +9395,17 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             return "incluster"
         return None
 
+    def maybe_cred(sc):
+        """B-1083: True when an OVERFLOWED scope (incomplete taint map) may hold a credential:
+        a direct read, a handoff slot, a cred-returning helper call, or module-level taint.
+        A scope with none of these has nothing to lose, so it stays silent."""
+        return bool(
+            sc.seeded
+            or mod.overflow
+            or base
+            or any(k in impure_f or k in incl_f for k in sc.seed_fs)
+        )
+
     # ---- sink params (reverse BFS over param -> param edges) -------------------------
     sink_direct: set = set()
     sink_nonexempt: set = set()
@@ -9440,9 +9457,10 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
     for d, sc, call, is_net in sink_calls:
         o = origins_of(call, sc)
         kd = kind(o)
-        if kd is None and sc.overflow and (sc.seeded or mod.overflow or base):
+        if kd is None and sc.overflow and maybe_cred(sc):
             # the scope's pair budget ran out: its taint map is incomplete, so a scope that
-            # reads a credential (or sees module-level taint) and has a sink is convicted
+            # reads a credential (directly, or through a cred-returning helper call) or sees
+            # module-level taint, and has a sink, is convicted
             kd = "impure"
         if kd is None:
             continue
@@ -9467,6 +9485,8 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
                         if (k, q) not in sink_params:
                             continue
                         kd = kind(origins_of(arg, sc))
+                        if kd is None and sc.overflow and maybe_cred(sc):
+                            kd = "impure"  # B-1083: same fail-closed fallback as above
                         if kd is None or (kd == "incluster" and (k, q) not in nonexempt):
                             continue
                         ln = getattr(call, "lineno", 0)
