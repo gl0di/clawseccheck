@@ -8947,6 +8947,28 @@ def _xf_const_names_cred(value: str):
     return None
 
 
+def _xf_extra_bound(body) -> set:
+    """B-1084: names a scope binds that `_own_bound_names` deliberately does not report --
+    lambda parameters and comprehension targets (both folded into the enclosing scope by
+    `_xf_scope_nodes`), and global/nonlocal-declared names (a write through one rebinds the
+    OUTER binding). Used only to fail closed when deciding whether a module constant is
+    still what a bare name refers to."""
+    out: set = set()
+    for n in _xf_scope_nodes(body):
+        if isinstance(n, ast.Lambda):
+            a = n.args
+            out.update(x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs))
+            if a.vararg:
+                out.add(a.vararg.arg)
+            if a.kwarg:
+                out.add(a.kwarg.arg)
+        elif isinstance(n, ast.comprehension):
+            out |= _assign_target_names(n.target)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            out.update(n.names)
+    return out
+
+
 def _xf_cred_class(node: ast.AST, ctx) -> str:
     """`_cred_source_classification` restricted to PATH-SHAPED constants (see
     `_xf_const_names_cred`). The same-scope pass tolerates a prose constant because a
@@ -9231,31 +9253,85 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             _sm.append(_simple_str_const_assigns(tree))
         return _sm[0]
 
-    def scope_str_map(d, sc):
-        """B-1084: the string map as seen from inside function *d*. A name that is a
-        parameter or is rebound in the function is NOT the module constant of the same
-        name -- resolving it through the file-wide map would let `def call(API, tok)`
-        borrow the in-cluster exemption from a module-level `API = "https://kubernetes..."`.
-        Such a name resolves only when the function binds it exactly once, to a string
-        literal (that literal is then its value); a parameter ("p:" origin) never resolves."""
-        m = get_str_map()
-        if d is None:
-            return m
-        shadow = (set(d.params) | sc.plain) & m.keys()
-        if not shadow:
-            return m
-        m = dict(m)
-        for nm in shadow:
-            bound = [v for ts, v in sc.bindings if nm in ts]
-            if (
-                nm in d.params
-                or len(bound) != 1
-                or not (isinstance(bound[0], ast.Constant) and isinstance(bound[0].value, str))
-            ):
-                del m[nm]
+    # B-1084: which names the file-wide string map may resolve FROM INSIDE a given scope.
+    # Fails closed: a name resolves only when it is provably the one literal binding of its
+    # owning scope and provably unbound in every scope between the use and that owner.
+    # "Bound" is `_own_bound_names` (the complete walker: params, assign/for/with/walrus/
+    # import/except/match/def/class/del targets) plus lambda parameters, comprehension
+    # targets and global/nonlocal-declared names (`_xf_extra_bound`) -- a `global X` write
+    # rebinds the module constant itself, so it is treated as a binding, not an exemption.
+    parent_fn: dict = {}
+    _pstack = [(tree, None)]
+    while _pstack:
+        _pn, _pf = _pstack.pop()
+        for _ch in ast.iter_child_nodes(_pn):
+            if isinstance(_ch, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parent_fn[_ch] = _pf
+                _pstack.append((_ch, _ch))
             else:
-                m[nm] = bound[0].value
-        return m
+                _pstack.append((_ch, _pf))
+    _lit_owner: list = []
+    _ob_cache: dict = {}
+
+    def _lit_assigns(body, m):
+        for n in _xf_scope_nodes(body):
+            if (
+                isinstance(n, ast.Assign)
+                and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and n.targets[0].id in m
+                and isinstance(n.value, ast.Constant)
+                and isinstance(n.value.value, str)
+            ):
+                yield n
+
+    def lit_owner():
+        """name -> the scope node (module tree / def node) holding its unique literal assign."""
+        if not _lit_owner:
+            m = get_str_map()
+            own: dict = {}
+            for a in _lit_assigns(getattr(tree, "body", []), m):
+                own[a.targets[0].id] = tree
+            for dd in defs:
+                for a in _lit_assigns(dd.node.body, m):
+                    own[a.targets[0].id] = dd.node
+            _lit_owner.append(own)
+        return _lit_owner[0]
+
+    def other_bound(snode):
+        """Names *snode* binds by anything OTHER than a candidate `NAME = "literal"` assign
+        (those are neutralised for the walk, then restored)."""
+        if snode not in _ob_cache:
+            m = get_str_map()
+            body = snode.body
+            swapped = [(a, a.targets) for a in _lit_assigns(body, m)]
+            try:
+                for a, _t in swapped:
+                    a.targets = [ast.Name(id="\x00", ctx=ast.Store())]
+                _ob_cache[snode] = _own_bound_names(snode) | _xf_extra_bound(body)
+            finally:
+                for a, t in swapped:
+                    a.targets = t
+        return _ob_cache[snode]
+
+    def str_resolves(d, nm):
+        owner = lit_owner().get(nm)
+        if owner is None:
+            return False
+        sn = d.node if d is not None else None
+        while sn is not None:
+            if sn is owner:
+                return nm not in other_bound(sn)
+            if nm in other_bound(sn):
+                return False
+            sn = parent_fn.get(sn)
+        return owner is tree and nm not in other_bound(tree)
+
+    def scope_str_map(d, call):
+        """The string map as seen at *call* inside function *d* (None = module scope):
+        only the names the call mentions, only those `str_resolves`."""
+        m = get_str_map()
+        return {nm: m[nm] for nm in _names_in(call) if nm in m and str_resolves(d, nm)}
 
     tops = [n for n in getattr(tree, "body", [])]
     mod = _XfScope(tops, [], None)
@@ -9476,7 +9552,7 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
                         continue
                     sink_direct.add((d.idx, p))
                     hit = {nm for nm in names if tag in sc.tainted.get(nm, ())}
-                    if not (is_net and hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, sc))):
+                    if not (is_net and hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, call))):
                         sink_nonexempt.add((d.idx, p))
             if d is not None:
                 for fn_expr, v_args, v_kws in _xf_call_views(call):
@@ -9515,7 +9591,7 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             continue
         if kd == "incluster" and is_net:
             hit = {nm for nm in _names_in(call) if "I" in sc.tainted.get(nm, ())}
-            if hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, sc)):
+            if hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, call)):
                 continue
         detail = (
             "credential-file contents flow into a network sink (read secret -> send out)"
