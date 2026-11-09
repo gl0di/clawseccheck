@@ -9208,6 +9208,32 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             _sm.append(_simple_str_const_assigns(tree))
         return _sm[0]
 
+    def scope_str_map(d, sc):
+        """B-1084: the string map as seen from inside function *d*. A name that is a
+        parameter or is rebound in the function is NOT the module constant of the same
+        name -- resolving it through the file-wide map would let `def call(API, tok)`
+        borrow the in-cluster exemption from a module-level `API = "https://kubernetes..."`.
+        Such a name resolves only when the function binds it exactly once, to a string
+        literal (that literal is then its value); a parameter ("p:" origin) never resolves."""
+        m = get_str_map()
+        if d is None:
+            return m
+        shadow = (set(d.params) | sc.plain) & m.keys()
+        if not shadow:
+            return m
+        m = dict(m)
+        for nm in shadow:
+            bound = [v for ts, v in sc.bindings if nm in ts]
+            if (
+                nm in d.params
+                or len(bound) != 1
+                or not (isinstance(bound[0], ast.Constant) and isinstance(bound[0].value, str))
+            ):
+                del m[nm]
+            else:
+                m[nm] = bound[0].value
+        return m
+
     tops = [n for n in getattr(tree, "body", [])]
     mod = _XfScope(tops, [], None)
     scopes = [(None, mod)]
@@ -9427,7 +9453,7 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
                         continue
                     sink_direct.add((d.idx, p))
                     hit = {nm for nm in names if tag in sc.tainted.get(nm, ())}
-                    if not (is_net and hit and _is_incluster_auth_exempt(call, hit, get_str_map())):
+                    if not (is_net and hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, sc))):
                         sink_nonexempt.add((d.idx, p))
             if d is not None:
                 for fn_expr, v_args, v_kws in _xf_call_views(call):
@@ -9466,7 +9492,7 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             continue
         if kd == "incluster" and is_net:
             hit = {nm for nm in _names_in(call) if "I" in sc.tainted.get(nm, ())}
-            if hit and _is_incluster_auth_exempt(call, hit, get_str_map()):
+            if hit and _is_incluster_auth_exempt(call, hit, scope_str_map(d, sc)):
                 continue
         detail = (
             "credential-file contents flow into a network sink (read secret -> send out)"
