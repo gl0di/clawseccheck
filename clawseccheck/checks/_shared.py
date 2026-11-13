@@ -4326,6 +4326,13 @@ _VENDOR_SECRET_ENV_MAP_PATHS = tuple(
         r"(?:^|\.)mcp\.servers\.[^.\[]+\.env\.[^.\[]+$",
         r"^models\.providers\.[^.\[]+\.localService\.env\.[^.\[]+$",
         r"^security\.installPolicy\.exec\.env\.[^.\[]+$",
+        # OpenClaw 2026.11.3 `env.vars.*`: the config block applyConfigEnvVars injects into the
+        # gateway process environment. Same free-form env-map shape as the three above (vendor
+        # redacts every value, most are not credentials), so it is COVERED with the same
+        # value-shape rule, not excluded: a literal API key placed here is a plaintext secret
+        # in the config file. Not excluded because, unlike the TLS cert/CA or SSH known_hosts
+        # slots, the map is the documented home of provider keys.
+        r"^env\.vars\.[^.\[]+$",
     )
 )
 _VENDOR_SECRET_HEADER_MAP_PATHS = tuple(

@@ -447,7 +447,9 @@ def self_reported_version(config: "dict | None") -> str:
 # B391 default worker image row (node:24.22.1-slim) were all re-grounded on the installed 11.1 dist.
 # Raised to 2026.11.2 on 2026-11-09 (C-789): the same set of snapshots, baselines, oracles and the
 # B391 image row (unchanged, node:24.22.1-slim) were re-grounded on the installed 11.2 dist.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 2)
+# Raised to 2026.11.3 on 2026-11-13 (C-799): the same set re-grounded on the installed 11.3 dist;
+# the B391 image row is unchanged (node:24.22.1-slim) and `env.vars.*` is covered (C-688).
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 3)
 
 
 def grounding_gap(installed_version: "str | None"):
