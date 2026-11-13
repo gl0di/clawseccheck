@@ -54,7 +54,7 @@ sys.path.insert(0, str(HERE.parent))
 BATTERY_PATH = HERE / "data" / "retiredformats_battery.json"
 
 #: The build the battery was generated against (recorded in the battery header).
-ORACLE_BUILD = "2026.11.2"
+ORACLE_BUILD = "2026.11.3"
 
 _FINDER = "findRetiredConfigUpgradeRequirement"
 
