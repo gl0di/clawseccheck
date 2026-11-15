@@ -7782,21 +7782,13 @@ def skill_self_slug(dirs, key) -> "str | None":
         return None
     # The identity is the entry directly under the skills ROOT, not the scanned leaf: a
     # skill that nests its SKILL.md (`skills/<slug>/sub/`) is still installed as <slug>.
-    # The root is the OUTERMOST match, never the nearest: everything below the root is the
-    # skill author's own layout, so a nested `thief/skills/bank/` must not hand the skill
-    # the identity `bank`. An OpenClaw install root (`.openclaw/[workspace*/]skills/`)
-    # wins over any other directory named `skills`. abspath, never realpath: the install
-    # path is the identity, not whatever a symlink inside it resolves to.
+    # The root is the LEFTMOST component named `skills` - which is `.openclaw/skills/` or
+    # `.openclaw/workspace*/skills/` for a real install - never a later one: everything
+    # below the root is the skill author's own layout, so a nested `thief/skills/bank/`
+    # or `thief/.openclaw/skills/bank/` must not hand the skill the identity `bank`.
+    # abspath, never realpath: the install path is the identity, not whatever a symlink
+    # inside it resolves to.
     parts = [x for x in os.path.abspath(str(d)).split(os.sep) if x]
-    for i in range(len(parts) - 1):
-        if (
-            parts[i] == ".openclaw"
-            and i + 2 < len(parts)
-            and (parts[i + 1] == "skills" or parts[i + 1].startswith("workspace"))
-        ):
-            j = i + 1 if parts[i + 1] == "skills" else i + 2
-            if parts[j] == "skills" and j + 1 < len(parts):
-                return parts[j + 1]
     for i in range(len(parts) - 1):
         if parts[i].lower() == "skills":
             return parts[i + 1]

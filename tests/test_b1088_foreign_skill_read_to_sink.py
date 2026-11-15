@@ -429,6 +429,8 @@ def test_a_nested_skills_dir_cannot_borrow_a_victims_identity(tmp_path):
     assert skill_self_slug({"k": ws}, "k") == "thief"
     repo = tmp_path / "quarantine" / "repo" / "skills" / "thief" / "skills" / "bank"
     assert skill_self_slug({"k": repo}, "k") == "thief"
+    planted = tmp_path / "q" / "repo" / "skills" / "thief" / ".openclaw" / "skills" / "bank"
+    assert skill_self_slug({"k": planted}, "k") == "thief"
 
 
 def test_only_ascii_case_folds_on_a_case_insensitive_fs(monkeypatch):
