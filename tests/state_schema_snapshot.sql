@@ -2,7 +2,7 @@
 --
 -- openclaw-version: 2026.11.3
 -- state-schema-version: 22
--- generated: 2026-11-12
+-- generated: 2026-11-13
 -- tables: 15
 --
 -- What this is

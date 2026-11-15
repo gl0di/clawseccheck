@@ -9,7 +9,7 @@
 # re-recording removes it here; that is progress, never a failure.
 #
 # openclaw-version: 2026.11.3
-# generated: 2026-11-12
+# generated: 2026-11-13
 # violations: 294
 #
 clawseccheck/behavioral.py	server-runtime-subscriptions-OlWMLbPY.js

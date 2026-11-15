@@ -180,7 +180,7 @@ def test_enabled_with_unrecognized_isolation_value_warns():
 #   2026.10.10            node:24.22.1-slim   (installed dist, read 2026-11-03)
 #   2026.11.1             node:24.22.1-slim   (installed dist, read 2026-11-06)
 #   2026.11.2             node:24.22.1-slim   (installed dist, read 2026-11-09)
-#   2026.11.3             node:24.22.1-slim   (installed dist, read 2026-11-12)
+#   2026.11.3             node:24.22.1-slim   (installed dist, read 2026-11-13)
 # The check used to print node:24.19.0-slim on every build -- wrong on 2026.8.x/9.1/9.2 and,
 # after 2026.9.7, wrong again. Now it names the image only for a build whose default was
 # actually read (exact match); every other build gets no literal at all.
