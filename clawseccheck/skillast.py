@@ -25,6 +25,7 @@ import builtins
 import os
 import posixpath
 import re
+import sys
 import weakref
 from collections import namedtuple
 from urllib.parse import urlparse
@@ -7728,7 +7729,11 @@ def _foreign_skill_path(s: str, self_slug: "str | None", glob: bool = True) -> b
     skill's directory, or harvests every skill's directory by glob."""
     if not isinstance(s, str) or "skills/" not in s:
         return False
-    cands = (s, posixpath.normpath(s)) if ".." in s else (s,)
+    # The OS resolves `skills//bank/`, `skills/./bank/` and `skills/x/../bank/` to
+    # `skills/bank/`, so match the normalized spelling too - never only the literal one,
+    # or an empty or "." segment hides the real sibling behind it.
+    norm = posixpath.normpath(re.sub(r"/{2,}", "/", s))
+    cands = (s, norm) if norm != s else (s,)
     for cand in cands:
         for m in _FOREIGN_SKILL_RE.finditer(cand):
             seg = m.group(1)
@@ -7744,9 +7749,19 @@ def _foreign_skill_path(s: str, self_slug: "str | None", glob: bool = True) -> b
             # is a file at the root, not another skill.
             if m.group(2) != "/" or _FOLD_UNK in seg:
                 continue
-            if self_slug and seg.lower() != self_slug.lower():
+            if self_slug and not _same_skill_name(seg, self_slug):
                 return True
     return False
+
+
+def _same_skill_name(a: str, b: str) -> bool:
+    """Compare two skill directory names the way this machine's filesystem does: a
+    different-case name is a different directory on Linux, the same one on macOS/Windows.
+    A case-insensitive compare on Linux would let a skill installed as `bank` read a
+    sibling installed as `Bank` as if it were its own directory."""
+    if sys.platform in ("darwin", "win32", "cygwin"):
+        return a.casefold() == b.casefold()
+    return a == b
 
 
 def skill_self_slug(dirs, key) -> "str | None":
@@ -7760,10 +7775,16 @@ def skill_self_slug(dirs, key) -> "str | None":
     d = (dirs or {}).get(key)
     if not d:
         return None
-    p = os.path.abspath(str(d))
-    if os.path.basename(os.path.dirname(p)).lower() != "skills":
-        return None
-    return os.path.basename(p) or None
+    # The identity is the entry directly under the NEAREST ancestor named `skills`, not
+    # the scanned leaf: a skill that nests its SKILL.md (`skills/<slug>/sub/`) is still
+    # installed as <slug>, and treating it as slug-less would let its named reads of a
+    # sibling (`skills/bank/...`) through. abspath, never realpath: the install path is
+    # the identity, not whatever a symlink inside it resolves to.
+    parts = [x for x in os.path.abspath(str(d)).split(os.sep) if x]
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i].lower() == "skills":
+            return parts[i + 1] or None
+    return None
 
 
 # Cheap source pre-filter for the above (the real predicate runs per constant / fold).

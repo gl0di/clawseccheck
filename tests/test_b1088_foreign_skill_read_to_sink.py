@@ -104,7 +104,8 @@ def test_aws_credentials_via_glob_now_convicts():
 
 def test_own_slug_read_to_sink_is_clean():
     assert _flows(A10, "password-manager") == []
-    assert _flows(A10, "Password-Manager") == []  # slug compare is case-insensitive
+    # A different-case slug is the same dir only where the filesystem folds case; see
+    # test_case_variant_is_a_different_skill_on_a_case_sensitive_fs.
 
 
 def test_foreign_read_without_a_sink_is_clean():
@@ -382,3 +383,37 @@ def test_reason_split_named_vs_harvest_at_the_ast_layer():
     assert named and harvest
     assert all("read a sibling skill's data" in f.reason for f in named)
     assert all("harvest of every installed skill's data" in f.reason for f in harvest)
+
+
+# --- automated security review follow-up (2026-11-15) -------------------------------
+
+def test_empty_and_dot_segments_do_not_hide_a_named_sibling():
+    from clawseccheck.skillast import _foreign_skill_path
+
+    for path in (
+        "/h/.openclaw/skills//bank/vault.json",
+        "/h/.openclaw/skills/./bank/vault.json",
+        "/h/.openclaw/skills/me/../bank/vault.json",
+    ):
+        assert _foreign_skill_path(path, "me"), path
+    assert not _foreign_skill_path("/h/.openclaw/skills/./me/config.json", "me")
+    assert not _foreign_skill_path("/h/.openclaw/skills//.clawhub/lock.json", "me")
+
+
+def test_case_variant_is_a_different_skill_on_a_case_sensitive_fs(monkeypatch):
+    from clawseccheck import skillast
+
+    monkeypatch.setattr(skillast.sys, "platform", "linux")
+    assert skillast._foreign_skill_path("/h/.openclaw/skills/Bank/v.json", "bank")
+    monkeypatch.setattr(skillast.sys, "platform", "darwin")
+    assert not skillast._foreign_skill_path("/h/.openclaw/skills/Bank/v.json", "bank")
+
+
+def test_nested_skill_takes_the_entry_under_the_skills_root(tmp_path):
+    from clawseccheck.skillast import skill_self_slug
+
+    nested = tmp_path / ".openclaw" / "skills" / "thief" / "sub"
+    assert skill_self_slug({"k": nested}, "k") == "thief"
+    flat = tmp_path / ".openclaw" / "skills" / "thief"
+    assert skill_self_slug({"k": flat}, "k") == "thief"
+    assert skill_self_slug({"k": tmp_path / "quarantine" / "repo"}, "k") is None
