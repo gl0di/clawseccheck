@@ -5993,6 +5993,13 @@ _B13_WINNER_SUBSIGNAL = {
     "crashed_skills": "could not be fully analyzed \u2014 the scan engine raised an unexpected error",
 }
 
+# B-884 / CLAWSECCHECK-B-1087: the B13 buckets soft enough that a tied, dedicated
+# SKILL_CONTENT_RING finding on the same evidence wins the --vet headline over them.
+_B13_SOFT_HEADLINE_SUBSIGNALS = frozenset({
+    _B13_WINNER_SUBSIGNAL["warns_content"],
+    _B13_WINNER_SUBSIGNAL["warns_install_curl"],
+})
+
 # B-743 note on the paragraph above: its "LIFTED FROM THE BRANCH'S OWN VERDICT HEADLINE"
 # contract still holds for `warns_js`, by the opposite construction. That branch's headline
 # is now DERIVED FROM the labels in `_JS_WARN_REMEDIATION` below (`_js_warn_headline`)
@@ -6964,29 +6971,20 @@ def check_installed_skills(ctx: Context) -> Finding:
                         and not _url_host_is_local("http://" + host)
                         and h not in _RESERVED_EXAMPLE_DOMAINS
                     ):
-                        # B-884: when `host` is itself a bare public IPv4 literal, the exact
-                        # same "https?://<ip>" text is also what `_IOC_IPURL_RE` below
-                        # matches - and that loop's `fence_needs_negation=True` (B-525) means
-                        # an unannotated fence no longer suppresses IT, so this same fence
-                        # reliably produces a separate "hardcoded public-IP URL" WARN even
-                        # though the pipe-to-shell EXECUTION shape stays unassessed here. The
-                        # flat "so it was not assessed" wording read as contradicting that
-                        # WARN (same evidence, two notes that looked like they disagreed) -
-                        # name the two questions as different ones instead of restating
-                        # "not assessed" next to a WARN about the identical text.
-                        if _ip_reaches_nonlocal_host(host):
-                            coverage_fence.append(
-                                f"coverage: {name}: this fence's pipe-to-shell EXECUTION "
-                                f"(no marker we recognise) was not assessed \u2014 a different "
-                                f"question from the bare public-IP URL ({host}) itself, "
-                                "which is scored separately, above"
-                            )
-                        else:
-                            coverage_fence.append(
-                                f"coverage: {name}: a pipe-to-shell from {host} sits in a "
-                                "fence carrying no marker we recognise, so it was not "
-                                "assessed"
-                            )
+                        # CLAWSECCHECK-B-1087 (Dave, 2026-11-15): the identical command as
+                        # bare prose under an install heading is a WARN, so a bare fence -
+                        # the normal markdown way to write an install step, and a free
+                        # choice of the author - may not turn it into a mere coverage note
+                        # with an INSTALL verdict. Demote, never drop (the B-526 rule), and
+                        # never FAIL: a fenced installer is the documented-installer shape
+                        # F-097 already down-ranks. This reverses the pipe-to-shell site of
+                        # e795615a's "disclose, don't score" choice for this one site only;
+                        # its measured cost there was 2/763 benign skills INSTALL->CAUTION.
+                        warns_install_curl.append(
+                            f"{name}: pipe-to-shell from non-reputable host {host} "
+                            "(inside a code fence)"
+                        )
+                        install_hosts_by_skill.setdefault(name, set()).add(h)
                     continue
                 msg = f"{name}: pipe-to-shell from non-reputable host {host}"
                 # C-259 (D5, docs/design/severity-separability.md): measured net-correct,
@@ -10531,10 +10529,15 @@ def _vet_resolved_skill(p: Path) -> Finding:
         # to that one bucket via its unique `sub_signals` label so every other B13 winner
         # keeps today's tie-break unchanged - this flips which finding a tie resolves to,
         # never a finding's own status/severity.
+        # CLAWSECCHECK-B-1087: the fenced pipe-to-shell WARN joined the down-ranked
+        # "installer/setup fetch" bucket, which is just as soft and lands on the same fence
+        # a dedicated ring check (B100's ClickFix setup-section finding) names precisely,
+        # so it yields the tie too - alone or together with "warns_content", nothing else.
         _b13_is_soft_content_signal = (
             finding.id == "B13"
             and finding.status == WARN
-            and finding.sub_signals == frozenset({_B13_WINNER_SUBSIGNAL["warns_content"]})
+            and bool(finding.sub_signals)
+            and finding.sub_signals <= _B13_SOFT_HEADLINE_SUBSIGNALS
         )
         pool = [*ring, finding] if _b13_is_soft_content_signal else [finding, *ring]
         primary = max(pool, key=lambda fx: _VET_MERGE_RANK.get(fx.status, 0))

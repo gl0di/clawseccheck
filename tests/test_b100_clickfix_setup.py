@@ -254,20 +254,20 @@ def test_vet_bad_clickfix_ip_fetch_b100_is_the_primary_headline():
     ), "B13's own WARN must still be disclosed, demoted into ring_findings"
 
 
-def test_vet_bad_clickfix_ip_fetch_pipe_to_shell_note_names_the_other_signal():
-    """B-884: the fenced pipe-to-shell EXECUTION shape stays unassessed here (no
-    annotation marker B-525 would need to score it) — but the bare public-IP URL it
-    fetches from is a SEPARATE signal that B13 does score (previous test). Before this
-    fix, the disclosure flatly said "so it was not assessed", which — printed right next
-    to a Danger headline about that identical text — read as contradicting it. The note
-    must now name the two as different questions instead of just repeating "not
-    assessed"."""
+def test_vet_bad_clickfix_ip_fetch_pipe_to_shell_is_scored_not_disclosed():
+    """B-884 pinned a coverage note saying this fence's pipe-to-shell EXECUTION was "not
+    assessed". CLAWSECCHECK-B-1087 made a bare fence demote that match to B13's WARN
+    instead (the same WARN the identical bare-prose command gets), so the execution IS
+    scored now: B13 names it as a fenced pipe-to-shell, and no note may still claim the
+    opposite next to it."""
     skill_dir = FIXTURES / "bad_b100_clickfix_ip_fetch" / "skills" / "quick-tool"
     f = vet_skill(skill_dir)
     b13 = next(x for x in getattr(f, "ring_findings", []) if x.id == "B13")
-    note = next(e for e in b13.evidence if "pipe-to-shell" in e.lower())
-    assert "185.220.101.5" in note, note
-    assert "different question" in note or "scored separately" in note, note
+    assert b13.status == WARN, b13.detail
+    assert "185.220.101.5 (inside a code fence)" in b13.detail, b13.detail
+    assert not any(
+        "pipe-to-shell" in e.lower() and "not assessed" in e.lower() for e in b13.evidence
+    ), b13.evidence
 
 
 def test_vet_clean_private_ip_fetch_b100_passes():
