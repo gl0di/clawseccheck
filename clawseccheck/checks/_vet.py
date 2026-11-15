@@ -52,6 +52,7 @@ from ..skillast import (
     hardcoded_env_secret_is_inert as _b998_hardcoded_env_secret_is_inert,
 )
 from ..skillast import _PERSIST_OVERFLOW_TAG  # B-1049
+from ..skillast import foreign_named_disclosure, skill_self_slug  # B-1088
 from ..skillast import _SH_VAR_ASSIGN_RE, _SH_VAR_REF_RE  # B-985 companion
 from ..skillast import _sh_candidate_destination_tokens as _sh_dest_tokens
 from ..skillast import _sh_line_destination_text as _sh_dest_text
@@ -7454,7 +7455,9 @@ def check_installed_skills(ctx: Context) -> Finding:
                 # so `_b998_env_secret_stays_local` (G2) can see EVERY finding this file
                 # produced, not just the ones already iterated past by the time
                 # HARDCODED_PROVIDER_SECRET is reached in the loop below.
-                _afs = analyze_python(src, relpath, own_host=_own_host, artifact=_shipped)
+                # B-1088: slug = the scanned directory's basename (never SKILL.md's `name:`).
+                _afs = analyze_python(src, relpath, own_host=_own_host, artifact=_shipped,
+                                      self_slug=skill_self_slug(getattr(ctx, "installed_skill_dirs", None), name))
                 _b998_inert = None  # tri-state cache: None = not yet computed this file
                 for af in _afs:
                     if af.rule == "AST_UNANALYZABLE":
@@ -8142,6 +8145,7 @@ def check_installed_skills(ctx: Context) -> Finding:
             # exfiltrator - a crypto-reducer exemption was retracted after five review
             # rounds. Disclosed in the advice, never `detail` (fingerprint stability).
             fix += _JS_SIGNING_CLIENT_DISCLOSURE
+        fix += foreign_named_disclosure(crit)  # B-1088: named-sibling identity residual
         if same_line_cred_exfil_skills:
             # Accepted §2.5 residual ("cred-path x exfil-token textual co-occurrence
             # without taint"), Dave ruling 2026-09-26 - same-line half. See the note
@@ -10462,6 +10466,7 @@ def _vet_resolved_skill(p: Path) -> Finding:
     ctx.installed_skill_py = {name or "skill": py_sources}
     ctx.installed_skill_shell = {name or "skill": shell_sources}
     ctx.installed_skill_js = {name or "skill": js_sources}
+    ctx.installed_skill_dirs = {name or "skill": p} if pathprobe.is_dir(p) else {}  # B-1088
     # B-612: findings only - deliberately NOT passed to _looks_like_a_skill_package above
     # nor merged into the three lists, which coverage reads. See read_skill_declared.
     ctx.installed_skill_declared = {name or "skill": declared_sources}

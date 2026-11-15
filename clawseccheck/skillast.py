@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import bisect
 import builtins
+import os
 import posixpath
 import re
 import weakref
@@ -7704,6 +7705,99 @@ _FOLDED_CRED_PATH_RE = re.compile(
     re.I,
 )
 _FOLD_UNK = "\x00"  # an unresolved path segment; never a substring of any pattern above
+
+# B-1088: another installed skill's files as a credential-class SOURCE. A skill that reads
+# `~/.openclaw/skills/<other>/...` (or harvests `skills/*/...`) and sends it to a network
+# sink is reading a sibling's vault/config/SKILL.md out of the box -- the same
+# read-secret -> send-out shape as `.ssh/id_rsa`, with no filename a closed list could name.
+# The segment after `skills/` is the discriminator: a glob metachar is a HARVEST (fires with
+# no slug at all); a plain name is foreign only when the caller KNOWS the scanned skill's own
+# slug and the names differ. A named segment with no known slug is NOT foreign (fail-safe:
+# we cannot tell self from sibling), and the slug is always the scanned directory's basename,
+# never SKILL.md's attacker-controlled `name:` (CLAUDE.md 2.5, the B61 slug-identity
+# residual). An unresolved (runtime-built) segment, a bare `skills/` root and env-var-built
+# roots are out of scope.
+_FOREIGN_SKILL_RE = re.compile(
+    r"(?:^|/)\.openclaw/(?:workspace[^/]*/)?skills/([^/]+)(/|$)", re.I
+)
+_GLOB_META_RE = re.compile(r"[*?\[]")
+
+
+def _foreign_skill_path(s: str, self_slug: "str | None", glob: bool = True) -> bool:
+    """True if path string *s* (a literal or a folded path) names another installed
+    skill's directory, or harvests every skill's directory by glob."""
+    if not isinstance(s, str) or "skills/" not in s:
+        return False
+    cands = (s, posixpath.normpath(s)) if ".." in s else (s,)
+    for cand in cands:
+        for m in _FOREIGN_SKILL_RE.finditer(cand):
+            seg = m.group(1)
+            # A dot-segment (`.clawhub`, `.openclaw-install-backups`) is OpenClaw's own
+            # bookkeeping directory, not a skill -- whatever it holds.
+            if seg.startswith("."):
+                continue
+            if _GLOB_META_RE.search(seg):
+                if glob:
+                    return True
+                continue
+            # A named segment must be a DIRECTORY (followed by "/"): `skills/README.md`
+            # is a file at the root, not another skill.
+            if m.group(2) != "/" or _FOLD_UNK in seg:
+                continue
+            if self_slug and seg.lower() != self_slug.lower():
+                return True
+    return False
+
+
+def skill_self_slug(dirs, key) -> "str | None":
+    """B-1088: the slug to hand `analyze_python(self_slug=...)` for the skill filed under
+    *key* in *dirs* (`ctx.installed_skill_dirs`): the scanned directory's basename, but ONLY
+    when that directory really sits in a skills root (its parent is named `skills`, as in
+    `~/.openclaw/skills/<slug>` or `~/.openclaw/workspace-x/skills/<slug>`). A pre-install
+    vet scans a quarantine copy (`$QUARANTINE/repo`, `weather-1.2.0/`) whose name says
+    nothing about the slug it will install under -- None there, so only glob harvests
+    convict. Never SKILL.md's `name:` (attacker-controlled; CLAUDE.md 2.5, B61 residual)."""
+    d = (dirs or {}).get(key)
+    if not d:
+        return None
+    p = os.path.abspath(str(d))
+    if os.path.basename(os.path.dirname(p)).lower() != "skills":
+        return None
+    return os.path.basename(p) or None
+
+
+# Cheap source pre-filter for the above (the real predicate runs per constant / fold).
+_FOREIGN_SKILL_SRC_RE = re.compile(r"\.openclaw/(?:workspace[^/]*/)?skills/", re.I)
+# Two reasons, one rule id: a NAMED sibling (`skills/<other>/...`) vs a glob HARVEST
+# (`skills/*/...`). Only the named one carries the identity-residual disclosure in the B13
+# FAIL's `fix` (never `detail` -- `baseline.fingerprint()` hashes it); see
+# `foreign_named_disclosure`.
+_FOREIGN_SKILL_FLOW_DETAIL = (
+    "another installed skill's files flow into a network sink "
+    "(read a sibling skill's data -> send out)"
+)
+_FOREIGN_SKILL_HARVEST_DETAIL = (
+    "another installed skill's files flow into a network sink "
+    "(harvest of every installed skill's data -> send out)"
+)
+_FOREIGN_NAMED_DISCLOSURE = (
+    " A skill whose code reads ~/.openclaw/skills/<name>/ is judged by its install "
+    "directory name: if this skill was vetted from a folder named differently from the "
+    "name it uses for itself (a repo checkout), a read of its own files reads as another "
+    "skill's - the scan cannot tell the two apart, because the name inside SKILL.md is "
+    "the author's to set."
+)
+
+
+def foreign_named_disclosure(findings) -> str:
+    """B-1088: the `fix` sentence for a B13 FAIL whose crit entries (strings carrying
+    `ASTFinding.reason`) include a named-sibling conviction; "" otherwise. A glob harvest
+    and a plain credential conviction never get it."""
+    return (
+        _FOREIGN_NAMED_DISCLOSURE
+        if any(_FOREIGN_SKILL_FLOW_DETAIL in str(c) for c in findings)
+        else ""
+    )
 # B-830 round-3 (C-135): the fold's own recursion has no depth limit of its own, so a
 # long left-deep chain -- `/`-chained BinOps, chained `.joinpath(...)` calls, or a chain
 # of single-use name-hops -- can overflow the interpreter's recursion limit well before
@@ -7781,7 +7875,23 @@ class _FsFoldCtx:
     every fold call: which names are bound to a path module / pathlib class / typed
     join function, and which simple single-assignment names may be resolved by value."""
 
-    def __init__(self, tree: ast.AST):
+    def __init__(
+        self, tree: ast.AST, self_slug: "str | None" = None, foreign: bool = False
+    ):
+        # B-1088: *foreign* opts this ctx into "another installed skill's files" as a
+        # credential-class source and into the enumeration fold steps (`.glob`/`.rglob`/
+        # `.iterdir`/`glob.glob`/`os.listdir`). Off by default so every other consumer of
+        # the fold (capability families, persistence destinations) is unchanged.
+        # `fold_enum` is fixed at construction (it shapes memoised fold results);
+        # `foreign_on` is a verdict-only toggle the caller may flip to re-run a pass
+        # without the foreign source (to tell the two flow reasons apart).
+        self.self_slug = self_slug
+        self.fold_enum = foreign
+        self.foreign_on = foreign
+        self.glob_on = True  # verdict-only toggle: False = named siblings only
+        self.glob_mods: set = set()
+        self.glob_funcs: set = set()
+        self.listdir_funcs: set = set()
         self.path_aliases = _path_module_aliases(tree)
         counts, simple = _binding_site_counts(tree)
         self.single = {k: v for k, v in simple.items() if counts.get(k, 0) == 1}
@@ -7791,6 +7901,7 @@ class _FsFoldCtx:
         self.shadowed = set(counts)
 
         join_funcs, expanduser_funcs, ctor_names, pathlib_mods = set(), set(), set(), set()
+        glob_mods, glob_funcs, listdir_funcs = set(), set(), set()
         for n in ast.walk(tree):
             if isinstance(n, ast.ImportFrom) and n.module in _PATH_JOIN_MODULES:
                 for a in n.names:
@@ -7802,10 +7913,20 @@ class _FsFoldCtx:
                 for a in n.names:
                     if a.name in _PATHLIB_CLASSES:
                         ctor_names.add(a.asname or a.name)
+            elif isinstance(n, ast.ImportFrom) and n.module == "glob":
+                for a in n.names:
+                    if a.name in ("glob", "iglob"):
+                        glob_funcs.add(a.asname or a.name)
+            elif isinstance(n, ast.ImportFrom) and n.module == "os":
+                for a in n.names:
+                    if a.name == "listdir":
+                        listdir_funcs.add(a.asname or a.name)
             elif isinstance(n, ast.Import):
                 for a in n.names:
                     if a.name == "pathlib":
                         pathlib_mods.add(a.asname or "pathlib")
+                    elif a.name == "glob":
+                        glob_mods.add(a.asname or "glob")
 
         # A name earns membership only by being bound EXACTLY ONCE, by its qualifying
         # import -- a name bound any other way too (fail-safe direction) is untyped.
@@ -7816,6 +7937,9 @@ class _FsFoldCtx:
         self.expanduser_funcs = import_bound(expanduser_funcs)
         self.ctor_names = import_bound(ctor_names)
         self.pathlib_mods = import_bound(pathlib_mods)
+        self.glob_mods = import_bound(glob_mods)
+        self.glob_funcs = import_bound(glob_funcs)
+        self.listdir_funcs = import_bound(listdir_funcs)
         self.memo: dict = {}
         # B-830 round-3: how many times a fold call hit _FOLD_MAX_DEPTH and gave up
         # (observability only -- never consulted for a verdict; see _fold_fs_path).
@@ -7828,6 +7952,11 @@ class _FsFoldCtx:
         # must be consulted together when deciding whether a result is cacheable as
         # budget=None ("exact").
         self.inexact = 0
+
+    def foreign(self, s: str) -> bool:
+        """B-1088: *s* names another installed skill's files (see `_foreign_skill_path`);
+        always False on a ctx that did not opt in, or with the source toggled off."""
+        return self.foreign_on and _foreign_skill_path(s, self.self_slug, self.glob_on)
 
     def is_suffix_preserving(self, call: ast.Call) -> bool:
         """True for a single-argument wrapper that changes at most a leading '~'
@@ -8095,6 +8224,36 @@ def _fold_fs_path_uncached(
         inner = _fold_fs_path(f.value, ctx, visiting, depth + 1)
         if inner is not None:
             return inner
+    if ctx.fold_enum:
+        # B-1088: enumeration of a directory reads every entry under it, so it folds to
+        # the directory plus a wildcard tail (`.glob(p)` -> dir/p, `.iterdir()` ->
+        # dir/*, `glob.glob(x)` -> x, `os.listdir(x)` -> x/*). A wildcard tail never
+        # satisfies the closed Gate-V set (`id_[a-z0-9_]+` needs a literal character).
+        _direct, _viaos = ctx.path_aliases
+        if (
+            (isinstance(f, ast.Name) and f.id in ctx.glob_funcs)
+            or (
+                isinstance(f, ast.Attribute)
+                and f.attr in ("glob", "iglob")
+                and isinstance(f.value, ast.Name)
+                and f.value.id in ctx.glob_mods
+            )
+        ) and args:
+            return _fold_seg(args[0], ctx, visiting, depth + 1)
+        if (
+            (isinstance(f, ast.Name) and f.id in ctx.listdir_funcs)
+            or (
+                isinstance(f, ast.Attribute)
+                and f.attr == "listdir"
+                and isinstance(f.value, ast.Name)
+                and f.value.id in _viaos
+            )
+        ) and args:
+            return _fold_pjoin(seg_or_unk(args[0]), "*")
+        if isinstance(f, ast.Attribute) and f.attr in ("glob", "rglob") and args:
+            return _fold_pjoin(seg_or_unk(f.value), seg_or_unk(args[0]))
+        if isinstance(f, ast.Attribute) and f.attr == "iterdir" and not args:
+            return _fold_pjoin(seg_or_unk(f.value), "*")
     if isinstance(f, ast.Attribute) and f.attr == "joinpath":
         # Gate S: `.joinpath(...)` counts on ANY receiver -- the method name alone is
         # the signal; an unresolved receiver just folds to _FOLD_UNK.
@@ -8141,6 +8300,65 @@ def _has_folded_cred_path(node: ast.AST, ctx: "_FsFoldCtx") -> bool:
     return False
 
 
+# B-1088: the foreign-skill source is CONTENT-gated. Listing a skills root, a skill's name,
+# an existence check, or sending the path string itself discloses no file content and is
+# ordinary housekeeping (an update checker enumerates installed skills); only a read of a
+# foreign/enumerated path -- open()/.read*()/json.load/tarfile/zipfile/make_archive --
+# makes it a credential-class source. (Existing credential paths are deliberately NOT gated
+# this way: their path/name alone stays a source, exactly as before.)
+_FOREIGN_READ_ATTRS = frozenset(
+    {"open", "read", "read_text", "read_bytes", "readlines", "readline", "load",
+     "make_archive", "ZipFile", "TarFile"}
+)
+_FOREIGN_READ_NAMES = frozenset({"open", "make_archive", "ZipFile", "TarFile"})
+
+
+def _is_content_read_call(c: ast.AST) -> bool:
+    """A call that reads file CONTENT (or bundles it): open() in a read mode, `.read*()`,
+    `.open()`, `load`, `make_archive`, `ZipFile`/`TarFile`."""
+    if not isinstance(c, ast.Call):
+        return False
+    f = c.func
+    name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+    if name is None:
+        return False
+    if isinstance(f, ast.Name) and name not in _FOREIGN_READ_NAMES:
+        return False
+    if isinstance(f, ast.Attribute) and name not in _FOREIGN_READ_ATTRS:
+        return False
+    if name == "open":
+        mode = c.args[1] if len(c.args) > 1 else next(
+            (k.value for k in c.keywords if k.arg == "mode"), None
+        )
+        if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+            m = mode.value
+            if any(ch in m for ch in "wax") and "+" not in m:
+                return False  # write-only open reads nothing
+    return True
+
+
+def _foreign_hit(node: ast.AST, ctx: "_FsFoldCtx") -> bool:
+    """*node*'s subtree names another skill's path: a literal, or a folded path."""
+    if not ctx.foreign_on:
+        return False
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and ctx.foreign(n.value):
+            return True
+        fs = _fold_fs_path(n, ctx)
+        if fs and ctx.foreign(fs):
+            return True
+    return False
+
+
+def _foreign_content_read(node: ast.AST, ctx: "_FsFoldCtx") -> bool:
+    """True if some content-read call inside *node* itself reads a foreign path."""
+    if not ctx.foreign_on:
+        return False
+    return any(
+        _is_content_read_call(c) and _foreign_hit(c, ctx) for c in ast.walk(node)
+    )
+
+
 def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool:
     """True if the subtree contains a string constant naming a credential file, OR --
     when *ctx* is given -- a root-independent credential path assembled via typed
@@ -8152,7 +8370,9 @@ def _has_cred_path_const(node: ast.AST, ctx: "_FsFoldCtx | None" = None) -> bool
             and _CRED_PATH_RE.search(n.value)
         ):
             return True
-    return ctx is not None and _has_folded_cred_path(node, ctx)
+    if ctx is None:
+        return False
+    return _has_folded_cred_path(node, ctx) or _foreign_content_read(node, ctx)
 
 
 # B-422 follow-up (C-348 adversarial re-review): base-gating put/patch/request on the
@@ -8659,7 +8879,9 @@ def _cred_source_classification(node: ast.AST, ctx: "_FsFoldCtx | None" = None) 
                 has_incluster = True
             elif _CRED_PATH_RE.search(n.value):
                 has_other = True
-    if not has_other and ctx is not None and _has_folded_cred_path(node, ctx):
+    if not has_other and ctx is not None and (
+        _has_folded_cred_path(node, ctx) or _foreign_hit(node, ctx)
+    ):
         has_other = True
     if has_other:
         return "other"
@@ -9124,7 +9346,7 @@ def _xf_inline_cred_read(node: ast.AST, ctx) -> bool:
         ):
             if _xf_cred_class(c, ctx) == "other":
                 return True
-    return False
+    return _foreign_content_read(node, ctx)  # B-1088: a read of another skill's files
 
 
 class _XfDef:
@@ -9479,11 +9701,22 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
             seeds.add("#")
         elif c == "incluster":
             seeds.add("I")
+        if "#" not in seeds and _foreign_hit(v, ctx):
+            # B-1088: a foreign-skill path is a SOURCE only once its content is read --
+            # "F" is the path-only origin; it upgrades to "#" where a read consumes it
+            # (see `_f_read_upgrade`) and never convicts on its own.
+            seeds.add("#" if _foreign_content_read(v, ctx) else "F")
         for sub in ast.walk(v):
             if isinstance(sub, ast.Call):
                 for k in resolve(sub, scope_cls):
                     seeds.add(f"f:{k}")
         return seeds
+
+    def _f_reads(v, names):
+        """True if *v* holds a content-read call referencing any of *names*."""
+        return any(
+            _is_content_read_call(c) and (_xf_refs(c) & names) for c in ast.walk(v)
+        )
 
     def propagate(scope, base, attr_base=None):
         tainted: dict = {}
@@ -9534,8 +9767,11 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
         while queue and not overflow:
             name, new = queue.pop()
             for bi in uses.get(name, ()):
+                new2 = new
+                if "F" in new and "#" not in new and _f_reads(scope.bindings[bi][1], {name}):
+                    new2 = new | {"#"}  # B-1088: a read consumed the foreign path
                 for t in scope.bindings[bi][0]:
-                    add(t, new)
+                    add(t, new2)
         scope.tainted = tainted
         scope.overflow = overflow
         return tainted
@@ -9608,6 +9844,11 @@ def _xf_cred_flow_findings(tree, source_ctx, net_sink_aliases):
                     o.add(f"f:{k}")
         if _xf_inline_cred_read(node, ctx):
             o.add("#")
+        if "#" not in o and "F" in o:
+            # B-1088: path-only foreign origin reaching a read in this very expression
+            fnames = {nm for nm in _xf_refs(node) if "F" in scope.tainted.get(nm, ())}
+            if fnames and _f_reads(node, fnames):
+                o.add("#")
         return o
 
     # ---- cred-returning / in-cluster-returning functions (reverse BFS) ---------------
@@ -15398,6 +15639,7 @@ def analyze_python(
     filename: str = "<skill>",
     own_host: str | None = None,
     artifact=None,
+    self_slug: str | None = None,
 ) -> list[ASTFinding]:
     """Return AST findings for one Python source string. Never raises, never executes.
 
@@ -15410,6 +15652,12 @@ def analyze_python(
     text itself), used to REWORD (not silence - self-declaration proves disclosed,
     not trustworthy) HOST_INFO_EXFIL_FLOW when a host-info value flows to the
     skill's OWN disclosed endpoint rather than an undeclared third party.
+
+    `self_slug` (B-1088): the scanned skill's OWN directory basename. With it, a read of
+    another installed skill's files (`~/.openclaw/skills/<other>/...`) that reaches a
+    network sink is a CRED_EXFIL_FLOW; a glob harvest of `skills/*/...` is one even
+    without it. Callers must pass the directory name, never SKILL.md's `name:` (which is
+    attacker-controlled -- CLAUDE.md 2.5, the B61 slug-identity residual).
 
     `artifact` (B-638): a `shippedexec.ShippedArtifact` over every Python file the caller
     analyses for this artifact. With it, an exec/eval call proven to run exactly a file the
@@ -15822,10 +16070,24 @@ def analyze_python(
     # UNKNOWN/degraded-engine disclosure -- strictly worse than a loud crash. With
     # recursion now bounded inside the fold itself, an unhandled RecursionError from
     # this call would indicate a genuinely unexpected condition and should propagate.
-    _fsctx = _FsFoldCtx(tree)
-    _folded_cred_hit = _has_folded_cred_path(tree, _fsctx)
-    if _CRED_PATH_RE.search(source) or _folded_cred_hit:
+    _fsctx = _FsFoldCtx(tree, self_slug, foreign=True)
+    _folded_cred_hit = _has_folded_cred_path(tree, _fsctx) or _foreign_hit(tree, _fsctx)
+    # B-1088: another installed skill's directory is a credential-class source too. The
+    # source regex is only a cheap pre-filter; `_fsctx.foreign` decides per constant/fold.
+    if (
+        _CRED_PATH_RE.search(source)
+        or _folded_cred_hit
+        or _FOREIGN_SKILL_SRC_RE.search(source)
+    ):
         cred_tainted = _cred_tainted_names(tree, _fsctx)
+        # Names tainted by an ORDINARY credential path only -- a flow whose hit names are
+        # all outside this set came solely from a sibling skill's files (distinct reason).
+        _fsctx.foreign_on = False
+        std_tainted = _cred_tainted_names(tree, _fsctx) if cred_tainted else set()
+        _fsctx.foreign_on = True
+        _fsctx.glob_on = False
+        named_tainted = _cred_tainted_names(tree, _fsctx) if cred_tainted else set()
+        _fsctx.glob_on = True
         if cred_tainted:
             # B-415: names sourced PURELY from the in-cluster K8s service-account
             # token -- computed once per file, only when there's anything credential-
@@ -15867,6 +16129,12 @@ def analyze_python(
                         "credential-file contents flow into a network sink "
                         "(read secret -> send out)"
                     )
+                    if not (hit_names & std_tainted):
+                        _detail = (
+                            _FOREIGN_SKILL_FLOW_DETAIL
+                            if hit_names & named_tainted
+                            else _FOREIGN_SKILL_HARVEST_DETAIL
+                        )
                 add(
                     "CRED_EXFIL_FLOW",
                     "crit",
@@ -15878,7 +16146,26 @@ def analyze_python(
         # and the network send split across local functions (return -> argument), and
         # the loop / with / container bindings that pass never modelled. Scoped and
         # linear; see the block comment above `_xf_cred_flow_findings`.
-        for _xf_ln, _xf_detail in _xf_cred_flow_findings(tree, _fsctx, net_sink_aliases):
+        _xf_all = _xf_cred_flow_findings(tree, _fsctx, net_sink_aliases)
+        if _xf_all:
+            # B-1088: a flow that exists only because a sibling skill's directory counts as
+            # a source gets its own reason -- re-run without that source and relabel what
+            # disappears. Never changes WHETHER something is reported.
+            _fsctx.foreign_on = False
+            _xf_std = {
+                (ln_, d_) for ln_, d_ in _xf_cred_flow_findings(tree, _fsctx, net_sink_aliases)
+            }
+            _fsctx.foreign_on = True
+            _fsctx.glob_on = False
+            _xf_named = set(_xf_cred_flow_findings(tree, _fsctx, net_sink_aliases))
+            _fsctx.glob_on = True
+        for _xf_ln, _xf_detail in _xf_all:
+            if (_xf_ln, _xf_detail) not in _xf_std:
+                _xf_detail = (
+                    _FOREIGN_SKILL_FLOW_DETAIL
+                    if (_xf_ln, _xf_detail) in _xf_named
+                    else _FOREIGN_SKILL_HARVEST_DETAIL
+                )
             add("CRED_EXFIL_FLOW", "crit", _xf_ln, _xf_detail)
 
     # B-830 round-4: ctx.truncated (see _FsFoldCtx.__init__) counts how many fold calls

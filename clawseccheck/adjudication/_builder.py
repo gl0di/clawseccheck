@@ -64,7 +64,7 @@ from ..catalog import ACTIONABLE_STATUSES, BY_ID, UNKNOWN, WARN
 from ..logsafe import redact
 from ..sar import _VERDICT_VALUES, build_sars
 from ..shippedexec import ShippedArtifact
-from ..skillast import analyze_env_auth_kwarg_exfil, analyze_python
+from ..skillast import analyze_env_auth_kwarg_exfil, analyze_python, skill_self_slug
 from ..textnorm import normalize_for_scan
 
 # --------------------------------------------------------------------------- constants
@@ -948,7 +948,12 @@ def _recover_dropped_taint(ctx) -> list[dict]:
             or getattr(ctx, "home", None),
         )
         for relpath, src in sources:
-            for af in analyze_python(src, relpath, artifact=shipped):
+            for af in analyze_python(
+                src,
+                relpath,
+                artifact=shipped,
+                self_slug=skill_self_slug(getattr(ctx, "installed_skill_dirs", None), skill_name),
+            ):
                 if af.rule not in _RECOVERED_TAINT_RULES:
                     continue
                 loc = f"{relpath}:{af.lineno}"
