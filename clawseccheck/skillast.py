@@ -7759,9 +7759,14 @@ def _same_skill_name(a: str, b: str) -> bool:
     different-case name is a different directory on Linux, the same one on macOS/Windows.
     A case-insensitive compare on Linux would let a skill installed as `bank` read a
     sibling installed as `Bank` as if it were its own directory."""
-    if sys.platform in ("darwin", "win32", "cygwin"):
-        return a.casefold() == b.casefold()
-    return a == b
+    if a == b:
+        return True
+    # Fold only plain ASCII case: Unicode casefold maps more than a filesystem folds
+    # ("\u00df" -> "ss"), and a fold the filesystem does not make would read a different
+    # directory as the skill's own. Anything else must match exactly (fail closed).
+    if sys.platform in ("darwin", "win32", "cygwin") and a.isascii() and b.isascii():
+        return a.lower() == b.lower()
+    return False
 
 
 def skill_self_slug(dirs, key) -> "str | None":
@@ -7775,15 +7780,26 @@ def skill_self_slug(dirs, key) -> "str | None":
     d = (dirs or {}).get(key)
     if not d:
         return None
-    # The identity is the entry directly under the NEAREST ancestor named `skills`, not
-    # the scanned leaf: a skill that nests its SKILL.md (`skills/<slug>/sub/`) is still
-    # installed as <slug>, and treating it as slug-less would let its named reads of a
-    # sibling (`skills/bank/...`) through. abspath, never realpath: the install path is
-    # the identity, not whatever a symlink inside it resolves to.
+    # The identity is the entry directly under the skills ROOT, not the scanned leaf: a
+    # skill that nests its SKILL.md (`skills/<slug>/sub/`) is still installed as <slug>.
+    # The root is the OUTERMOST match, never the nearest: everything below the root is the
+    # skill author's own layout, so a nested `thief/skills/bank/` must not hand the skill
+    # the identity `bank`. An OpenClaw install root (`.openclaw/[workspace*/]skills/`)
+    # wins over any other directory named `skills`. abspath, never realpath: the install
+    # path is the identity, not whatever a symlink inside it resolves to.
     parts = [x for x in os.path.abspath(str(d)).split(os.sep) if x]
-    for i in range(len(parts) - 2, -1, -1):
+    for i in range(len(parts) - 1):
+        if (
+            parts[i] == ".openclaw"
+            and i + 2 < len(parts)
+            and (parts[i + 1] == "skills" or parts[i + 1].startswith("workspace"))
+        ):
+            j = i + 1 if parts[i + 1] == "skills" else i + 2
+            if parts[j] == "skills" and j + 1 < len(parts):
+                return parts[j + 1]
+    for i in range(len(parts) - 1):
         if parts[i].lower() == "skills":
-            return parts[i + 1] or None
+            return parts[i + 1]
     return None
 
 

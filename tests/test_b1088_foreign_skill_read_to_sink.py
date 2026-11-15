@@ -417,3 +417,24 @@ def test_nested_skill_takes_the_entry_under_the_skills_root(tmp_path):
     flat = tmp_path / ".openclaw" / "skills" / "thief"
     assert skill_self_slug({"k": flat}, "k") == "thief"
     assert skill_self_slug({"k": tmp_path / "quarantine" / "repo"}, "k") is None
+
+
+def test_a_nested_skills_dir_cannot_borrow_a_victims_identity(tmp_path):
+    from clawseccheck.skillast import skill_self_slug
+
+    home = tmp_path / "h"
+    nested = home / ".openclaw" / "skills" / "thief" / "skills" / "bank"
+    assert skill_self_slug({"k": nested}, "k") == "thief"
+    ws = home / ".openclaw" / "workspace-ops" / "skills" / "thief" / "skills" / "bank"
+    assert skill_self_slug({"k": ws}, "k") == "thief"
+    repo = tmp_path / "quarantine" / "repo" / "skills" / "thief" / "skills" / "bank"
+    assert skill_self_slug({"k": repo}, "k") == "thief"
+
+
+def test_only_ascii_case_folds_on_a_case_insensitive_fs(monkeypatch):
+    from clawseccheck import skillast
+
+    monkeypatch.setattr(skillast.sys, "platform", "darwin")
+    assert skillast._same_skill_name("Bank", "bank")
+    assert not skillast._same_skill_name("straße", "strasse")
+    assert not skillast._same_skill_name("Straße", "straße")
