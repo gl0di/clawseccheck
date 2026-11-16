@@ -165,7 +165,9 @@ _EXEMPT = {
                           "schema-verification layer (~900 lines would remain, per "
                           "B-845's own analysis) — either narrows this file with no "
                           "import cycle.",
-    "checks/_config.py": "~9,732 lines (restated 2026-10-13, C-700 — was ~9,230, +5% "
+    "checks/_config.py": "~10,031 lines (restated 2026-11-16, C-802 — was ~9,732, +3% "
+                         "stale: B399 plus the drift since; earlier 2026-10-13, C-700 — "
+                         "was ~9,230, +5% "
                          "stale: the importance-ordered C015 home walk and its budget "
                          "passes; earlier 2026-10-11, C-681 — was ~8,600, +7% "
                          "stale; earlier 2026-10-08, C-653 — was ~8,019, +7% "

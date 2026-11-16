@@ -450,6 +450,7 @@ from ._config import (
     check_local_first,
     check_local_model_service_command,
     check_nodehost_workerruns_isolation,
+    check_openclaw_auto_approve_changes,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_redactor_blind_secret_paths,
@@ -1684,6 +1685,11 @@ CHECKS = [
     # three transports (ingress / Tailscale Serve / direct). WARN-only, unscored
     # advisory; requires an agent scope granted `portal` while unsandboxed.
     check_gateway_portal_reach,
+    # B399 - tools.openclaw.autoApproveChanges: true (global or per agent) is a standing
+    # grant for the `openclaw` delegate tool to apply config, plugin, provider and API-key
+    # changes with no human approval. WARN-only, unscored advisory; requires an agent
+    # scope granted `openclaw` while unsandboxed.
+    check_openclaw_auto_approve_changes,
     # B351 - code mode: the model is handed exec+wait over a catalog bridge instead of
     # the ordinary tool surface. Walks agents.list, which can enable it independently.
     check_code_mode_tool_surface,

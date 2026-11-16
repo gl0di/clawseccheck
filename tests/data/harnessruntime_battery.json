@@ -24736,6 +24736,84 @@
    }
   },
   {
+   "label": "fixture:bad_b399_agent_override_true",
+   "cfg": {
+    "agents": {
+     "entries": {
+      "main": {},
+      "ops": {
+       "tools": {
+        "openclaw": {
+         "autoApproveChanges": true
+        }
+       }
+      }
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
+   "label": "fixture:bad_b399_global_true",
+   "cfg": {
+    "agents": {
+     "entries": {
+      "main": {}
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
+   "label": "fixture:bad_b399_sandbox_non_main",
+   "cfg": {
+    "agents": {
+     "defaults": {
+      "sandbox": {
+       "mode": "non-main"
+      }
+     },
+     "entries": {
+      "main": {}
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
    "label": "fixture:bad_b48_docker_trio",
    "cfg": {
     "agents": {
@@ -25479,6 +25557,83 @@
       }
      ]
     }
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
+   "label": "fixture:clean_b399_agent_false_overrides_global",
+   "cfg": {
+    "agents": {
+     "entries": {
+      "main": {
+       "tools": {
+        "openclaw": {
+         "autoApproveChanges": false
+        }
+       }
+      }
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
+   "label": "fixture:clean_b399_only_openclaw_agent",
+   "cfg": {
+    "agents": {
+     "entries": {
+      "openclaw": {}
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
+   },
+   "env": {},
+   "oracle": {
+    "collect": [],
+    "refs": [],
+    "runtimes": []
+   }
+  },
+  {
+   "label": "fixture:clean_b399_sandbox_all",
+   "cfg": {
+    "agents": {
+     "defaults": {
+      "sandbox": {
+       "mode": "all"
+      }
+     },
+     "entries": {
+      "main": {}
+     }
+    },
+    "models": {
+     "main": {
+      "provider": "ollama/llama3"
+     }
+    },
+    "tools": {}
    },
    "env": {},
    "oracle": {

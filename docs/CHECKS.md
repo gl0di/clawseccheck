@@ -2945,6 +2945,20 @@ Advisory checks are recorded for coverage but are not scored.
 - Remediation:
   - none
 
+## Advisory checks
+
+### B399 - Standing auto-approval grant for delegated OpenClaw changes
+
+- Severity: HIGH
+- Block: advisory
+- Framework: Control Plane
+- Scored: no
+- Confidence: HIGH
+- OWASP: LLM06 Excessive Agency
+- What it checks: Standing auto-approval grant for delegated OpenClaw changes
+- Remediation:
+  - none
+
 ## Compound risk chains
 
 These paths are computed from multiple checks. They fire only when every leg is positively evidenced.
