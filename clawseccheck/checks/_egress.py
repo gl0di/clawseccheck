@@ -2778,9 +2778,12 @@ def _b78_judge_entries(entries: dict, scope: str = "", unread_note: str = "") ->
     if scope:
         # The vendor sets the signature only for three structural anomalies (size drop, missing
         # gatewayMode, update-channel-only root; OpenClaw 2026.11.1 removed the fourth, missing
-        # meta) and clears it on any healthy observation, so a clean row says "the latest
-        # observation was healthy" - not that the config's history is clean. The legacy-file wording below predates this and is
-        # byte-identical (a fingerprint hashes it).
+        # meta) and clears it on a healthy observation. Since 2026.11.4 an accepted write over an
+        # already-suspicious state stores `<hash>:inherited-config-anomaly`, and that mark
+        # re-fires while the hash is unchanged, so an inherited anomaly is not a healthy
+        # observation and still leaves a non-null signature (WARN above). A clean row says "the
+        # latest observation was healthy" - not that the config's history is clean. The
+        # legacy-file wording below predates this and is byte-identical (a fingerprint hashes it).
         return (
             PASS,
             f"OpenClaw's own record for {len(entries)} tracked config(s){scope} shows no "

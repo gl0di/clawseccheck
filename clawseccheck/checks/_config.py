@@ -5184,6 +5184,7 @@ _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
     (2026, 11, 1): "node:24.22.1-slim",
     (2026, 11, 2): "node:24.22.1-slim",
     (2026, 11, 3): "node:24.22.1-slim",
+    (2026, 11, 4): "node:24.22.1-slim",
 }
 
 

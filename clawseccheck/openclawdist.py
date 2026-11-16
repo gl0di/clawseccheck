@@ -449,7 +449,9 @@ def self_reported_version(config: "dict | None") -> str:
 # B391 image row (unchanged, node:24.22.1-slim) were re-grounded on the installed 11.2 dist.
 # Raised to 2026.11.3 on 2026-11-13 (C-799): the same set re-grounded on the installed 11.3 dist;
 # the B391 image row is unchanged (node:24.22.1-slim) and `env.vars.*` is covered (C-688).
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 3)
+# Raised to 2026.11.4 on 2026-11-16 (C-801): re-grounded on the installed 11.4 dist; the schema
+# gained only `tools.openclaw.autoApproveChanges` (both scopes), which no check reads.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 4)
 
 
 def grounding_gap(installed_version: "str | None"):
