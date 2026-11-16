@@ -37,6 +37,7 @@ from ..skillast import (
     ScriptProseCoverageIncomplete,
     analyze_python,
     extract_script_prose,
+    skill_self_slug,
 )
 from ..textnorm import (
     _nfkc_ascii_fold_changed,
@@ -11762,7 +11763,7 @@ def check_dynamic_dispatch_obfuscation(ctx: Context) -> Finding:
     hits: list[str] = []
     for name, files in getattr(ctx, "installed_skill_py", {}).items():
         for relpath, src in files:
-            for af in analyze_python(src, relpath):
+            for af in analyze_python(src, relpath, self_slug=skill_self_slug(getattr(ctx, "installed_skill_dirs", None), name)):
                 if af.rule in ("GETATTR_INDIRECTION", "DYNAMIC_IMPORT_EXEC"):
                     hits.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
     if not hits:
@@ -12210,7 +12211,7 @@ def check_import_from_writable(ctx: Context) -> Finding:
     hits: list[str] = []
     for name, files in getattr(ctx, "installed_skill_py", {}).items():
         for relpath, src in files:
-            for af in analyze_python(src, relpath):
+            for af in analyze_python(src, relpath, self_slug=skill_self_slug(getattr(ctx, "installed_skill_dirs", None), name)):
                 if af.rule == "IMPORT_FROM_WRITABLE":
                     hits.append(f"{name}: {af.reason} ({relpath}:{af.lineno})")
     if not hits:
