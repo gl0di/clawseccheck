@@ -5994,7 +5994,7 @@ _B13_WINNER_SUBSIGNAL = {
     "crashed_skills": "could not be fully analyzed \u2014 the scan engine raised an unexpected error",
 }
 
-# B-884 / CLAWSECCHECK-B-1087: the B13 buckets soft enough that a tied, dedicated
+# B-884 / B-1087: the B13 buckets soft enough that a tied, dedicated
 # SKILL_CONTENT_RING finding on the same evidence wins the --vet headline over them.
 _B13_SOFT_HEADLINE_SUBSIGNALS = frozenset({
     _B13_WINNER_SUBSIGNAL["warns_content"],
@@ -6972,7 +6972,7 @@ def check_installed_skills(ctx: Context) -> Finding:
                         and not _url_host_is_local("http://" + host)
                         and h not in _RESERVED_EXAMPLE_DOMAINS
                     ):
-                        # CLAWSECCHECK-B-1087 (Dave, 2026-11-15): the identical command as
+                        # B-1087 (Dave, 2026-11-15): the identical command as
                         # bare prose under an install heading is a WARN, so a bare fence -
                         # the normal markdown way to write an install step, and a free
                         # choice of the author - may not turn it into a mere coverage note
@@ -10534,7 +10534,7 @@ def _vet_resolved_skill(p: Path) -> Finding:
         # to that one bucket via its unique `sub_signals` label so every other B13 winner
         # keeps today's tie-break unchanged - this flips which finding a tie resolves to,
         # never a finding's own status/severity.
-        # CLAWSECCHECK-B-1087: the fenced pipe-to-shell WARN joined the down-ranked
+        # B-1087: the fenced pipe-to-shell WARN joined the down-ranked
         # "installer/setup fetch" bucket, which is just as soft and lands on the same fence
         # a dedicated ring check (B100's ClickFix setup-section finding) names precisely,
         # so it yields the tie too - alone or together with "warns_content", nothing else.

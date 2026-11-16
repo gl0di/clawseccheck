@@ -232,7 +232,7 @@ _EXEMPT = {
                           "own change with its own verification (byte-identical audit "
                           "output at every step, as I-022-R2 did); this entry's job is to "
                           "stop recording a non-reason as a decision.",
-    "checks/_vet.py": "~11,070 lines (restated 2026-10-30 after C-755's agent/IDE persistence binding leg, ~320 lines - its parser half went to the new writedest.py instead; was ~10,751, restated 2026-10-13 after the empty-pool coverage note, ~16 lines; was ~10,236, restated 2026-09-26 on integration/4.3.0 after "
+    "checks/_vet.py": "~11,572 lines (restated 2026-11-16 after B-1087/B-1088 (+8 net); the file was already 11,564 on dev 266c017c, ~490 lines of growth since the last restatement, so this restates accumulated growth, not one change; was ~11,070, restated 2026-10-30 after C-755's agent/IDE persistence binding leg, ~320 lines - its parser half went to the new writedest.py instead; was ~10,751, restated 2026-10-13 after the empty-pool coverage note, ~16 lines; was ~10,236, restated 2026-09-26 on integration/4.3.0 after "
                       "merging three fleet-FP fixes — was ~9,185: the vet-example-prohibition "
                       "round 2 scoping of the scanner-finding-line recognizer into a caller-"
                       "opt-in `scanner_finding_line_ok` parameter plus its WARN-not-PASS "

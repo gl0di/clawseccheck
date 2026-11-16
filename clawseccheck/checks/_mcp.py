@@ -2281,7 +2281,7 @@ _VET_MCP_RUNNER_CMDS = frozenset({"npx", "npm", "uvx", "pnpm", "bunx"})
 _VET_MCP_UNPINNED_PKG_RE = re.compile(
     r"@latest"
     # bare package name with no version: no "@" after the name. A LEADING "@" is an npm
-    # scope (`@scope/pkg`), not a version separator - CLAWSECCHECK-B-1089: treating it as
+    # scope (`@scope/pkg`), not a version separator - B-1089: treating it as
     # one let every unversioned scoped package (the most common MCP launch shape) pass.
     r"|^(?!-)@?[^@\s]+$",
     re.I,
