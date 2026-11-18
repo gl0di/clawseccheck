@@ -561,9 +561,15 @@ def test_openclaw_itself_says_annotations_are_what_removes_the_approval_step():
     # The hint still exists...
     assert "tools have no safety annotations" in text
     # ...and still fires on exactly "mode is auto AND no tool carries annotations", which
-    # is the half the framing depends on.
-    assert 'codexApprovalMode === "auto"' in text
-    assert ".codexAnnotations ?? {}).length === 0" in text
+    # is the half the framing depends on. 2026.11.5 minified this bundle (locals are one
+    # letter now: ``const r = t.codexApprovalMode ?? "auto"`` then ``r === "auto" && i.length
+    # > 0 && i.every((e) => Object.keys(e.codexAnnotations ?? {}).length === 0)``), so the
+    # condition is pinned by SHAPE, with the vendor's own property names as the anchors.
+    assert re.search(r'\bcodexApprovalMode \?\? "auto"', text)
+    assert re.search(
+        r'\b\w+ === "auto" && \w+\.length > 0 && \w+\.every\(\(\w+\) => '
+        r'Object\.keys\(\w+\.codexAnnotations \?\? \{\}\)\.length === 0\)', text), (
+        "the approvalHint emission condition moved — re-check the B333 framing")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="no node on this machine")
@@ -575,7 +581,8 @@ def test_the_probe_still_cannot_carry_annotations_so_the_source_split_stands():
     hiding real evidence instead of declining to guess.
     """
     text = dist_file("mcp-cli-*.js", symbol="codexApprovalMode").read_text(errors="replace")
-    assert "tools: projectedTools.map((tool) => tool.name).toSorted()" in text, (
+    # 2026.11.5: ``projectedTools``/``tool`` became one-letter locals; same projection.
+    assert re.search(r"\btools: \w+\.map\(\(\w+\) => \w+\.name\)\.toSorted\(\)", text), (
         "the probe's tool projection changed shape — re-check whether it now carries "
         "annotations, because B333's UNKNOWN source legs assume it cannot"
     )
@@ -761,7 +768,11 @@ import { readFileSync } from "node:fs";
 const ns = await import(process.argv[2]);
 const M = JSON.parse(process.argv[4]);
 const normalize = ns[M.normalizeMcpToolFilter];
-const allowed = ns[M.isMcpToolAllowed];
+// 2026.11.5 replaced ``isMcpToolAllowed(filter, name)`` with ``createMcpToolFilter(filter,
+// scope?)`` returning the predicate. Called WITHOUT a scope, which the vendor documents as
+// "matching is raw-only" -- the semantics the old function had and the port models.
+const create = ns[M.createMcpToolFilter];
+const allowed = (norm, name) => create(norm)(name);
 const cases = JSON.parse(readFileSync(process.argv[3], "utf8"));
 console.log(JSON.stringify(cases.map(([raw, name]) => {
   const norm = normalize(raw ?? undefined);
@@ -784,15 +795,19 @@ def test_the_tool_filter_port_agrees_with_the_installed_dist(tmp_path):
     #     t as isMcpToolAllowed } from "./mcp-tool-filter-BiXzv8v3.mjs";` then
     #     `export { isMcpToolAllowed, normalizeMcpToolFilter };` -- no body.
     # So anchor on the declaration, which only the definition carries.
-    module = dist_file("mcp-tool-filter-*.js", symbol="isMcpToolAllowed",
-                       contains="function isMcpToolAllowed(")
+    # 2026.11.5: ``isMcpToolAllowed`` no longer exists; the definition is
+    #   mcp-tool-filter-C-kFHmr0.mjs `function createMcpToolFilter(e, t) {` (predicate factory,
+    #   exported ``as t``), beside `normalizeMcpToolFilter` and a scope-aware alias resolver;
+    #   mcp-tool-filter-0kZY-G3C.mjs is a 2-line barrel. Anchor on the declaration again.
+    module = dist_file("mcp-tool-filter-*.js", symbol="createMcpToolFilter",
+                       contains="function createMcpToolFilter(")
 
     work = tmp_path
     (work / "f.mjs").write_text(_FILTER_SCRIPT, encoding="utf-8")
     (work / "cases.json").write_text(json.dumps([[r, n] for r, n in _FILTER_CASES]),
                                      encoding="utf-8")
     proc = subprocess.run(["node", str(work / "f.mjs"), str(module), str(work / "cases.json"),
-                           _alias_map(module, ("normalizeMcpToolFilter", "isMcpToolAllowed"))],
+                           _alias_map(module, ("normalizeMcpToolFilter", "createMcpToolFilter"))],
                           capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     dist = json.loads(proc.stdout)

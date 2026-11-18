@@ -12,13 +12,12 @@
 # Regenerate ONLY on a machine with the matching OpenClaw installed, as part of the
 # upgrade protocol's re-baseline step. Hand-adding a line here defeats the guard.
 #
-# openclaw-version: 2026.11.4
+# openclaw-version: 2026.11.5
 #
 acp.runtime.installCommand
 agents.defaults.cwd
 agents.defaults.elevatedDefault
 agents.defaults.embeddedAgent.projectSettingsPolicy
-agents.defaults.heartbeat
 agents.defaults.model
 agents.defaults.models
 agents.defaults.sandbox.docker.binds
@@ -120,7 +119,6 @@ proxy
 proxy.enabled
 proxy.proxyUrl
 relative:agentRuntime.id
-relative:heartbeat
 relative:mcp.servers
 relative:memory.search.remote
 relative:models

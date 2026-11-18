@@ -451,6 +451,11 @@ def self_reported_version(config: "dict | None") -> str:
 # the B391 image row is unchanged (node:24.22.1-slim) and `env.vars.*` is covered (C-688).
 # Raised to 2026.11.4 on 2026-11-16 (C-801): re-grounded on the installed 11.4 dist; the schema
 # gained only `tools.openclaw.autoApproveChanges` (both scopes), which no check reads.
+# NOT raised to 2026.11.5 on 2026-11-18 (C-803), deliberately. The 11.5 snapshots are re-grounded,
+# but three known false negatives remain on 11.5 (B-1110: heartbeats Doctor moved into cron_jobs;
+# B-1111: device keys moved to client/credentials.sqlite; B-1112: tools.github.app.privateKey), so
+# claiming 11.5 as grounded would drop the "newer than grounded" disclosure while the audit is known
+# to miss them. Raise it when those land.
 GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 4)
 
 

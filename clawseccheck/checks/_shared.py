@@ -3366,8 +3366,8 @@ def _norm_dm_policy(channel_name, value):
 # governing traffic once `accounts` is added - OpenClaw runs it as an extra IMPLICIT
 # default account alongside the explicitly configured ones. The shared helper every
 # multi-account channel plugin builds its account list with is `createAccountListHelpers`
-# (installed 2026.10.10 dist `account-helpers-Bj9HVUkM.mjs:8-11`), and it honours TWO
-# registration forms, ORed: a predicate option `hasImplicitDefaultAccount(cfg)`, and a
+# (dist `account-helpers-BzDh_oRX.mjs:8-11`, read 2026-11-18, 2026.11.5; logic identical to
+# 2026.10.10 apart from minified locals), and it honours TWO registration forms, ORed: a predicate option `hasImplicitDefaultAccount(cfg)`, and a
 # key list `implicitDefaultAccount.channelKeys` (any one key present, by
 # `hasConfiguredAccountValue`). A few plugins build the list some other way (their own
 # `listAccountIds`, `resolveImplicitAccountId`, or no named accounts at all). So a
@@ -3466,7 +3466,7 @@ _RESERVED_CHANNEL_CONFIG_KEYS = frozenset({"defaults", "modelByChannel"})
 
 def _has_configured_account_value(value) -> bool:
     """The vendor's ``hasConfiguredAccountValue``: a string counts only after ``.strip()``;
-    any other non-``None`` value counts as-is (dist account-helpers-Bj9HVUkM.mjs:58-61)."""
+    any other non-``None`` value counts as-is (dist account-helpers-BzDh_oRX.mjs:58-61, read 2026-11-18, 2026.11.5)."""
     if isinstance(value, str):
         return bool(value.strip())
     return value is not None
@@ -3492,7 +3492,7 @@ def _js_truthy(value) -> bool:
 
 def _has_configured_secret_input(value) -> bool:
     """The vendor's ``hasConfiguredSecretInput``: a non-blank string, or a well-formed
-    SecretRef object (dist types.secrets-Dgbd2kyP.mjs:68-71)."""
+    SecretRef object (dist types.secrets-BmNLLnHp.mjs:68-71, read 2026-11-18, 2026.11.5)."""
     if isinstance(value, str):
         return bool(value.strip())
     return _is_secret_ref_object(value)
@@ -3657,14 +3657,14 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict, cfg=None) -
 
 # B-1002 (C-135): when a configured account's id IS the default account id, the implicit
 # default account and that configured account are ONE account - the vendor's
-# `listCombinedAccountIds` collects ids in a Set (dist account-helpers-Bj9HVUkM.mjs:62-69) -
+# `listCombinedAccountIds` collects ids in a Set (dist account-helpers-BzDh_oRX.mjs:62-69, read 2026-11-18, 2026.11.5) -
 # and its config is the MERGE of the base node under that entry
-# (`resolveMergedAccountConfig`, dist channel-account-config-BTy7yQJw.mjs:39-46), which
+# (`resolveMergedAccountConfig`, dist channel-account-config-BvENCH3O.mjs:39-46, same read), which
 # `_resolved_channel_nodes` already yields. The raw base node then never runs unmerged, so
 # adding it back would read a base policy the entry overrides: a spurious FAIL.
 #
 # Which keys are that entry: the vendor finds the default account's entry with
-# `resolveAccountKey` (dist account-lookup-Dm5zJglt.mjs:26-52). The exact key `default`
+# `resolveAccountKey` (dist account-lookup-FhQZVFfo.mjs:26-52, same read). The exact key `default`
 # always wins. Otherwise a key matches when `normalize(key) == "default"`, where `normalize`
 # is - per channel, read at the tag - one of:
 #   trim + lowercase (the SDK default, `normalizeLowercaseStringOrEmpty`) for every channel
@@ -3673,7 +3673,7 @@ def _channel_has_implicit_default_account(name: str, raw_node: dict, cfg=None) -
 #     imessage, line, mattermost, slack, sms, synology-chat, whatsapp, x, zalo, zalouser
 #     (e.g. [tag] slack/src/accounts.ts:66-81, x/src/accounts.ts:20-26,
 #     whatsapp/src/account-config.ts:12). Unknown/third-party channels get the same rule.
-#   `normalizeAccountId` (agent-id canonicalization, dist agent-id-D1-Q6vR4.mjs:14-20: trim,
+#   `normalizeAccountId` (agent-id canonicalization, dist agent-id-CQjtp2ft.mjs:14-20, same read: trim,
 #     lowercase, runs of invalid characters to "-", leading/trailing dashes dropped) where the
 #     channel passes it: clickclack ([tag] clickclack/src/accounts.ts:85), irc
 #     (irc/src/accounts.ts:40), raft (raft/src/accounts.ts:23), qa-channel
@@ -3725,7 +3725,7 @@ def _js_trim(value: str) -> str:
 
 def _canonical_account_id(key) -> str | None:
     """The vendor's ``normalizeAgentIdStrict`` as ``normalizeAccountId`` applies it to a
-    configured account key (dist agent-id-D1-Q6vR4.mjs:14-20); ``None`` when it has no
+    configured account key (dist agent-id-CQjtp2ft.mjs:14-20, read 2026-11-18, 2026.11.5); ``None`` when it has no
     representable form."""
     if not isinstance(key, str):
         return None

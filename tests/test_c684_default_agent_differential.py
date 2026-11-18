@@ -114,6 +114,7 @@ def _execute(rows, scratch: Path) -> "tuple[list, str]":
         pytest.skip("node is not installed - this differential executes the vendor")
     home = scratch / "home"
     home.mkdir()
+    oracle.link_vendor_packages(scratch, dist)
     modules = {}
     for role, (_, exports) in _MODULES.items():
         target = scratch / f"{role}.mjs"

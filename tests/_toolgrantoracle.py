@@ -285,12 +285,26 @@ def _require_node() -> str:
     return node
 
 
+def link_vendor_packages(scratch: Path, dist: Path) -> None:
+    """Let the rewritten scratch copies resolve bare package imports.
+
+    A bundle may import a bare package (2026.11.5: ``@openclaw/fs-safe/advanced`` from
+    ``agent-scope-config``). Node resolves those by walking up from the importing file, and the
+    copies sit in ``scratch``, not beside the install -- so point ``scratch/node_modules`` at
+    the installed package's own. Resolution only; no bundle byte changes, and nothing is
+    written outside ``scratch``. Shared by ``test_c684_default_agent_differential.py``."""
+    pkgs = dist.parent / "node_modules"
+    if pkgs.is_dir():
+        (scratch / "node_modules").symlink_to(pkgs, target_is_directory=True)
+
+
 def _execute(want, rows=(), tools=()) -> dict:
     dist = require_dist()
     node = _require_node()
     with tempfile.TemporaryDirectory(prefix="toolgrant-oracle-", dir=SCRATCH_ROOT) as tmp:
         scratch = Path(tmp)
         (scratch / "home").mkdir()
+        link_vendor_packages(scratch, dist)
         modules = {}
         for role, (_, exports) in _MODULES.items():
             path = locate(role)

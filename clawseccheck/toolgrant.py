@@ -264,20 +264,24 @@ def _dispatcher_rules_apply(version) -> bool:
 # new catalog tools,
 # "skills_search" and "skills_read" (sectionId agents, profiles ["coding"],
 # includeInOpenClawGroup), each in group:agents and group:openclaw, after "skill_workshop".
+# Re-grounded against openclaw@2026.11.5 (C-803; tables read by execution 2026-11-18): one new
+# catalog tool, "sessions_create" (group:sessions and group:openclaw, right after "sessions";
+# profiles coding and messaging), and one removal - "heartbeat_respond" is no longer in the
+# catalog, so it left group:openclaw and group:automation (nothing in clawseccheck/ names it).
 # This module is build-agnostic - it holds the newest grounded tables and carries no build
 # window - so a config judged for an older install answers with these; that can only change
-# the answer for the two new names, which nothing in clawseccheck/ asks about by name except
-# the user-written alsoAllow candidate filter.
+# the answer for the new names (skills_search, skills_read, sessions_create) and for
+# heartbeat_respond, which a <=2026.11.4 "group:automation" grant no longer names; nothing in
+# clawseccheck/ asks about any of them by name except the user-written alsoAllow candidate filter.
 _CORE_TOOL_GROUPS = {
     "group:openclaw": [
         "decision_evaluate", "code_execution", "secrets", "web_search", "web_fetch", "x_search",
         "memory_search", "memory_get", "personal_instructions", "presence", "sessions",
-        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "sessions_create", "sessions_list", "sessions_history", "sessions_search", "conversations_list",
         "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
         "github_identity_status", "github_publish", "agents_wait", "sessions_yield", "subagents",
         "session_status", "suggest_task", "dismiss_task", "browser",
         "screen", "theme", "dashboard", "terminal", "portal", "show_widget", "message",
-        "heartbeat_respond",
         "automations", "gateway", "plugins", "openclaw", "nodes", "computer", "mobile_ui",
         "agents_list", "get_goal", "create_goal", "update_goal", "progress_card", "ask_user",
         "skill_workshop", "skills_search", "skills_read", "view_image", "image_generate",
@@ -288,8 +292,8 @@ _CORE_TOOL_GROUPS = {
     "group:web": ["web_search", "web_fetch", "x_search"],
     "group:memory": ["memory_search", "memory_get", "personal_instructions"],
     "group:sessions": [
-        "presence", "sessions", "sessions_list", "sessions_history", "sessions_search",
-        "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
+        "presence", "sessions", "sessions_create", "sessions_list", "sessions_history",
+        "sessions_search", "conversations_list", "conversations_send", "conversations_turn", "sessions_send",
         "sessions_spawn", "github_identity_status", "github_publish", "agents_wait",
         "sessions_yield", "subagents", "session_status", "suggest_task", "dismiss_task",
     ],
@@ -297,7 +301,7 @@ _CORE_TOOL_GROUPS = {
         "browser", "screen", "theme", "dashboard", "terminal", "portal", "canvas", "show_widget",
     ],
     "group:messaging": ["message"],
-    "group:automation": ["heartbeat_respond", "automations", "gateway", "plugins", "openclaw"],
+    "group:automation": ["automations", "gateway", "plugins", "openclaw"],
     "group:nodes": ["nodes", "computer", "mobile_ui"],
     "group:agents": [
         "decision_evaluate", "agents_list", "get_goal", "create_goal", "update_goal",
@@ -326,8 +330,8 @@ _CORE_TOOL_PROFILES = {
     "coding": [
         "decision_evaluate", "ls", "read", "write", "edit", "apply_patch", "exec", "process",
         "code_execution", "secrets", "web_search", "web_fetch", "x_search", "memory_search",
-        "memory_get", "personal_instructions", "presence", "sessions", "sessions_list",
-        "sessions_history", "sessions_search", "conversations_list", "conversations_send",
+        "memory_get", "personal_instructions", "presence", "sessions", "sessions_create",
+        "sessions_list", "sessions_history", "sessions_search", "conversations_list", "conversations_send",
         "conversations_turn", "sessions_send", "sessions_spawn", "github_identity_status",
         "github_publish", "agents_wait", "sessions_yield", "subagents", "session_status",
         "suggest_task", "dismiss_task", "screen", "theme", "dashboard", "terminal",
@@ -337,7 +341,7 @@ _CORE_TOOL_PROFILES = {
     ],
     "messaging": [
         "decision_evaluate", "secrets", "personal_instructions", "presence", "sessions",
-        "sessions_list", "sessions_history", "sessions_search", "conversations_list",
+        "sessions_create", "sessions_list", "sessions_history", "sessions_search", "conversations_list",
         "conversations_send", "conversations_turn", "sessions_send", "sessions_spawn",
         "sessions_yield", "subagents", "session_status", "theme", "message", "gateway",
         "ask_user", "bundle-mcp",
