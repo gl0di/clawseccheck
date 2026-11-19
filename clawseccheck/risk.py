@@ -1604,29 +1604,44 @@ def _rule_self_escalating_autonomy(ctx: Context, findings: list[Finding],
     source = _scheduled_actor_source(ctx, include_cron_config=False)
     if source is None:
         return None
-    from_db = source == "cron_jobs"
+    if source == "cron_jobs":
+        return RiskPath(
+            id="RISK-14",
+            severity=HIGH,
+            title="Wildcard-elevated sender + scheduled automation = self-escalating autonomy loop",
+            chain=[
+                f"any sender via wildcard elevated provider(s): {', '.join(providers)}",
+                "injected instruction invokes elevated tools",
+                "an enabled state DB cron job re-runs the agent unattended -> self-escalating "
+                "privilege loop",
+            ],
+            why=(
+                "A provider in tools.elevated.allowFrom is set to '*', so any sender on that "
+                "channel can invoke elevated tools, and an enabled cron job in the OpenClaw "
+                "state database (where OpenClaw 2026.11.5 moves a retired heartbeat) makes the "
+                "agent act on its own schedule. Together, a single prompt-injection from an "
+                "untrusted sender can trigger elevated actions that the scheduled job keeps "
+                "re-running unattended \u2014 a self-escalating autonomous privilege loop with no "
+                "human in the path."
+            ),
+            fix=(
+                "Replace the '*' in tools.elevated.allowFrom with an explicit per-provider "
+                "sender allowlist, and gate elevated execution (tools.exec.mode='ask'). If "
+                "unattended autonomy is not required, disable the scheduled job "
+                "(openclaw cron list / openclaw cron disable). Breaking either leg breaks "
+                "the chain."
+            ),
+        )
     return RiskPath(
         id="RISK-14",
         severity=HIGH,
-        title=("Wildcard-elevated sender + scheduled automation = self-escalating autonomy loop"
-               if from_db else
-               "Wildcard-elevated sender + heartbeat = self-escalating autonomy loop"),
+        title="Wildcard-elevated sender + heartbeat = self-escalating autonomy loop",
         chain=[
             f"any sender via wildcard elevated provider(s): {', '.join(providers)}",
             "injected instruction invokes elevated tools",
-            ("an enabled state DB cron job re-runs the agent unattended -> self-escalating "
-             "privilege loop" if from_db else
-             "heartbeat re-runs the agent unattended -> self-escalating privilege loop"),
+            "heartbeat re-runs the agent unattended -> self-escalating privilege loop",
         ],
         why=(
-            "A provider in tools.elevated.allowFrom is set to '*', so any sender on that "
-            "channel can invoke elevated tools, and an enabled cron job in the OpenClaw "
-            "state database (where OpenClaw 2026.11.5 moves a retired heartbeat) makes the "
-            "agent act on its own schedule. Together, a single prompt-injection from an "
-            "untrusted sender can trigger elevated actions that the scheduled job keeps "
-            "re-running unattended \u2014 a self-escalating autonomous privilege loop with no "
-            "human in the path."
-            if from_db else
             "A provider in tools.elevated.allowFrom is set to '*', so any sender on that "
             "channel can invoke elevated tools, and a heartbeat (agents.defaults.heartbeat "
             "or a per-agent heartbeat) makes the agent act on its own schedule. Together, a "
@@ -1829,6 +1844,37 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
     if not heartbeat_cfg and not _has_enabled_agent_turn_job(ctx):
         return None
     ch_label = vis_all_channels[0]
+    if not heartbeat_cfg:
+        return RiskPath(
+            id="RISK-18",
+            severity=HIGH,
+            title="Untrusted context + cron + scheduled agent job = persistent autonomous foothold",
+            chain=[
+                f"channel '{ch_label}' contextVisibility='all' \u2192 prompt injection via untrusted input",
+                "injected instruction schedules a cron task (persistent scheduler surface)",
+                "an enabled agent-turn cron job (a migrated heartbeat) re-executes the cron "
+                "task autonomously with no human review",
+                "persistent autonomous foothold",
+            ],
+            why=(
+                "A channel exposes full untrusted context to the agent "
+                "(channels.<p>.contextVisibility='all'), a cron scheduler surface is active, "
+                "and the agent runs autonomously through an enabled agent-turn cron job in the "
+                "OpenClaw state database (where OpenClaw 2026.11.5 moves a retired heartbeat). "
+                "A prompt-injection in untrusted input can plant a cron task that this job "
+                "re-executes indefinitely \u2014 no human approval is required after the initial "
+                "injection. The result is a persistent autonomous foothold that survives "
+                "restarts and continues running without further attacker interaction."
+            ),
+            fix=(
+                "Set channels.<provider>.contextVisibility (or channels.defaults.contextVisibility) "
+                "to 'allowlist' or 'allowlist_quote' to prevent untrusted content from reaching "
+                "the agent. Disable the cron scheduler (remove the top-level 'cron' key) if "
+                "scheduled tasks are not required. Disable the agent-turn cron job "
+                "(openclaw cron list / openclaw cron disable) or add a human-approval gate for "
+                "autonomous re-execution. Breaking any one leg breaks the chain."
+            ),
+        )
     return RiskPath(
         id="RISK-18",
         severity=HIGH,
@@ -1836,10 +1882,7 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
         chain=[
             f"channel '{ch_label}' contextVisibility='all' \u2192 prompt injection via untrusted input",
             "injected instruction schedules a cron task (persistent scheduler surface)",
-            ("heartbeat re-executes cron task autonomously with no human review"
-             if heartbeat_cfg else
-             "an enabled agent-turn cron job (a migrated heartbeat) re-executes the cron "
-             "task autonomously with no human review"),
+            "heartbeat re-executes cron task autonomously with no human review",
             "persistent autonomous foothold",
         ],
         why=(
@@ -1851,15 +1894,6 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
             "approval is required after the initial injection. The result is a persistent "
             "autonomous foothold that survives restarts and continues running without "
             "further attacker interaction."
-            if heartbeat_cfg else
-            "A channel exposes full untrusted context to the agent "
-            "(channels.<p>.contextVisibility='all'), a cron scheduler surface is active, "
-            "and the agent runs autonomously through an enabled agent-turn cron job in the "
-            "OpenClaw state database (where OpenClaw 2026.11.5 moves a retired heartbeat). "
-            "A prompt-injection in untrusted input can plant a cron task that this job "
-            "re-executes indefinitely \u2014 no human approval is required after the initial "
-            "injection. The result is a persistent autonomous foothold that survives "
-            "restarts and continues running without further attacker interaction."
         ),
         fix=(
             "Set channels.<provider>.contextVisibility (or channels.defaults.contextVisibility) "

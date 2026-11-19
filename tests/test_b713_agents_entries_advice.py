@@ -61,6 +61,11 @@ _ADVICE_HELPER_NAMES = {"_key_advice", "_retired_key_note"}
 # (relative path, lineno) rather than by file, so a NEW hardcoded 'agents.list' added
 # anywhere else -- including elsewhere in these same files -- is still caught.
 _LABEL_BUILDER_SITES = {
+    # B382's per-agent retired-heartbeat walk (B-1110): the on-disk position of a heartbeat key in
+    # the legacy array, built from the real index. Reached only when the config carries
+    # agents.list; the same function emits agents.entries.<id> for the keyed shape.
+    ("clawseccheck/checks/_shared.py", "_roster_key_paths", "agents.list[]."):
+        "retired-heartbeat legacy-array position label (a position on disk, not advice)",
     # AgentEntry.labelled(): reached only when self.path does not start with
     # "agents.entries." -- i.e. this entry really did come from the legacy array.
     ("clawseccheck/collector.py", "labelled", "agents.list[]"):
