@@ -2813,7 +2813,9 @@ CATALOG: list[CheckMeta] = [
     # holds device_identities.private_key_pem, device_auth_tokens.token,
     # device_bootstrap_tokens.token, web_push_vapid_keys.private_key, apns_registrations.token
     # and auth_profile_stores.store_json (all verified as real CREATE TABLE statements in the
-    # dist's OPENCLAW_STATE_SCHEMA_SQL). No existing permission check stat'ed it: B19 covers
+    # dist's OPENCLAW_STATE_SCHEMA_SQL). B-1111: from OpenClaw 2026.11.5 the device tables
+    # live in <stateDir>/client/credentials.sqlite and VAPID/auth-profile tables left the state
+    # schema, so B188 stats both stores. No existing permission check stat'ed it: B19 covers
     # workspace memory/logs + F-120 transcripts, B11 reads only openclaw.json's mode, B182
     # enumerates only ClawHub CLI token stores. Path-aware via _other_can_reach_read -- a 0644
     # DB sealed inside a 0700 home is the routine umask-022 outcome and must NOT fire (the

@@ -371,9 +371,9 @@ _EXEMPT = {
                       "_content.py first, learn what the shared-machinery module wants to "
                       "look like, then decide here. That is a sequencing decision, not a "
                       "deferral for its own sake.",
-    "checks/_egress.py": "~5,781 lines (restated 2026-10-05 for the 4.4.0 build - "
-                         "was ~5,267; B390 and the B188 extension to retained state-DB "
-                         "copies landed here since) — the "
+    "checks/_egress.py": "~6,377 lines (restated 2026-11-19 - was ~5,781 on "
+                         "2026-10-05; the B188 client-credential-store leg for OpenClaw "
+                         "2026.11.5 and earlier egress fixes landed here since) — the "
                          "egress-hardening topic (proxy/TLS/SSRF/data-at-rest + "
                          "web-fetch/log checks). Crossed the budget with B178's "
                          "check_provider_baseurl (models.providers.<id>.baseUrl "

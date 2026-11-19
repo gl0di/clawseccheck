@@ -8678,7 +8678,9 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     nested `groupAllowFrom`/per-group/per-topic variants - see `checks/_agents.py`'s
     `groupAllowFrom`-wins-for-groups handling and `checks/_capability.py`'s `dmPolicy`/
     `groupPolicy` reading, which already model that shape); device-auth tokens now live
-    in the state SQLite DB (`device_auth_tokens`/`gateway_origin_device_tokens`).
+    in a SQLite DB - the state DB before OpenClaw 2026.11.5, and from 2026.11.5 the client
+    credential store `client/credentials.sqlite` (`device_auth_tokens`/
+    `gateway_origin_device_tokens`).
 
     So this is not "an attacker added a sender ID" - it is "this install has not run
     `openclaw doctor --fix`", and for the device-auth file specifically that carries an
