@@ -144,7 +144,7 @@ def test_benign_near_misses_stay_pass_and_say_what_was_checked(cfg):
     f = _run(cfg)
     assert f.status == PASS
     assert "retired-format finder names nothing in it" in f.detail
-    assert "none of the 20 retired config keys this check tracks" in f.detail
+    assert "none of the 23 retired config keys this check tracks" in f.detail
 
 
 _FINDER_ONLY = {"agents": {"entries": {"main": {"agentRuntime": {"id": "codex"}}}}}
@@ -157,7 +157,7 @@ def test_outside_the_window_the_pass_carries_the_caveat_in_detail(build):
     f = _run(_FINDER_ONLY, build)
     assert f.status == PASS and f.pass_confidence == "no_signal"
     assert f.detail == (
-        "The file audited holds none of the 20 retired config keys this check tracks. "
+        "The file audited holds none of the 23 retired config keys this check tracks. "
         "OpenClaw's own retired-format list was NOT checked: it is ported only for "
         f"2026.10.1-2026.11.4 and this build is {build}.")
     assert "retired-format finder names nothing" not in f.detail

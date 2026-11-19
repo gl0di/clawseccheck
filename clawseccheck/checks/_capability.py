@@ -41,6 +41,7 @@ from ._shared import (
     _config_unreadable,
     _custom,
     _dir_replaceable_by_others,
+    _enabled_cron_job_rows,
     _MENTION_GATE_CONTAINERS,
     _channels,
     _external_input_channels,
@@ -167,7 +168,9 @@ def _approval_bypass_actors(
     actors = set(_attest.approval_bypass_actors(ctx.attestation))
     if _has_heartbeat_signal(ctx):
         actors.add("heartbeat")
-    if dig(ctx.config, "cron"):
+    # B-1110: the top-level `cron` config key, or an enabled state-DB cron job (where
+    # OpenClaw 2026.11.5's Doctor moves a retired heartbeat). Never a disabled/unread one.
+    if dig(ctx.config, "cron") or _enabled_cron_job_rows(ctx):
         actors.add("cron")
     return list(actors)
 

@@ -381,7 +381,10 @@ _EXEMPT = {
                          "check_outbound_proxy, its sibling check on the SAME provider "
                          "object, rather than splitting one config object's security "
                          "posture across two topic files. A finer split is a later cycle.",
-    "checks/_shared.py": "~8,260 lines (restated 2026-10-30, B-1002 - was ~7,934 on dev; the "
+    "checks/_shared.py": "~8,870 lines (restated 2026-11-18, B-1110 - was ~8,260; the scheduled-actor "
+                         "helpers and the retired-heartbeat key rows, ~290 lines, are read by risk/"
+                         "_lifecycle/_capability/_config so they stay in this leaf. Before that: "
+                         "~8,260 lines (restated 2026-10-30, B-1002 - was ~7,934 on dev; the "
                          "implicit-default-account registration for all 28 OpenClaw 2026.10.9 "
                          "channel plugins (key table, predicate table incl. Slack's transport "
                          "rule and Matrix's auth rule, single-account set), the per-channel "

@@ -210,7 +210,9 @@ from ._host import (
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_tool_texts, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
-from ._shared import (_RETIRED_CONFIG_KEYS, _retired_keys_present,)
+from ._shared import (_RETIRED_CONFIG_KEYS, _RETIRED_HEARTBEAT_KEYS, _retired_keys_present,)
+# B-1110: scheduled-actor evidence (heartbeat config, top-level cron, enabled state-DB cron job).
+from ._shared import (_has_heartbeat_cfg, _enabled_cron_job_rows, _agent_cron_job_rows, _MEMORY_DREAMING_SENTINEL, _heartbeat_config_retired, _scheduled_actor_source, _has_scheduled_actor, _has_enabled_agent_turn_job, _channel_heartbeat_visibility_paths,)
 # C-645: the boot-time config self-heal was removed in 2026.9.7; B382 / B38 / RISK-05 /
 # RISK-15 word their advice off this one predicate (risk.py reaches it only through here).
 from ._shared import (_startup_repair_removed, _legacy_ssrf_alias_startup_blocked, _LEGACY_SSRF_ALIAS_970_FACT, _LEGACY_SSRF_ALIAS_970_ORDER,)

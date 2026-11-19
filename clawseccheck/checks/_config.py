@@ -56,6 +56,7 @@ from ._content import (
 )
 from ._shared import (
     _RETIRED_CONFIG_KEYS,
+    _RETIRED_HEARTBEAT_KEYS,
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
     _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
@@ -2392,7 +2393,7 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
                 # measured, not every key the vendor ever removed, so "holds no removed key"
                 # would read as a completeness claim this check cannot make. C-689: inside
                 # the finder's window the PASS also says the vendor's own list was applied.
-                f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired "
+                f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS) + len(_RETIRED_HEARTBEAT_KEYS)} retired "
                 f"config keys this check tracks, and OpenClaw {installed}'s own "
                 "retired-format finder names nothing in it.",
                 "No action needed. The list covers only the retired keys that were measured, "
@@ -2408,7 +2409,7 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
         return _finding(
             "B382",
             PASS,
-            f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired config "
+            f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS) + len(_RETIRED_HEARTBEAT_KEYS)} retired config "
             "keys this check tracks. OpenClaw's own retired-format list was NOT checked: it "
             f"is ported only for {window} and this build is {installed}.",
             "No action needed for the keys this check tracks. The list covers only the "
@@ -2472,6 +2473,15 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
             "A config that uses $include may be refused automatic repair, so run the "
             "command explicitly."
         )
+        if any(path.endswith((".heartbeat", ".heartbeatVisibility")) for path, _repl in found):
+            # B-1110: these rows have no replacement KEY -- Doctor moves a heartbeat into a
+            # state-DB cron job -- so name the command, and warn that deleting by hand
+            # discards the schedule. Only in `fix`; `detail` (the fingerprint) is untouched.
+            fix += (
+                " For a retired heartbeat key there is no replacement key: `openclaw doctor "
+                "--fix` preserves the heartbeat as an editable automation (a cron job in the "
+                "OpenClaw state database), while deleting the key by hand discards it."
+            )
         if _doctor_refuses_retired_formats(ctx) and not in_window:
             # C-686: from 2026.10.1 Doctor and `openclaw update` STOP on a config that holds a
             # key from the vendor's retired list. Inside the port's window the finder was

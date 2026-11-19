@@ -1319,13 +1319,13 @@ _NOT_IN_CURRENT_SCHEMA = {
     # reads stay (Golden Rule #6). Reading the migrated cron_jobs rows on 11.5 is B-1110.
     "agents.defaults.heartbeat": (
         "2026.11.5 dist: no heartbeat field in the zod schema; LEGACY_HEARTBEAT_CONFIG_RULES "
-        "marks it retired. Valid on <= 2026.11.4. Read by risk.py::_has_heartbeat_cfg and "
+        "marks it retired. Valid on <= 2026.11.4. Read by checks/_shared.py::_has_heartbeat_cfg and "
         "checks/_lifecycle.py::check_autonomy."
     ),
     "relative:heartbeat": (
         "2026.11.5 dist: the per-agent heartbeat (agents.entries.*.heartbeat / "
         "agents.list[].heartbeat) is in LEGACY_HEARTBEAT_CONFIG_RULES and absent from the "
-        "agent entry schema. Valid on <= 2026.11.4. Read by risk.py::_has_heartbeat_cfg and "
+        "agent entry schema. Valid on <= 2026.11.4. Read by checks/_shared.py::_has_heartbeat_cfg and "
         "checks/_capability.py::_has_heartbeat_signal."
     ),
     # C-744: OpenClaw 2026.10.5 removed Skill Workshop proposals. Measured on the installed

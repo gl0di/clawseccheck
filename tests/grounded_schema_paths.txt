@@ -55,6 +55,7 @@ commands.ownerAllowFrom
 commands.plugins
 commands.useAccessGroups
 cron
+cron.enabled
 cron.store
 desktop.host
 diagnostics.cacheTrace.filePath

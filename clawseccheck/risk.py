@@ -32,6 +32,8 @@ from . import trajectory as _trajectory
 from .catalog import CRITICAL, FAIL, FAIL_WEIGHT_STATUSES, HIGH, MEDIUM, WARN, Finding
 from .checks import (
     _key_advice,
+    _scheduled_actor_source,
+    _has_enabled_agent_turn_job,
     _doctor_refuses_retired_formats,
     _legacy_ssrf_alias_fact,
     _legacy_ssrf_alias_order,
@@ -405,14 +407,6 @@ def _wildcard_elevated_providers(cfg: dict) -> list[str]:
         return []
     return [p for p, v in allow.items()
             if v == "*" or (isinstance(v, list) and "*" in v)]
-
-
-def _has_heartbeat_cfg(cfg: dict) -> bool:
-    """Autonomous heartbeat configured at agents.defaults or any per-agent entry."""
-    if dig(cfg, "agents.defaults.heartbeat"):
-        return True
-    # B-699: agents.entries as well as agents.list
-    return any(dig(a.entry, "heartbeat") for a in agent_roster(cfg))
 
 
 def _host_reaching_bind(cfg: dict) -> str | None:
@@ -1556,12 +1550,17 @@ def _rule_sleeper_delayed_rce(ctx: Context, findings: list[Finding],
     """
     if _finding_status(findings, "B65") not in (FAIL, WARN):
         return None
-    scheduled = bool(dig(cfg, "cron")) or _has_heartbeat_cfg(cfg)
-    if not scheduled:
+    # B-1110: also an enabled state-DB cron job (where 2026.11.5's Doctor moves heartbeats).
+    source = _scheduled_actor_source(ctx)
+    if source is None:
         return None
     if not (_has_exec_or_write_tools(tools) or "elevated" in tools):
         return None
-    schedule_label = "cron scheduler" if dig(cfg, "cron") else "heartbeat"
+    schedule_label = {
+        "cron": "cron scheduler",
+        "heartbeat": "heartbeat",
+        "cron_jobs": "scheduled automation (state DB cron job)",
+    }[source]
     return RiskPath(
         id="RISK-17",
         severity=HIGH,
@@ -1599,18 +1598,35 @@ def _rule_self_escalating_autonomy(ctx: Context, findings: list[Finding],
     providers = _wildcard_elevated_providers(cfg)
     if not providers:
         return None
-    if not _has_heartbeat_cfg(cfg):
+    # B-1110: a heartbeat in the config, or (2026.11.5+, where Doctor moves heartbeats into
+    # the state DB) an enabled cron job there. A bare top-level `cron` key was never this
+    # rule's leg, so it stays out (include_cron_config=False): no new firing on old configs.
+    source = _scheduled_actor_source(ctx, include_cron_config=False)
+    if source is None:
         return None
+    from_db = source == "cron_jobs"
     return RiskPath(
         id="RISK-14",
         severity=HIGH,
-        title="Wildcard-elevated sender + heartbeat = self-escalating autonomy loop",
+        title=("Wildcard-elevated sender + scheduled automation = self-escalating autonomy loop"
+               if from_db else
+               "Wildcard-elevated sender + heartbeat = self-escalating autonomy loop"),
         chain=[
             f"any sender via wildcard elevated provider(s): {', '.join(providers)}",
             "injected instruction invokes elevated tools",
-            "heartbeat re-runs the agent unattended -> self-escalating privilege loop",
+            ("an enabled state DB cron job re-runs the agent unattended -> self-escalating "
+             "privilege loop" if from_db else
+             "heartbeat re-runs the agent unattended -> self-escalating privilege loop"),
         ],
         why=(
+            "A provider in tools.elevated.allowFrom is set to '*', so any sender on that "
+            "channel can invoke elevated tools, and an enabled cron job in the OpenClaw "
+            "state database (where OpenClaw 2026.11.5 moves a retired heartbeat) makes the "
+            "agent act on its own schedule. Together, a single prompt-injection from an "
+            "untrusted sender can trigger elevated actions that the scheduled job keeps "
+            "re-running unattended \u2014 a self-escalating autonomous privilege loop with no "
+            "human in the path."
+            if from_db else
             "A provider in tools.elevated.allowFrom is set to '*', so any sender on that "
             "channel can invoke elevated tools, and a heartbeat (agents.defaults.heartbeat "
             "or a per-agent heartbeat) makes the agent act on its own schedule. Together, a "
@@ -1806,7 +1822,11 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
         return None
     if not dig(cfg, "cron"):
         return None
-    if not dig(cfg, "agents.defaults.heartbeat"):
+    # B-1110: the heartbeat leg is also satisfied by an enabled agent-turn cron job in the
+    # state DB -- the shape 2026.11.5's Doctor gives a migrated heartbeat. Config wins, so a
+    # config that fires today keeps its exact wording.
+    heartbeat_cfg = bool(dig(cfg, "agents.defaults.heartbeat"))
+    if not heartbeat_cfg and not _has_enabled_agent_turn_job(ctx):
         return None
     ch_label = vis_all_channels[0]
     return RiskPath(
@@ -1816,7 +1836,10 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
         chain=[
             f"channel '{ch_label}' contextVisibility='all' \u2192 prompt injection via untrusted input",
             "injected instruction schedules a cron task (persistent scheduler surface)",
-            "heartbeat re-executes cron task autonomously with no human review",
+            ("heartbeat re-executes cron task autonomously with no human review"
+             if heartbeat_cfg else
+             "an enabled agent-turn cron job (a migrated heartbeat) re-executes the cron "
+             "task autonomously with no human review"),
             "persistent autonomous foothold",
         ],
         why=(
@@ -1828,6 +1851,15 @@ def _rule_persistent_foothold(ctx: Context, findings: list[Finding],
             "approval is required after the initial injection. The result is a persistent "
             "autonomous foothold that survives restarts and continues running without "
             "further attacker interaction."
+            if heartbeat_cfg else
+            "A channel exposes full untrusted context to the agent "
+            "(channels.<p>.contextVisibility='all'), a cron scheduler surface is active, "
+            "and the agent runs autonomously through an enabled agent-turn cron job in the "
+            "OpenClaw state database (where OpenClaw 2026.11.5 moves a retired heartbeat). "
+            "A prompt-injection in untrusted input can plant a cron task that this job "
+            "re-executes indefinitely \u2014 no human approval is required after the initial "
+            "injection. The result is a persistent autonomous foothold that survives "
+            "restarts and continues running without further attacker interaction."
         ),
         fix=(
             "Set channels.<provider>.contextVisibility (or channels.defaults.contextVisibility) "

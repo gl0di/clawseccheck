@@ -2200,6 +2200,41 @@ _RETIRED_CONFIG_KEYS = {
     "surfaces.*.silentReplyRewrite": (None, (2026, 9, 7)),
 }
 
+# B-1110: the heartbeat keys 2026.11.5 retired, kept BESIDE the measured table above rather than
+# in it: the table's rows are plain dotted keys each executed against a build's root schema and
+# each paired with a Doctor sample (tests/test_c686_doctor_advice_grounding.py), and two of these
+# three are patterns that need `_present_key_paths`'s special segments. Same row shape, same
+# version gate, same reader (`_retired_keys_present`). Grounded on the installed 2026.11.5 dist
+# (`legacy-config-migrations-*.mjs` LEGACY_HEARTBEAT_CONFIG_RULES, read 2026-11-18): the rules
+# name `agents.defaults.heartbeat`, a `heartbeat` on any `agents.entries.<id>` and on any
+# `agents.list[]` element, and a channel's `heartbeatVisibility` ("requires `openclaw doctor
+# --fix` before startup"). There is no replacement KEY: Doctor moves each heartbeat into the
+# state DB's `cron_jobs` table, so the advice is the command, not a path. The special segments
+# are expanded by `_present_key_paths`: `@roster` walks `agent_roster` (BOTH roster shapes) and
+# `@channel-heartbeat-visibility` mirrors the vendor's own channel rule, including the legacy
+# `channels.<p>.heartbeat` visibility object (Feishu's own `heartbeatVisibility` is live).
+_HEARTBEAT_CONFIG_RETIRED_MIN = (2026, 11, 5)
+_RETIRED_HEARTBEAT_KEYS = {
+    "agents.defaults.heartbeat": (None, _HEARTBEAT_CONFIG_RETIRED_MIN),
+    "agents.@roster.heartbeat": (None, _HEARTBEAT_CONFIG_RETIRED_MIN),
+    "channels.@channel-heartbeat-visibility": (None, _HEARTBEAT_CONFIG_RETIRED_MIN),
+}
+# Measured 2026-11-18 with the installed 2026.11.5 CLI against a throwaway config (HOME,
+# OPENCLAW_HOME, OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH all in a temp dir): `openclaw config
+# validate` exits 1, "Unrecognized key" / "must not have additional properties", for
+# agents.defaults.heartbeat, agents.entries.<id>.heartbeat, channels.telegram.heartbeatVisibility
+# and channels.telegram.heartbeat; for agents.list[] it says "agents.list moved to keyed
+# agents.entries. Run openclaw doctor --fix" (the retired-roster row already says so). A bare
+# `{"gateway": {"port": 1}}` control validates, a bogus root key is rejected -- so B382's "the
+# strict schema rejects the file" detail is true for every heartbeat row.
+
+
+def _heartbeat_config_retired(ctx) -> bool:
+    """True only when the INSTALLED build is known to be 2026.11.5 or later, which removed the
+    heartbeat config (B-1110). An unknown build answers False and keeps the older advice."""
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return installed is not None and installed >= _HEARTBEAT_CONFIG_RETIRED_MIN
+
 # C-645: 2026.9.7 removed the boot-time config self-heal. Through 2026.9.6 the gateway's
 # pre-bootstrap step ran `resolveStartupConfigSnapshot`, repaired a config the strict schema
 # rejected IN MEMORY (the same migrations `openclaw doctor` applies) and booted with the
@@ -2387,6 +2422,91 @@ def _has_key_path(cfg, dotted: str) -> bool:
     return True
 
 
+_HEARTBEAT_VISIBILITY_KEYS = ("showOk", "showAlerts", "useIndicator")
+
+
+def _channel_heartbeat_visibility_paths(cfg) -> "list[str]":
+    """Channel heartbeat-visibility keys the installed 2026.11.5 retired, as concrete paths.
+
+    A line-for-line mirror of the vendor's channel rule (``LEGACY_HEARTBEAT_CONFIG_RULES``,
+    ``legacy-config-migrations-*.mjs:3974-3985``, and ``selectLegacyHeartbeatVisibility``,
+    ``channel-legacy-config-migrate-*.mjs:33-48``). For ``channels.<p>`` (``channels.defaults``
+    is just a provider named ``defaults``) and for each ``channels.<p>.accounts.<id>`` a block
+    counts when either:
+
+    * the selector finds a key -- ``heartbeatVisibility`` (any value, ``null`` included) for
+      every provider but Feishu, which owns a live ``heartbeatVisibility`` of its own
+      (``visibility`` / ``intervalMs``) and is selected only when the value is an object that
+      carries a shared visibility field (``showOk`` / ``showAlerts`` / ``useIndicator``); for
+      Feishu the legacy ``heartbeat`` key is tried second, under the same condition; or
+    * the legacy ``heartbeat`` object holds ONLY shared visibility fields (an empty one counts
+      for ``channels.defaults`` alone). Any other key in it is a transport setting, which the
+      vendor says is NOT retired.
+
+    The account level uses the provider's name for the Feishu carve-out and never the
+    empty-object allowance, exactly as the vendor's closure does.
+    """
+    channels = cfg.get("channels") if isinstance(cfg, dict) else None
+    if not isinstance(channels, dict):
+        return []
+
+    def owned(value) -> bool:
+        return isinstance(value, dict) and any(k in value for k in _HEARTBEAT_VISIBILITY_KEYS)
+
+    def retired_key(provider: str, block: dict, allow_empty: bool) -> "str | None":
+        for key in ("heartbeatVisibility", "heartbeat") if provider == "feishu" \
+                else ("heartbeatVisibility",):
+            if key not in block:
+                continue
+            if provider == "feishu" and not owned(block[key]):
+                continue
+            return key
+        legacy = block.get("heartbeat")
+        if isinstance(legacy, dict) and (allow_empty or legacy) \
+                and all(k in _HEARTBEAT_VISIBILITY_KEYS for k in legacy):
+            return "heartbeat"
+        return None
+
+    out = []
+    for provider, block in channels.items():
+        if not isinstance(provider, str) or not isinstance(block, dict):
+            continue
+        key = retired_key(provider, block, provider == "defaults")
+        if key:
+            out.append(f"channels.{provider}.{key}")
+        accounts = block.get("accounts")
+        if isinstance(accounts, dict):
+            for acct, ablock in accounts.items():
+                if isinstance(acct, str) and isinstance(ablock, dict):
+                    akey = retired_key(provider, ablock, False)
+                    if akey:
+                        out.append(f"channels.{provider}.accounts.{acct}.{akey}")
+    return sorted(out)
+
+
+def _roster_key_paths(cfg, key: str) -> "list[str]":
+    """``key`` on every per-agent entry of BOTH roster shapes, each checked on its own.
+
+    The vendor's rules look at ``agents.entries`` (a record) and ``agents.list`` (an array)
+    independently (``legacy-config-migrations-*.mjs:3964-3973``), so a config that holds both
+    is walked as both -- ``agent_roster`` would pick ``entries`` and never look at ``list``.
+    A key counts when it is PRESENT (the vendor's ``!== undefined``), ``null`` included.
+    """
+    agents = cfg.get("agents") if isinstance(cfg, dict) else None
+    if not isinstance(agents, dict):
+        return []
+    out = []
+    entries = agents.get("entries")
+    if isinstance(entries, dict):
+        out += [f"agents.entries.{k}.{key}" for k, v in entries.items()
+                if isinstance(k, str) and isinstance(v, dict) and key in v]
+    lst = agents.get("list")
+    if isinstance(lst, list):
+        out += [f"agents.list[{i}].{key}" for i, v in enumerate(lst)
+                if isinstance(v, dict) and key in v]
+    return sorted(out)
+
+
 def _present_key_paths(cfg, dotted: str) -> "list[str]":
     """The concrete dotted paths of ``dotted`` that ``cfg`` holds, sorted.
 
@@ -2398,6 +2518,12 @@ def _present_key_paths(cfg, dotted: str) -> "list[str]":
     name, and a literal key named ``*`` is an ordinary key like any other.
     """
     parts = dotted.split(".")
+    if parts[:2] == ["agents", "@roster"] and len(parts) == 3:
+        # B-1110: a key on every declared agent, from BOTH roster shapes independently; the
+        # path is the entry's own label (`agents.entries.main.heartbeat` / `agents.list[0]...`).
+        return _roster_key_paths(cfg, parts[2])
+    if dotted == "channels.@channel-heartbeat-visibility":
+        return _channel_heartbeat_visibility_paths(cfg)
     if "*" not in parts:
         return [dotted] if _has_key_path(cfg, dotted) else []
     live = [([], cfg)]
@@ -2474,8 +2600,117 @@ def _retired_keys_present(ctx) -> "list[tuple[str, str | None]]":
     # A row with a `*` segment yields one entry per concrete path the file holds (so the
     # finding names `surfaces.telegram.silentReply.internal`, never `surfaces.*...`); every
     # other row yields exactly `(key, repl)` when present, as before.
-    return [(path, repl) for key, (repl, min_build) in _RETIRED_CONFIG_KEYS.items()
+    return [(path, repl)
+            for table in (_RETIRED_CONFIG_KEYS, _RETIRED_HEARTBEAT_KEYS)
+            for key, (repl, min_build) in table.items()
             if installed >= min_build for path in _present_key_paths(cfg, key)]
+
+
+def _has_heartbeat_cfg(cfg: dict) -> bool:
+    """Autonomous heartbeat configured at agents.defaults or any per-agent entry.
+
+    Config only: correct for OpenClaw <= 2026.11.4. From 2026.11.5 Doctor moves each heartbeat
+    into the state DB's ``cron_jobs`` table (B-1110) -- ``_scheduled_actor_source`` reads that.
+    """
+    if dig(cfg, "agents.defaults.heartbeat"):
+        return True
+    # B-699: agents.entries as well as agents.list
+    return any(dig(a.entry, "heartbeat") for a in agent_roster(cfg))
+
+
+# B-1110 round 2: the plugin-managed memory-core "dreaming" job is an enabled `agentTurn` row on
+# every install that has dreaming on, but its message is a sentinel the plugin's own
+# `before_agent_reply` hook intercepts: `extensions/memory-core/index.js:526-545` returns early
+# unless the trigger is `heartbeat`/`cron` and `includesSystemEventToken(cleanedBody, SENTINEL)`
+# (`dreaming-shared-*.mjs:13-22`: both sides trimmed, whole-string equal, or one trimmed line
+# equal after an optional `[cron:...]` prefix), then runs `runShortTermDreamingPromotion`, whose
+# every return is `{handled: true}` (index.js:190-216, 390) -- the model never sees the turn.
+# Only a message that equals the sentinel EXACTLY (after the trim) is excluded: such a row can
+# only ever be intercepted, so excluding it is sound even if someone else wrote it, while any
+# extra text keeps the row a real actor. Deliberately narrower than the vendor's per-line match,
+# and NOT keyed on the declarationKey. Caveat: with the plugin absent the bare token would reach
+# the model as plain text -- it carries no instruction, so that is not an actor.
+_MEMORY_DREAMING_SENTINEL = "__openclaw_memory_core_short_term_promotion_dream__"
+
+# Cron payload kinds, grounded on the installed 2026.11.5 dist. `jobs-validation-*.mjs:40-49`:
+# the kinds are agentTurn / systemEvent / script / command. `service-CYHZSFSC.mjs:2051-2088`
+# (`executeMainSessionCronJob`) and :2462-2464 (`executionKind: ... "agent"` for agentTurn and
+# systemEvent, "command" for command) show the first two run an AGENT session; `script` (:2021)
+# and `command` (:2098) run headless host code with no agent and no approval gate. So the
+# agent-actor readers (B17, RISK-14, RISK-17) count agentTurn + systemEvent, RISK-18's heartbeat
+# leg only agentTurn (the shape Doctor gives a migrated heartbeat), and the approval-bypass
+# `cron` actor any kind.
+_AGENT_RUNNING_CRON_KINDS = ("agentTurn", "systemEvent")
+
+
+def _cron_scheduler_enabled(ctx) -> bool:
+    """False only when the config switches the cron scheduler off (``cron.enabled: false``):
+    OpenClaw reads ``cron?.enabled ?? true`` (`local-service-*.mjs:19`) and a disabled scheduler
+    runs no job (`service-CYHZSFSC.mjs:937-940`), so no row is a live actor then."""
+    return dig(ctx.config, "cron.enabled") is not False
+
+
+def _enabled_cron_job_rows(ctx) -> "list[dict]":
+    """Job rows of the state-DB cron store that are positive evidence of a live scheduled actor.
+
+    B-1110. Only a row whose ``enabled`` is literally ``True`` counts (a disabled row, or one
+    whose flag the store left ``null``, never does; a fired one-shot ``at`` job is disabled by
+    the runtime, `timer-outcomes-*.mjs:194-196`, so it is already out). The read must also be
+    LIVE: a store that could not be parsed (``cron_parse_error``) and a legacy ``jobs.json``
+    shadowing live SQLite rows (``cron_store_shadowed``, definitions the runtime does not
+    execute) yield no evidence at all, and so does a config with the scheduler switched off.
+    A read that hit the row cap (``cron_jobs_truncated``) still counts the enabled rows it DID
+    read: they are positive evidence, and dropping them would be a false negative. The
+    memory-core dreaming sentinel row is excluded (see ``_MEMORY_DREAMING_SENTINEL``). None of
+    these ever means "absent" -- a caller that finds no row falls back to the config.
+    """
+    if getattr(ctx, "cron_parse_error", False) or getattr(ctx, "cron_store_shadowed", False):
+        return []
+    rows = getattr(ctx, "cron_jobs", None)
+    if not isinstance(rows, list) or not _cron_scheduler_enabled(ctx):
+        return []
+    return [j for j in rows if isinstance(j, dict) and j.get("enabled") is True
+            and not (isinstance(j.get("payload_message"), str)
+                     and j["payload_message"].strip() == _MEMORY_DREAMING_SENTINEL)]
+
+
+def _agent_cron_job_rows(ctx) -> "list[dict]":
+    """The ``_enabled_cron_job_rows`` that run an agent turn (``_AGENT_RUNNING_CRON_KINDS``)."""
+    return [j for j in _enabled_cron_job_rows(ctx)
+            if j.get("payload_kind") in _AGENT_RUNNING_CRON_KINDS]
+
+
+def _scheduled_actor_source(ctx, include_cron_config: bool = True) -> "str | None":
+    """Where the evidence of an unattended (scheduled) actor came from, else ``None``.
+
+    ``"cron"`` -- a top-level ``cron`` config key (skipped when ``include_cron_config`` is
+    False, for a reader that only ever meant the heartbeat); ``"heartbeat"`` -- a heartbeat
+    in the config (``agents.defaults`` or any per-agent entry, either roster shape);
+    ``"cron_jobs"`` -- an enabled agent-turn row in the state DB's ``cron_jobs`` table, which is where
+    OpenClaw 2026.11.5's Doctor moves every heartbeat. Config evidence wins, so a config that
+    produced a finding before keeps the wording it had.
+    """
+    cfg = ctx.config
+    if include_cron_config and dig(cfg, "cron"):
+        return "cron"
+    if _has_heartbeat_cfg(cfg):
+        return "heartbeat"
+    if _agent_cron_job_rows(ctx):
+        return "cron_jobs"
+    return None
+
+
+def _has_scheduled_actor(ctx, include_cron_config: bool = True) -> bool:
+    """True when the agent runs unattended: heartbeat config, top-level ``cron`` config, or an
+    enabled state-DB cron job (B-1110). See ``_scheduled_actor_source`` / ``_enabled_cron_job_rows``."""
+    return _scheduled_actor_source(ctx, include_cron_config) is not None
+
+
+def _has_enabled_agent_turn_job(ctx) -> bool:
+    """True when an enabled state-DB cron job runs an agent turn (``payload.kind: "agentTurn"``)
+    -- the shape Doctor gives a migrated heartbeat (B-1110). Same evidence rules as
+    ``_enabled_cron_job_rows``."""
+    return any(j.get("payload_kind") == "agentTurn" for j in _enabled_cron_job_rows(ctx))
 
 
 def _meta(cid: str):

@@ -96,6 +96,8 @@ from ._shared import (
     _safe_mtime,
     _skill_corpus_complete,
     _skill_frontmatter_block,
+    _scheduled_actor_source,  # B-1110
+    _heartbeat_config_retired,  # B-1110
     _surface_absent,
     _workshop_proposals_state,  # C-744
     _workshop_symlink_knob,
@@ -1054,13 +1056,13 @@ def check_autonomy(ctx: Context) -> Finding:
     # Signal 2: real heartbeat / cron keys in config
     # Real paths: agents.defaults.heartbeat or agents.list[].heartbeat; top-level cron
     # heartbeat (top-level) and schedule do NOT exist in OpenClaw schema - removed
-    has_heartbeat_cfg = bool(
-        dig(cfg, "agents.defaults.heartbeat")
-        # B-699: agents.entries as well as agents.list
-        or any(dig(agent.entry, "heartbeat") for agent in agent_roster(cfg))
-        or dig(cfg, "cron")
-    )
+    # B-1110: plus an enabled state-DB cron job -- OpenClaw 2026.11.5's Doctor deletes the
+    # heartbeat keys and moves each schedule into the `cron_jobs` table, so on that build the
+    # config alone shows no unattended actor. Config evidence is read first (same set as before).
+    source = _scheduled_actor_source(ctx)
+    has_heartbeat_cfg = source is not None
     autonomous = has_heartbeat_file or has_heartbeat_cfg
+    db_only = source == "cron_jobs" and not has_heartbeat_file
 
     if not autonomous:
         # Either no HEARTBEAT.md/config signal at all, OR a HEARTBEAT.md exists but
@@ -1073,14 +1075,42 @@ def check_autonomy(ctx: Context) -> Finding:
                 "A HEARTBEAT.md file is present but contains no task content (empty or "
                 "comments-only) and no heartbeat/cron config key was found \u2014 cannot "
                 "confirm the agent actually runs on an active schedule.",
-                "If heartbeat scheduling is intended, add real task entries to "
-                "HEARTBEAT.md or set agents.defaults.heartbeat / a per-agent heartbeat.",
+                # B-1110: 2026.11.5 retired the heartbeat config (B382 flags it there), so the
+                # old advice would send the user to a key their build rejects.
+                ("If scheduled runs are intended, add real task entries to HEARTBEAT.md or "
+                 "schedule a cron job (OpenClaw 2026.11.5 and later no longer accepts a "
+                 "heartbeat config key)."
+                 if _heartbeat_config_retired(ctx) else
+                 "If heartbeat scheduling is intended, add real task entries to "
+                 "HEARTBEAT.md or set agents.defaults.heartbeat / a per-agent heartbeat."),
             )
         return _finding("B17", UNKNOWN, "No autonomy/heartbeat signal detected.", "\u2014")
 
     tools = _enabled_tools(cfg)
     has_outbound = _hint(tools, OUTBOUND_TOOL_HINTS)
 
+    if db_only:
+        # B-1110: new evidence path, new wording (the config-evidence `detail` strings below
+        # are unchanged -- baseline.fingerprint() hashes `detail`).
+        if has_outbound:
+            return _finding(
+                "B17",
+                WARN,
+                "Agent runs autonomously (scheduled automation: an enabled cron job in the "
+                "OpenClaw state database) and can take outbound actions \u2014 ensure it "
+                "cannot act on untrusted input without approval.",
+                "Add an approval gate (tools.exec.mode='ask', or tools.exec.ask='always' to "
+                "be asked before every one) for all outbound/exec actions triggered by "
+                "scheduled cron jobs; validate any external content before acting on it.",
+            )
+        return _finding(
+            "B17",
+            WARN,
+            "Agent runs on a schedule (an enabled cron job in the OpenClaw state "
+            "database) \u2014 verify scheduled job payloads cannot be manipulated by "
+            "untrusted input (e.g. memory poisoning, injected task files).",
+            "Review the enabled cron jobs and keep their payloads write-protected.",
+        )
     if has_outbound:
         return _finding(
             "B17",
