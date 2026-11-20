@@ -75,6 +75,7 @@ _MCP_CONN_STRING_CREDENTIAL_RE
 _MCP_DATA_CAP_RE
 _MCP_FS_PKG_RE
 _MCP_INTAKE_CAP_RE
+_MCP_SCOPED_ALIAS_FILTER_MIN
 _MESSAGE_CROSS_CONTEXT_GUARDED_ACTIONS
 _MSTEAMS_IDENTITY_KEYS
 _PORTALS_ABSENT_MEASURED_MIN
@@ -202,6 +203,7 @@ _mcp_leg_contributions
 _mcp_sensitive_reason
 _mcp_server_risks
 _mcp_servers
+_mcp_tool_filter_alias_entries
 _mcp_value_looks_secret
 _memory_default_owner_blocked
 _message_actions_allow_for_scope
