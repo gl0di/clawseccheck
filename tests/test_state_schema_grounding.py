@@ -2665,11 +2665,52 @@ _FEATURE_DEFINITION_RE = re.compile(
     r"getOpenClawStateFeatureSchemaSql\(\s*(?:\"([^\"\\\n]*)\"|([A-Za-z_$][\w$]*))\s*\)\s*;")
 
 
+def _local_string_bindings(text: str, ident: str) -> "set[str]":
+    return set(re.findall(
+        rf"\b(?:const|let|var)\s+{re.escape(ident)}\s*=\s*\"([^\"\\\n]*)\"\s*[;,]", text))
+
+
+def _imported_string_bindings(text: str, ident: str, path: Path) -> "set[str]":
+    """C-806 (2026.11.6): the constant may arrive by ONE relative ES import,
+    `import { t as IDENT } from "./mod-<hash>.mjs"` (or `{ IDENT }`), with the literal bound in
+    that module as `const LOCAL = "lit"` and exported as `export { LOCAL as t }` (or `LOCAL`).
+    Followed exactly one hop. Zero or several imports of IDENT, or anything but one binding in the
+    target, gives an empty or multi-valued set, which the caller rejects."""
+    found: set = set()
+    imports = re.findall(r"import\s*\{([^}]*)\}\s*from\s*\"(\./[^\"]+)\"", text)
+    hits = []
+    for names, spec in imports:
+        for part in names.split(","):
+            m = re.fullmatch(r"\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*", part)
+            if m and (m.group(2) or m.group(1)) == ident:
+                hits.append((m.group(1), spec))
+    if len(hits) != 1:
+        return found
+    exported, spec = hits[0]
+    target = (path.parent / spec)
+    try:
+        ttext = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return found
+    locals_ = set()
+    for names in re.findall(r"export\s*\{([^}]*)\}", ttext):
+        for part in names.split(","):
+            m = re.fullmatch(r"\s*([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*", part)
+            if m and (m.group(2) or m.group(1)) == exported:
+                locals_.add(m.group(1))
+    if len(locals_) != 1:
+        return found
+    return _local_string_bindings(ttext, next(iter(locals_)))
+
+
 def _bound_string_literal(text: str, ident: str, name: str, path: Path) -> str:
     """The string literal *ident* is bound to in *text*: exactly one
-    `const|let|var ident = "lit"` followed by `;` or `,`. None or several raises."""
-    bound = set(re.findall(
-        rf"\b(?:const|let|var)\s+{re.escape(ident)}\s*=\s*\"([^\"\\\n]*)\"\s*[;,]", text))
+    `const|let|var ident = "lit"` followed by `;` or `,`, or - when the file has no such
+    binding - exactly one through a single relative import (`_imported_string_bindings`).
+    None or several raises."""
+    bound = _local_string_bindings(text, ident)
+    if not bound:
+        bound = _imported_string_bindings(text, ident, path)
     if len(bound) != 1:
         raise AssertionError(
             f"{name}: the table argument `{ident}` is not bound to exactly "

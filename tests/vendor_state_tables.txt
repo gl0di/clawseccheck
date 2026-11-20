@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.11.5
+# openclaw-version: 2026.11.6
 # state-schema-version: 36
-# generated: 2026-11-18
+# generated: 2026-11-20
 # tables: 135
 #
-# source-bundle: sqlite-database-admission-cJZUzNzo.mjs
+# source-bundle: sqlite-database-admission-BQtRqoHB.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -27,7 +27,7 @@
 #
 # Satellite sources read (bundle it came from, tables it adds beyond the main constant; the
 # featureLocalSql entry lists the tables every value in that object declares):
-#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-Cfk8pS6U.mjs, 10 copies]
+#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-BVGyRNh0.mjs, 10 copies]
 #     adds: user_profile_emails, user_profiles, worker_environment_session_attachments
 #
 # Why it exists

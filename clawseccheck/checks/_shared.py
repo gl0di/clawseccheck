@@ -2646,7 +2646,7 @@ _AGENT_RUNNING_CRON_KINDS = ("agentTurn", "systemEvent")
 def _cron_scheduler_enabled(ctx) -> bool:
     """False only when the config switches the cron scheduler off (``cron.enabled: false``):
     OpenClaw reads ``cron?.enabled ?? true`` (`local-service-*.mjs:19`) and a disabled scheduler
-    runs no job (`service-CYHZSFSC.mjs:937-940`), so no row is a live actor then."""
+    runs no job (`service-CYHZSFSC.mjs:937-940` on 2026.11.5), so no row is a live actor then."""
     return dig(ctx.config, "cron.enabled") is not False
 
 
