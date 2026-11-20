@@ -87,7 +87,9 @@ check needs:
 - a `CheckMeta` entry in the catalog (one entry per check ID — an ID, once
   shipped, keeps its meaning),
 - a **clean fixture** (the finding must not fire) and a **bad fixture** (it
-  must), plus explicit `UNKNOWN`-path coverage,
+  must), plus explicit `UNKNOWN`-path coverage. A fixture skill's manifest goes in
+  `tests/fixture_skill_md/<path under fixtures>/SKILL.md.fixture`, never as a tracked
+  `SKILL.md` under `fixtures/` (see [docs/CHECK_AUTHORING.md](docs/CHECK_AUTHORING.md)),
 - zero false-positive FAILs on realistic configs — precision is this project's
   reputation; a noisy check will not be merged,
 - if the check reads a **new** OpenClaw config `dig()` path, a matching entry

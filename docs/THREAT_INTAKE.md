@@ -160,6 +160,7 @@ assumed:
 | 2026-11-06 | not published | 2026.11.1 | 2026.9.36 | 2026.11.5-beta.1 |
 | 2026-11-09 | not published | 2026.11.2 | 2026.9.36 | 2026.11.5-beta.1 |
 | 2026-11-12 | not published | 2026.11.3 | 2026.9.37 | 2026.11.5-beta.2 |
+| 2026-11-20 | not published | 2026.11.6 | 2026.10.33 | 2026.11.10-beta.1 |
 
 `beta` moved twice in three weeks while `latest` did not move at all. That asymmetry is the
 whole reason for the step: a fact confirmed on a beta build is not a fact about OpenClaw,
