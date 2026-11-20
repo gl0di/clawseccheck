@@ -28,6 +28,7 @@ from _realhome import REAL_HOME  # noqa: E402  (must follow the sys.path insert 
 # `tests/test_fixture_perm_determinism.py` asserts the pin directly against
 # `_fixtureperms` too (not through this module) -- see its own docstring.
 from _fixtureperms import pin_fixture_modes  # noqa: E402  (must follow the sys.path insert above)
+from _fixtureskills import materialize as materialize_fixture_skills  # noqa: E402  (C-809)
 
 # CSC_HERMETICITY_LEDGER (see pytest_configure below) -- the opt-in sys.addaudithook
 # instrument. Import only the template/classifier module here; the hook itself is
@@ -236,6 +237,10 @@ def _isolate_local_store(tmp_path_factory):
 #
 # tests/test_hermeticity_gate.py is the comparison; it no-ops (skip) whenever this is off.
 def pytest_configure(config):
+    # C-809: write the fixture corpus's SKILL.md files from tests/fixture_skill_md/ before
+    # collection, because some test modules read fixture skills at import time. In place and
+    # gitignored by owner ruling (2026-11-20); see tests/_fixtureskills.py for why.
+    materialize_fixture_skills()
     if not os.environ.get("CSC_HERMETICITY_LEDGER"):
         return
     herm_dir = tempfile.mkdtemp(prefix="csc-herm-")

@@ -365,7 +365,13 @@ alarming-looking string live here on purpose:
    where the two URLs most often quoted back at us live -
    `http://evil.example/x` and `http://evil/x`. Neither can resolve: `.example`
    is reserved by [RFC 2606](https://www.rfc-editor.org/rfc/rfc2606) for
-   documentation, and `evil` is a bare label with no TLD.
+   documentation, and `evil` is a bare label with no TLD. **Never install a
+   fixture skill.** None of them is a usable skill, and many imitate malicious
+   ones on purpose. Their manifests are stored as
+   `tests/fixture_skill_md/**/SKILL.md.fixture`, not `SKILL.md`, so that skill
+   catalogs which index every `SKILL.md` in a public repository do not list them;
+   the test setup writes them back under `fixtures/` (gitignored) before a run.
+   The one skill this repository publishes is the `SKILL.md` at its root.
 
 **What you can verify yourself, without trusting this paragraph:**
 
