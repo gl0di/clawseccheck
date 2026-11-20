@@ -4513,6 +4513,24 @@ def _harness_build(ctx) -> "tuple | None":
     return None
 
 
+def _b333_alias_gate_build(ctx) -> "tuple | None":
+    """The build B333's toolFilter alias gate (B-1113) may trust as "older than 2026.11.5".
+
+    Only an INSTALLED build can prove the raw-only filter is what runs. A config stamp is
+    written when the config is saved, so after an upgrade it understates the running build:
+    a stamp below the alias floor would select the raw path while 2026.11.5+ runs, turning
+    an include alias into a missed WARN and an exclude alias into a false WARN. So a stamp
+    counts only when it is already at or above the floor; below it, the build is unknown
+    and the gate stays on (UNKNOWN), never the raw path.
+    """
+    build = _harness_build(ctx)
+    if build is None or tuple(build[:3]) >= _MCP_SCOPED_ALIAS_FILTER_MIN:
+        return build
+    if _numeric_version(getattr(ctx, "installed_dist_version", None)) is not None:
+        return build
+    return None
+
+
 def _harness_reach(ctx) -> "_harnessruntime.HarnessReach":
     return _harnessruntime.codex_harness_reach(getattr(ctx, "config", None), _harness_build(ctx))
 
@@ -5335,7 +5353,7 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
     warn_hits: list[str] = []
     unknown_hits: list[str] = []
     alias_hits: list[str] = []
-    build = _harness_build(ctx) if modern else None
+    build = _b333_alias_gate_build(ctx) if modern else None
     surfaces_seen = 0
     for sname, spec in sorted(servers.items()):
         tools = spec.get("tools") if isinstance(spec, dict) else None

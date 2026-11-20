@@ -220,6 +220,34 @@ def test_the_check_keeps_todays_result_below_the_floor(tmp_path):
     assert f.status == WARN
 
 
+def _stamped(tool_filter, stamp):
+    cfg = _cfg(tool_filter)
+    cfg["meta"] = {"lastTouchedVersion": stamp}
+    return cfg
+
+
+def test_a_stale_stamp_below_the_floor_never_selects_the_raw_path(tmp_path):
+    """C-135 finding on B-1113: a config stamp is written at save time, so after an upgrade
+    it understates the running build. With no installed build detected, a stamp below
+    2026.11.5 must leave the build unknown (UNKNOWN), not select the raw path, which gives
+    a missed WARN for an include alias and a false WARN for an exclude alias."""
+    f = _finding(_tmp(tmp_path, "a"), _stamped({"include": ["srv__fetch"]}, "2026.10.1"), None)
+    assert f.status == UNKNOWN
+    f = _finding(_tmp(tmp_path, "b"), _stamped({"exclude": ["srv__fetch"]}, "2026.10.1"), None)
+    assert f.status == UNKNOWN
+    # Positive controls: the same stale stamp without an alias still WARNs, and an
+    # INSTALLED build below the floor still selects the raw path.
+    f = _finding(_tmp(tmp_path, "c"), _stamped(None, "2026.10.1"), None)
+    assert f.status == WARN
+    f = _finding(_tmp(tmp_path, "d"), _stamped({"include": ["srv__fetch"]}, "2026.10.1"), "2026.11.4")
+    assert f.status == PASS
+
+
+def test_a_stamp_at_or_above_the_floor_keeps_the_gate_on(tmp_path):
+    f = _finding(tmp_path, _stamped({"include": ["srv__fetch"]}, "2026.11.6"), None)
+    assert f.status == UNKNOWN
+
+
 # ---------------------------------------------------------------------------------------
 # Differential against the real vendor
 # ---------------------------------------------------------------------------------------
