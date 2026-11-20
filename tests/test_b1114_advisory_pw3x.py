@@ -9,8 +9,8 @@ delegation could skip approval for restricted agents". Ranges on the core npm pa
 
 One table row spans both (max_vulnerable 2026.11.3, first vulnerable 2026.9.2); the stretch
 between them, [2026.10.33, 2026.11.1), is `_ADVISORY_RANGE_GAPS`. The extended-stable 2026.9
-line (9.33+) is inside the first range but was not examined, so it is UNKNOWN by the existing
-rule - never a guessed FAIL or PASS.
+line (9.33+) is inside the first range; the 2026.9.37 tarball was examined and carries the pre-fix
+code, so 9.33-9.37 FAIL and anything past 9.37 (or a variant) stays UNKNOWN.
 
 The ranges are checked here by a comparator written in THIS file, not by the check's matcher.
 Hermetic: the version comes from the config stamp of a home that is not this machine's.
@@ -80,10 +80,20 @@ def test_below_the_first_vulnerable_build_the_advisory_is_not_named():
 
 
 @pytest.mark.parametrize("version", ["2026.9.33", "2026.9.37"])
-def test_the_unexamined_extended_stable_9_line_is_unknown_not_a_guess(version):
+def test_the_examined_extended_stable_9_line_fails(version):
+    """Examined 2026-11-20 in the 2026.9.37 release tarball: the delegate tool's fullPermission
+    ignores the tool policy and `hasUnrestrictedGatewayExecution` is absent (the 2026.10.33
+    fix), so the pre-fix code is present on the 2026.9 line."""
     assert _published(version)  # numerically inside the first published range
     f = check_known_vulns(_ctx(version))
-    assert f.status == UNKNOWN, f.detail
+    assert f.status == FAIL, f.detail
+    assert f.evidence == [_ID]
+    assert _lifecycle._EXTENDED_STABLE_LINES[(2026, 9)] == (37, (_ID,))
+
+
+@pytest.mark.parametrize("version", ["2026.9.38", "2026.9.33-1"])
+def test_past_the_examined_build_or_a_variant_the_9_line_stays_unknown(version):
+    assert check_known_vulns(_ctx(version)).status == UNKNOWN
 
 
 def test_the_gap_only_trims_this_row():

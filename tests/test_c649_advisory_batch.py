@@ -230,9 +230,10 @@ def test_extended_stable_data_refers_to_table_ids():
     ids = {row[0] for row in _KNOWN_ADVISORIES}
     assert _lifecycle._EXTENDED_STABLE_MIN_PATCH == 33
     assert _lifecycle._EXTENDED_STABLE_NOT_AFFECTED <= ids
-    assert set(_lifecycle._EXTENDED_STABLE_LINES) == {(2026, 6), (2026, 7), (2026, 8)}
+    assert set(_lifecycle._EXTENDED_STABLE_LINES) == {(2026, 6), (2026, 7), (2026, 8), (2026, 9)}
     for (_year, _minor), (newest, confirmed) in _lifecycle._EXTENDED_STABLE_LINES.items():
-        assert newest == 35
+        # the 2026.9 line was examined at 2026.9.37 (B-1114 follow-up), the others at .35
+        assert newest == (37 if _minor == 9 else 35)
         assert set(confirmed) <= ids
         assert len(set(confirmed)) == len(confirmed)
         assert not set(confirmed) & _lifecycle._EXTENDED_STABLE_NOT_AFFECTED
@@ -283,8 +284,8 @@ _EXTENDED = [
     ("2026.7.33", FAIL, 3, "2026.11.4"),
     ("2026.7.34", FAIL, 3, "2026.11.4"),
     ("2026.7.35", FAIL, 3, "2026.11.4"),
-    ("2026.9.33", UNKNOWN, 0, None),  # the extended-stable 9 line: one published range (GHSA-pw3x) reaches it, no row confirms it
-    ("2026.9.35", UNKNOWN, 0, None),
+    ("2026.9.33", FAIL, 1, "2026.11.4"),  # the extended-stable 9 line: GHSA-pw3x confirmed unfixed at 2026.9.37
+    ("2026.9.35", FAIL, 1, "2026.11.4"),
     ("2026.8.33", PASS, 0, None),
     ("2026.8.34", PASS, 0, None),
     ("2026.8.35", PASS, 0, None),
@@ -515,7 +516,7 @@ def test_2026_8_36_matches_no_row_once_the_not_affected_advisory_is_removed_so_i
 
 def test_an_unknown_line_is_unknown_when_rows_match_and_pass_when_none_do():
     assert check_known_vulns(_stamp_ctx("2026.5.33")).status == UNKNOWN  # line 5 was never examined
-    assert check_known_vulns(_stamp_ctx("2026.9.33")).status == UNKNOWN  # GHSA-pw3x's range reaches line 9 (B-1114)
+    assert check_known_vulns(_stamp_ctx("2026.9.38")).status == UNKNOWN  # past the examined 2026.9.37
     assert check_known_vulns(_stamp_ctx("2026.10.33")).status == PASS  # nothing reaches it
     assert check_known_vulns(_stamp_ctx("2026.12.34")).status == PASS
 

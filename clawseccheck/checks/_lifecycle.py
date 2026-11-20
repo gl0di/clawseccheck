@@ -235,7 +235,8 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # of a published summary is noticed (owner ruling C-662, g).
 #
 # Extended-stable builds (a final release, minor 1-12, patch >= 33 - the maintenance lines
-# 2026.6.33-35, 2026.7.33-35 and 2026.8.33-35) get fixes back-ported selectively and the
+# 2026.6.33-35, 2026.7.33-35, 2026.8.33-35 and 2026.9.33-37; 2026.10.33 is clear through
+# `_ADVISORY_RANGE_GAPS`) get fixes back-ported selectively and the
 # advisories do not say which. Measured against the vendor's repository: the 2026.8 line is
 # the exact 2026.8.2 release plus back-ports and, as far as could be checked, carries the
 # batch's fixes (the one advisory fixed in 2026.9.2 is back-ported there; its code is absent
@@ -643,6 +644,13 @@ _EXTENDED_STABLE_LINES: dict[tuple[int, int], tuple[int, tuple[str, ...]]] = {
     (2026, 6): (35, ("GHSA-8xxh-v4vc-qvm4", "GHSA-66hm-hxq3-5pfh")),
     (2026, 7): (35, ("GHSA-66hm-hxq3-5pfh", "GHSA-xx9p-hc9w-6p5h", "GHSA-7cp7-87pj-p32v")),
     (2026, 8): (35, ()),
+    # B-1114 follow-up (2026-11-20): the 2026.9.37 release tarball's `openclaw` delegate tool
+    # (`createOpenClawDelegateToolsForRun`, openclaw-tools-*.mjs) decides `fullPermission` from the
+    # exec defaults alone (security "full", ask "off", not sandboxed, not workspace-only) and never
+    # consults the tool policy, and it has no `hasUnrestrictedGatewayExecution` check - the code the
+    # 2026.10.33 fix ("require effective approval for delegated changes") added. Pre-fix code
+    # observed, so GHSA-pw3x-g8v8-fvj2 is confirmed unfixed on the 2026.9 line.
+    (2026, 9): (37, ("GHSA-pw3x-g8v8-fvj2",)),
 }
 _EXTENDED_STABLE_RE = re.compile(r"([1-9][0-9]{3})\.([1-9]|1[0-2])\.([1-9][0-9]*)")
 
