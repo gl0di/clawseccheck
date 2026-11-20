@@ -218,7 +218,7 @@ from ._shared import (_has_heartbeat_cfg, _enabled_cron_job_rows, _agent_cron_jo
 from ._shared import (_startup_repair_removed, _legacy_ssrf_alias_startup_blocked, _LEGACY_SSRF_ALIAS_970_FACT, _LEGACY_SSRF_ALIAS_970_ORDER,)
 # C-686: from 2026.10.1 Doctor and `openclaw update` refuse the retired formats; the advice that
 # sent the user to `openclaw doctor --fix` is worded off this one predicate.
-from ._shared import (_DOCTOR_REFUSES_RETIRED_MIN, _RETIRED_STATE_BRIDGE_VERSION, _LEGACY_SSRF_ALIAS_1010_FACT, _LEGACY_SSRF_ALIAS_1010_ORDER, _LEGACY_SSRF_ALIAS_1010_INERT, _DOCTOR_WHOLE_CONFIG_HEDGE, _doctor_refuses_retired_formats, _doctor_whole_config_hedge, _legacy_ssrf_alias_consequence, _legacy_ssrf_alias_fact, _legacy_ssrf_alias_order,)
+from ._shared import (_DOCTOR_REFUSES_RETIRED_MIN, _RETIRED_STATE_BRIDGE_VERSION, _LEGACY_SSRF_ALIAS_1010_FACT, _LEGACY_SSRF_ALIAS_1010_ORDER, _LEGACY_SSRF_ALIAS_1010_INERT, _DOCTOR_WHOLE_CONFIG_HEDGE, _doctor_refuses_retired_formats, _DOCTOR_MIGRATES_RETIRED_STATE_MIN, _doctor_migrates_retired_state, _doctor_whole_config_hedge, _legacy_ssrf_alias_consequence, _legacy_ssrf_alias_fact, _legacy_ssrf_alias_order,)
 from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands, _node_allow_skills,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate - risk.py's ingress leg reaches it only

@@ -2312,6 +2312,15 @@ _DOCTOR_REFUSES_RETIRED_MIN = (2026, 10, 1)
 #: vendor's `RetiredStateFormatError` message by tests/test_c686_doctor_advice_grounding.py.
 _RETIRED_STATE_BRIDGE_VERSION = "2026.9.7"
 
+#: C-805: from 2026.11.5 a retired STATE file is no longer a stop. EXECUTED on the installed
+#: 2026.11.6 (tests/test_c686_doctor_advice_grounding.py): `assertNoRetiredStateFiles` still
+#: throws `RetiredStateFormatError` for cron state, referenced OAuth sidecars and JSON delivery
+#: queues, but its message no longer names a bridge release - it says 'The files were left
+#: unchanged. Run "openclaw doctor --fix" to migrate or archive them, then retry.' The legacy
+#: plugin install index message says the same ("Run openclaw doctor --fix to archive ...").
+#: Retired CONFIG keys are unchanged: the finder still makes Doctor refuse the config.
+_DOCTOR_MIGRATES_RETIRED_STATE_MIN = (2026, 11, 5)
+
 _LEGACY_SSRF_ALIAS_1010_FACT = (
     "On OpenClaw 2026.10.1 and later 'openclaw doctor --fix' and 'openclaw update' refuse a "
     "config that holds the retired browser.ssrfPolicy.allowPrivateNetwork key until it is "
@@ -2363,6 +2372,15 @@ def _doctor_refuses_retired_formats(ctx) -> bool:
     """
     installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
     return installed is not None and installed >= _DOCTOR_REFUSES_RETIRED_MIN
+
+
+def _doctor_migrates_retired_state(ctx) -> bool:
+    """True only when the INSTALLED build is known to be 2026.11.5 or later, whose Doctor
+    migrates or archives a retired STATE file instead of refusing over it (config keys are
+    still refused; see `_DOCTOR_MIGRATES_RETIRED_STATE_MIN`). Same reading rule as
+    `_doctor_refuses_retired_formats`: an unknown or pre-release build answers False."""
+    installed = _numeric_version(getattr(ctx, "installed_dist_version", None))
+    return installed is not None and installed >= _DOCTOR_MIGRATES_RETIRED_STATE_MIN
 
 
 def _legacy_ssrf_alias_fact(ctx) -> str:

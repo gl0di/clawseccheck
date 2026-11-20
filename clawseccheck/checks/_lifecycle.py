@@ -84,6 +84,7 @@ from ._shared import (
     _node_allow_skills,  # B396 - shared with B386
     _node_commands,  # B396 - shared with B71
     _doctor_refuses_retired_formats,  # C-686
+    _doctor_migrates_retired_state,  # C-805
     _doctor_whole_config_hedge,  # C-686
     _numeric_version,  # B396
     _RETIRED_STATE_BRIDGE_VERSION,  # C-686
@@ -2011,7 +2012,14 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # swapped by the INSTALLED build only (an unknown or older build keeps the
         # original, byte for byte) and the FAIL stays: the file is still a latent hazard on
         # the upgrade route the vendor itself prescribes.
+        # C-805: from 2026.11.5 Doctor migrates retired cron state again (the vendor's own
+        # message now says 'Run "openclaw doctor --fix" to migrate or archive them'), so the
+        # reactivation sentence is true again on those builds.
         dormant_label = (
+            f"{job_label}.payload (dormant legacy shape \u2014 `openclaw doctor --fix` on the "
+            "installed OpenClaw imports this retired file into its active cron jobs, which "
+            "would reactivate it, unless it quarantines the row)"
+            if _doctor_migrates_retired_state(ctx) else
             f"{job_label}.payload (dormant legacy shape \u2014 the installed OpenClaw's "
             "Doctor refuses this retired file instead of importing it; Doctor on the "
             f"bridge release {_RETIRED_STATE_BRIDGE_VERSION} would import it)"
@@ -8764,6 +8772,18 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
             "Stop the OpenClaw gateway and run `openclaw doctor --fix` to migrate this "
             "legacy state, then confirm the file(s) above are gone."
             + (
+                # C-805: on 2026.11.5 and later a retired state file no longer stops Doctor
+                # (see `_DOCTOR_MIGRATES_RETIRED_STATE_MIN`); a retired config key still does.
+                " On OpenClaw 2026.11.5 and later Doctor still stops first if the config "
+                "holds a retired pre-July-2026 key, and names the release to install first, "
+                "so follow that message before retrying. In the usual case retired state files "
+                "no longer stop it: for older cron state, OAuth credential sidecars, JSON "
+                "delivery queues and a legacy plugin install index, OpenClaw's own message "
+                "says to run `openclaw doctor --fix`, which migrates or archives them. It "
+                "still stops on the cron files at a custom `cron.store` path while the config "
+                "itself does not parse (fix the config first), and on a retired file it "
+                "cannot read (restore access to it)."
+                if _doctor_migrates_retired_state(ctx) else
                 # C-686: EXECUTED on 2026.10.2 -- Doctor's preflight (`prepareDoctorConfigRecovery`)
                 # throws before it migrates anything when the config holds a key from the
                 # vendor's retired list or the state tree holds a retired file (OAuth
