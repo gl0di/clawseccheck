@@ -90,7 +90,10 @@ def test_the_machine_form_never_relies_on_path_or_cwd(argv0):
         assert os.path.isabs(head), f"{started_as!r} -> {prefix!r} starts with a bare name"
 
 
-def test_the_machine_form_prefers_the_shim_over_the_module_form(argv0):
+def test_the_machine_form_prefers_the_shim_over_the_module_form(argv0, monkeypatch, tmp_path):
+    # B-1115: hermetic - an installed `clawseccheck` on the machine's PATH (a pipx copy, say)
+    # must not decide this test.
+    monkeypatch.setenv("PATH", str(tmp_path))
     """`-m clawseccheck` resolves through `sys.path`, which for a source tree means the
     CURRENT DIRECTORY — a job started from anywhere else gets ModuleNotFoundError, which
     the fail-open trigger turns into the same alarm rc=127 gave. `audit.py` locates its own
