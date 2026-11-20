@@ -10,11 +10,12 @@ Logic under test (check_known_vulns + _parse_version):
            the finding in one upgrade.
 - PASS     when the parsed version is past all known advisory fixes.
 
-C-649: the table now also holds every published core advisory up to 2026.9.2, a row may
+C-649: the table now also holds every published core advisory up to 2026.9.2 (B-1114 added
+GHSA-pw3x-g8v8-fvj2, fixed 2026.11.4), a row may
 carry a lower bound / exact-build restriction (side tables) and an extended-stable build
 follows its own rule. Those, the subject-version rule (installed build vs config stamp) and
 the per-build verdict table are pinned in tests/test_c649_advisory_batch.py; this file keeps
-the older, row-by-row assertions, re-grounded on the new newest boundary (2026.9.2).
+the older, row-by-row assertions, re-grounded on the newest boundary (2026.11.4, GHSA-pw3x-g8v8-fvj2's fix).
 
 Confirmed advisories seeded in _KNOWN_ADVISORIES:
   GHSA-g8p2-7wf7-98mq — OpenClaw/clawdbot <= 2026.1.28 vulnerable,
@@ -173,12 +174,12 @@ def test_b33_fail_names_ghsa_not_cve():
 
 def test_b33_fail_names_fixed_version():
     """B-332: FAIL fix text must mention the HIGHEST fixed version across every
-    matched advisory (2026.9.2, GHSA-5x6q-wg56-rxg8's fix; was 2026.6.6 before the
-    C-649 batch) — not just the first table row's fixed version (2026.1.29) — since
+    matched advisory (2026.11.4, GHSA-pw3x-g8v8-fvj2's fix; was 2026.9.2 before B-1114 and
+    2026.6.6 before the C-649 batch) — not just the first table row's fixed version (2026.1.29) — since
     only the highest actually clears the finding in a single upgrade."""
     result = check_known_vulns(_ver_ctx("2026.1.28"))
     assert result.status == FAIL
-    assert "2026.9.2" in result.fix
+    assert "2026.11.4" in result.fix
     assert "2026.1.29" not in result.fix
 
 
@@ -216,9 +217,10 @@ def test_b33_root_alias_affected_version_fails():
 
 
 def test_b33_root_alias_safe_version_passes():
-    """Root-level lastTouchedVersion past all known-advisory fixes -> PASS (2026.9.2 is
-    the newest boundary in the table; this was 2026.6.6 before the C-649 batch)."""
-    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.9.2"})).status == PASS
+    """Root-level lastTouchedVersion past all known-advisory fixes -> PASS (2026.11.4 is
+    the newest boundary in the table; this was 2026.9.2 before B-1114 and 2026.6.6 before
+    the C-649 batch)."""
+    assert check_known_vulns(_ctx({"lastTouchedVersion": "2026.11.4"})).status == PASS
 
 
 def test_b33_meta_takes_precedence_over_root_alias():
@@ -264,9 +266,9 @@ def test_b33_version_much_newer_passes():
 
 def test_b33_pass_detail_includes_version():
     """PASS detail should mention the installed version string."""
-    result = check_known_vulns(_ver_ctx("2026.9.2"))
+    result = check_known_vulns(_ver_ctx("2026.11.6"))
     assert result.status == PASS
-    assert "2026.9.2" in result.detail
+    assert "2026.11.6" in result.detail
 
 
 @pytest.mark.parametrize("version_str,expected_status", [
@@ -276,7 +278,8 @@ def test_b33_pass_detail_includes_version():
     ("2026.2.9",  FAIL),  # still <= 2026.2.13 -> hits GHSA-g6q9-8fvw-f7rf / GHSA-cv7m-c9jx-vg7q
     ("2026.2.14", FAIL),  # fixed for the original 4 but now hits an E-059 addition
     ("2026.6.6",  FAIL),  # past the E-059 sweep's newest row, but inside the C-649 batch
-    ("2026.9.2",  PASS),  # past every advisory in the table, including the batch's newest
+    ("2026.9.2",  FAIL),  # past 5x6q's fix, but inside GHSA-pw3x-g8v8-fvj2's range (B-1114)
+    ("2026.11.4", PASS),  # past every advisory in the table, including the newest row's
     ("nightly",   UNKNOWN),
     (None,        UNKNOWN),
 ])
@@ -305,13 +308,13 @@ def test_b33_ghsa_mc68_docker_sandbox_injection_fails_at_boundary():
 def test_b33_ghsa_g6q9_gateway_ssrf_fails_at_2026_2_0():
     """2026.2.0 <= 2026.2.13 -> FAIL, naming GHSA-g6q9-8fvw-f7rf (Gateway SSRF) among
     the matched advisories. B-332: `fix` targets the HIGHEST fixed version across ALL
-    matches (2026.9.2 since C-649; it was 2026.6.6), not GHSA-g6q9's own fixed version
+    matches (2026.11.4 since B-1114; 2026.9.2 before, 2026.6.6 before C-649), not GHSA-g6q9's own fixed version
     (2026.2.14) — upgrading only to 2026.2.14 would still leave every later advisory in
     the table unfixed."""
     result = check_known_vulns(_ver_ctx("2026.2.0"))
     assert result.status == FAIL
     assert "GHSA-g6q9-8fvw-f7rf" in result.detail
-    assert "2026.9.2" in result.fix
+    assert "2026.11.4" in result.fix
 
 
 def test_b33_ghsa_g6q9_boundary_2026_2_13_fails():
@@ -345,15 +348,17 @@ def test_b33_ghsa_g6q9_fixed_version_2026_2_14_fixed_but_not_past_e059_additions
     assert result.status == FAIL
 
 
-def test_b33_version_2026_9_2_passes_all_advisories():
+def test_b33_version_2026_11_4_passes_all_advisories():
     """Past every known advisory fix, including the newest row's
-    (GHSA-5x6q-wg56-rxg8, fixed 2026.9.2) -> PASS. 2026.6.6 used to be the table's
-    ceiling (CVE-2026-62195); the C-649 batch moved it, see the next test."""
-    result = check_known_vulns(_ver_ctx("2026.9.2"))
+    (GHSA-pw3x-g8v8-fvj2, fixed 2026.11.4) -> PASS. 2026.6.6 used to be the table's
+    ceiling (CVE-2026-62195); the C-649 batch moved it to 2026.9.2 and B-1114 to
+    2026.11.4. 2026.9.2 itself (GHSA-5x6q's fix) is now inside pw3x's range."""
+    result = check_known_vulns(_ver_ctx("2026.11.4"))
     assert result.status == PASS
+    assert check_known_vulns(_ver_ctx("2026.9.2")).status == FAIL
 
 
-def test_b33_known_advisories_table_has_ninety_five_entries():
+def test_b33_known_advisories_table_has_ninety_six_entries():
     """The ClawRadar sweep 2026-07-22 appended 19 fetch-confirmed advisories to
     the existing 4 -> 23. The 2026-07-31 sweep added 2 more, each verified against
     osv.dev before landing (CVE-2026-27488 cron-webhook SSRF, last affected 2026.2.17;
@@ -361,9 +366,9 @@ def test_b33_known_advisories_table_has_ninety_five_entries():
     The 2026-10-05 sweep of the vendor repository's own advisory endpoint added every
     published core advisory reaching 2026.6.6 or later: 70 more (9 fixed in
     2026.6.8/2026.6.9, 19 in 2026.7.1, 40 in 2026.8.1, 1 in 2026.8.2, 1 in 2026.9.2)
-    -> 95 total."""
+    -> 95 total. B-1114 appended GHSA-pw3x-g8v8-fvj2 (fixed 2026.11.4) -> 96."""
     from clawseccheck.checks import _KNOWN_ADVISORIES
-    assert len(_KNOWN_ADVISORIES) == 95
+    assert len(_KNOWN_ADVISORIES) == 96
 
 
 def test_b33_does_not_add_unverified_cve_2026_25593():
@@ -413,13 +418,14 @@ def test_b33_correction_release_at_vulnerable_boundary_fails():
 
 
 def test_b33_correction_release_past_boundary_passes():
-    """"2026.9.2-2" truncates to (2026, 9, 2), past all known-advisory fixes
-    (including the newest row's, fixed 2026.9.2) -> PASS, same as its base "2026.9.2".
-    (2026.9.2 has no real correction release; the shape is what is pinned. This was
-    "2026.6.6-2" before the C-649 batch moved the table's ceiling.)"""
-    result = check_known_vulns(_ver_ctx("2026.9.2-2"))
+    """"2026.11.4-2" truncates to (2026, 11, 4), past all known-advisory fixes
+    (including the newest row's, fixed 2026.11.4) -> PASS, same as its base "2026.11.4".
+    (2026.11.4 has no real correction release; the shape is what is pinned. This was
+    "2026.9.2-2" before B-1114 and "2026.6.6-2" before the C-649 batch moved the
+    table's ceiling.)"""
+    result = check_known_vulns(_ver_ctx("2026.11.4-2"))
     assert result.status == PASS
-    assert result.status == check_known_vulns(_ver_ctx("2026.9.2")).status
+    assert result.status == check_known_vulns(_ver_ctx("2026.11.4")).status
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +545,7 @@ def test_b33_treadmill_closed_in_one_step():
         (fixed_ver for _ghsa, _max_vuln, fixed_ver, _desc in matched),
         key=lambda v: _parse_version(v),
     )
-    assert highest_fixed == "2026.9.2"  # was 2026.6.6 before the C-649 batch
+    assert highest_fixed == "2026.11.4"  # 2026.9.2 before B-1114, 2026.6.6 before C-649
     assert highest_fixed in oldest.fix
 
     result = check_known_vulns(_ver_ctx(highest_fixed))

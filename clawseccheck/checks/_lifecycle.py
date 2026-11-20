@@ -204,12 +204,12 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-10-30 against the vendor repository's own advisory endpoint (688 distinct
-# advisory ids on the core npm package, 689 range rows; newest published 2026-09-11, newest core fix
-# 2026.9.2 -- nothing new since the 2026-10-19 sweep, which counted 722 published advisories over
-# every package of the repository). The global GitHub advisory database lags it and missed a whole batch, so it is
+# Last swept: 2026-11-20 against the vendor repository's own advisory endpoint (689 distinct
+# advisory ids on the core npm package, 691 range rows; 723 published advisories over every
+# package of the repository; newest published 2026-11-19, GHSA-pw3x-g8v8-fvj2, the one id new
+# since the 2026-10-30 sweep, and the only one published as two ranges). The global GitHub advisory database lags it and missed a whole batch, so it is
 # not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
-# npm package (70 rows, titles as published); below that it is a curated subset, so the id
+# npm package (71 rows, titles as published); below that it is a curated subset, so the id
 # list for an old build is a lower bound, not a census. Checked against that sweep, a row's
 # max_vulnerable tuple is the upper bound of the range the advisory publishes: for `< X` that is X
 # minus one patch (`< 2026.8.1` -> (2026, 8, 0); no ".0" patch was ever published, so that means
@@ -573,6 +573,11 @@ _KNOWN_ADVISORIES: list[
     # ---- published 2026-09-11, first stable patched version 2026.9.2
     ("GHSA-5x6q-wg56-rxg8", (2026, 9, 1), "2026.9.2",
      "Discord realtime transcripts could inherit another speaker's owner status"),
+    # ---- published 2026-11-19, first stable patched version 2026.11.4 (extended-stable 2026.10.33);
+    # two published ranges, `>= 2026.9.2, < 2026.10.33` and `>= 2026.11.1, < 2026.11.4`: the gap
+    # between them is `_ADVISORY_RANGE_GAPS` below.
+    ("GHSA-pw3x-g8v8-fvj2", (2026, 11, 3), "2026.11.4",
+     "OpenClaw delegation could skip approval for restricted agents"),
 ]
 
 # A range with a lower bound (`>= X, < Y`): the row matches only from X up. A lower bound
@@ -602,6 +607,17 @@ _ADVISORY_FIRST_VULNERABLE: dict[str, tuple[int, ...]] = {
     "GHSA-xw48-j584-r73h": (2026, 6, 6),  # >= 2026.6.6, < 2026.8.1
     "GHSA-6xpv-wwr5-265h": (2026, 5, 28),  # >= 2026.5.28, < 2026.8.1
     "GHSA-5x6q-wg56-rxg8": (2026, 7, 2),  # >= 2026.7.2, < 2026.9.2
+    "GHSA-pw3x-g8v8-fvj2": (2026, 9, 2),  # >= 2026.9.2, < 2026.10.33 and >= 2026.11.1, < 2026.11.4
+}
+
+# An advisory published as TWO ranges (B-1114): the row's max_vulnerable and first-vulnerable
+# bound span both, and each (low, high) here - low inclusive, high exclusive, compared as parsed
+# tuples - is a stretch between them that the vendor does NOT list as vulnerable, so the row does
+# not cover a build inside it. GHSA-pw3x-g8v8-fvj2's gap is the 2026.10 extended-stable fix line:
+# 2026.10.33 is the published patched build, and no build exists between it and 2026.11.1. Like a
+# lower bound, a gap only trims which ids cover a build; it never makes the `fix` text lower.
+_ADVISORY_RANGE_GAPS: dict[str, tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]] = {
+    "GHSA-pw3x-g8v8-fvj2": (((2026, 10, 33), (2026, 11, 1)),),
 }
 
 # A range that is one exact build (`= 2026.7.1-2`). _parse_version() collapses 2026.7.1,
@@ -3910,9 +3926,9 @@ def _b33_assess(raw: str, cfg: dict) -> "_B33Outcome | None":
     None when the string cannot be parsed.
 
     A row matches when parsed <= max_vulnerable, its optional condition holds (C-414),
-    parsed >= its `_ADVISORY_FIRST_VULNERABLE` bound and, for an `_ADVISORY_EXACT_BUILDS`
-    row, the stripped string is a listed member (a row absent from a side table is
-    unbounded). For EVERY FAIL `fix` is the highest fixed version over every row that reaches
+    parsed >= its `_ADVISORY_FIRST_VULNERABLE` bound, parsed lies in none of its
+    `_ADVISORY_RANGE_GAPS` and, for an `_ADVISORY_EXACT_BUILDS` row, the stripped string is a
+    listed member (a row absent from a side table is unbounded). For EVERY FAIL `fix` is the highest fixed version over every row that reaches
     the build by version (bounds and the not-affected set only trim the id list), so upgrading
     to it clears the finding in one step. A reserved extended-stable patch follows the rule
     above the table.
@@ -3928,6 +3944,7 @@ def _b33_assess(raw: str, cfg: dict) -> "_B33Outcome | None":
         r for r in reach
         if parsed >= _ADVISORY_FIRST_VULNERABLE.get(r[0], ())
         and s in _ADVISORY_EXACT_BUILDS.get(r[0], (s,))
+        and not any(lo <= parsed < hi for lo, hi in _ADVISORY_RANGE_GAPS.get(r[0], ()))
     ]
     n_published = len(cover)  # what the finding text calls "published ranges": the not-affected id counts
     if reserved:
