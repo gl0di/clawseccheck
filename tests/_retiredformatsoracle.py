@@ -54,7 +54,7 @@ sys.path.insert(0, str(HERE.parent))
 BATTERY_PATH = HERE / "data" / "retiredformats_battery.json"
 
 #: The build the battery was generated against (recorded in the battery header).
-ORACLE_BUILD = "2026.11.4"
+ORACLE_BUILD = "2026.11.6"
 
 _FINDER = "findRetiredConfigUpgradeRequirement"
 
@@ -151,7 +151,11 @@ def vendor_vocabulary() -> "list[str]":
     literals plus the identifier words inside its template literals (``surfaces.${id}`` ->
     ``surfaces``), minus the closing ``return {message, nextAction}`` block (prose)."""
     body = vendor_sources()["finder"]
-    body = body[:body.index("if (retired.length === 0) return;")]
+    # 2026.11.5 minified the local names (`retired` -> `t`), so the closing guard is found by
+    # shape, not by name.
+    m = re.search(r"if \(\w+\.length === 0\) return;", body)
+    assert m, "the finder's closing `if (<retired>.length === 0) return;` guard moved; re-ground"
+    body = body[:m.start()]
     words: "set[str]" = set()
     for lit in re.findall(r'"([^"\\\n]*)"', body):
         words.add(lit)
