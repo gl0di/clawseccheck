@@ -4543,6 +4543,13 @@ _VENDOR_SECRET_VALUE_PATHS = tuple(
         r"(?:^|\.)request(?:\.proxy)?\.tls\.key$",  # TLS client private key (inline PEM)
         r"(?:^|\.)request\.auth\.value$",  # custom auth-header value
         r"^gateway\.remote\.edgeAuth\.[^.\[]+$",  # "secret-backed" edge-proxy headers
+        # B-1112: OpenClaw 2026.11.5's GitHub App identity. The SecretInput holds the PEM
+        # itself (github-tool-identity-*.mjs signs the app JWT with the resolved string), at the
+        # top level and per agent: agents.entries.<id> and the legacy agents.list[N] roster,
+        # both collected by runtime-config-collectors-core-*.mjs (`listAgentEntriesWithSource`;
+        # Doctor migrates the list form). Checked against 2026.11.5 and 2026.11.6.
+        # Path-scoped on purpose: a bare `privateKey` leaf is not widened into SECRET_KEY_RE.
+        r"^(?:agents\.entries\.[^.\[]+\.|agents\.list\[\]\.)?tools\.github\.app\.privateKey$",
     )
 )
 # Free-form env / header maps: the vendor redacts every value, but most values are not
