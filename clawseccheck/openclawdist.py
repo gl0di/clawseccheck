@@ -456,7 +456,16 @@ def self_reported_version(config: "dict | None") -> str:
 # B-1111: device keys moved to client/credentials.sqlite; B-1112: tools.github.app.privateKey), so
 # claiming 11.5 as grounded would drop the "newer than grounded" disclosure while the audit is known
 # to miss them. Raise it when those land.
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 4)
+# Raised to 2026.11.6 on 2026-11-20, over 2026.11.5, once they had landed: B-1110 (scheduled
+# actors read the state-DB cron_jobs Doctor moves heartbeats into), B-1111 (B188 stats
+# client/credentials.sqlite), B-1112 (a plaintext tools.github.app.privateKey), plus the two
+# windowed ports: C-804 (the harness port follows 11.5's pre-GPT-5 OpenAI routing rule) and C-805
+# (the retired-format finder is unchanged through 11.6; Doctor's retired-state advice is
+# build-aware). On the installed 11.6 (C-806): the schema snapshot is unchanged apart from its
+# stamp (167 paths), state schema 36 with 135 vendor tables, the DM-policy manifest moved no
+# channel, the default-diff oracle flipped nothing (both controls run), the fleet gate shows no
+# new FAIL, and the one advisory published since (GHSA-pw3x-g8v8-fvj2) is in B33 (B-1114).
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 6)
 
 
 def grounding_gap(installed_version: "str | None"):
