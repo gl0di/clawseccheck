@@ -1,5 +1,5 @@
 {
- "build": "2026.11.4",
+ "build": "2026.11.6",
  "rows": [
   {
    "label": "empty",
@@ -2840,7 +2840,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -2884,11 +2884,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [],
-    "refs": [
-     "anthropic/c"
-    ],
-    "runtimes": []
+    "error": "n.find is not a function"
    }
   },
   {
@@ -8729,18 +8725,14 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai /o3",
      "google/codex-mini",
      "anthropic/gpt-image-1",
      "anthropic/gpt-5.6-sol"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -9463,9 +9455,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "anthropic/o3",
      "azure/m:work",
@@ -9473,9 +9463,7 @@
      "openai/o3",
      "x/codex-mini"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -10362,7 +10350,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -10955,7 +10943,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -11766,7 +11754,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -12257,9 +12245,7 @@
     "refs": [
      "OpenAI/o3"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -13068,9 +13054,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai/o3",
      "anthropic/o3",
@@ -13078,9 +13062,7 @@
      "openai:w/gpt-5",
      "google/gpt-5.6-sol"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -13300,7 +13282,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -15815,15 +15797,11 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai /o3"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -16281,7 +16259,7 @@
      "alias",
      "google/gpt-image-1"
     ],
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -16550,17 +16528,13 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "x/m:work",
      "openai/o3",
      "openai-codex/*"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -17676,16 +17650,12 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai /o3",
      "azure/codex-mini"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -19901,7 +19871,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -21089,9 +21059,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai-codex/m:work",
      "azure/m:work",
@@ -21101,9 +21069,7 @@
      "openai-codex/m",
      "google/gpt-image-1"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -22053,7 +22019,7 @@
    },
    "env": {},
    "oracle": {
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
@@ -22337,17 +22303,13 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai/o3",
      "azure/gpt-image-1",
      "openai:w/m:work"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -22551,9 +22513,7 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai/gpt-5",
      "OpenAI/o3",
@@ -22824,16 +22784,12 @@
    },
    "env": {},
    "oracle": {
-    "collect": [
-     "codex"
-    ],
+    "collect": [],
     "refs": [
      "openai/o3",
      "openai-codex/o3"
     ],
-    "runtimes": [
-     "codex"
-    ]
+    "runtimes": []
    }
   },
   {
@@ -24093,7 +24049,7 @@
      "openai-codex/gpt-image-1",
      "azure/*"
     ],
-    "error": "value?.id?.trim is not a function"
+    "error": "e?.id?.trim is not a function"
    }
   },
   {
