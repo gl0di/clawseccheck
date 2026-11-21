@@ -143,4 +143,10 @@ def test_vendor_chunks_operator_patterns_only_above_32_kib():
                   contains="function replacePatternBounded")])
     assert re.search(r"REDACT_REGEX_CHUNK_THRESHOLD = 32768;", text)
     assert re.search(r"REDACT_REGEX_CHUNK_SIZE = 16384;", text)
-    assert "!builtInResolvedPatterns.has(pattern)" in text  # built-ins are scanned whole
+    # Built-ins are scanned whole; only a pattern that is not built-in reaches the chunked
+    # replace. 2026.11.5 minified the loop variable (``pattern`` -> ``a``; the module-level
+    # ``builtInResolvedPatterns`` set keeps its name), so pin the guard by shape: the
+    # built-in exclusion must sit in the condition that selects ``replacePatternBounded``.
+    assert re.search(
+        r"!builtInResolvedPatterns\.has\(\w+\)[^?;]*\? replacePatternBounded\(", text), (
+        "the built-in / operator split moved - re-check what the chunked replace covers")

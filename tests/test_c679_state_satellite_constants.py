@@ -348,3 +348,50 @@ def test_the_installed_dist_classifies_every_schema_constant_and_matches_the_bas
     _, names = _read_vendor_table_baseline()
     assert set(provenance) == set(_STATE_SATELLITE_CONSTANTS) | {_FEATURE_PROVENANCE_KEY}
     assert _table_set_delta(surface, names) == ([], [])
+
+
+# C-806 (OpenClaw 2026.11.6): `save.kernel-*.mjs` takes CRON_RUNTIME_AUTHORITY_TABLE from an import of
+# `runtime-authority-store-*.mjs` instead of binding it locally. `_bound_string_literal` follows exactly
+# one relative ES import to the exporting module and its single string binding.
+
+def _hop(tmp_path, importer: str, target: str):
+    import test_state_schema_grounding as g
+    (tmp_path / "store-AbCd1234.mjs").write_text(target, encoding="utf-8")
+    p = tmp_path / "save.kernel-XyZw9876.mjs"
+    p.write_text(importer, encoding="utf-8")
+    return g._bound_string_literal(importer, "TBL", "X_SCHEMA_SQL", p)
+
+
+_TARGET_OK = 'const TBL_LOCAL = "cron_job_runtime_authorities";\nexport { TBL_LOCAL as t };\n'
+
+
+def test_a_table_constant_imported_from_one_module_is_followed(tmp_path):
+    imp = 'import { a as other, t as TBL } from "./store-AbCd1234.mjs";\n'
+    assert _hop(tmp_path, imp, _TARGET_OK) == "cron_job_runtime_authorities"
+    # the unaliased form too
+    assert _hop(tmp_path, 'import { TBL } from "./store-AbCd1234.mjs";\n',
+                'const TBL = "x_table";\nexport { TBL };\n') == "x_table"
+
+
+@pytest.mark.parametrize("importer,target", [
+    # two imports of the same identifier
+    ('import { t as TBL } from "./store-AbCd1234.mjs";\nimport { t as TBL } from "./store-AbCd1234.mjs";\n',
+     _TARGET_OK),
+    # the target does not export that name
+    ('import { q as TBL } from "./store-AbCd1234.mjs";\n', _TARGET_OK),
+    # the exported local is bound twice
+    ('import { t as TBL } from "./store-AbCd1234.mjs";\n',
+     _TARGET_OK + 'let TBL_LOCAL = "other";\n'),
+    # a non-relative (package) import is never followed
+    ('import { t as TBL } from "some-package";\n', _TARGET_OK),
+    # the target file is missing
+    ('import { t as TBL } from "./missing-00000000.mjs";\n', _TARGET_OK),
+])
+def test_an_ambiguous_or_unresolvable_import_is_refused(tmp_path, importer, target):
+    with pytest.raises(AssertionError, match="not bound to exactly one"):
+        _hop(tmp_path, importer, target)
+
+
+def test_a_local_binding_still_wins_over_an_import(tmp_path):
+    imp = 'import { t as TBL } from "./store-AbCd1234.mjs";\nconst TBL = "local_table";\n'
+    assert _hop(tmp_path, imp, _TARGET_OK) == "local_table"

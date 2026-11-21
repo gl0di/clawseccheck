@@ -213,7 +213,7 @@ _MAX_OWN_SOURCE_BYTES = 2_000_000
 # relying on any figure quoted here.
 #   * _MAX_OWN_SOURCE_FILES: the real engine has 11 files, so 32 is ~2.9x headroom.
 #   * _MAX_OWN_SOURCE_TOTAL_BYTES: the real engine is 11 files, about 4.8 MB in all,
-#     largest about 1.0 MB, so 8 MB is ~1.7x headroom, in line with the ~2x the per-file
+#     largest about 1.0 MB, so 8 MB is ~1.6x headroom, in line with the ~2x the per-file
 #     cap keeps over the largest real file. Only files under the per-file cap count
 #     toward it. (The engine figures are rounded; a test fails if they drift over 3%.)
 # Do NOT lower any of the three without re-measuring: a cap the real install exceeds loses
@@ -5683,7 +5683,7 @@ def _cron_store_key_candidates(jobs_json: Path) -> list:
     """Return the ``cron_jobs.store_key`` spellings that denote the audited store file.
 
     The runtime's partition key is ``cronStoreKey(storePath) { return path.resolve(storePath); }``
-    (key-BBZ40bDq.mjs:5-7, grounded against openclaw@2026.9.3) - an identity resolve, so the
+    (key-BNWVX7Bb.mjs:5-7, read 2026-11-18, 2026.11.5; body identical to 2026.11.4 apart from the minified parameter) - an identity resolve, so the
     key is just the absolute store path.
 
     Two spellings are returned because Node's ``path.resolve`` is **purely lexical**
@@ -5771,7 +5771,7 @@ def _flag_shadowed_cron_store(home: Path, ctx: Context, jobs_json: Path) -> None
     store path only to derive a key (``cronStoreKey(path.resolve(storePath))``,
     store-ScQ9SjOe.js:710) and then reads ``loadCronRows`` from the database; writes go
     through ``replaceCronRows`` (store-ScQ9SjOe.js:647). Grepped the dist's cron modules
-    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BBZ40bDq.mjs) for unlink/rm/writeFile: there
+    (store-ScQ9SjOe.js, run-log-DIhrTrSU.js, key-BNWVX7Bb.mjs as of 2026.11.5) for unlink/rm/writeFile: there
     are none, so nothing ever removes a stale jobs.json. An install that predates the SQLite
     migration therefore keeps a file that the runtime no longer reads, and differencing run
     logs against it makes live jobs look erased.

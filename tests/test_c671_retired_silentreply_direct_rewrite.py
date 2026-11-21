@@ -24,7 +24,11 @@ from _distgrounding import dist_file, require_dist
 
 from clawseccheck.catalog import PASS, WARN
 from clawseccheck.checks._config import check_retired_config_keys_invalid
-from clawseccheck.checks._shared import _RETIRED_CONFIG_KEYS, _retired_keys_present
+from clawseccheck.checks._shared import (
+    _RETIRED_CONFIG_KEYS,
+    _RETIRED_HEARTBEAT_KEYS,
+    _retired_keys_present,
+)
 from clawseccheck.collector import Context
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,7 +135,8 @@ def test_b382_stays_advisory_warn_at_most():
 def test_pass_text_says_what_was_checked_not_that_the_file_is_complete():
     f = _run({"gateway": {"port": 1}}, "2026.9.9")
     assert f.status == PASS
-    n = len(_RETIRED_CONFIG_KEYS)
+    # B-1110: the PASS count also covers the three heartbeat rows kept beside the table.
+    n = len(_RETIRED_CONFIG_KEYS) + len(_RETIRED_HEARTBEAT_KEYS)
     assert f"none of the {n} retired config keys this check tracks" in f.detail
     assert "holds no key that OpenClaw" not in f.detail
     # the advice must also stop short of "complete": the list is not the vendor's own
@@ -142,7 +147,8 @@ def test_pass_text_says_what_was_checked_not_that_the_file_is_complete():
 def test_pass_count_follows_the_table_not_a_literal():
     f = _run({}, "2026.9.9")
     assert f.status == PASS
-    assert re.search(rf"none of the {len(_RETIRED_CONFIG_KEYS)} ", f.detail)
+    assert re.search(rf"none of the {len(_RETIRED_CONFIG_KEYS) + len(_RETIRED_HEARTBEAT_KEYS)} ",
+                     f.detail)
 
 
 def test_threat_coverage_row_states_the_new_size_and_the_floor():

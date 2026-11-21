@@ -48,6 +48,7 @@ import _retiredformatsoracle as oracle
 from clawseccheck import retiredformats as rf
 from clawseccheck.checks import (
     _DOCTOR_REFUSES_RETIRED_MIN,
+    _DOCTOR_MIGRATES_RETIRED_STATE_MIN,
     _RETIRED_CONFIG_KEYS,
     _RETIRED_STATE_BRIDGE_VERSION,
 )
@@ -413,7 +414,14 @@ def test_retired_state_file_makes_the_vendor_throw_naming_the_bridge(
     thrown = vendor_state_answers[scenario][probe]
     assert thrown is not None, f"{scenario}: no longer a retired state file"
     assert thrown["name"] == "RetiredStateFormatError"
-    assert f"Upgrade through OpenClaw {_RETIRED_STATE_BRIDGE_VERSION}," in thrown["message"]
+    installed = _numeric_version(oracle.dist_version())
+    if installed is not None and installed >= _DOCTOR_MIGRATES_RETIRED_STATE_MIN:
+        # C-805: the message stopped naming a bridge release; it sends the user to Doctor,
+        # which the B168 label and the B356 fix now say on these builds.
+        assert 'Run "openclaw doctor --fix" to migrate or archive them' in thrown["message"]
+        assert "Upgrade through" not in thrown["message"]
+    else:
+        assert f"Upgrade through OpenClaw {_RETIRED_STATE_BRIDGE_VERSION}," in thrown["message"]
 
 
 def test_an_unreferenced_oauth_sidecar_does_not_block_doctor(vendor_state_answers):

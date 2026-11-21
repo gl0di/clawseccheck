@@ -176,6 +176,11 @@ def pin_fixture_modes() -> None:
     loop -- a duplicate is exactly how the standalone ``--write`` path drifted from what
     pytest's own autouse fixture pins in the first place.
     """
+    # C-809: the corpus's SKILL.md files are generated from tests/fixture_skill_md/, so a
+    # standalone entry point (e.g. the fingerprint manifest's --write) must write them before
+    # it pins or reads anything.
+    from _fixtureskills import materialize
+    materialize()
     _FIXTURES.chmod(_DIR_MODE)
     for p in iter_fixture_paths():
         p.chmod(expected_mode(p))

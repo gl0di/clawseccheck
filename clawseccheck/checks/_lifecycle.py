@@ -84,6 +84,7 @@ from ._shared import (
     _node_allow_skills,  # B396 - shared with B386
     _node_commands,  # B396 - shared with B71
     _doctor_refuses_retired_formats,  # C-686
+    _doctor_migrates_retired_state,  # C-805
     _doctor_whole_config_hedge,  # C-686
     _numeric_version,  # B396
     _RETIRED_STATE_BRIDGE_VERSION,  # C-686
@@ -96,6 +97,8 @@ from ._shared import (
     _safe_mtime,
     _skill_corpus_complete,
     _skill_frontmatter_block,
+    _scheduled_actor_source,  # B-1110
+    _heartbeat_config_retired,  # B-1110
     _surface_absent,
     _workshop_proposals_state,  # C-744
     _workshop_symlink_knob,
@@ -202,12 +205,12 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # row is not exempt from this gate merely because it is more precise than a version-only
 # one - precision does not change what it discloses.
 #
-# Last swept: 2026-10-30 against the vendor repository's own advisory endpoint (688 distinct
-# advisory ids on the core npm package, 689 range rows; newest published 2026-09-11, newest core fix
-# 2026.9.2 -- nothing new since the 2026-10-19 sweep, which counted 722 published advisories over
-# every package of the repository). The global GitHub advisory database lags it and missed a whole batch, so it is
+# Last swept: 2026-11-20 against the vendor repository's own advisory endpoint (689 distinct
+# advisory ids on the core npm package, 691 range rows; 723 published advisories over every
+# package of the repository; newest published 2026-11-19, GHSA-pw3x-g8v8-fvj2, the one id new
+# since the 2026-10-30 sweep, and the only one published as two ranges). The global GitHub advisory database lags it and missed a whole batch, so it is
 # not a sweep source. From 2026.6.6 up this table holds EVERY published advisory on the core
-# npm package (70 rows, titles as published); below that it is a curated subset, so the id
+# npm package (71 rows, titles as published); below that it is a curated subset, so the id
 # list for an old build is a lower bound, not a census. Checked against that sweep, a row's
 # max_vulnerable tuple is the upper bound of the range the advisory publishes: for `< X` that is X
 # minus one patch (`< 2026.8.1` -> (2026, 8, 0); no ".0" patch was ever published, so that means
@@ -232,7 +235,8 @@ _IDENTITY_TARGETS = ("SOUL.md",)  # minimal - the single file that defines the a
 # of a published summary is noticed (owner ruling C-662, g).
 #
 # Extended-stable builds (a final release, minor 1-12, patch >= 33 - the maintenance lines
-# 2026.6.33-35, 2026.7.33-35 and 2026.8.33-35) get fixes back-ported selectively and the
+# 2026.6.33-35, 2026.7.33-35, 2026.8.33-35 and 2026.9.33-37; 2026.10.33 is clear through
+# `_ADVISORY_RANGE_GAPS`) get fixes back-ported selectively and the
 # advisories do not say which. Measured against the vendor's repository: the 2026.8 line is
 # the exact 2026.8.2 release plus back-ports and, as far as could be checked, carries the
 # batch's fixes (the one advisory fixed in 2026.9.2 is back-ported there; its code is absent
@@ -571,6 +575,11 @@ _KNOWN_ADVISORIES: list[
     # ---- published 2026-09-11, first stable patched version 2026.9.2
     ("GHSA-5x6q-wg56-rxg8", (2026, 9, 1), "2026.9.2",
      "Discord realtime transcripts could inherit another speaker's owner status"),
+    # ---- published 2026-11-19, first stable patched version 2026.11.4 (extended-stable 2026.10.33);
+    # two published ranges, `>= 2026.9.2, < 2026.10.33` and `>= 2026.11.1, < 2026.11.4`: the gap
+    # between them is `_ADVISORY_RANGE_GAPS` below.
+    ("GHSA-pw3x-g8v8-fvj2", (2026, 11, 3), "2026.11.4",
+     "OpenClaw delegation could skip approval for restricted agents"),
 ]
 
 # A range with a lower bound (`>= X, < Y`): the row matches only from X up. A lower bound
@@ -600,6 +609,17 @@ _ADVISORY_FIRST_VULNERABLE: dict[str, tuple[int, ...]] = {
     "GHSA-xw48-j584-r73h": (2026, 6, 6),  # >= 2026.6.6, < 2026.8.1
     "GHSA-6xpv-wwr5-265h": (2026, 5, 28),  # >= 2026.5.28, < 2026.8.1
     "GHSA-5x6q-wg56-rxg8": (2026, 7, 2),  # >= 2026.7.2, < 2026.9.2
+    "GHSA-pw3x-g8v8-fvj2": (2026, 9, 2),  # >= 2026.9.2, < 2026.10.33 and >= 2026.11.1, < 2026.11.4
+}
+
+# An advisory published as TWO ranges (B-1114): the row's max_vulnerable and first-vulnerable
+# bound span both, and each (low, high) here - low inclusive, high exclusive, compared as parsed
+# tuples - is a stretch between them that the vendor does NOT list as vulnerable, so the row does
+# not cover a build inside it. GHSA-pw3x-g8v8-fvj2's gap is the 2026.10 extended-stable fix line:
+# 2026.10.33 is the published patched build, and no build exists between it and 2026.11.1. Like a
+# lower bound, a gap only trims which ids cover a build; it never makes the `fix` text lower.
+_ADVISORY_RANGE_GAPS: dict[str, tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]] = {
+    "GHSA-pw3x-g8v8-fvj2": (((2026, 10, 33), (2026, 11, 1)),),
 }
 
 # A range that is one exact build (`= 2026.7.1-2`). _parse_version() collapses 2026.7.1,
@@ -624,6 +644,13 @@ _EXTENDED_STABLE_LINES: dict[tuple[int, int], tuple[int, tuple[str, ...]]] = {
     (2026, 6): (35, ("GHSA-8xxh-v4vc-qvm4", "GHSA-66hm-hxq3-5pfh")),
     (2026, 7): (35, ("GHSA-66hm-hxq3-5pfh", "GHSA-xx9p-hc9w-6p5h", "GHSA-7cp7-87pj-p32v")),
     (2026, 8): (35, ()),
+    # B-1114 follow-up (2026-11-20): the 2026.9.37 release tarball's `openclaw` delegate tool
+    # (`createOpenClawDelegateToolsForRun`, openclaw-tools-*.mjs) decides `fullPermission` from the
+    # exec defaults alone (security "full", ask "off", not sandboxed, not workspace-only) and never
+    # consults the tool policy, and it has no `hasUnrestrictedGatewayExecution` check - the code the
+    # 2026.10.33 fix ("require effective approval for delegated changes") added. Pre-fix code
+    # observed, so GHSA-pw3x-g8v8-fvj2 is confirmed unfixed on the 2026.9 line.
+    (2026, 9): (37, ("GHSA-pw3x-g8v8-fvj2",)),
 }
 _EXTENDED_STABLE_RE = re.compile(r"([1-9][0-9]{3})\.([1-9]|1[0-2])\.([1-9][0-9]*)")
 
@@ -1054,13 +1081,13 @@ def check_autonomy(ctx: Context) -> Finding:
     # Signal 2: real heartbeat / cron keys in config
     # Real paths: agents.defaults.heartbeat or agents.list[].heartbeat; top-level cron
     # heartbeat (top-level) and schedule do NOT exist in OpenClaw schema - removed
-    has_heartbeat_cfg = bool(
-        dig(cfg, "agents.defaults.heartbeat")
-        # B-699: agents.entries as well as agents.list
-        or any(dig(agent.entry, "heartbeat") for agent in agent_roster(cfg))
-        or dig(cfg, "cron")
-    )
+    # B-1110: plus an enabled state-DB cron job -- OpenClaw 2026.11.5's Doctor deletes the
+    # heartbeat keys and moves each schedule into the `cron_jobs` table, so on that build the
+    # config alone shows no unattended actor. Config evidence is read first (same set as before).
+    source = _scheduled_actor_source(ctx)
+    has_heartbeat_cfg = source is not None
     autonomous = has_heartbeat_file or has_heartbeat_cfg
+    db_only = source == "cron_jobs" and not has_heartbeat_file
 
     if not autonomous:
         # Either no HEARTBEAT.md/config signal at all, OR a HEARTBEAT.md exists but
@@ -1073,14 +1100,42 @@ def check_autonomy(ctx: Context) -> Finding:
                 "A HEARTBEAT.md file is present but contains no task content (empty or "
                 "comments-only) and no heartbeat/cron config key was found \u2014 cannot "
                 "confirm the agent actually runs on an active schedule.",
-                "If heartbeat scheduling is intended, add real task entries to "
-                "HEARTBEAT.md or set agents.defaults.heartbeat / a per-agent heartbeat.",
+                # B-1110: 2026.11.5 retired the heartbeat config (B382 flags it there), so the
+                # old advice would send the user to a key their build rejects.
+                ("If scheduled runs are intended, add real task entries to HEARTBEAT.md or "
+                 "schedule a cron job (OpenClaw 2026.11.5 and later no longer accepts a "
+                 "heartbeat config key)."
+                 if _heartbeat_config_retired(ctx) else
+                 "If heartbeat scheduling is intended, add real task entries to "
+                 "HEARTBEAT.md or set agents.defaults.heartbeat / a per-agent heartbeat."),
             )
         return _finding("B17", UNKNOWN, "No autonomy/heartbeat signal detected.", "\u2014")
 
     tools = _enabled_tools(cfg)
     has_outbound = _hint(tools, OUTBOUND_TOOL_HINTS)
 
+    if db_only:
+        # B-1110: new evidence path, new wording (the config-evidence `detail` strings below
+        # are unchanged -- baseline.fingerprint() hashes `detail`).
+        if has_outbound:
+            return _finding(
+                "B17",
+                WARN,
+                "Agent runs autonomously (scheduled automation: an enabled cron job in the "
+                "OpenClaw state database) and can take outbound actions \u2014 ensure it "
+                "cannot act on untrusted input without approval.",
+                "Add an approval gate (tools.exec.mode='ask', or tools.exec.ask='always' to "
+                "be asked before every one) for all outbound/exec actions triggered by "
+                "scheduled cron jobs; validate any external content before acting on it.",
+            )
+        return _finding(
+            "B17",
+            WARN,
+            "Agent runs on a schedule (an enabled cron job in the OpenClaw state "
+            "database) \u2014 verify scheduled job payloads cannot be manipulated by "
+            "untrusted input (e.g. memory poisoning, injected task files).",
+            "Review the enabled cron jobs and keep their payloads write-protected.",
+        )
     if has_outbound:
         return _finding(
             "B17",
@@ -1965,7 +2020,14 @@ def check_cron_job_content(ctx: Context) -> Finding:
         # swapped by the INSTALLED build only (an unknown or older build keeps the
         # original, byte for byte) and the FAIL stays: the file is still a latent hazard on
         # the upgrade route the vendor itself prescribes.
+        # C-805: from 2026.11.5 Doctor migrates retired cron state again (the vendor's own
+        # message now says 'Run "openclaw doctor --fix" to migrate or archive them'), so the
+        # reactivation sentence is true again on those builds.
         dormant_label = (
+            f"{job_label}.payload (dormant legacy shape \u2014 `openclaw doctor --fix` on the "
+            "installed OpenClaw imports this retired file into its active cron jobs, which "
+            "would reactivate it, unless it quarantines the row)"
+            if _doctor_migrates_retired_state(ctx) else
             f"{job_label}.payload (dormant legacy shape \u2014 the installed OpenClaw's "
             "Doctor refuses this retired file instead of importing it; Doctor on the "
             f"bridge release {_RETIRED_STATE_BRIDGE_VERSION} would import it)"
@@ -3880,9 +3942,9 @@ def _b33_assess(raw: str, cfg: dict) -> "_B33Outcome | None":
     None when the string cannot be parsed.
 
     A row matches when parsed <= max_vulnerable, its optional condition holds (C-414),
-    parsed >= its `_ADVISORY_FIRST_VULNERABLE` bound and, for an `_ADVISORY_EXACT_BUILDS`
-    row, the stripped string is a listed member (a row absent from a side table is
-    unbounded). For EVERY FAIL `fix` is the highest fixed version over every row that reaches
+    parsed >= its `_ADVISORY_FIRST_VULNERABLE` bound, parsed lies in none of its
+    `_ADVISORY_RANGE_GAPS` and, for an `_ADVISORY_EXACT_BUILDS` row, the stripped string is a
+    listed member (a row absent from a side table is unbounded). For EVERY FAIL `fix` is the highest fixed version over every row that reaches
     the build by version (bounds and the not-affected set only trim the id list), so upgrading
     to it clears the finding in one step. A reserved extended-stable patch follows the rule
     above the table.
@@ -3898,6 +3960,7 @@ def _b33_assess(raw: str, cfg: dict) -> "_B33Outcome | None":
         r for r in reach
         if parsed >= _ADVISORY_FIRST_VULNERABLE.get(r[0], ())
         and s in _ADVISORY_EXACT_BUILDS.get(r[0], (s,))
+        and not any(lo <= parsed < hi for lo, hi in _ADVISORY_RANGE_GAPS.get(r[0], ()))
     ]
     n_published = len(cover)  # what the finding text calls "published ranges": the not-affected id counts
     if reserved:
@@ -8648,7 +8711,9 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
     nested `groupAllowFrom`/per-group/per-topic variants - see `checks/_agents.py`'s
     `groupAllowFrom`-wins-for-groups handling and `checks/_capability.py`'s `dmPolicy`/
     `groupPolicy` reading, which already model that shape); device-auth tokens now live
-    in the state SQLite DB (`device_auth_tokens`/`gateway_origin_device_tokens`).
+    in a SQLite DB - the state DB before OpenClaw 2026.11.5, and from 2026.11.5 the client
+    credential store `client/credentials.sqlite` (`device_auth_tokens`/
+    `gateway_origin_device_tokens`).
 
     So this is not "an attacker added a sender ID" - it is "this install has not run
     `openclaw doctor --fix`", and for the device-auth file specifically that carries an
@@ -8715,6 +8780,18 @@ def check_legacy_state_migration_pending(ctx: Context) -> Finding:
             "Stop the OpenClaw gateway and run `openclaw doctor --fix` to migrate this "
             "legacy state, then confirm the file(s) above are gone."
             + (
+                # C-805: on 2026.11.5 and later a retired state file no longer stops Doctor
+                # (see `_DOCTOR_MIGRATES_RETIRED_STATE_MIN`); a retired config key still does.
+                " On OpenClaw 2026.11.5 and later Doctor still stops first if the config "
+                "holds a retired pre-July-2026 key, and names the release to install first, "
+                "so follow that message before retrying. In the usual case retired state files "
+                "no longer stop it: for older cron state, OAuth credential sidecars, JSON "
+                "delivery queues and a legacy plugin install index, OpenClaw's own message "
+                "says to run `openclaw doctor --fix`, which migrates or archives them. It "
+                "still stops on the cron files at a custom `cron.store` path while the config "
+                "itself does not parse (fix the config first), and on a retired file it "
+                "cannot read (restore access to it)."
+                if _doctor_migrates_retired_state(ctx) else
                 # C-686: EXECUTED on 2026.10.2 -- Doctor's preflight (`prepareDoctorConfigRecovery`)
                 # throws before it migrates anything when the config holds a key from the
                 # vendor's retired list or the state tree holds a retired file (OAuth

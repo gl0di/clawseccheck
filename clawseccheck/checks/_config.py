@@ -56,6 +56,7 @@ from ._content import (
 )
 from ._shared import (
     _RETIRED_CONFIG_KEYS,
+    _RETIRED_HEARTBEAT_KEYS,
     _b323_contains_env_var_reference,
     _B55_FS_WRITE_TOOLS,
     _C015_EXTRA_SECRET_PATTERNS,  # noqa: F401 - re-exported (moved to _shared, B-666)
@@ -2392,7 +2393,7 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
                 # measured, not every key the vendor ever removed, so "holds no removed key"
                 # would read as a completeness claim this check cannot make. C-689: inside
                 # the finder's window the PASS also says the vendor's own list was applied.
-                f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired "
+                f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS) + len(_RETIRED_HEARTBEAT_KEYS)} retired "
                 f"config keys this check tracks, and OpenClaw {installed}'s own "
                 "retired-format finder names nothing in it.",
                 "No action needed. The list covers only the retired keys that were measured, "
@@ -2408,7 +2409,7 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
         return _finding(
             "B382",
             PASS,
-            f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS)} retired config "
+            f"The file audited holds none of the {len(_RETIRED_CONFIG_KEYS) + len(_RETIRED_HEARTBEAT_KEYS)} retired config "
             "keys this check tracks. OpenClaw's own retired-format list was NOT checked: it "
             f"is ported only for {window} and this build is {installed}.",
             "No action needed for the keys this check tracks. The list covers only the "
@@ -2472,6 +2473,15 @@ def check_retired_config_keys_invalid(ctx: Context) -> Finding:
             "A config that uses $include may be refused automatic repair, so run the "
             "command explicitly."
         )
+        if any(path.endswith((".heartbeat", ".heartbeatVisibility")) for path, _repl in found):
+            # B-1110: these rows have no replacement KEY -- Doctor moves a heartbeat into a
+            # state-DB cron job -- so name the command, and warn that deleting by hand
+            # discards the schedule. Only in `fix`; `detail` (the fingerprint) is untouched.
+            fix += (
+                " For a retired heartbeat key there is no replacement key: `openclaw doctor "
+                "--fix` preserves the heartbeat as an editable automation (a cron job in the "
+                "OpenClaw state database), while deleting the key by hand discards it."
+            )
         if _doctor_refuses_retired_formats(ctx) and not in_window:
             # C-686: from 2026.10.1 Doctor and `openclaw update` STOP on a config that holds a
             # key from the vendor's retired list. Inside the port's window the finder was
@@ -5184,6 +5194,9 @@ _NODE_WORKER_DEFAULT_IMAGE_BY_BUILD = {
     (2026, 11, 1): "node:24.22.1-slim",
     (2026, 11, 2): "node:24.22.1-slim",
     (2026, 11, 3): "node:24.22.1-slim",
+    (2026, 11, 4): "node:24.22.1-slim",
+    (2026, 11, 5): "node:24.22.1-slim",
+    (2026, 11, 6): "node:24.22.1-slim",
 }
 
 
@@ -8656,6 +8669,139 @@ def check_gateway_computer_plugin_reach(ctx: Context) -> Finding:
         "instead), or set plugins.entries.cua-computer.enabled to false if desktop "
         "control is not actually needed.",
         evidence=warn_scopes,
+    )
+
+
+# B399 - a standing auto-approval grant for the `openclaw` delegate tool. Grounded
+# against openclaw@2026.11.4 (read 2026-11-16), by symbol name (the bundle filenames rotate
+# every release): `OpenClawToolConfigSchema` declares `tools.openclaw.autoApproveChanges`
+# as `strictObject({autoApproveChanges: boolean().optional()})`, global and per agent;
+# `createOpenClawDelegateToolsForRun` (openclaw-tools-*.mjs) builds the delegate tool
+# only for an unsandboxed run of an agent other than `openclaw`, and
+# `assertAutoApproveChangesCurrent` is the gate that lets a delegated change skip human
+# approval when the effective value (agent value, else the global one) is true. The tool
+# itself sits behind the ordinary tool policy (it is in `group:automation` and
+# `group:openclaw`, and in no profile except `full`), which `toolgrant.granted` models.
+# `granted()` returns a plain bool (no unknown state), so an opaque row (byProvider /
+# toolsBySender layers it cannot see) is judged on that bool and is NOT skipped: the
+# quiet direction there is a finding, not silence. WARN-only, never FAIL: it is an
+# explicit operator opt-in, not a proven compromise.
+def _b399_block_malformed(owner) -> bool:
+    """True when ``tools`` or ``tools.openclaw`` on a config root or roster entry is present
+    but not an object (``dig()`` would read that as "absent"). Null is unset, not malformed."""
+    if not isinstance(owner, dict):
+        return False
+    tools = owner.get("tools")
+    if tools is None:
+        return False
+    if not isinstance(tools, dict):
+        return True
+    block = tools.get("openclaw")
+    return block is not None and not isinstance(block, dict)
+
+
+def check_openclaw_auto_approve_changes(ctx: Context) -> Finding:
+    """B399 - ``tools.openclaw.autoApproveChanges: true`` (global, or per agent) lets the
+    `openclaw` delegate tool apply config/channel/plugin/provider/API-key changes with no
+    human approval. WARN when an agent that can be offered the tool outside a sandbox
+    resolves to true; UNKNOWN when nothing could be read or the value is malformed; PASS
+    otherwise. See the comment block above for the vendor grounding."""
+    from ..logsafe import redact  # noqa: PLC0415
+
+    if (f := _config_unreadable("B399", ctx)) is not None:
+        return f
+    cfg = ctx.config
+    if not isinstance(cfg, dict) or not cfg:
+        return _finding(
+            "B399",
+            UNKNOWN,
+            "No config was read, so whether the `openclaw` delegate tool holds a standing "
+            "auto-approval grant could not be determined.",
+            "Run the audit on the host where ~/.openclaw lives.",
+            not_applicable=_surface_absent(ctx, LIMIT_DOMAIN_CONFIG),
+        )
+    scopes = _toolgrant.resolved_scopes(cfg)
+    if scopes is None:
+        return _finding(
+            "B399",
+            UNKNOWN,
+            "The tool policy or agent roster could not be resolved (a malformed tools "
+            "block, or two agents whose ids normalize to the same id), so whether the "
+            "`openclaw` delegate tool is offered with tools.openclaw.autoApproveChanges "
+            "set could not be determined.",
+            "Make every tools block a valid object and give each agent a distinct id, "
+            "then re-run the audit.",
+        )
+
+    g = None
+    g_malformed = _b399_block_malformed(cfg)
+    if not g_malformed:
+        g = dig(cfg, "tools.openclaw.autoApproveChanges")
+        g_malformed = g is not None and not isinstance(g, bool)
+    offending = []
+    malformed = []
+    for row in scopes:
+        scope_id = row.scope if isinstance(row.scope, str) else "main"
+        if _toolgrant._normalize_agent_id(scope_id) == "openclaw":
+            continue
+        a = None
+        a_malformed = _b399_block_malformed(row.entry)
+        if not a_malformed and isinstance(row.entry, dict):
+            a = dig(row.entry, "tools.openclaw.autoApproveChanges")
+            a_malformed = a is not None and not isinstance(a, bool)
+        if a_malformed or (a is None and g_malformed):
+            malformed.append(redact(row.label))
+            continue
+        eff = a if a is not None else g
+        if eff is not True:
+            continue
+        if not _toolgrant.granted(cfg, "openclaw", row.scope):
+            continue
+        if _b389_sandbox_mode(cfg, row.entry) == "all":
+            continue
+        source = "per-agent override" if a is not None else "global setting"
+        offending.append((redact(row.label), source))
+
+    if offending:
+        offending.sort()
+        joined = ", ".join(f"{label} ({source})" for label, source in offending)
+        return _finding(
+            "B399",
+            WARN,
+            f"tools.openclaw.autoApproveChanges is true for {joined}, and the `openclaw` "
+            "delegate tool is offered to those agents outside a sandbox, so a "
+            "prompt-injected request in such a session can have OpenClaw apply config, "
+            "channel, plugin, provider and API-key changes - including changes that run "
+            "code on the Gateway host - without a human approval, even where exec and "
+            "file-write tools are denied.",
+            "Set tools.openclaw.autoApproveChanges to false, and change any per-agent "
+            "override (agents.entries.<id>.tools.openclaw.autoApproveChanges) that is "
+            "true, so every delegated change waits for your approval. Or deny the tool "
+            "(tools.deny: [\"openclaw\"]) for agents that do not need delegated setup. "
+            "sandbox.mode \"all\" also removes the tool; \"non-main\" leaves each agent's "
+            "main session unsandboxed. tools.fs.workspaceOnly blocks this grant only "
+            "outside Full Access sessions, so do not rely on it.",
+            evidence=[label for label, _source in offending],
+        )
+    if malformed:
+        return _finding(
+            "B399",
+            UNKNOWN,
+            "tools.openclaw.autoApproveChanges (or an agent's override) is set to a value "
+            "that is not true or false, which OpenClaw's config schema rejects, so the "
+            "standing delegation grant could not be determined.",
+            "Set it to true or false (false keeps delegated changes under human review), "
+            "then re-run the audit.",
+        )
+    return _finding(
+        "B399",
+        PASS,
+        "No agent that can be offered the `openclaw` delegate tool has "
+        "tools.openclaw.autoApproveChanges set to true, so delegated OpenClaw changes are "
+        "applied automatically only under Full Access and otherwise wait for human "
+        "approval.",
+        "No action needed. Keep tools.openclaw.autoApproveChanges unset or false unless an "
+        "agent must apply OpenClaw changes unattended.",
     )
 
 

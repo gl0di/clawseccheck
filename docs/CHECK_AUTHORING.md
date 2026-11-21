@@ -34,6 +34,12 @@ its topic peers, and keep the two registries the single source of truth:
   and a **bad** fixture (the finding fires), plus a test asserting both, and explicit
   coverage of the `UNKNOWN` path. A new FAIL-capable check also needs an adversarial
   "try to make it fire wrongly" pass against real configs (zero false-positive FAILs).
+- **A fixture skill's `SKILL.md` is not tracked under that name.** Write it as
+  `tests/fixture_skill_md/<path under fixtures>/SKILL.md.fixture`; the test setup writes it
+  to `fixtures/<path>/SKILL.md` (gitignored) before the suite runs. Skill catalogs list
+  every `SKILL.md` in a public repository as an installable skill, and many fixtures are
+  deliberately unsafe. `tests/test_c809_no_skill_md_under_fixtures.py` fails on a tracked
+  one.
 - **Regenerate the catalog doc.** `docs/CHECKS.md` is generated from `catalog.py` - run
   `python3 scripts/gen_checks_docs.py --write` after adding a check.
 

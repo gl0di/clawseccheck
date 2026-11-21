@@ -53,6 +53,7 @@ Read-only, stdlib only. A LEAF: imports nothing from the package.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -120,6 +121,66 @@ def _is_our_entry_script(path: str) -> bool:
         return pkg in resolved.parents
     except (OSError, ValueError):
         return False
+
+
+#: pip's `#!/bin/sh` trampoline line, written when the interpreter path is long or has spaces.
+_EXEC_TRAMPOLINE_RE = re.compile("^'''exec'\\s+(?:\"([^\"]+)\"|(\\S+))")
+
+
+def _console_script_interpreter(script: str) -> "str | None":
+    """The interpreter a console script runs, read from its shebang; None when that cannot
+    be read (no `#!`: a Windows `.exe` launcher or another binary).
+
+    Handles the three shapes pip writes: `#!/abs/python`, `#!/usr/bin/env python3` (resolved
+    on PATH the way the kernel would), and the `#!/bin/sh` trampoline pip uses for a long or
+    space-containing interpreter path (an `exec "/abs/python" "$0" "$@"` line after it).
+    """
+    try:
+        with open(script, "rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    lines = head.decode("utf-8", "replace").splitlines()
+    parts = lines[0][2:].split()
+    if not parts:
+        return None
+    if os.path.basename(parts[0]) == "env":
+        args = [a for a in parts[1:] if not a.startswith("-")]
+        return shutil.which(args[0]) if args else None
+    if os.path.basename(parts[0]) in ("sh", "bash"):
+        for line in lines[1:4]:
+            m = _EXEC_TRAMPOLINE_RE.match(line.strip())
+            if m:
+                return m.group(1) or m.group(2)
+        return None
+    return parts[0]
+
+
+def _console_script_for_this_install() -> "str | None":
+    """`shutil.which("clawseccheck")`, but only when that script runs THIS installation.
+
+    B-1115: a console script on PATH can belong to a different install - a pipx copy of an
+    older release beside a source checkout, say - and a job this tool writes for a scheduler
+    would then run that other version, not the one that wrote it. So the script is used only
+    when its interpreter belongs to the running environment: the interpreter's prefix (the
+    directory above its `bin/`) equals `sys.prefix`. Compared as plain paths, never
+    symlink-resolved: a venv's `bin/python` usually links to the system interpreter, and
+    resolving would make every venv look like the system one. When the interpreter cannot
+    be read (a Windows `.exe` launcher), the script is trusted as before - there is no
+    evidence it belongs elsewhere.
+    """
+    found = shutil.which(_CONSOLE_NAME)
+    if not found:
+        return None
+    interp = _console_script_interpreter(found)
+    if interp is None:
+        return found
+    prefix = os.path.dirname(os.path.dirname(os.path.abspath(interp)))
+    here = os.path.abspath(sys.prefix)
+    same = os.path.normcase(os.path.normpath(prefix)) == os.path.normcase(os.path.normpath(here))
+    return found if same else None
 
 
 def _shim_beside_the_package() -> "str | None":
@@ -213,7 +274,7 @@ def command_prefix() -> str:
     # argv[0] told us nothing usable - an embedding host, or a frozen build. Prefer a
     # console script that DEMONSTRABLY exists over one we hope is installed; only then
     # fall back to the shim, and only then to the bare name.
-    if shutil.which(_CONSOLE_NAME):
+    if _console_script_for_this_install():
         return _CONSOLE_NAME
     shim = _shim_beside_the_package()
     if shim:
@@ -239,7 +300,7 @@ def machine_command_prefix() -> str:
         return exe + " " + _display_path(argv0)
 
     # An absolute console script needs no PATH and no cwd.
-    found = shutil.which(_CONSOLE_NAME) or (
+    found = _console_script_for_this_install() or (
         argv0 if _looks_like_console_script(argv0) and os.path.isabs(argv0) else None)
     if found:
         return _display_path(found)

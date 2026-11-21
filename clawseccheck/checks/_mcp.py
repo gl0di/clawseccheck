@@ -2280,7 +2280,10 @@ _VET_MCP_RUNNER_CMDS = frozenset({"npx", "npm", "uvx", "pnpm", "bunx"})
 # "@latest" explicit, OR a bare package name without any "@" version suffix.
 _VET_MCP_UNPINNED_PKG_RE = re.compile(
     r"@latest"
-    r"|^(?!-)[^@\s]+$",  # bare package name: no "@" at all (not a flag like -y)
+    # bare package name with no version: no "@" after the name. A LEADING "@" is an npm
+    # scope (`@scope/pkg`), not a version separator - B-1089: treating it as
+    # one let every unversioned scoped package (the most common MCP launch shape) pass.
+    r"|^(?!-)@?[^@\s]+$",
     re.I,
 )
 
@@ -4211,6 +4214,55 @@ def _mcp_tool_allowed(tool_filter: "dict | None", tool_name: str) -> bool:
     return not any(_mcp_tool_filter_matches(p, tool_name) for p in exc)
 
 
+# B-1113: OpenClaw 2026.11.5 taught the tool filter ALIASES, and the raw-only port above
+# cannot see them. The vendor rule, measured on 2026.11.6:
+#   mcp-tool-filter-C-kFHmr0.mjs      `createMcpToolFilter(filter, scope)` -- an entry with no
+#                                     `*` that is not an exact inventory name is compiled as
+#                                     an alias, resolved against the server's full inventory
+#                                     through `safeToolNameCandidate`;
+#   agent-bundle-mcp-names-856aMFJA.mjs  `safeToolNameCandidate` builds the alias as
+#                                     `<safeServerName>__<sanitised tool fragment>`, so every
+#                                     alias contains `__`.
+# The decisive line is
+#     const s = r ? o : o.filter((e) => o.length === 1 && candidate(e) === i);
+# i.e. an EXCLUDE alias hides every owner (collision-suffixed ones included), an INCLUDE
+# alias matches only a unique, unsuffixed owner, and an entry that resolves to nothing
+# matches nothing. Without a scope the filter is raw-only, which is all we model.
+#
+# We do NOT port the resolution -- we report UNKNOWN instead. `safeServerName` is not the
+# configured server name: it depends on declaration-order collision suffixes
+# (`assignSafeServerNames`) and on the merge order across `mcp.servers`, the legacy
+# `mcpServers` and plugin-contributed servers, none of which we can prove statically. The
+# inventory we hold may also be partial (a config-embedded tools list), and a wrongly
+# guessed name would re-open the very false negative this guards (an include alias
+# silently dropping a tool that WARNs). So the helper only says "an entry here would be
+# read as an alias on 2026.11.5+", and the caller decides what that means.
+_MCP_SCOPED_ALIAS_FILTER_MIN = (2026, 11, 5)
+
+
+def _mcp_tool_filter_alias_entries(
+    tool_filter: "dict | None", tool_names: "list[str] | set[str]"
+) -> "list[str]":
+    """Include/exclude entries OpenClaw 2026.11.5+ would resolve as a tool ALIAS.
+
+    An entry qualifies when, after the vendor's own `trim()`, it has no `*`, is not exactly
+    a tool name we hold, and contains `__` (every alias is `<server>__<fragment>`; anything
+    without it can only ever match raw). Over-approximates on purpose: an entry naming a
+    real tool we simply do not hold looks the same, and UNKNOWN is the safe error.
+    """
+    names = {n for n in tool_names if isinstance(n, str)}
+    out: "list[str]" = []
+    for key in ("include", "exclude"):
+        for entry in (tool_filter or {}).get(key) or []:
+            if not isinstance(entry, str):
+                continue
+            trimmed = _js_trim(entry)
+            if (trimmed and "*" not in trimmed and "__" in trimmed
+                    and trimmed not in names and trimmed not in out):
+                out.append(trimmed)
+    return out
+
+
 def _mcp_codex_normalize_mode(value: object) -> "str | None":
     """`normalizeApprovalMode`: only the three exact literals survive; anything else is
     None, which lets the caller's `??` chain continue to the next source."""
@@ -4291,8 +4343,13 @@ def _mcp_codex_requires_approval(mode: str, annotations: dict) -> bool:
             or annotations.get("openWorldHint") is not False)
 
 
+#: Sentinel for `_b333_waived_tool_names(tool_filter=...)`: read the filter from the spec.
+#: `None` cannot be it -- None is a real override meaning "no filter at all".
+_USE_SPEC_FILTER = object()
+
+
 def _b333_waived_tool_names(
-    surface: "_mcpsurface.ToolSurface", mode: str, spec: dict
+    surface: "_mcpsurface.ToolSurface", mode: str, spec: dict, *, tool_filter: object = _USE_SPEC_FILTER
 ) -> list[str]:
     """Tools whose approval gate the SERVER'S OWN annotations waive, on 2026.8.1.
 
@@ -4323,9 +4380,10 @@ def _b333_waived_tool_names(
         return []
     if isinstance(spec, dict) and spec.get("enabled") is False:
         return []
-    tool_filter = _mcp_normalize_tool_filter(
-        spec.get("toolFilter") if isinstance(spec, dict) else None
-    )
+    if tool_filter is _USE_SPEC_FILTER:
+        tool_filter = _mcp_normalize_tool_filter(
+            spec.get("toolFilter") if isinstance(spec, dict) else None
+        )
     # A name cut at the ingest cap is a PREFIX of the real one, so a filter that names the
     # full tool can neither include nor exclude it as far as we can tell. Reproduced before
     # this rule: a 250-character tool with `toolFilter.include=[full name]` reported zero
@@ -4373,7 +4431,7 @@ def _b333_surface_verdict(surface: "_mcpsurface.ToolSurface") -> "tuple[str, lis
 
 
 def _b333_modern_surface_verdict(
-    surface: "_mcpsurface.ToolSurface", name: str, spec: dict
+    surface: "_mcpsurface.ToolSurface", name: str, spec: dict, build: "tuple | None"
 ) -> "tuple[str, list[str]] | None":
     """One ToolSurface's contribution to B333 on OpenClaw 2026.8.1 and later.
 
@@ -4393,7 +4451,39 @@ def _b333_modern_surface_verdict(
     """
     if surface.source != "manifest":
         return (UNKNOWN, hinted) if (hinted := _b333_hinted_tool_names(surface)) else None
-    waived = _b333_waived_tool_names(surface, _mcp_codex_approval_mode(name, spec), spec)
+    mode = _mcp_codex_approval_mode(name, spec)
+    # B-1113: on 2026.11.5+ (or an unknown build) a toolFilter entry shaped like a tool alias
+    # is resolved by the vendor against an inventory we cannot rebuild, so whether a tool
+    # is reachable can be UNKNOWN -- not WARN (an exclude alias would be a false WARN) and
+    # not PASS (an include alias would be a false negative). It only matters when some tool
+    # would waive its gate with the filter ignored: if none does, PASS holds either way.
+    if build is None or tuple(build[:3]) >= _MCP_SCOPED_ALIAS_FILTER_MIN:
+        raw_filter = _mcp_normalize_tool_filter(
+            spec.get("toolFilter") if isinstance(spec, dict) else None
+        )
+        aliases = _mcp_tool_filter_alias_entries(raw_filter, [t.name for t in surface.tools])
+        if aliases and _b333_waived_tool_names(surface, mode, spec, tool_filter=None):
+            exclude_aliases = {_js_trim(e) for e in (raw_filter or {}).get("exclude", [])
+                               } & set(aliases)
+            if not exclude_aliases:
+                # Aliases sit in `include` only. An include entry can only ADD a match, so
+                # the tools the NON-alias include entries (exact names and globs, resolved
+                # raw exactly as before) keep, under the unchanged raw exclude, are
+                # reachable whatever the aliases turn out to mean. That is a certain WARN
+                # and must not be downgraded. An empty include list means "allow all" to
+                # the filter, so with no non-alias include the certain set is empty by
+                # definition -- never passed through as an empty filter.
+                certain_include = [e for e in raw_filter["include"] if _js_trim(e) not in aliases]
+                if certain_include:
+                    certain_filter = {"include": certain_include}
+                    if raw_filter.get("exclude"):
+                        certain_filter["exclude"] = raw_filter["exclude"]
+                    certain = _b333_waived_tool_names(
+                        surface, mode, spec, tool_filter=certain_filter)
+                    if certain:
+                        return WARN, certain
+            return UNKNOWN, aliases
+    waived = _b333_waived_tool_names(surface, mode, spec)
     return (WARN, waived) if waived else None
 
 
@@ -4420,6 +4510,24 @@ def _harness_build(ctx) -> "tuple | None":
     stamped = _numeric_version(_openclawdist.self_reported_version(getattr(ctx, "config", None)))
     if stamped is not None and _harnessruntime.ORACLE_MIN <= stamped[:3] <= _harnessruntime.ORACLE_MAX:
         return stamped
+    return None
+
+
+def _b333_alias_gate_build(ctx) -> "tuple | None":
+    """The build B333's toolFilter alias gate (B-1113) may trust as "older than 2026.11.5".
+
+    Only an INSTALLED build can prove the raw-only filter is what runs. A config stamp is
+    written when the config is saved, so after an upgrade it understates the running build:
+    a stamp below the alias floor would select the raw path while 2026.11.5+ runs, turning
+    an include alias into a missed WARN and an exclude alias into a false WARN. So a stamp
+    counts only when it is already at or above the floor; below it, the build is unknown
+    and the gate stays on (UNKNOWN), never the raw path.
+    """
+    build = _harness_build(ctx)
+    if build is None or tuple(build[:3]) >= _MCP_SCOPED_ALIAS_FILTER_MIN:
+        return build
+    if _numeric_version(getattr(ctx, "installed_dist_version", None)) is not None:
+        return build
     return None
 
 
@@ -5244,6 +5352,8 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
 
     warn_hits: list[str] = []
     unknown_hits: list[str] = []
+    alias_hits: list[str] = []
+    build = _b333_alias_gate_build(ctx) if modern else None
     surfaces_seen = 0
     for sname, spec in sorted(servers.items()):
         tools = spec.get("tools") if isinstance(spec, dict) else None
@@ -5251,13 +5361,20 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
         if surface is None:
             continue
         surfaces_seen += 1
-        verdict = (_b333_modern_surface_verdict(surface, sname, spec) if modern
+        verdict = (_b333_modern_surface_verdict(surface, sname, spec, build) if modern
                    else _b333_surface_verdict(surface))
         if verdict is None:
             continue
         status, hinted = verdict
         line = f"{sname}: {', '.join(hinted[:5])}"
-        (warn_hits if status == WARN else unknown_hits).append(line)
+        if status == WARN:
+            warn_hits.append(line)
+        elif modern and surface.source == "manifest":
+            # B-1113: the only UNKNOWN a modern manifest surface produces is the
+            # toolFilter alias one -- the entries listed are filter entries, not tools.
+            alias_hits.append(line)
+        else:
+            unknown_hits.append(line)
 
     if warn_hits:
         ev = warn_hits[:5]
@@ -5325,6 +5442,32 @@ def check_mcp_unenforced_annotations(ctx: Context) -> Finding:
             "tool allowlist, instead. (OpenClaw 2026.8.1 and later DO read them, in the "
             "server's favour -- upgrading changes this from inert to load-bearing.)",
             evidence=ev,
+        )
+    if alias_hits:
+        ev = alias_hits[:5]
+        detail = (
+            "Whether the tools that waive their own approval gate are reachable could not "
+            "be decided: toolFilter entries (" + "; ".join(ev) + ") name no tool this "
+            "audit holds, and OpenClaw 2026.11.5 and later resolves such an entry as a "
+            "tool alias (<server>__<tool>) against the server's full inventory, which "
+            "this check cannot resolve statically -- an include alias keeps a tool and "
+            "an exclude alias hides it, in either case unseen here."
+        )
+        if unknown_hits:
+            detail += (
+                " Separately, annotation-carrying tool surface(s) were only available "
+                "from OpenClaw's own retained/compiled form (" + "; ".join(unknown_hits[:5])
+                + "), which never carries annotations at all."
+            )
+        return _finding(
+            "B333",
+            UNKNOWN,
+            detail,
+            "Check by hand which tools these alias entries resolve to on your OpenClaw "
+            "build. If you did not mean to let a server waive its own gate, set "
+            "mcp.servers.<name>.codex.defaultToolsApprovalMode to \"prompt\", which holds "
+            "whatever the filter resolves to.",
+            evidence=ev + unknown_hits[:5],
         )
     if unknown_hits:
         ev = unknown_hits[:5]

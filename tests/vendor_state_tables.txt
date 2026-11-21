@@ -1,11 +1,11 @@
 # vendor_state_tables.txt -- GENERATED. Do not hand-edit.
 #
-# openclaw-version: 2026.11.3
-# state-schema-version: 22
-# generated: 2026-11-13
-# tables: 134
+# openclaw-version: 2026.11.6
+# state-schema-version: 36
+# generated: 2026-11-20
+# tables: 135
 #
-# source-bundle: native-hook-relay-client.worker.js
+# source-bundle: sqlite-database-admission-BQtRqoHB.mjs
 #   Recorded, not assumed: the generator writes the file it ACTUALLY resolved. That name
 #   is build output and rotates between releases, so it is evidence, not a locator.
 #
@@ -27,7 +27,7 @@
 #
 # Satellite sources read (bundle it came from, tables it adds beyond the main constant; the
 # featureLocalSql entry lists the tables every value in that object declares):
-#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-CYc16G0w.mjs, 7 copies]
+#   featureLocalSql (getOpenClawStateFeatureSchemaSql)  [openclaw-state-feature-schema-BVGyRNh0.mjs, 10 copies]
 #     adds: user_profile_emails, user_profiles, worker_environment_session_attachments
 #
 # Why it exists
@@ -59,11 +59,6 @@ capture_sessions
 channel_ingress_events
 channel_pairing_allow_entries
 channel_pairing_requests
-claw_cron_refs
-claw_installs
-claw_mcp_server_refs
-claw_package_refs
-claw_workspace_files
 clawhub_promotion_claims
 config_health_entries
 config_machine_state
@@ -75,9 +70,7 @@ cron_run_receipts
 cron_run_trigger_state_retirements
 current_conversation_bindings
 delivery_queue_entries
-device_auth_tokens
 device_bootstrap_tokens
-device_identities
 device_pair_setup_completions
 device_pairing_join_codes
 device_pairing_paired
@@ -89,7 +82,6 @@ execution_identity_contexts
 execution_owner_lifecycle_bindings
 flow_runs
 gateway_boot_lifecycle
-gateway_origin_device_tokens
 gateway_restart_handoff
 gateway_restart_intent
 gateway_restart_sentinel
@@ -97,7 +89,10 @@ github_personal_publication_requests
 github_publication_requests
 github_publication_session_lifecycles
 github_repository_publication_requests
+local_workspace_manifest_nodes
 local_workspace_projections
+local_workspace_source_path_sets
+local_workspace_tree_packs
 macos_port_guardian_records
 managed_outgoing_image_records
 mcp_oauth_pending_authorizations
@@ -127,6 +122,7 @@ plugin_binding_approvals
 plugin_blob_entries
 plugin_state_entries
 projects
+sandbox_persistent_execs
 sandbox_registry_entries
 schema_meta
 secret_store_entries
@@ -148,6 +144,11 @@ state_leases
 subagent_runs
 task_delivery_state
 task_runs
+template_cron_refs
+template_installs
+template_mcp_server_refs
+template_package_refs
+template_workspace_files
 update_runs
 user_background_images
 user_preferences

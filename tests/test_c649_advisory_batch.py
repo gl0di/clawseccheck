@@ -4,10 +4,10 @@ Until 2026-10-05 the table ended at 2026.6.6, so every build from 2026.6.6 up re
 all known-advisory fixes" while the vendor's repository endpoint listed 70 published advisories on
 the core package that reach them (9 published 2026-06-30, 61 published 2026-09-11). This file pins:
 
-* the table: 95 rows, the batch's ranges encoded faithfully (checked against the published range
+* the table: 96 rows (the batch's 70 + the 25 older + GHSA-pw3x-g8v8-fvj2 from B-1114), the batch's ranges encoded faithfully (checked against the published range
   strings below, evaluated by a small comparator written HERE - not by the check's own matcher),
   the two side tables (lower bounds, the one exact-build row);
-* the per-build verdict: every published final from 2026.6.5 to 2026.9.8, the two 2026.7.1
+* the per-build verdict: every published final from 2026.6.5 to 2026.9.8 (plus 2026.10.9 and the 2026.11.3 / 2026.11.4 / 2026.11.6 boundary after B-1114), the two 2026.7.1
   correction releases and the nine extended-stable builds;
 * the range shapes (`<`, `<=`, `=`, `>= , <`, the exact build) and the lower bounds;
 * the extended-stable rule (PASS / FAIL naming only confirmed advisories / UNKNOWN);
@@ -109,6 +109,8 @@ _PUBLISHED = (  # (advisory id, vulnerable_version_range, first stable patched v
 
 _EXACT_ID = "GHSA-356g-m7rx-7pm3"  # the only exact-build range: `= 2026.7.1-2`
 _NOT_AFFECTED_ID = "GHSA-5x6q-wg56-rxg8"  # `>= 2026.7.2, < 2026.9.2`; back-ported on the 2026.8 line
+_PW3X_ID = "GHSA-pw3x-g8v8-fvj2"  # B-1114: `>= 2026.9.2, < 2026.10.33` and `>= 2026.11.1, < 2026.11.4`
+_PW3X_FIRST, _PW3X_FIXED = (2026, 9, 2, 0), (2026, 11, 4, 0)
 _OLD_TABLE_LEN = 25  # rows that predate the batch: ids[24] is CVE-2026-62195, fixed 2026.6.6
 _SCOPE_NOTE = (  # appended to the `fix` of every verdict that judged a version (C-662, b)
     " Advisories on separately versioned plugin packages and on the iOS app are not tabulated "
@@ -180,17 +182,19 @@ def _ids(version) -> list:
 # The table
 # ---------------------------------------------------------------------------
 
-def test_table_has_95_unique_plain_rows_and_the_batch_is_exactly_the_published_70():
+def test_table_has_96_unique_plain_rows_and_the_batch_is_exactly_the_published_70():
     ids = [row[0] for row in _KNOWN_ADVISORIES]
-    assert len(_KNOWN_ADVISORIES) == 95
-    assert len(set(ids)) == 95
+    assert len(_KNOWN_ADVISORIES) == 96
+    assert len(set(ids)) == 96
     assert all(len(row) == 4 for row in _KNOWN_ADVISORIES), "the batch adds plain 4-tuples only"
     assert ids[_OLD_TABLE_LEN - 1] == "CVE-2026-62195"
-    assert set(ids[_OLD_TABLE_LEN:]) == {i for i, _r, _f in _PUBLISHED}
+    batch_end = _OLD_TABLE_LEN + 70
+    assert set(ids[_OLD_TABLE_LEN:batch_end]) == {i for i, _r, _f in _PUBLISHED}
+    assert ids[batch_end:] == [_PW3X_ID]  # B-1114: exactly one row after the batch
     assert len(_PUBLISHED) == 70
     for row in _KNOWN_ADVISORIES:
         assert isinstance(row[3], str) and row[3].strip(), row[0]
-    for row in _KNOWN_ADVISORIES[_OLD_TABLE_LEN:]:
+    for row in _KNOWN_ADVISORIES[_OLD_TABLE_LEN:batch_end]:
         assert row[3].isascii(), row[0]  # the batch's titles are plain ASCII, as published
 
 
@@ -212,7 +216,7 @@ def test_side_tables_are_keyed_by_table_ids_and_their_bounds_are_sane():
     rows = {row[0]: row for row in _KNOWN_ADVISORIES}
     first = _lifecycle._ADVISORY_FIRST_VULNERABLE
     exact = _lifecycle._ADVISORY_EXACT_BUILDS
-    assert len(first) == 23
+    assert len(first) == 24
     for ident, lo in first.items():
         assert ident in rows, ident
         assert lo <= rows[ident][1], f"{ident}: first_vulnerable {lo} above max_vulnerable"
@@ -226,9 +230,10 @@ def test_extended_stable_data_refers_to_table_ids():
     ids = {row[0] for row in _KNOWN_ADVISORIES}
     assert _lifecycle._EXTENDED_STABLE_MIN_PATCH == 33
     assert _lifecycle._EXTENDED_STABLE_NOT_AFFECTED <= ids
-    assert set(_lifecycle._EXTENDED_STABLE_LINES) == {(2026, 6), (2026, 7), (2026, 8)}
+    assert set(_lifecycle._EXTENDED_STABLE_LINES) == {(2026, 6), (2026, 7), (2026, 8), (2026, 9)}
     for (_year, _minor), (newest, confirmed) in _lifecycle._EXTENDED_STABLE_LINES.items():
-        assert newest == 35
+        # the 2026.9 line was examined at 2026.9.37 (B-1114 follow-up), the others at .35
+        assert newest == (37 if _minor == 9 else 35)
         assert set(confirmed) <= ids
         assert len(set(confirmed)) == len(confirmed)
         assert not set(confirmed) & _lifecycle._EXTENDED_STABLE_NOT_AFFECTED
@@ -246,35 +251,41 @@ def test_the_correction_release_rule_still_holds_for_every_row():
 # ---------------------------------------------------------------------------
 
 _MAINLINE = [
-    ("2026.6.5", FAIL, 64, "2026.9.2"),  # 63 published ranges + the older CVE-2026-62195 row
-    ("2026.6.6", FAIL, 66, "2026.9.2"),
-    ("2026.6.8", FAIL, 61, "2026.9.2"),
-    ("2026.6.9", FAIL, 58, "2026.9.2"),
-    ("2026.6.10", FAIL, 58, "2026.9.2"),
-    ("2026.6.11", FAIL, 58, "2026.9.2"),
-    ("2026.7.1", FAIL, 40, "2026.9.2"),
-    ("2026.8.1", FAIL, 2, "2026.9.2"),
-    ("2026.8.2", FAIL, 1, "2026.9.2"),
-    ("2026.9.1", FAIL, 1, "2026.9.2"),
-    ("2026.9.2", PASS, 0, None),
-    ("2026.9.3", PASS, 0, None),
-    ("2026.9.4", PASS, 0, None),
-    ("2026.9.5", PASS, 0, None),
-    ("2026.9.6", PASS, 0, None),
-    ("2026.9.7", PASS, 0, None),
-    ("2026.9.8", PASS, 0, None),
+    ("2026.6.5", FAIL, 64, "2026.11.4"),  # 63 published ranges + the older CVE-2026-62195 row
+    ("2026.6.6", FAIL, 66, "2026.11.4"),
+    ("2026.6.8", FAIL, 61, "2026.11.4"),
+    ("2026.6.9", FAIL, 58, "2026.11.4"),
+    ("2026.6.10", FAIL, 58, "2026.11.4"),
+    ("2026.6.11", FAIL, 58, "2026.11.4"),
+    ("2026.7.1", FAIL, 40, "2026.11.4"),
+    ("2026.8.1", FAIL, 2, "2026.11.4"),
+    ("2026.8.2", FAIL, 1, "2026.11.4"),
+    ("2026.9.1", FAIL, 1, "2026.11.4"),
+    ("2026.9.2", FAIL, 1, "2026.11.4"),  # past 5x6q's fix, inside GHSA-pw3x-g8v8-fvj2's first range
+    ("2026.9.3", FAIL, 1, "2026.11.4"),
+    ("2026.9.4", FAIL, 1, "2026.11.4"),
+    ("2026.9.5", FAIL, 1, "2026.11.4"),
+    ("2026.9.6", FAIL, 1, "2026.11.4"),
+    ("2026.9.7", FAIL, 1, "2026.11.4"),
+    ("2026.9.8", FAIL, 1, "2026.11.4"),
+    ("2026.10.9", FAIL, 1, "2026.11.4"),
+    ("2026.11.3", FAIL, 1, "2026.11.4"),  # pw3x's newest vulnerable build
+    ("2026.11.4", PASS, 0, None),
+    ("2026.11.6", PASS, 0, None),
 ]
 _CORRECTIONS = [
-    ("2026.7.1-1", FAIL, 40, "2026.9.2"),  # same id set as the base ...
-    ("2026.7.1-2", FAIL, 41, "2026.9.2"),  # ... plus the exact-build row
+    ("2026.7.1-1", FAIL, 40, "2026.11.4"),  # same id set as the base ...
+    ("2026.7.1-2", FAIL, 41, "2026.11.4"),  # ... plus the exact-build row
 ]
 _EXTENDED = [
-    ("2026.6.33", FAIL, 2, "2026.9.2"),
-    ("2026.6.34", FAIL, 2, "2026.9.2"),
-    ("2026.6.35", FAIL, 2, "2026.9.2"),
-    ("2026.7.33", FAIL, 3, "2026.9.2"),
-    ("2026.7.34", FAIL, 3, "2026.9.2"),
-    ("2026.7.35", FAIL, 3, "2026.9.2"),
+    ("2026.6.33", FAIL, 2, "2026.11.4"),
+    ("2026.6.34", FAIL, 2, "2026.11.4"),
+    ("2026.6.35", FAIL, 2, "2026.11.4"),
+    ("2026.7.33", FAIL, 3, "2026.11.4"),
+    ("2026.7.34", FAIL, 3, "2026.11.4"),
+    ("2026.7.35", FAIL, 3, "2026.11.4"),
+    ("2026.9.33", FAIL, 1, "2026.11.4"),  # the extended-stable 9 line: GHSA-pw3x confirmed unfixed at 2026.9.37
+    ("2026.9.35", FAIL, 1, "2026.11.4"),
     ("2026.8.33", PASS, 0, None),
     ("2026.8.34", PASS, 0, None),
     ("2026.8.35", PASS, 0, None),
@@ -299,9 +310,12 @@ def test_verdict_for_every_published_build(version, status, n, target):
 @pytest.mark.parametrize("version,status,n,_target", _MAINLINE + _CORRECTIONS)
 def test_counts_agree_with_the_published_ranges_for_every_non_extended_build(version, status, n, _target):
     """Cross-check that does not use the check's matcher: the number of published ranges that
-    contain the build. 2026.6.5 additionally matches one older row (CVE-2026-62195)."""
+    contain the build. 2026.6.5 additionally matches one older row (CVE-2026-62195), and a
+    build in [2026.9.2, 2026.11.4) one newer row (GHSA-pw3x-g8v8-fvj2, B-1114, outside the batch;
+    none of the builds in these tables sits in its 2026.10.33 - 2026.11.1 gap)."""
     older_rows = 1 if version == "2026.6.5" else 0
-    assert len(_published_ids(version)) + older_rows == n
+    newer_rows = 1 if _PW3X_FIRST <= _vkey(version) < _PW3X_FIXED else 0
+    assert len(_published_ids(version)) + older_rows + newer_rows == n
 
 
 @pytest.mark.parametrize(
@@ -318,7 +332,7 @@ def test_the_fix_target_of_an_extended_stable_build_clears_the_finding_in_one_st
     """The same property for the six extended-stable FAIL builds: the named version, fed back as a
     stamp, is a PASS. It is the highest fixed version over every row that reaches the build, listed or
     not - not the highest among the LISTED ids, which is 2026.8.1 and itself FAILs."""
-    assert target == "2026.9.2"
+    assert target == "2026.11.4"
     assert check_known_vulns(_stamp_ctx(target)).status == PASS
     assert check_known_vulns(_stamp_ctx("2026.8.1")).status == FAIL  # what the old, listed-ids-only target was
     assert f">= {target} to remediate" in check_known_vulns(_stamp_ctx(version)).fix
@@ -388,7 +402,7 @@ def test_a_prerelease_still_reads_as_its_release(all_ids):
     """`_parse_version` stays the parser: 2026.8.1-beta.2 is judged exactly as 2026.8.1 (existing
     behaviour, noted here so a change to it is a decision, not an accident)."""
     assert _ids("2026.8.1-beta.2") == _ids("2026.8.1")
-    assert check_known_vulns(_stamp_ctx("2026.9.2-beta.1")).status == PASS
+    assert check_known_vulns(_stamp_ctx("2026.11.4-beta.1")).status == PASS
 
 
 def test_lower_bounds_keep_a_build_below_them_out_of_the_list(all_ids):
@@ -426,7 +440,7 @@ def test_extended_stable_2026_6_lists_only_confirmed_advisories(all_ids, version
     assert result.status == FAIL
     assert result.evidence == _in_table_order(_CONFIRMED_6)
     assert result.detail == f"OpenClaw {version} is affected by 2 known advisories: {', '.join(result.evidence)}."
-    assert "Upgrade OpenClaw to >= 2026.9.2 to remediate all 2 listed advisories." in result.fix
+    assert "Upgrade OpenClaw to >= 2026.11.4 to remediate all 2 listed advisories." in result.fix
     # 58 published ranges reach it numerically (the cross-check below), 2 are listed -> 56 further
     assert len(_published_ids(version)) == 58
     assert " 56 further published advisories cover this build by version range" in result.fix
@@ -442,7 +456,7 @@ def test_extended_stable_2026_7_lists_only_confirmed_advisories(all_ids, version
     result = check_known_vulns(_stamp_ctx(version))
     assert result.status == FAIL
     assert result.evidence == _in_table_order(_CONFIRMED_7)
-    assert "Upgrade OpenClaw to >= 2026.9.2 to remediate all 3 listed advisories." in result.fix
+    assert "Upgrade OpenClaw to >= 2026.11.4 to remediate all 3 listed advisories." in result.fix
     # 41 published ranges contain it numerically - the not-affected id's range is one of them and is
     # COUNTED, because the text says "published" - and 3 are listed -> 38 further
     assert len(_published_ids(version)) == 41 and _NOT_AFFECTED_ID in _published_ids(version)
@@ -502,7 +516,8 @@ def test_2026_8_36_matches_no_row_once_the_not_affected_advisory_is_removed_so_i
 
 def test_an_unknown_line_is_unknown_when_rows_match_and_pass_when_none_do():
     assert check_known_vulns(_stamp_ctx("2026.5.33")).status == UNKNOWN  # line 5 was never examined
-    assert check_known_vulns(_stamp_ctx("2026.9.33")).status == PASS  # nothing reaches it
+    assert check_known_vulns(_stamp_ctx("2026.9.38")).status == UNKNOWN  # past the examined 2026.9.37
+    assert check_known_vulns(_stamp_ctx("2026.10.33")).status == PASS  # nothing reaches it
     assert check_known_vulns(_stamp_ctx("2026.12.34")).status == PASS
 
 
@@ -518,7 +533,7 @@ def test_near_misses_of_the_extended_stable_predicate_take_the_ordinary_path(all
     assert (result.status, list(result.evidence)) == (status, ids)
     if status == FAIL:
         assert "extended-stable" not in result.fix  # no disclosure: it is not treated as extended-stable
-        assert ">= 2026.9.2" in result.fix
+        assert ">= 2026.11.4" in result.fix
 
 
 @pytest.mark.parametrize("version", ["2026.8.33-1", "2026.8.33-beta.1", "2026.8.35-2", "2026.8.34.1"])
@@ -568,7 +583,7 @@ def test_the_unknown_for_an_exact_unexamined_final_keeps_its_wording():
 
 
 def test_a_variant_on_a_line_no_row_reaches_passes():
-    assert check_known_vulns(_stamp_ctx("2026.9.33-1")).status == PASS
+    assert check_known_vulns(_stamp_ctx("2026.10.33-1")).status == PASS  # 2026.9.33-1 is UNKNOWN since B-1114
     assert check_known_vulns(_stamp_ctx("2026.12.34.2")).status == PASS
 
 
@@ -692,8 +707,8 @@ def _run(stamp, installed, home):
     return check_known_vulns(c)
 
 
-_I_AFF, _I_OK, _I_EXT, _I_UNEX, _I_BAD = "2026.7.1", "2026.9.7", "2026.7.35", "2026.7.36", "nightly"
-_S_AFF, _S_OK, _S_UNEX = "2026.6.8", "2026.9.2", "2026.6.36"
+_I_AFF, _I_OK, _I_EXT, _I_UNEX, _I_BAD = "2026.7.1", "2026.11.6", "2026.7.35", "2026.7.36", "nightly"
+_S_AFF, _S_OK, _S_UNEX = "2026.6.8", "2026.11.4", "2026.6.36"
 
 # (installed, stamp) -> (status, detail prefix) when the audited home IS this machine's home.
 _THIS_HOME = {
@@ -702,16 +717,16 @@ _THIS_HOME = {
     (_I_AFF, None): (FAIL, "OpenClaw 2026.7.1 (installed) is affected by 40 known advisories: "),
     (_I_AFF, "nightly"): (FAIL, "OpenClaw 2026.7.1 (installed) is affected by 40 known advisories: "),
     (_I_AFF, _I_AFF): (FAIL, "OpenClaw 2026.7.1 is affected by 40 known advisories: "),  # same string: today's form
-    (_I_OK, _S_AFF): (WARN, "The installed OpenClaw build (2026.9.7) is at or past all known-advisory fixes, "
+    (_I_OK, _S_AFF): (WARN, "The installed OpenClaw build (2026.11.6) is at or past all known-advisory fixes, "
                             "but the build that last wrote this config (2026.6.8) is affected by 61 known advisories "
                             "(the evidence lists the first 20). "),
-    (_I_OK, _S_UNEX): (WARN, "The installed OpenClaw build (2026.9.7) is at or past all known-advisory fixes, "
+    (_I_OK, _S_UNEX): (WARN, "The installed OpenClaw build (2026.11.6) is at or past all known-advisory fixes, "
                              "but the build that last wrote this config (2026.6.36) is an extended-stable build "
                              "the table has not checked (58 published advisory ranges cover it numerically). "),
-    (_I_OK, _S_OK): (PASS, "OpenClaw 2026.9.7 (installed) is at or past all known-advisory fixes."),
-    (_I_OK, None): (PASS, "OpenClaw 2026.9.7 (installed) is at or past all known-advisory fixes."),
-    (_I_OK, "nightly"): (PASS, "OpenClaw 2026.9.7 (installed) is at or past all known-advisory fixes."),
-    (_I_OK, _I_OK): (PASS, "OpenClaw 2026.9.7 is at or past all known-advisory fixes."),  # same string: today's form
+    (_I_OK, _S_OK): (PASS, "OpenClaw 2026.11.6 (installed) is at or past all known-advisory fixes."),
+    (_I_OK, None): (PASS, "OpenClaw 2026.11.6 (installed) is at or past all known-advisory fixes."),
+    (_I_OK, "nightly"): (PASS, "OpenClaw 2026.11.6 (installed) is at or past all known-advisory fixes."),
+    (_I_OK, _I_OK): (PASS, "OpenClaw 2026.11.6 is at or past all known-advisory fixes."),  # same string: today's form
     (_I_EXT, _I_EXT): (FAIL, "OpenClaw 2026.7.35 is affected by 3 known advisories: "),  # same string: today's form
     (_I_UNEX, _I_UNEX): (UNKNOWN, "OpenClaw 2026.7.36 is an extended-stable build that has not been checked"),
 }
@@ -728,7 +743,7 @@ for _stamp in (_S_AFF, _S_OK, None, "nightly", _S_UNEX):
 # another home, no installed build, or an installed string that does not parse. The stamp decides.
 _STAMP_DECIDES = {
     _S_AFF: (FAIL, "OpenClaw 2026.6.8 is affected by 61 known advisories: "),
-    _S_OK: (PASS, "OpenClaw 2026.9.2 is at or past all known-advisory fixes."),
+    _S_OK: (PASS, "OpenClaw 2026.11.4 is at or past all known-advisory fixes."),
     None: (UNKNOWN, "OpenClaw version unknown (meta.lastTouchedVersion / lastTouchedVersion not set)"),
     "nightly": (UNKNOWN, "OpenClaw version 'nightly' could not be parsed"),
     _S_UNEX: (UNKNOWN, "OpenClaw 2026.6.36 is an extended-stable build that has not been checked"),
@@ -822,23 +837,23 @@ def test_an_installed_variant_with_rows_left_is_unknown_and_is_labelled_installe
 
 
 def test_a_rolled_back_build_is_not_hidden_by_a_newer_stamp(machine):
-    """The reverse of the stale-stamp case: the stamp says 2026.9.7 but the installed package is the
+    """The reverse of the stale-stamp case: the stamp says 2026.11.6 but the installed package is the
     affected 2026.7.1 (a rollback). The installed build decides -> FAIL; the stamp alone said PASS."""
-    assert _run("2026.9.7", None, machine / ".openclaw").status == PASS
-    assert _run("2026.9.7", "2026.7.1", machine / ".openclaw").status == FAIL
+    assert _run("2026.11.6", None, machine / ".openclaw").status == PASS
+    assert _run("2026.11.6", "2026.7.1", machine / ".openclaw").status == FAIL
 
 
 def test_whitespace_around_the_installed_string_is_ignored(machine):
-    result = _run(None, "  2026.9.7 \n", machine / ".openclaw")
+    result = _run(None, "  2026.11.6 \n", machine / ".openclaw")
     assert result.status == PASS
-    assert result.detail == "OpenClaw 2026.9.7 (installed) is at or past all known-advisory fixes."
+    assert result.detail == "OpenClaw 2026.11.6 (installed) is at or past all known-advisory fixes."
 
 
 def test_installed_equal_to_the_stamp_keeps_todays_detail_byte_for_byte(machine):
     """The stamp string is shown as written (today's `{raw_ver}`), padding included."""
-    result = _run(" 2026.9.2 ", "2026.9.2", machine / ".openclaw")
+    result = _run(" 2026.11.4 ", "2026.11.4", machine / ".openclaw")
     assert result.status == PASS
-    assert result.detail == "OpenClaw  2026.9.2  is at or past all known-advisory fixes."
+    assert result.detail == "OpenClaw  2026.11.4  is at or past all known-advisory fixes."
 
 
 # --- the home predicate: its inputs are HOME and the OPENCLAW_* path variables ---------------
@@ -895,7 +910,7 @@ def test_a_profile_home_under_the_effective_home_is_this_machines_home(machine):
     home.mkdir()
     warn = _run(_S_AFF, _I_OK, home)  # installed clear, stamp affected: the stale-stamp case
     assert warn.status == WARN
-    assert warn.detail.startswith("The installed OpenClaw build (2026.9.7) is at or past all known-advisory fixes")
+    assert warn.detail.startswith("The installed OpenClaw build (2026.11.6) is at or past all known-advisory fixes")
     fail = _run(_S_OK, _I_AFF, home)  # installed affected: the installed build decides
     assert fail.status == FAIL
     assert fail.detail.startswith("OpenClaw 2026.7.1 (installed) is affected by 40 known advisories: ")
@@ -1092,12 +1107,12 @@ def test_an_extended_stable_fail_with_nothing_further_does_not_claim_further_adv
     monkeypatch.setattr(_lifecycle, "_EXTENDED_STABLE_NOT_AFFECTED", frozenset())
     result = check_known_vulns(_stamp_ctx("2026.7.35"))
     assert result.status == FAIL
-    assert result.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate all 41 listed advisories." + _SCOPE_NOTE
+    assert result.fix == "Upgrade OpenClaw to >= 2026.11.4 to remediate all 41 listed advisories." + _SCOPE_NOTE
 
 
 def test_hermetic_default_context_never_sees_an_installed_build():
     c = Context(home=Path("/nonexistent"))
-    c.config = {"meta": {"lastTouchedVersion": "2026.9.2"}}
+    c.config = {"meta": {"lastTouchedVersion": "2026.11.4"}}
     assert c.installed_dist_version is None
     assert check_known_vulns(c).status == PASS
 
@@ -1107,22 +1122,22 @@ def test_hermetic_default_context_never_sees_an_installed_build():
 # ---------------------------------------------------------------------------
 
 def test_stamp_only_pass_text_is_unchanged():
-    result = check_known_vulns(_stamp_ctx("2026.9.2"))
+    result = check_known_vulns(_stamp_ctx("2026.11.4"))
     assert result.status == PASS
-    assert result.detail == "OpenClaw 2026.9.2 is at or past all known-advisory fixes."
+    assert result.detail == "OpenClaw 2026.11.4 is at or past all known-advisory fixes."
     assert result.fix == _GENERIC_FIX
 
 
 def test_stamp_only_fail_texts_are_unchanged_in_form():
     one = check_known_vulns(_stamp_ctx("2026.9.1"))
     assert one.detail == "OpenClaw 2026.9.1 is affected by 1 known advisory: GHSA-5x6q-wg56-rxg8."
-    assert one.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate this advisory in a single upgrade." + _SCOPE_NOTE
+    assert one.fix == "Upgrade OpenClaw to >= 2026.11.4 to remediate this advisory in a single upgrade." + _SCOPE_NOTE
     assert one.evidence == ["GHSA-5x6q-wg56-rxg8"]
     two = check_known_vulns(_stamp_ctx("2026.8.1"))
     assert two.detail == (
         "OpenClaw 2026.8.1 is affected by 2 known advisories: GHSA-m78m-7h3q-q938, GHSA-5x6q-wg56-rxg8."
     )
-    assert two.fix == "Upgrade OpenClaw to >= 2026.9.2 to remediate all 2 matched advisories in a single upgrade." + _SCOPE_NOTE
+    assert two.fix == "Upgrade OpenClaw to >= 2026.11.4 to remediate all 2 matched advisories in a single upgrade." + _SCOPE_NOTE
 
 
 def test_stamp_only_unknown_texts_are_unchanged():
@@ -1149,7 +1164,7 @@ def test_the_root_alias_is_still_read_when_meta_has_no_version():
     c = Context(home=Path("/nonexistent"))
     c.config = {"lastTouchedVersion": "2026.9.1"}
     assert check_known_vulns(c).status == FAIL
-    c.config = {"meta": {"lastTouchedVersion": "2026.9.2"}, "lastTouchedVersion": "2026.1.1"}
+    c.config = {"meta": {"lastTouchedVersion": "2026.11.4"}, "lastTouchedVersion": "2026.1.1"}
     assert check_known_vulns(c).status == PASS  # meta wins over the root alias, as before
 
 

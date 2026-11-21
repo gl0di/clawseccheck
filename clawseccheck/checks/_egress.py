@@ -2778,9 +2778,12 @@ def _b78_judge_entries(entries: dict, scope: str = "", unread_note: str = "") ->
     if scope:
         # The vendor sets the signature only for three structural anomalies (size drop, missing
         # gatewayMode, update-channel-only root; OpenClaw 2026.11.1 removed the fourth, missing
-        # meta) and clears it on any healthy observation, so a clean row says "the latest
-        # observation was healthy" - not that the config's history is clean. The legacy-file wording below predates this and is
-        # byte-identical (a fingerprint hashes it).
+        # meta) and clears it on a healthy observation. Since 2026.11.4 an accepted write over an
+        # already-suspicious state stores `<hash>:inherited-config-anomaly`, and that mark
+        # re-fires while the hash is unchanged, so an inherited anomaly is not a healthy
+        # observation and still leaves a non-null signature (WARN above). A clean row says "the
+        # latest observation was healthy" - not that the config's history is clean. The
+        # legacy-file wording below predates this and is byte-identical (a fingerprint hashes it).
         return (
             PASS,
             f"OpenClaw's own record for {len(entries)} tracked config(s){scope} shows no "
@@ -3292,6 +3295,20 @@ def _ancestors_allow_other_access(home: Path, stop: "Path | None" = None) -> boo
 # <stateDir>/state/openclaw.sqlite) and against the real file. The -wal sibling matters as
 # much as the DB: it holds recently written rows that have not yet been checkpointed in.
 _B188_DB_NAMES = ("openclaw.sqlite", "openclaw.sqlite-wal", "openclaw.sqlite-shm")
+# B-1111: from OpenClaw 2026.11.5 the device identity
+# (device_identities.private_key_pem) and the device auth tokens left the state DB for a store
+# of their own, <stateDir>/client/credentials.sqlite (resolveClientCredentialStorePath,
+# client-credential-paths-*.mjs; tables in CLIENT_CREDENTIAL_SCHEMA_SQL,
+# client-credential-schema-*.mjs). OpenClaw opens it only in DELETE journal mode
+# (client-credential-store-*.mjs throws otherwise), so the one sibling is a transient
+# -journal file. -wal/-shm are looked for anyway: should anything ever open the store in WAL
+# mode, those siblings hold the same rows, and a stat of an absent file costs nothing.
+_B188_CLIENT_DB_NAMES = (
+    "credentials.sqlite",
+    "credentials.sqlite-journal",
+    "credentials.sqlite-wal",
+    "credentials.sqlite-shm",
+)
 # The per-tree file bound for the retained-copy scans below (state/**/*.sqlite* and backups/**).
 # One constant, read by both collectors and interpolated into the cut-walk UNKNOWN text, so the
 # number a user is told cannot drift from the number the walk actually stops at.
@@ -3431,6 +3448,55 @@ def _b188_retained_copy_warn(exposed_extra: "list[str]") -> Finding:
     )
 
 
+def _b188_live_store_fail(exposed: "list[str]", client_exposed: "list[str]") -> Finding:
+    """B188's FAIL for a live secret store (state DB and/or client credential store).
+
+    Build-honest wording (B-1111): on OpenClaw 2026.11.5+ the device private key and device
+    auth tokens live in client/credentials.sqlite, and the state DB keeps bootstrap and push
+    tokens, stored secret values (secret_store_entries.value), MCP OAuth stores and the audit
+    signing key; before 2026.11.5 the state DB held the device private key itself.
+    """
+    parts: list[str] = []
+    chmod_files: list[str] = []
+    chmod_dirs: list[str] = []
+    if client_exposed:
+        parts.append(
+            "the client credential store (client/credentials.sqlite) holds this install's "
+            "device private key and device auth tokens"
+        )
+        chmod_files.append("~/.openclaw/client/credentials.sqlite*")
+        chmod_dirs.append("~/.openclaw/client")
+    if exposed:
+        parts.append(
+            "the state database (state/openclaw.sqlite) holds bootstrap and push tokens, "
+            "stored secret values and MCP OAuth credentials (and, on OpenClaw before "
+            "2026.11.5, the device private key and device auth tokens too)"
+        )
+        chmod_files.insert(0, "~/.openclaw/state/openclaw.sqlite*")
+        chmod_dirs.insert(0, "~/.openclaw/state")
+    evidence = exposed + client_exposed
+    return _finding(
+        "B188",
+        FAIL,
+        "OpenClaw secrets are stored at rest in a file another local user can reach and "
+        "read: " + "; ".join(evidence) + ". In it, " + "; ".join(parts) + ". Anyone who "
+        "can read these files can reuse those credentials" + (
+            " \u2014 with the device private key, impersonate a paired device and forge "
+            "control-plane authentication." if client_exposed else
+            " \u2014 and, on OpenClaw before 2026.11.5, where this file still held the device "
+            "private key, impersonate a paired device and forge control-plane authentication."
+        ),
+        f"Run `chmod 600 {' '.join(chmod_files)}` and `chmod 700 {' '.join(chmod_dirs)} "
+        "~/.openclaw`. Then rotate what was exposed: re-pair any paired devices and re-issue "
+        "bootstrap tokens, since a copy taken while the file was readable stays valid. If "
+        "the state directory lives on a filesystem that does not implement POSIX modes "
+        "(CIFS/exFAT/DrvFs), chmod silently does nothing there \u2014 OpenClaw hits the same "
+        "wall and logs 'skipped permission hardening' \u2014 so move the state directory "
+        "onto a POSIX filesystem instead.",
+        evidence=evidence,
+    )
+
+
 def check_state_db_atrest(ctx: Context) -> Finding:
     """B188 (B-293, DISK-2) - the shared state SQLite database's at-rest permissions.
 
@@ -3439,7 +3505,21 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     (openclaw-state-db-DzSsA9Ji.js): ``device_identities.private_key_pem`` (:711/715),
     ``device_auth_tokens.token`` (:723), ``web_push_vapid_keys.private_key`` (:878/881),
     plus ``device_bootstrap_tokens.token``, ``apns_registrations.token`` and
-    ``auth_profile_stores.store_json``. A backup/rsync/umask slip that leaves the file
+    ``auth_profile_stores.store_json``.
+
+    B-1111 - OpenClaw 2026.11.5 split that set (measured in the installed 11.5 dist, text
+    only). The device tables (``device_identities``, ``device_auth_tokens``,
+    ``gateway_origin_device_tokens``) moved to ``<stateDir>/client/credentials.sqlite``
+    (CLIENT_CREDENTIAL_SCHEMA_SQL); ``web_push_vapid_keys`` and ``auth_profile_stores`` are
+    gone from the state schema; the state DB keeps ``device_bootstrap_tokens.token``,
+    ``apns_registrations.token``, ``secret_store_entries.value``,
+    ``mcp_oauth_stores.store_json`` and ``audit_identity_keys.key``. So this check stats
+    BOTH stores, with the same reachability rule. OpenClaw itself refuses to open the client
+    store when the file or its directory has any group/other bit (``(mode & 63) !== 0`` ->
+    "unsafe", client-credential-store-*.mjs), so a loose client store also breaks device
+    auth - but its contents are still readable on disk, which is what FAILs here.
+
+    A backup/rsync/umask slip that leaves the file
     group- or world-readable lets another local account read a paired device's private key
     and forge control-plane auth - and before this check, EVERY ClawSecCheck permission
     check passed over it, because none of them stat'ed the state DB. B19 above covers
@@ -3480,8 +3560,9 @@ def check_state_db_atrest(ctx: Context) -> Finding:
     warn path (:1825). On such a mount the `chmod` remediation is itself a no-op, so the
     FAIL's fix text says so.
 
-    FAIL    - the DB (or a -wal/-shm sibling) is reachable AND readable by another user,
-              with the whole directory chain (above and below ~/.openclaw) permitting it.
+    FAIL    - the state DB (or a -wal/-shm sibling) or the client credential store (or its
+              -journal) is reachable AND readable by another user, with the whole directory
+              chain (above and below ~/.openclaw) permitting it.
     WARN    - ``state/`` is reachable and writable by another user: they cannot read the
               secrets, but they can swap the database under the agent (mirrors B182's
               ``swappable`` branch). ALSO WARN (C-555, never escalated to FAIL) - a
@@ -3527,6 +3608,19 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             db_unlooked = True
             continue
 
+    # B-1111: the client credential store (2026.11.5+). Same probe, same never-open rule.
+    client_dir = ctx.home / "client"
+    client_present: list[Path] = []
+    client_unlooked = False
+    for name in _B188_CLIENT_DB_NAMES:
+        p = client_dir / name
+        try:
+            if pathprobe.is_file(p) and not pathprobe.is_symlink(p):
+                client_present.append(p)
+        except OSError:
+            client_unlooked = True
+            continue
+
     # Reachability of the chain above ~/.openclaw. Proven, not assumed: `_other_can_reach_read`
     # stops at ctx.home, so on its own it would call a 0644 file under a 0755 ~/.openclaw
     # "exposed" even when $HOME above it is 0700 and denies o+x to every non-owner. That is a
@@ -3560,7 +3654,7 @@ def check_state_db_atrest(ctx: Context) -> Finding:
                 rel = p
             exposed_extra.append(f"{rel} (mode {oct(mode)[-3:]}) is readable by other users")
 
-    if not present:
+    if not present and not client_present:
         if exposed_extra and ancestors_open:
             # Capped at WARN: with no live DB the only reachable evidence is a retained copy.
             return _b188_retained_copy_warn(exposed_extra)
@@ -3598,6 +3692,16 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             except OSError:
                 continue
             exposed.append(f"state/{p.name} (mode {oct(mode)[-3:]}) is readable by other users")
+    client_exposed: list[str] = []
+    for p in client_present:
+        if _other_can_reach_read(ctx.home, p):
+            try:
+                mode = p.stat().st_mode & 0o777
+            except OSError:
+                continue
+            client_exposed.append(
+                f"client/{p.name} (mode {oct(mode)[-3:]}) is readable by other users"
+            )
 
     writable_dir = _other_can_reach_write(ctx.home, state_dir)
 
@@ -3635,23 +3739,8 @@ def check_state_db_atrest(ctx: Context) -> Finding:
         # wins; once per run, so a second invocation on the same ctx adds no duplicate.
         note_limit(ctx.limit_hits, LIMIT_DOMAIN_STATE_DB, cut_detail)
 
-    if exposed and ancestors_open:
-        return _finding(
-            "B188",
-            FAIL,
-            "The OpenClaw state database holds device private keys, device/bootstrap auth "
-            "tokens and web-push VAPID private keys at rest, and another local user can "
-            "reach and read it: " + "; ".join(exposed) + ". Anyone who can read this file "
-            "can impersonate a paired device and forge control-plane authentication.",
-            "Run `chmod 600 ~/.openclaw/state/openclaw.sqlite*` and `chmod 700 "
-            "~/.openclaw/state ~/.openclaw`. Then rotate what was exposed: re-pair any "
-            "paired devices and re-issue bootstrap tokens, since a copy taken while the "
-            "file was readable stays valid. If the state directory lives on a filesystem "
-            "that does not implement POSIX modes (CIFS/exFAT/DrvFs), chmod silently does "
-            "nothing there \u2014 OpenClaw hits the same wall and logs 'skipped permission "
-            "hardening' \u2014 so move the state directory onto a POSIX filesystem instead.",
-            evidence=exposed,
-        )
+    if (exposed or client_exposed) and ancestors_open:
+        return _b188_live_store_fail(exposed, client_exposed)
 
     # Swap vector: the secrets stay unreadable, but a writable state/ lets another user
     # replace the database wholesale under the running agent.
@@ -3697,6 +3786,37 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             "as the account that owns ~/.openclaw.",
         )
 
+    # B-1111: with the client store present, the no-store early return above no longer catches
+    # an unsearchable state/. Same rule as the client twin below: UNKNOWN when state/ is
+    # reachable by other users, never a verified PASS over a database nobody looked at.
+    if db_unlooked and ancestors_open and _b188_dir_traversable_by_other(ctx.home, state_dir):
+        return _finding(
+            "B188",
+            UNKNOWN,
+            "The state database at ~/.openclaw/state/openclaw.sqlite could not be looked "
+            "for \u2014 the state directory could not be searched \u2014 and that directory is "
+            "reachable by other local users, so whether the secrets stored there are exposed "
+            "cannot be determined.",
+            "Make ~/.openclaw/state searchable by the user running this audit (or run the "
+            "audit as the account that owns it), then re-run.",
+        )
+
+    # B-1111: the client credential store could not be looked for while its directory is
+    # reachable by other users - not a verified PASS over a store nobody looked at.
+    if client_unlooked and ancestors_open and _b188_dir_traversable_by_other(
+        ctx.home, client_dir
+    ):
+        return _finding(
+            "B188",
+            UNKNOWN,
+            "The client credential store at ~/.openclaw/client/credentials.sqlite could not be "
+            "looked for \u2014 the directory could not be searched \u2014 and that directory is "
+            "reachable by other local users, so whether the device private key stored there "
+            "is exposed cannot be determined.",
+            "Run this audit as the account that owns ~/.openclaw, or check the store yourself: "
+            "`ls -l ~/.openclaw/client/`.",
+        )
+
     # C-629: the copy walk was cut by its file limit while that tree is reachable. No exposed
     # copy was found among the files that WERE checked (a FAIL/WARN above would have won), but
     # a "verified" PASS over a walk that stopped early is a fake PASS (Golden Rule #4).
@@ -3710,31 +3830,35 @@ def check_state_db_atrest(ctx: Context) -> Finding:
             "`find ~/.openclaw/backups ~/.openclaw/state -type f -perm /044`.",
         )
 
-    names = ", ".join(f"state/{p.name}" for p in present)
-    if (exposed or writable_dir or exposed_extra) and not ancestors_open:
+    names = ", ".join(
+        [f"state/{p.name}" for p in present] + [f"client/{p.name}" for p in client_present]
+    )
+    if (exposed or client_exposed or writable_dir or exposed_extra) and not ancestors_open:
         # Loose modes inside ~/.openclaw, but a directory above it (typically $HOME at 0700)
         # denies traversal to every non-owner, so nothing here is actually reachable. Not a
         # finding - but say so plainly, because the seal is one `chmod 755 ~` away from gone.
         return _finding(
             "B188",
             PASS,
-            f"The state database and its siblings ({names}) carry loose permissions inside "
-            "~/.openclaw, but a directory above ~/.openclaw denies access to other users, "
-            "so they are not reachable and the device keys and auth tokens are not exposed "
-            "at rest.",
+            f"The OpenClaw secret-holding databases ({names}) carry loose permissions "
+            "inside ~/.openclaw, but a directory above ~/.openclaw denies access to other "
+            "users, so they are not reachable and the device keys and auth tokens are not "
+            "exposed at rest.",
             "No exposure today, but the only thing sealing these files is the parent "
             "directory. Tighten them at the source too: `chmod 600 "
-            "~/.openclaw/state/openclaw.sqlite*` and `chmod 700 ~/.openclaw/state "
-            "~/.openclaw`, so loosening your home directory later cannot expose them.",
+            "~/.openclaw/state/openclaw.sqlite* ~/.openclaw/client/credentials.sqlite*` and "
+            "`chmod 700 ~/.openclaw/state ~/.openclaw/client ~/.openclaw`, so loosening your "
+            "home directory later cannot expose them.",
             pass_confidence="verified",
         )
     return _finding(
         "B188",
         PASS,
-        f"The state database and its siblings ({names}) are not reachable and readable by "
-        "other users, so the device private keys, auth tokens and VAPID keys stored in them "
-        "are not exposed at rest.",
-        "Keep ~/.openclaw and ~/.openclaw/state at chmod 700 and the database files at 600.",
+        f"The OpenClaw secret-holding databases ({names}) are not reachable and readable "
+        "by other users, so the device keys, auth tokens and stored secrets in them are "
+        "not exposed at rest.",
+        "Keep ~/.openclaw, ~/.openclaw/state and ~/.openclaw/client at chmod 700 and the "
+        "database files at 600.",
         pass_confidence="verified",
     )
 

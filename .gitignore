@@ -30,3 +30,11 @@ CLAUDE.local.md
 !fixtures/**/CLAUDE.md
 
 *.egg-info/
+
+# C-809: fixture skills' SKILL.md files are GENERATED from tests/fixture_skill_md/ by the test
+# setup (tests/_fixtureskills.py). Tracking them made skill catalogs list deliberately unsafe
+# test fixtures as installable skills under this repository's publisher.
+fixtures/**/SKILL.md
+
+# C-809: temp files of tests/_fixtureskills.py (removed on success)
+tests/fixture_skill_md/.materialize-*

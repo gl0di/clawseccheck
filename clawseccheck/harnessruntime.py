@@ -216,8 +216,26 @@ from .collector import agent_roster
 #: is 0.26.0 in all three; ``@openclaw/ai`` is the installed 2026.10.9 rather than the build's own
 #: pin, which no harness module imported) and answered identically on every row too. The chain is now
 #: 9.5 = ... = 10.6 = 10.7 = 10.8 = 10.9, and the floor stays where it is.
+#:
+#: The ceiling moved to 2026.11.6 on 2026-11-20 (C-804), with a build-conditional rule. 2026.11.5
+#: added a model-id test to the OpenAI route policy (``withRuntimePolicy``,
+#: ``provider-policy-api-*.mjs``): a model id matching ``OPENAI_PRE_GPT5_MODEL_ID_PATTERN`` =
+#: ``/^(?:ft:)?(?:gpt-3\.5|gpt-4|o[134])/`` (lowercased, a leading ``openai/`` stripped) drops
+#: ``codex`` from the route's compatible runtimes, so ``openai/o3`` or ``openai/gpt-4o`` no
+#: longer implies the Codex harness. The pattern is identical in the 2026.11.5 tarball and the
+#: installed 2026.11.6. Regenerated against 2026.11.6 and compared with the 2026.11.4 battery
+#: by label: 779 rows each, the vendor's answer changed on 12 rows, every one an ``openai/o3``
+#: (or ``OpenAI/o3``) ref that used to imply codex, plus 9 rows whose thrown-error text changed
+#: with minification. ``_implies_codex`` applies the pattern from ``_PRE_GPT5_RULE_MIN`` on;
+#: earlier builds keep the old rule. The chain is now 9.5 = ... = 11.4, then 11.5 = 11.6 under
+#: the new rule.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 11, 3)
+ORACLE_MAX = (2026, 11, 6)
+
+#: C-804: from this build an OpenAI model id matching the vendor's pre-GPT-5 pattern no longer
+#: implies the Codex harness. The pattern is the vendor's, verbatim.
+_PRE_GPT5_RULE_MIN = (2026, 11, 5)
+_OPENAI_PRE_GPT5_MODEL_ID_RE = re.compile(r"^(?:ft:)?(?:gpt-3\.5|gpt-4|o[134])")
 
 YES, NO, UNKNOWN = "yes", "no", "unknown"
 
@@ -693,9 +711,38 @@ def _mentions_openai_base_url(cfg, environ) -> bool:
     return False
 
 
-def _analyse(cfg, environ) -> HarnessReach:
+def _implies_codex(model_id, build) -> bool:
+    """Whether an ``openai/<model_id>`` ref still implies the Codex harness on *build*."""
+    if build is None or tuple(build)[:3] < _PRE_GPT5_RULE_MIN:
+        return True
+    mid = str(model_id).lower()
+    if mid.startswith("openai/"):
+        mid = mid[len("openai/"):]
+    return not _OPENAI_PRE_GPT5_MODEL_ID_RE.match(mid)
+
+
+def _js_truthy(value) -> bool:
+    """JavaScript truthiness of a parsed-JSON value (``{}`` and ``[]`` are truthy)."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def _analyse(cfg, environ, build=None) -> HarnessReach:
     if not _is_record(cfg):
         raise _Bail("config is not an object")
+    # C-804: `resolveAgentHarnessPolicy` (policy-*.mjs, 2026.11.5 and 2026.11.6) returns the
+    # embedded runtime for EVERY ref when `cloudWorkers.requiredProfile` is truthy, before any
+    # routing. Not modelled, and not checkable on 2026.11.4 (no tree), so on every build the
+    # answer there is UNKNOWN rather than a YES the vendor would not back.
+    workers = cfg.get("cloudWorkers")
+    if _is_record(workers) and _js_truthy(workers.get("requiredProfile")):
+        return HarnessReach(UNKNOWN, ("cloudWorkers.requiredProfile is set, which overrides "
+                                      "the runtime OpenClaw picks for every model",))
     models = cfg.get("models")
     if models is not None and not _is_record(models):
         raise _Bail("models is not an object")
@@ -810,7 +857,7 @@ def _analyse(cfg, environ) -> HarnessReach:
     for path, refs in effective:
         for r in refs:
             parsed = _parse_ref(r)
-            if parsed and parsed[0] == "openai":
+            if parsed and parsed[0] == "openai" and _implies_codex(parsed[1], build):
                 openai_paths.append(path)
                 break
     if openai_paths:
@@ -884,7 +931,7 @@ def codex_harness_reach(cfg, version, environ=None) -> HarnessReach:
                                       "build this determination was validated on",))
     env = os.environ if environ is None else environ
     try:
-        return _analyse(cfg, env)
+        return _analyse(cfg, env, tuple(version))
     except _Bail as exc:
         return HarnessReach(UNKNOWN, (str(exc),))
     except (TypeError, AttributeError, ValueError, KeyError):

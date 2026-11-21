@@ -38,7 +38,7 @@ _NOTE = (
     "Advisories on separately versioned plugin packages and on the iOS app are not tabulated "
     "here, so this result says nothing about them."
 )
-_INSTALLED_OK = "2026.9.7"  # patched: no row reaches it
+_INSTALLED_OK = "2026.11.6"  # patched: no row reaches it (2026.9.7 until B-1114 added GHSA-pw3x)
 
 
 @pytest.fixture
@@ -82,7 +82,7 @@ def test_a_stamp_only_affected_result_stays_fail_on_every_path_without_an_instal
         r = _run("2026.7.1", installed, home)
         assert r.status == FAIL, (home, installed)
         assert r.detail.startswith("OpenClaw 2026.7.1 is affected by 40 known advisories: ")
-        assert ">= 2026.9.2" in r.fix
+        assert ">= 2026.11.4" in r.fix
 
 
 def test_a_the_same_stamp_is_only_a_warn_when_the_installed_build_decides(machine):
@@ -108,7 +108,7 @@ def test_b_the_untabulated_plugin_and_ios_advisories_are_not_rows():
 
 def test_b_every_verdict_that_judged_a_version_says_plugins_and_ios_are_not_tabulated(machine):
     results = {
-        "pass": _stamp_only("2026.9.2"),
+        "pass": _stamp_only("2026.11.4"),
         "fail": _stamp_only("2026.7.1"),
         "fail-extended": _stamp_only("2026.7.35"),
         "unknown-unexamined": _stamp_only("2026.7.36"),
@@ -132,7 +132,7 @@ def test_c_a_prerelease_collapses_onto_its_release():
     assert _parse_version("2026.7.1-2") == (2026, 7, 1)
 
 
-@pytest.mark.parametrize("stamp", ["2026.9.2-beta.1", "2026.9.3-beta.1"])
+@pytest.mark.parametrize("stamp", ["2026.11.4-beta.1", "2026.11.5-beta.1"])
 def test_c_a_beta_of_the_newest_fixed_build_reads_as_patched(stamp):
     """In the vendor's order such a beta is below the fixed build; B33 judges it as the release and
     PASSes. No such build is published; ordering it below its release would move verdicts."""

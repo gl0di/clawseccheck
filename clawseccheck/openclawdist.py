@@ -449,7 +449,23 @@ def self_reported_version(config: "dict | None") -> str:
 # B391 image row (unchanged, node:24.22.1-slim) were re-grounded on the installed 11.2 dist.
 # Raised to 2026.11.3 on 2026-11-13 (C-799): the same set re-grounded on the installed 11.3 dist;
 # the B391 image row is unchanged (node:24.22.1-slim) and `env.vars.*` is covered (C-688).
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 3)
+# Raised to 2026.11.4 on 2026-11-16 (C-801): re-grounded on the installed 11.4 dist; the schema
+# gained only `tools.openclaw.autoApproveChanges` (both scopes), which no check reads.
+# NOT raised to 2026.11.5 on 2026-11-18 (C-803), deliberately. The 11.5 snapshots are re-grounded,
+# but three known false negatives remain on 11.5 (B-1110: heartbeats Doctor moved into cron_jobs;
+# B-1111: device keys moved to client/credentials.sqlite; B-1112: tools.github.app.privateKey), so
+# claiming 11.5 as grounded would drop the "newer than grounded" disclosure while the audit is known
+# to miss them. Raise it when those land.
+# Raised to 2026.11.6 on 2026-11-20, over 2026.11.5, once they had landed: B-1110 (scheduled
+# actors read the state-DB cron_jobs Doctor moves heartbeats into), B-1111 (B188 stats
+# client/credentials.sqlite), B-1112 (a plaintext tools.github.app.privateKey), plus the two
+# windowed ports: C-804 (the harness port follows 11.5's pre-GPT-5 OpenAI routing rule) and C-805
+# (the retired-format finder is unchanged through 11.6; Doctor's retired-state advice is
+# build-aware). On the installed 11.6 (C-806): the schema snapshot is unchanged apart from its
+# stamp (167 paths), state schema 36 with 135 vendor tables, the DM-policy manifest moved no
+# channel, the default-diff oracle flipped nothing (both controls run), the fleet gate shows no
+# new FAIL, and the one advisory published since (GHSA-pw3x-g8v8-fvj2) is in B33 (B-1114).
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 6)
 
 
 def grounding_gap(installed_version: "str | None"):

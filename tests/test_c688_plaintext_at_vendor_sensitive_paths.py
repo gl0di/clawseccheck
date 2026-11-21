@@ -99,6 +99,9 @@ _FLAGGED = [
     ("provider Proxy-Authorization", "models.providers.p1.headers.Proxy-Authorization"),
     ("request Cookie", "models.providers.p1.request.headers.Cookie"),
     ("web fetch x-access-token", "tools.web.fetch.headers.x-access-token"),
+    ("github app private key", "tools.github.app.privateKey"),
+    ("per-agent github app private key", "agents.entries.main.tools.github.app.privateKey"),
+    ("legacy roster github app private key", "agents.list[].tools.github.app.privateKey"),
 ]
 
 
@@ -147,7 +150,9 @@ def test_public_material_and_a_session_key_are_excluded(path):
     "path",
     ["some.unrelated.key", "some.unrelated.value", "request.auth.key", "tls.key",
      "foo.env.SSH_PASSPHRASE", "foo.headers.Authorization",
-     "storage.locations.s3.encryption.passphraseFile", "models.providers.p1.request.tls.keyFile"],
+     "storage.locations.s3.encryption.passphraseFile", "models.providers.p1.request.tls.keyFile",
+     "some.app.privateKey", "agents.list.tools.github.app.privateKey",
+     "agents.entries.main.tools.github.app.privateKeyFile"],
 )
 def test_an_unrelated_path_with_an_ambiguous_leaf_does_not_start_to_flag(path):
     assert _secret_paths(_nest(path, _secret())) == []
@@ -356,7 +361,8 @@ def _status(tmp_path: Path, cfg: dict, mode: int) -> tuple:
     "path",
     ["storage.locations.s3.encryption.passphrase", "models.providers.p1.request.tls.key",
      "models.providers.p1.request.auth.value",
-     "mcp.servers.s1.headers.Authorization", "agents.defaults.sandbox.ssh.identityData"],
+     "mcp.servers.s1.headers.Authorization", "agents.defaults.sandbox.ssh.identityData",
+     "tools.github.app.privateKey", "agents.entries.main.tools.github.app.privateKey"],
 )
 def test_b1_fails_a_readable_config_and_c015_warns(tmp_path, path):
     b1, c015 = _status(tmp_path, _nest(path, _secret()), 0o644)

@@ -1309,6 +1309,25 @@ _DIST_MAX_DEPTH = 8
 # Verdicts below are from `OpenClawSchema.safeParse()` on the installed 2026.7.1-2 dist, not
 # from this file's reader — the reader was cross-checked against it, not trusted over it.
 _NOT_IN_CURRENT_SCHEMA = {
+    # C-803: OpenClaw 2026.11.5 removed heartbeat from the config schema. Measured on the
+    # installed 2026.11.5 dist (read 2026-11-18): no `heartbeat:` field in any zod-schema
+    # chunk, and `legacy-config-migrations-*.mjs` LEGACY_HEARTBEAT_CONFIG_RULES flags
+    # agents.defaults.heartbeat, agents.entries.*.heartbeat and agents.list[].heartbeat as
+    # retired ("requires openclaw doctor --fix before startup"); Doctor's
+    # retireHeartbeatWithDoctor moves each schedule into the state DB's cron_jobs table and
+    # only then deletes the keys. The paths are real on 2026.11.4 and older, which is why the
+    # reads stay (Golden Rule #6). Reading the migrated cron_jobs rows on 11.5 is B-1110.
+    "agents.defaults.heartbeat": (
+        "2026.11.5 dist: no heartbeat field in the zod schema; LEGACY_HEARTBEAT_CONFIG_RULES "
+        "marks it retired. Valid on <= 2026.11.4. Read by checks/_shared.py::_has_heartbeat_cfg and "
+        "checks/_lifecycle.py::check_autonomy."
+    ),
+    "relative:heartbeat": (
+        "2026.11.5 dist: the per-agent heartbeat (agents.entries.*.heartbeat / "
+        "agents.list[].heartbeat) is in LEGACY_HEARTBEAT_CONFIG_RULES and absent from the "
+        "agent entry schema. Valid on <= 2026.11.4. Read by checks/_shared.py::_has_heartbeat_cfg and "
+        "checks/_capability.py::_has_heartbeat_signal."
+    ),
     # C-744: OpenClaw 2026.10.5 removed Skill Workshop proposals. Measured on the installed
     # 2026.10.5 root JSON schema (`schema-*.mjs` export `t`): `skills.workshop` is
     # `{type: object, additionalProperties: false}` with exactly {autonomous: {mode:

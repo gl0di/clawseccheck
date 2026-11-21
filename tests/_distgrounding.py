@@ -172,7 +172,17 @@ def _matches(pattern: str, symbol: str, contains: str | None) -> list:
 #: import") was tried and rejected: the synthetic bundles the unit tests build have none
 #: either. ``test_every_sealed_bundle_is_import_free_in_the_installed_dist`` checks each
 #: listed name against the real dist, so a second such helper is noticed, not swallowed.
-SEALED_BUNDLES = frozenset({"package-update-activation-recovery.mjs"})
+#:
+#: OpenClaw 2026.11.5 adds a second, ``dist/managed-handoff-runtime.mjs`` (6.6 MB, unhashed,
+#: ZERO relative imports, one ``export {}``): ``runtime-process-manifest-*.mjs`` names it
+#: ``runtimeProcessEntrypoint("infra/update-managed-service-handoff-sealed", ...)``, the
+#: sealed runtime of the update's managed-service handoff -- the same dependency-closure kind.
+#: Its ``resolveAgentWorkspaceDir`` is the ``agent-scope-config`` function with un-minified
+#: locals (same statements, same order; compared 2026-11-18), a copy and not a second site.
+SEALED_BUNDLES = frozenset({
+    "package-update-activation-recovery.mjs",
+    "managed-handoff-runtime.mjs",
+})
 
 
 @functools.lru_cache(maxsize=None)

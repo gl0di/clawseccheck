@@ -47,7 +47,8 @@ from clawseccheck.risk import risk_paths
 
 OLD_STARTUP = "2026.9.8"   # Doctor still migrates; the 2026.9.7-9.9 text applies
 NEW = "2026.10.2"          # Doctor refuses the retired formats
-NEWER = "2026.11.4"         # outside the finder's validated window, still >= 2026.10.1
+NEWER = "2026.11.7"         # outside the finder's validated window, still >= 2026.10.1
+STATE_MIGRATES = "2026.11.5"  # C-805: a retired STATE file no longer stops Doctor
 
 _LEGACY = {"browser": {"ssrfPolicy": {"allowPrivateNetwork": True}}}
 _UNTRUSTED = {"channels": {"telegram": {"contextVisibility": "all", "dmPolicy": "allowlist",
@@ -238,6 +239,18 @@ def test_b168_dormant_label_says_doctor_refuses_from_2026_10_1(tmp_path):
     assert f"bridge release {_RETIRED_STATE_BRIDGE_VERSION}" in f.detail
 
 
+def test_b168_dormant_label_says_doctor_migrates_again_from_2026_11_5(tmp_path):
+    f = check_cron_job_content(_cron_ctx(tmp_path, STATE_MIGRATES))
+    assert f.status == FAIL                                    # verdict unchanged
+    assert "Doctor refuses this retired file" not in f.detail
+    assert "bridge release" not in f.detail
+    assert "imports this retired file into its active cron jobs" in f.detail
+    assert "unless it quarantines the row" in f.detail
+    # the build just before keeps the 2026.10.1-2026.11.4 refusal text
+    g = check_cron_job_content(_cron_ctx(tmp_path / "older", "2026.11.4"))
+    assert "Doctor refuses this retired file instead of importing it" in g.detail
+
+
 # ------------------------------------------------------------------ B177 fix
 
 def _blocked_ctx(installed):
@@ -301,6 +314,22 @@ def test_b356_fix_warns_that_doctor_may_stop_first_from_2026_10_1(tmp_path):
     assert "or a legacy plugin install index" not in f.fix
     assert "Doctor only warns and leaves it unchanged (naming OpenClaw 2026.9.5)" in f.fix
     assert f"`openclaw update` refuses it (naming OpenClaw {_RETIRED_STATE_BRIDGE_VERSION})" in f.fix
+
+
+def test_b356_fix_from_2026_11_5_keeps_the_config_stop_and_drops_the_state_bridge(tmp_path):
+    ctx = Context(home=_legacy_home(tmp_path))
+    ctx.installed_dist_version = STATE_MIGRATES
+    f = check_legacy_state_migration_pending(ctx)
+    assert f.status == WARN
+    assert f.fix.startswith("Stop the OpenClaw gateway and run `openclaw doctor --fix`")
+    assert "Doctor still stops first if the config holds a retired pre-July-2026 key" in f.fix
+    assert "In the usual case retired state files no longer stop it" in f.fix
+    assert "migrates or archives them" in f.fix
+    # C-135 (2026-11-20): the narrow stops that remain are disclosed, not denied
+    assert "custom `cron.store` path while the config itself does not parse" in f.fix
+    assert "a retired file it cannot read" in f.fix
+    assert f"OpenClaw {_RETIRED_STATE_BRIDGE_VERSION}" not in f.fix
+    assert "naming OpenClaw 2026.9.5" not in f.fix
 
 
 def test_b356_clean_home_is_still_a_pass(tmp_path):

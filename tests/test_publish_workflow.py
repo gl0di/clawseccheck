@@ -308,8 +308,7 @@ def test_publish_workflow_pins_pytest_ruff_with_hashes() -> None:
             f"Found an unhashed pytest install line: {line!r}"
         )
     req_txt = (TOOLS_DIR / "requirements-ci.txt").read_text(encoding="utf-8")
-    # Every direct pin declared in requirements-ci.in (pytest is pinned per interpreter,
-    # so it appears twice) must be present in the generated lock.
+    # Every direct pin declared in requirements-ci.in must be present in the generated lock.
     req_in = (TOOLS_DIR / "requirements-ci.in").read_text(encoding="utf-8")
     direct = [ln.split(";")[0].strip() for ln in req_in.splitlines()
               if ln.strip() and not ln.lstrip().startswith("#")]

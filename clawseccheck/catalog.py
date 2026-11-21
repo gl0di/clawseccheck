@@ -2813,7 +2813,9 @@ CATALOG: list[CheckMeta] = [
     # holds device_identities.private_key_pem, device_auth_tokens.token,
     # device_bootstrap_tokens.token, web_push_vapid_keys.private_key, apns_registrations.token
     # and auth_profile_stores.store_json (all verified as real CREATE TABLE statements in the
-    # dist's OPENCLAW_STATE_SCHEMA_SQL). No existing permission check stat'ed it: B19 covers
+    # dist's OPENCLAW_STATE_SCHEMA_SQL). B-1111: from OpenClaw 2026.11.5 the device tables
+    # live in <stateDir>/client/credentials.sqlite and VAPID/auth-profile tables left the state
+    # schema, so B188 stats both stores. No existing permission check stat'ed it: B19 covers
     # workspace memory/logs + F-120 transcripts, B11 reads only openclaw.json's mode, B182
     # enumerates only ClawHub CLI token stores. Path-aware via _other_can_reach_read -- a 0644
     # DB sealed inside a 0700 home is the routine umask-022 outcome and must NOT fire (the
@@ -3759,6 +3761,21 @@ CATALOG: list[CheckMeta] = [
         confidence="HIGH",
         surface="skills",
     ),
+    # B399 (C-802): tools.openclaw.autoApproveChanges: true (global or per agent) lets the
+    # `openclaw` delegate tool apply config, channel, plugin, provider and API-key changes -
+    # including ones that run code on the Gateway host - with no human approval, even where
+    # exec is denied. WARN when an agent that can be offered the tool outside a sandbox
+    # resolves to true; advisory, never FAIL, unscored. See
+    # checks/_config.py::check_openclaw_auto_approve_changes for the grounding.
+    CheckMeta(
+        "B399",
+        "Standing auto-approval grant for delegated OpenClaw changes",
+        HIGH,
+        "advisory",
+        "Control Plane",
+        scored=False,
+        surface="tools",
+    ),
 ]
 
 BY_ID = {c.id: c for c in CATALOG}
@@ -3948,6 +3965,7 @@ AST_MAP = {
     "B193": ("AST02",),  # gateway secret inlined in the service unit = credential exposure on the persistence surface (cf. B182)
     "B348": ("AST02",),  # plugins.load.paths entry not in plugins.entries = supply-chain visibility gap (cf. B152/B158)
     "B396": ("AST08",),  # node-published skill content never reaches the content scanners = Poor Scanning (cf. B16)
+    "B399": ("AST03",),  # standing auto-approval of delegated OpenClaw changes = excessive agency (cf. B32)
     "B398": ("AST01",),  # hash-unchecked .pyc = compiled code the source scan never saw (cf. B89/B13)
     "B397": ("AST06",),  # second HTTP ingress outside gateway.auth = weak isolation (cf. B340/B358)
 }
@@ -4086,6 +4104,7 @@ OWASP_MAP = {
     "B187": ("LLM03", "LLM05"),  # non-bundled plugin declares agentToolResultMiddleware = Supply Chain + Improper Output Handling
     "B193": ("LLM02",),  # gateway secret inlined in the service unit = Sensitive Information Disclosure
     "B396": ("LLM03",),  # paired-node skills outside the skill content scan = Supply Chain (cf. B386)
+    "B399": ("LLM06",),  # standing auto-approval of delegated OpenClaw changes = Excessive Agency (cf. B32)
     "B398": ("LLM03",),  # skill ships compiled code that bypasses source review = Supply Chain (cf. B13)
     "B397": ("LLM06",),  # an agent can publish any local port off-host behind a bearer URL = Excessive Agency (cf. B32)
 }

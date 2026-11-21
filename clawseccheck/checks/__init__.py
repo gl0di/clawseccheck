@@ -210,13 +210,15 @@ from ._host import (
 )
 
 from ._shared import (_JSONL_SCAN_CAP, _MCP_REMOTE_TRANSPORTS, _custom, _mcp_has_remote, _mcp_servers, _mcp_tool_texts, _mcp_url_is_local, _read_jsonl_tail, correlation_indicators, _CORR_INDICATOR_CAP,)
-from ._shared import (_RETIRED_CONFIG_KEYS, _retired_keys_present,)
+from ._shared import (_RETIRED_CONFIG_KEYS, _RETIRED_HEARTBEAT_KEYS, _retired_keys_present,)
+# B-1110: scheduled-actor evidence (heartbeat config, top-level cron, enabled state-DB cron job).
+from ._shared import (_has_heartbeat_cfg, _enabled_cron_job_rows, _agent_cron_job_rows, _MEMORY_DREAMING_SENTINEL, _heartbeat_config_retired, _scheduled_actor_source, _has_scheduled_actor, _has_enabled_agent_turn_job, _channel_heartbeat_visibility_paths,)
 # C-645: the boot-time config self-heal was removed in 2026.9.7; B382 / B38 / RISK-05 /
 # RISK-15 word their advice off this one predicate (risk.py reaches it only through here).
 from ._shared import (_startup_repair_removed, _legacy_ssrf_alias_startup_blocked, _LEGACY_SSRF_ALIAS_970_FACT, _LEGACY_SSRF_ALIAS_970_ORDER,)
 # C-686: from 2026.10.1 Doctor and `openclaw update` refuse the retired formats; the advice that
 # sent the user to `openclaw doctor --fix` is worded off this one predicate.
-from ._shared import (_DOCTOR_REFUSES_RETIRED_MIN, _RETIRED_STATE_BRIDGE_VERSION, _LEGACY_SSRF_ALIAS_1010_FACT, _LEGACY_SSRF_ALIAS_1010_ORDER, _LEGACY_SSRF_ALIAS_1010_INERT, _DOCTOR_WHOLE_CONFIG_HEDGE, _doctor_refuses_retired_formats, _doctor_whole_config_hedge, _legacy_ssrf_alias_consequence, _legacy_ssrf_alias_fact, _legacy_ssrf_alias_order,)
+from ._shared import (_DOCTOR_REFUSES_RETIRED_MIN, _RETIRED_STATE_BRIDGE_VERSION, _LEGACY_SSRF_ALIAS_1010_FACT, _LEGACY_SSRF_ALIAS_1010_ORDER, _LEGACY_SSRF_ALIAS_1010_INERT, _DOCTOR_WHOLE_CONFIG_HEDGE, _doctor_refuses_retired_formats, _DOCTOR_MIGRATES_RETIRED_STATE_MIN, _doctor_migrates_retired_state, _doctor_whole_config_hedge, _legacy_ssrf_alias_consequence, _legacy_ssrf_alias_fact, _legacy_ssrf_alias_order,)
 from ._shared import (_key_advice, _openclaw_generation, _retired_key_note, _MCP_DATA_CAP_RE, _MCP_FS_PKG_RE, _MCP_BROAD_FS_ROOTS, _mcp_fs_root_is_broad, _mcp_sensitive_reason, _mcp_leg_contributions, _node_commands, _node_allow_skills,)
 from ._shared import (_MCP_INTAKE_CAP_RE, _mcp_intake_reason,)
 # B-297: the wildcard-group ingress predicate - risk.py's ingress leg reaches it only
@@ -450,6 +452,7 @@ from ._config import (
     check_local_first,
     check_local_model_service_command,
     check_nodehost_workerruns_isolation,
+    check_openclaw_auto_approve_changes,
     check_privileged_commands_exposure,
     check_proxy_header_forging,
     check_redactor_blind_secret_paths,
@@ -1033,7 +1036,9 @@ from ._mcp import (
     _mcp_codex_requires_approval,
     _mcp_is_per_requester,
     _mcp_normalize_tool_filter,
+    _MCP_SCOPED_ALIAS_FILTER_MIN,
     _mcp_tool_allowed,
+    _mcp_tool_filter_alias_entries,
     _mcp_tool_filter_matches,
     _memory_default_owner_blocked,
     _plugin_activation_blocked,
@@ -1684,6 +1689,11 @@ CHECKS = [
     # three transports (ingress / Tailscale Serve / direct). WARN-only, unscored
     # advisory; requires an agent scope granted `portal` while unsandboxed.
     check_gateway_portal_reach,
+    # B399 - tools.openclaw.autoApproveChanges: true (global or per agent) is a standing
+    # grant for the `openclaw` delegate tool to apply config, plugin, provider and API-key
+    # changes with no human approval. WARN-only, unscored advisory; requires an agent
+    # scope granted `openclaw` while unsandboxed.
+    check_openclaw_auto_approve_changes,
     # B351 - code mode: the model is handed exec+wait over a catalog bridge instead of
     # the ordinary tool surface. Walks agents.list, which can enable it independently.
     check_code_mode_tool_surface,

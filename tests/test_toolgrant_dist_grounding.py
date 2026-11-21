@@ -302,10 +302,15 @@ def test_the_pinned_battery_is_what_the_installed_vendor_answers(vendor):
 # --------------------------------------------------------------------- write => apply_patch
 
 def test_dist_still_lets_write_allow_apply_patch():
-    text = dist_text("tool-policy-match-*.js", symbol="writeAllowsApplyPatch",
-                     contains="writeAllowsApplyPatch")
-    assert "writeAllowsApplyPatch" in text, "the implication flag moved — re-ground granted()"
-    assert 'normalized === "apply_patch"' in text and 'matchesAnyGlobPattern("write", allow)' in text
+    # 2026.11.5 minified the module: the flag is a one-letter local now, so the implication is
+    # pinned by SHAPE (flag && name === "apply_patch" && write in the allowlist), not by the
+    # old ``writeAllowsApplyPatch`` / ``normalized`` names. ``contains`` selects the real
+    # module over the 2-line re-export stub that shares the filename prefix.
+    text = dist_text("tool-policy-match-*.js", symbol="the write => apply_patch implication",
+                     contains='matchesAnyGlobPattern("write"')
+    assert re.search(r'\b\w+ && \w+ === "apply_patch" && matchesAnyGlobPattern\("write", \w+\)', text), (
+        "the write => apply_patch implication moved — re-ground granted()"
+    )
 
 
 def test_write_only_allowlist_grants_apply_patch_but_not_edit():
@@ -318,10 +323,18 @@ def test_write_only_allowlist_grants_apply_patch_but_not_edit():
 # ------------------------------------------------------------------- agents.defaults.tools
 
 def test_dist_agent_tools_falls_back_to_agents_defaults_only_without_a_roster():
-    text = dist_text("agent-tools.policy-*.js", symbol="implicitDefaultTools",
-                     contains="implicitDefaultTools")
-    assert "implicitDefaultTools" in text
-    assert "hasAgentRosterProperty" in text
+    # 2026.11.5 minified ``implicitDefaultTools`` to a local; pin the derivation's shape:
+    # ``agentConfig?.tools ?? (config && !hasAgentRosterProperty(config) ? <defaults.tools> : void 0)``
+    # with ``<defaults.tools>`` read from ``config.agents.defaults.tools``. ``contains`` skips
+    # the re-export stub that shares the filename prefix.
+    text = dist_text("agent-tools.policy-*.js", symbol="resolveEffectiveToolPolicy's agentTools",
+                     contains="!hasAgentRosterProperty(")
+    assert re.search(r"\b(\w+) = e\.config \? \(e\.config\.agents\?\.defaults\)\?\.tools : void 0", text), (
+        "agents.defaults.tools is no longer the fallback source — re-ground granted()"
+    )
+    assert re.search(
+        r"\?\.tools \?\? \(e\.config && !hasAgentRosterProperty\(e\.config\) \? \w+ : void 0\)", text
+    ), "the no-roster-only fallback moved — re-ground granted()"
 
 
 def test_agents_defaults_tools_is_a_real_scope_with_no_roster():

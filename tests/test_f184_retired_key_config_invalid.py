@@ -620,18 +620,21 @@ def test_startup_no_longer_carries_the_automatic_config_repair():
 
 
 #: The gateway-run bootstrap branch for an invalid config: recorded, then handed back.
+#: C-805: matched by SHAPE, not by local names - 2026.11.5 minified `snapshot` to a single
+#: letter (`const u = await readGuardedGatewayRunConfig(e); ... lastGuardedGatewayRunSnapshot
+#: = u; return true;`, pre-bootstrap-*.mjs on 2026.11.6). The back-reference keeps it one value.
 _INVALID_SNAPSHOT_BRANCH_RE = re.compile(
-    r"const snapshot = await readGuardedGatewayRunConfig\(params\);\s*"
-    r"if \(!snapshot\) return false;\s*"
-    r"if \(!snapshot\.valid\) \{\s*"
-    r"lastGuardedGatewayRunSnapshot = snapshot;\s*"
+    r"const ([A-Za-z_$][\w$]*) = await readGuardedGatewayRunConfig\([A-Za-z_$][\w$]*\);\s*"
+    r"if \(!\1\) return false;\s*"
+    r"if \(!\1\.valid\) \{\s*"
+    r"lastGuardedGatewayRunSnapshot = \1;\s*"
     r"return true;\s*\}"
 )
 
 
 def test_the_gateway_run_bootstrap_hands_an_invalid_snapshot_back_unrepaired():
     path = dist_file("pre-bootstrap-*.mjs", symbol="the gateway-run config guard",
-                     contains="lastGuardedGatewayRunSnapshot = snapshot;")
+                     contains="readGuardedGatewayRunConfig(")
     text = path.read_text(encoding="utf-8", errors="replace")
     assert _INVALID_SNAPSHOT_BRANCH_RE.search(text), (
         f"{path.name}: the invalid-snapshot branch no longer reads 'record it and return' "
@@ -656,9 +659,15 @@ def test_the_startup_preflight_leaves_an_invalid_snapshot_to_doctor():
     path = dist_file("startup-config-preflight-*.mjs", symbol="runStartupConfigPreflight",
                      contains="function runStartupConfigPreflight")
     text = path.read_text(encoding="utf-8", errors="replace")
-    assert "legacy imports and repair receipts belong to Doctor" in text
-    # gateway mode: an invalid read is returned as read, before any state preparation
-    assert re.search(r"if \(!read\.snapshot\.valid\) return result\(read\);", text)
+    # gateway mode: an invalid read is returned as read, before any state preparation or
+    # recovery. C-805: by shape - 2026.11.5 renamed `read` and dropped the comment that used
+    # to say so ("legacy imports and repair receipts belong to Doctor").
+    early = re.search(r"if \(!([A-Za-z_$][\w$]*)\.snapshot\.valid\) return result\(\1\);", text)
+    assert early, f"{path.name}: the invalid-snapshot early return moved"
+    for later in ("recovery.apply(", "migration-lease"):
+        pos = text.find(later)
+        assert pos == -1 or pos > early.start(), (
+            f"{path.name}: {later} now runs before an invalid snapshot is returned")
     for repair in ("automatic-config-repair", "planAutomaticConfigRepair",
                    "commitAutomaticConfigRepair", "planAdmittedConfigRepair"):
         assert repair not in text, f"{path.name} now references {repair}"
@@ -685,14 +694,18 @@ def test_automatic_repair_gate_still_declines_on_include_present():
         contains="function canPlanAutomaticConfigRepair(",
     )
     text = path.read_text(encoding="utf-8", errors="replace")
-    gate = re.search(r"function canPlanAutomaticConfigRepair\(snapshot\) \{(.*?)\n\}", text, re.S)
+    # C-805: by shape - 2026.11.5 minified `snapshot` and added a second parameter
+    # (`canPlanAutomaticConfigRepair(e, t = false)`); the include clauses are unchanged.
+    gate = re.search(
+        r"function canPlanAutomaticConfigRepair\(([A-Za-z_$][\w$]*)(?:, [^)]*)?\) \{(.*?)\n\}",
+        text, re.S)
     assert gate, f"{path.name}: the gate's declaration moved"
-    body = gate.group(1)
-    assert "(snapshot.includedPaths?.length ?? 0) === 0" in body
-    assert "!containsConfigIncludeDirective(snapshot.parsed)" in body
+    var, body = gate.group(1), gate.group(2)
+    assert f"({var}.includedPaths?.length ?? 0) === 0" in body
+    assert f"!containsConfigIncludeDirective({var}.parsed)" in body
     # ...and the planner still asks it before doing anything
     assert re.search(
-        r"function planConfigRepair\(.*?\) \{\s*if \(!canPlanAutomaticConfigRepair\(snapshot\)\) return null;",
+        r"function planConfigRepair\(.*?\) \{\s*if \(!canPlanAutomaticConfigRepair\([^)]*\)\) return null;",
         text, re.S), f"{path.name}: planConfigRepair no longer gates on the include check"
 
 
