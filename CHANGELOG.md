@@ -3,6 +3,136 @@
 All notable changes to ClawSecCheck are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions use [SemVer](https://semver.org/).
 
+## [4.6.0] - 2026-11-21
+
+**This release adds one check (B399), fails OpenClaw builds affected by GHSA-pw3x-g8v8-fvj2 in
+B33, follows OpenClaw 2026.11.5's move of heartbeats and device credentials out of the config and
+state DB, and re-grounds the audit on OpenClaw 2026.11.6.** B399 is an unscored WARN and never
+FAILs. Several PASS, UNKNOWN or WARN results can now change on the shapes listed below: B33 now
+FAILS OpenClaw 2026.9.2 through 2026.11.3 except 2026.10.33 (the 2026.9 extended-stable line
+through 2026.9.37 included) with fix target 2026.11.4; B188 reads a second credential store and its
+detail text and fingerprint change; B17, B168, RISK-14, RISK-17 and RISK-18 now see heartbeats
+that live in state-DB cron jobs; B1 and C015 flag a plaintext GitHub App private key; B168 and B356
+wording changes on OpenClaw 2026.11.5 and later; `--vet` reads sibling-skill files sent off-host
+as exfiltration, warns on a fenced `curl | bash` install step, and flags an unversioned scoped npm
+package in `--vet-mcp`; and the Codex-harness check answers unknown in more cases. A config or
+skill that does not match one of them reads exactly as before.
+
+### Security
+- **New check B399: standing auto-approval grant for delegated OpenClaw changes.** OpenClaw
+  2026.11.4 adds `tools.openclaw.autoApproveChanges` (global and per agent). When it resolves to
+  true for an agent that is offered the `openclaw` delegate tool outside a sandbox, delegated
+  config, channel, plugin, provider and API-key changes, including ones that run code on the
+  Gateway host, apply without a human approval, even where `exec` is denied. B399 reports that as
+  an unscored WARN; it never FAILs.
+- **B33 fails builds affected by GHSA-pw3x-g8v8-fvj2.** OpenClaw published this high-severity
+  advisory on 2026-11-19: the `openclaw` tool could apply persistent config changes without
+  approval when tool policy denied `exec` and file writes. It is vulnerable from 2026.9.2 below
+  2026.10.33 and from 2026.11.1 below 2026.11.4, and B33 passed every one of those builds. Builds
+  2026.9.2 through 2026.11.3 now FAIL with an upgrade target of 2026.11.4, except 2026.10.33,
+  which is the published patched extended-stable build and stays clear. The 2026.9
+  extended-stable builds 2026.9.33 to 2026.9.37 also FAIL: the 2026.9.37 release still decides
+  full permission for the delegate tool from the exec defaults alone and lacks the check the
+  2026.10.33 fix added. A later 9.x patch or a suffixed variant stays UNKNOWN. 2026.11.4 is also
+  now the one-step fix target for older failing builds.
+- **B188 also checks the client credential store.** OpenClaw 2026.11.5 moved the device private
+  key and device auth tokens out of `state/openclaw.sqlite` into `client/credentials.sqlite`, so a
+  group- or world-readable client store passed every at-rest permission check. B188 now also
+  stats `client/credentials.sqlite` and its `-journal`, `-wal` and `-shm` siblings with the same
+  reachability and ancestor-directory rule as the state database (a 0644 file under a 0700
+  directory still passes). The FAIL text names what each store holds per build, an unsearchable
+  `state/` or `client/` directory that other users can reach reads UNKNOWN rather than PASS, and
+  the PASS text covers both stores. Neither database is ever opened. The B188 detail text and its
+  finding fingerprint change, so a `.clawseccheckignore` entry written against the old text needs
+  refreshing.
+- **B1 and C015 flag a plaintext GitHub App private key.** OpenClaw 2026.11.5 added
+  `tools.github.app.privateKey`, which holds the PEM itself, at the top level and per agent. Its
+  leaf name was not one the secret-key matcher knew, so a key written there in the clear was never
+  seen. It is now read at `tools.github`, `agents.entries.<id>.tools.github` and the legacy
+  `agents.list[N]` roster. A SecretRef or `${NAME}` value stays clean, and a `privateKey` anywhere
+  else is not affected.
+- **`--vet` convicts skill code that sends another installed skill's files off-host.** A skill
+  whose Python read a sibling skill's data (for example
+  `~/.openclaw/skills/password-manager/vault.json`) or harvested every installed skill
+  (`skills/*/SKILL.md`) and posted it vetted INSTALL, while the same flow from `~/.ssh/id_rsa`
+  failed. A content read under another skill's directory now seeds the credential-exfiltration
+  flow, and the path follows `.glob`, `.rglob`, `.iterdir`, `glob.glob` and `os.listdir`. Only a
+  real read convicts: a listing, a name, an existence check or the bare path does not.
+  Dot-directories and plain files under `skills/` are not skills. A skill's identity is its
+  directory name, never the `name:` in `SKILL.md`, taken from the leftmost `skills` component of
+  its path, so nothing the author nests below the install root can hand a skill a sibling's
+  identity. Empty and `.` path segments no longer hide the sibling, and directory names compare
+  case-sensitively except on macOS and Windows, where only plain ASCII case is folded. The one
+  residual: a repository checkout whose folder name differs from the name its own code uses for
+  itself still reads as a foreign read, and the finding's advice says so.
+- **`--vet` warns on a fenced `curl | bash` install step.** A pipe-to-shell from a non-reputable
+  host inside a bare Markdown fence only produced a "not assessed" coverage note, so `--vet` said
+  INSTALL while the identical command as prose under an install heading was a WARN. The fence now
+  demotes the match to the same B13 WARN instead of dropping it. It never FAILs, and local,
+  reputable and example hosts stay quiet. When B100's ClickFix finding covers the same fence, it
+  now takes the `--vet` headline from B13.
+- **`--vet-mcp` flags an unversioned scoped npm package.** The unpinned-package pattern treated
+  any `@` as a version separator, so the leading `@` of an npm scope made `npx -y @scope/pkg` read
+  as pinned and `--vet-mcp` said INSTALL on the most common real MCP launch shape. Only an `@`
+  after the package name is a version now.
+- **B333 no longer misreads MCP `toolFilter` tool aliases.** OpenClaw 2026.11.5 resolves a
+  `toolFilter` entry that names no tool and has no glob as a tool alias (`<server>__<tool>`). The
+  check read every entry literally, so an include alias hid a tool that waives its own approval
+  gate (a missed WARN), and an exclude alias left a hidden tool in the report (a false WARN). On
+  2026.11.5 and later, or an unknown build, such a server now reads UNKNOWN and names the entry,
+  unless a waiving tool is reachable through a plain include entry and no exclude alias is set,
+  which still WARNs. Older builds read exactly as before.
+
+### Fixed
+- **Heartbeats that OpenClaw moved into state-DB cron jobs are seen again.** OpenClaw 2026.11.5
+  removed `heartbeat` from the config schema, and `openclaw doctor --fix` moves each heartbeat
+  into the state database's `cron_jobs` table and deletes the keys. The readers of scheduled,
+  unattended agents only looked at config, so after the migration they saw none. B17, RISK-14,
+  RISK-17, the capability cron actor and RISK-18's heartbeat leg now also count an enabled cron
+  job that runs an agent turn. Config evidence wins, so existing findings keep their wording; an
+  unreadable or shadowed legacy store gives no evidence; `cron.enabled: false` gives none; and the
+  memory-core dreaming job is ignored only when its message is exactly the plugin's own sentinel.
+  The state-DB variants of RISK-14 and RISK-18 advise disabling the scheduled job instead of a
+  retired heartbeat key, and the B168 cron fixtures that read UNKNOWN now read WARN. B382 flags the
+  retired heartbeat keys on builds 2026.11.5 and later, and B17's UNKNOWN advice no longer
+  suggests a retired key there.
+- **B168 and B356 say Doctor migrates retired state files on OpenClaw 2026.11.5 and later.**
+  From 2026.11.5 a retired state file (retired cron state, referenced OAuth credential sidecars,
+  JSON delivery queues) is no longer a Doctor stop; OpenClaw says to run `openclaw doctor --fix`
+  to migrate or archive it. On an installed 2026.11.5 or later, B168's dormant-cron label says the
+  job would be reactivated if Doctor migrates it, and B356's fix keeps the config-key stop but
+  drops the bridge-release route for state files. Retired config keys are unchanged: Doctor still
+  refuses the config. Older and unknown builds keep their text byte for byte. The B356 row in the
+  threat coverage page now places device-auth tokens in `client/credentials.sqlite` from 2026.11.5.
+- **The Codex-harness answer follows OpenClaw 2026.11.5's narrower routing.** From 2026.11.5 a
+  model id matching OpenClaw's pre-GPT-5 pattern (`gpt-3.5`, `gpt-4`, `o1`, `o3`, `o4`, with an
+  optional `ft:` prefix) no longer means the agent runs the Codex app-server harness, so
+  `openai/o3` or `openai/gpt-4o` no longer reads as Codex reach. Earlier builds keep the old rule.
+  When `cloudWorkers.requiredProfile` is set, OpenClaw picks the embedded runtime for every model;
+  the port does not model that and now answers unknown there on every build. Both changes only
+  turn a yes into unknown.
+- **Scheduler jobs run the install that wrote them.** The command prefix used for the jobs this
+  tool writes took any `clawseccheck` found on `PATH`, so beside a source checkout an older pipx
+  copy could make a scheduler run that other version. A console script is now used only when its
+  shebang interpreter belongs to the running environment. A script with no readable shebang, such
+  as a Windows `.exe` launcher, is trusted as before.
+
+### Changed
+- Grounded against OpenClaw 2026.11.3, 2026.11.4, 2026.11.5 and 2026.11.6; the newest verified
+  build is now 2026.11.6. The schema, state-database and tool-catalog snapshots, the harness and
+  retired-format windows (the retired-format battery equals the 2026.11.4 one on all 1,063 rows)
+  and the worker image table are regenerated, and the audit's "newer than the newest grounded
+  build" ceiling rises to 2026.11.6. The config schema dropped `heartbeat`; the state database is
+  at version 36.
+- Contributor-facing: the fixture skills are no longer tracked as `SKILL.md`. Skill catalogs
+  index every file of that name in a public repository as an installable skill, and one listed
+  about 200 of this repository's deliberately unsafe fixtures. They are stored as
+  `tests/fixture_skill_md/**/SKILL.md.fixture` and written back, gitignored, before test
+  collection; a guard test fails if any other `SKILL.md` is tracked. Scan results and fingerprints
+  are unchanged. Never install a fixture skill.
+- CI tooling (ruff, pytest, GitHub Actions) bumped, and the dead Python 3.9 pin dropped from the CI
+  tools lockfile.
+
 ## [4.5.0] - 2026-11-09
 
 **This release closes a family of ways a skill could carry a credential or a command past
