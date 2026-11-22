@@ -1136,6 +1136,13 @@ IDS. Disclosed here so they are a known trade-off, not a surprise:
   symlink-and-`~`-expanded path, so the same home reached by two different spellings is never
   treated as a mismatch. A baseline saved before this check existed degrades to "unverified" on
   its first run afterward (disclosed, not silently trusted) rather than being blocked.
+- **A first `--monitor` run needs an OpenClaw setup to take a baseline of.** When no baseline
+  exists yet and `--home` holds no `openclaw.json` (or legacy `clawdbot.json`) - it is missing,
+  empty, or simply the wrong directory, such as `~` instead of `~/.openclaw` - the run is
+  refused (`MONITORING NOT ESTABLISHED`, exit 1, with or without `--exit-code`) and nothing is
+  written, so a scheduled job pointed at the wrong place fails instead of staying green while
+  watching nothing. Once a baseline exists, a config that later disappears is drift, not a
+  refusal: it is journaled as a HIGH alert and the last known-good values are kept.
 - Also worth knowing: `--state`/`--events`/`--history`'s containing directory is created `0700`
   (owner-only) the first time any of them is written (`safeio.secure_dir`) - a silent side effect
   outside the target file itself, with no message printed, from a tool that otherwise promises

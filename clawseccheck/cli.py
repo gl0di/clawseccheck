@@ -6600,6 +6600,28 @@ def _main(argv=None) -> int:
             # measured it), which put a row for a home the user did not mean to track into
             # a store that belongs to another one.
             return 1
+        # B-1093: a FIRST run (no baseline file at all) against a home with no
+        # openclaw.json used to save a baseline of nothing and exit 0 - also under
+        # --exit-code - so a cron job pointed at the wrong --home (a typo, `~` instead of
+        # `~/.openclaw`) stayed green forever while watching nothing. Same predicate the
+        # plain audit's --exit-code gate trips on (B-363: `config_found`), same refusal
+        # shape as B-781 above: nothing is compared and nothing is written, bare
+        # --monitor included, because rc 1 already means "monitoring is not established".
+        #
+        # Deliberately BASELINE_ABSENT only. With a prior baseline, a config that
+        # disappears is DRIFT, and the B-269 path below reports it (HIGH, journaled, rc 3
+        # under --exit-code) while keeping the last known-good values; a CORRUPT baseline
+        # journals its own HIGH alert (B-270). Refusing on either would silence an alert.
+        # F-176's "an ordinary partial run keeps rc 0" is untouched: this run is not
+        # partial, it found no OpenClaw setup at all.
+        if base_status == BASELINE_ABSENT and not getattr(ctx, "config_found", True):
+            print(
+                "MONITORING NOT ESTABLISHED — no openclaw.json (or legacy "
+                f"clawdbot.json) was found in --home {_home_identity(ctx.home)[1]}, so "
+                "there is no OpenClaw setup to take a baseline of. Nothing was recorded. "
+                "Point --home at your OpenClaw state directory (default ~/.openclaw) and "
+                "re-run.", file=sys.stderr)
+            return 1
         # F-173: run the behavioural layer HERE, in the shell, and hand `snapshot()` only
         # the reduced verdict. Two deliberate choices:
         #

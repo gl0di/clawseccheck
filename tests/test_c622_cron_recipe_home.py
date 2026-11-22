@@ -198,6 +198,9 @@ def test_the_emitted_command_baselines_the_home_it_was_given(tmp_path):
     i = stripped.index("--home")
     del stripped[i:i + 2]
     stripped[stripped.index("--data-dir") + 1] = str(tmp_path / "store-default")
+    # B-1093: a first --monitor run refuses a home with no openclaw.json, so the default
+    # home (conftest's throwaway $HOME/.openclaw) needs one for this control to baseline it.
+    _write(Path(os.path.expanduser("~/.openclaw")), {"gateway": {"bind": "127.0.0.1:8080"}})
     assert main(stripped) in (0, 3)
     other = json.loads((tmp_path / "store-default" / "state.json").read_text(encoding="utf-8"))
     assert other["home_digest"] != _home_identity(alt)[0]

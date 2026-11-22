@@ -197,6 +197,13 @@ def test_the_emitted_command_runs_from_a_foreign_cwd_with_a_minimal_path(tmp_pat
     PRINTS, from the environment a cron job actually has. Before the fix this was 127."""
     store = tmp_path / "store"
     store.mkdir()
+    # B-1093: a first --monitor run refuses a home with no openclaw.json (rc 1), and
+    # conftest's throwaway $HOME/.openclaw is empty - give the probe a setup to baseline.
+    oc = Path(os.environ["HOME"]) / ".openclaw"
+    oc.mkdir(exist_ok=True)
+    (oc / "openclaw.json").write_text('{"gateway": {"bind": "127.0.0.1:8080"}}',
+                                      encoding="utf-8")
+    os.chmod(oc / "openclaw.json", 0o600)
     recipe = subprocess.run(
         [sys.executable, str(REPO / "audit.py"), "--cron-recipe",
          "--data-dir", str(store)],

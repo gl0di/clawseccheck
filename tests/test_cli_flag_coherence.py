@@ -13,7 +13,7 @@ from pathlib import Path
 
 from clawseccheck.cli import main
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 VULN = str(FIXTURES / "home_vuln")
 COMMON = ["--no-native", "--no-host", "--no-history"]
 
