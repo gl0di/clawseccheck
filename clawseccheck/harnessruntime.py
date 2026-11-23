@@ -229,8 +229,12 @@ from .collector import agent_roster
 #: with minification. ``_implies_codex`` applies the pattern from ``_PRE_GPT5_RULE_MIN`` on;
 #: earlier builds keep the old rule. The chain is now 9.5 = ... = 11.4, then 11.5 = 11.6 under
 #: the new rule.
+#:
+#: The ceiling moved to 2026.11.7 on 2026-11-23 (C-810). The battery regenerated against the
+#: installed 2026.11.7 equals the 2026.11.6 one on all 779 rows -- only its ``build`` stamp moved,
+#: so no rule changed and the chain is 9.5 = ... = 11.4, then 11.5 = 11.6 = 11.7.
 ORACLE_MIN = (2026, 9, 5)
-ORACLE_MAX = (2026, 11, 6)
+ORACLE_MAX = (2026, 11, 7)
 
 #: C-804: from this build an OpenAI model id matching the vendor's pre-GPT-5 pattern no longer
 #: implies the Codex harness. The pattern is the vendor's, verbatim.

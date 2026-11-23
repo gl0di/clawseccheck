@@ -16,6 +16,7 @@ import pytest
 from clawseccheck import harnessruntime as hr
 
 OLD, NEW, NEWEST = (2026, 11, 4), (2026, 11, 5), (2026, 11, 6)
+NEWER = (2026, 11, 7)  # C-810: the battery is unchanged on 2026.11.7
 
 
 def _cfg(model):
@@ -27,7 +28,7 @@ def _cfg(model):
                                  "OpenAI/O3", "openai/o3:work"])
 def test_a_pre_gpt5_openai_model_no_longer_implies_codex_from_2026_11_5(ref):
     assert hr.codex_harness_reach(_cfg(ref), OLD, environ={}).answer == hr.YES
-    for build in (NEW, NEWEST):
+    for build in (NEW, NEWEST, NEWER):
         got = hr.codex_harness_reach(_cfg(ref), build, environ={})
         assert got.answer != hr.YES, (ref, build, got)
 
@@ -35,7 +36,7 @@ def test_a_pre_gpt5_openai_model_no_longer_implies_codex_from_2026_11_5(ref):
 @pytest.mark.parametrize("ref", ["openai/gpt-5", "openai/codex-mini", "openai/o5",
                                  "openai/zzz-not-a-model", "openai/gpt-5.1"])
 def test_other_openai_models_still_imply_codex(ref):
-    for build in (OLD, NEW, NEWEST):
+    for build in (OLD, NEW, NEWEST, NEWER):
         assert hr.codex_harness_reach(_cfg(ref), build, environ={}).answer == hr.YES, (ref, build)
 
 
