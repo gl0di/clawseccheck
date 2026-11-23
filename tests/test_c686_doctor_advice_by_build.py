@@ -47,7 +47,7 @@ from clawseccheck.risk import risk_paths
 
 OLD_STARTUP = "2026.9.8"   # Doctor still migrates; the 2026.9.7-9.9 text applies
 NEW = "2026.10.2"          # Doctor refuses the retired formats
-NEWER = "2026.11.7"         # outside the finder's validated window, still >= 2026.10.1
+NEWER = "2026.11.8"         # outside the finder's validated window, still >= 2026.10.1
 STATE_MIGRATES = "2026.11.5"  # C-805: a retired STATE file no longer stops Doctor
 
 _LEGACY = {"browser": {"ssrfPolicy": {"allowPrivateNetwork": True}}}
