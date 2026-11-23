@@ -6616,7 +6616,7 @@ def _main(argv=None) -> int:
         # partial, it found no OpenClaw setup at all.
         if base_status == BASELINE_ABSENT and not getattr(ctx, "config_found", True):
             print(
-                "MONITORING NOT ESTABLISHED — no openclaw.json (or legacy "
+                "MONITORING NOT ESTABLISHED \u2014 no openclaw.json (or legacy "
                 f"clawdbot.json) was found in --home {_home_identity(ctx.home)[1]}, so "
                 "there is no OpenClaw setup to take a baseline of. Nothing was recorded. "
                 "Point --home at your OpenClaw state directory (default ~/.openclaw) and "
