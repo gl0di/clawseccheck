@@ -465,7 +465,12 @@ def self_reported_version(config: "dict | None") -> str:
 # stamp (167 paths), state schema 36 with 135 vendor tables, the DM-policy manifest moved no
 # channel, the default-diff oracle flipped nothing (both controls run), the fleet gate shows no
 # new FAIL, and the one advisory published since (GHSA-pw3x-g8v8-fvj2) is in B33 (B-1114).
-GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 6)
+# Raised to 2026.11.7 on 2026-11-23 (C-810), over 2026.11.6: the schema snapshot (167 paths), the
+# state snapshot (schema 36, 135 vendor tables) and the citation baseline are re-grounded on the
+# installed 11.7 with only stamps and bundle names moving, the B391 worker image row is added, and
+# both windowed ports (the retired-format finder, the Codex-harness runtime) regenerate their
+# batteries unchanged, so their windows now end at 2026.11.7.
+GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 7)
 
 
 def grounding_gap(installed_version: "str | None"):
