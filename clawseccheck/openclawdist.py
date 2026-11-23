@@ -470,6 +470,9 @@ def self_reported_version(config: "dict | None") -> str:
 # installed 11.7 with only stamps and bundle names moving, the B391 worker image row is added, and
 # both windowed ports (the retired-format finder, the Codex-harness runtime) regenerate their
 # batteries unchanged, so their windows now end at 2026.11.7.
+# The same day's triage (workspace docs/research/openclaw-11.7-triage-2026-11-23.md) found no new
+# advisory, a +0/-0 config schema, default-diff 67 unchanged / 0 flipped / 141 unlocatable with both
+# controls passing, and the real-fleet FP gate clean (no new FAIL).
 GROUNDED_MAX_VERSION: "tuple[int, int, int]" = (2026, 11, 7)
 
 
